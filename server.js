@@ -3,6 +3,7 @@ const sqlite3 = require('sqlite3').verbose();
 const bcrypt = require('bcryptjs');
 const session = require('express-session');
 const bodyParser = require('body-parser');
+const multer = require('multer');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
@@ -41,6 +42,7 @@ db.serialize(() => {
         username TEXT UNIQUE NOT NULL,
         email TEXT UNIQUE NOT NULL,
         password TEXT NOT NULL,
+        avatar TEXT DEFAULT '',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
@@ -48,25 +50,55 @@ db.serialize(() => {
     db.run(`CREATE TABLE IF NOT EXISTS chats (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
+        room_id INTEGER,
         name TEXT NOT NULL,
         avatar TEXT NOT NULL,
         online INTEGER DEFAULT 0,
         is_bot INTEGER DEFAULT 0,
-        FOREIGN KEY (user_id) REFERENCES users(id)
+        FOREIGN KEY (user_id) REFERENCES users(id),
+        FOREIGN KEY (room_id) REFERENCES rooms(id)
     )`);
 
     // Messages table
     db.run(`CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         chat_id INTEGER NOT NULL,
+        room_id INTEGER,
         user_id INTEGER NOT NULL,
         text TEXT NOT NULL,
+        file_url TEXT,
+        file_name TEXT,
+        file_type TEXT,
+        message_type TEXT DEFAULT 'text',
         sent INTEGER DEFAULT 1,
         time TEXT NOT NULL,
         status TEXT DEFAULT 'sent',
         FOREIGN KEY (chat_id) REFERENCES chats(id),
+        FOREIGN KEY (room_id) REFERENCES rooms(id),
         FOREIGN KEY (user_id) REFERENCES users(id)
     )`);
+
+    // Migrate existing messages table if needed
+    db.get("PRAGMA table_info(messages)", (err, row) => {
+        if (!err && row) {
+            db.all("PRAGMA table_info(messages)", (err, columns) => {
+                if (!err) {
+                    if (!columns.some(col => col.name === 'file_url')) {
+                        db.run('ALTER TABLE messages ADD COLUMN file_url TEXT');
+                    }
+                    if (!columns.some(col => col.name === 'file_name')) {
+                        db.run('ALTER TABLE messages ADD COLUMN file_name TEXT');
+                    }
+                    if (!columns.some(col => col.name === 'file_type')) {
+                        db.run('ALTER TABLE messages ADD COLUMN file_type TEXT');
+                    }
+                    if (!columns.some(col => col.name === 'message_type')) {
+                        db.run("ALTER TABLE messages ADD COLUMN message_type TEXT DEFAULT 'text'");
+                    }
+                }
+            });
+        }
+    });
 
     // Unread messages table
     db.run(`CREATE TABLE IF NOT EXISTS unread (
@@ -77,11 +109,62 @@ db.serialize(() => {
         FOREIGN KEY (chat_id) REFERENCES chats(id),
         FOREIGN KEY (user_id) REFERENCES users(id)
     )`);
+
+    // Rooms for shared chats
+    db.run(`CREATE TABLE IF NOT EXISTS rooms (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        code TEXT UNIQUE NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    // Room participants
+    db.run(`CREATE TABLE IF NOT EXISTS room_participants (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        room_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        FOREIGN KEY (room_id) REFERENCES rooms(id),
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    )`);
+
+    db.get("PRAGMA table_info(chats)", (err, row) => {
+        if (!err && row) {
+            db.all("PRAGMA table_info(chats)", (err, columns) => {
+                if (!err && !columns.some(col => col.name === 'room_id')) {
+                    db.run('ALTER TABLE chats ADD COLUMN room_id INTEGER');
+                }
+            });
+        }
+    });
+
+    db.get("PRAGMA table_info(users)", (err, row) => {
+        if (!err && row) {
+            db.all("PRAGMA table_info(users)", (err, columns) => {
+                if (!err && !columns.some(col => col.name === 'avatar')) {
+                    db.run("ALTER TABLE users ADD COLUMN avatar TEXT DEFAULT ''");
+                }
+            });
+        }
+    });
+
+    db.get("PRAGMA table_info(messages)", (err, row) => {
+        if (!err && row) {
+            db.all("PRAGMA table_info(messages)", (err, columns) => {
+                if (!err && !columns.some(col => col.name === 'room_id')) {
+                    db.run('ALTER TABLE messages ADD COLUMN room_id INTEGER');
+                }
+            });
+        }
+    });
 });
 
 // Middleware
 app.use(bodyParser.json());
 app.use(express.static(path.join(__dirname)));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+const upload = multer({ dest: path.join(__dirname, 'uploads') });
+
 app.use(session({
     secret: 'messenger-secret-key-2024',
     resave: false,
@@ -145,6 +228,42 @@ function generateUniqueCodeAsync() {
     });
 }
 
+// Generate invite code for shared chat rooms
+function generateInviteCode() {
+    const chars = '0123456789';
+    let code = '';
+    for (let i = 0; i < 6; i++) {
+        code += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return code;
+}
+
+function generateInviteCodeAsync() {
+    return new Promise((resolve, reject) => {
+        function tryGenerate(attempts = 0) {
+            if (attempts > 100) {
+                reject(new Error('Could not generate invite code'));
+                return;
+            }
+
+            const code = generateInviteCode();
+            db.get('SELECT id FROM rooms WHERE code = ?', [code], (err, row) => {
+                if (err) {
+                    reject(err);
+                    return;
+                }
+                if (row) {
+                    tryGenerate(attempts + 1);
+                } else {
+                    resolve(code);
+                }
+            });
+        }
+
+        tryGenerate();
+    });
+}
+
 // Register endpoint
 app.post('/api/register', async (req, res) => {
     const { username, email, password, confirmPassword } = req.body;
@@ -185,8 +304,8 @@ app.post('/api/register', async (req, res) => {
 
             // Insert user
             db.run(
-                'INSERT INTO users (unique_code, username, email, password) VALUES (?, ?, ?, ?)',
-                [uniqueCode, username, email, hashedPassword],
+                'INSERT INTO users (unique_code, username, email, password, avatar) VALUES (?, ?, ?, ?, ?)',
+                [uniqueCode, username, email, hashedPassword, ''],
                 function(err) {
                     if (err) {
                         return res.json({ success: false, message: 'Ошибка при создании пользователя' });
@@ -213,11 +332,12 @@ app.post('/api/register', async (req, res) => {
                     req.session.userId = userId;
                     req.session.username = username;
                     req.session.uniqueCode = uniqueCode;
+                    req.session.avatar = '';
 
                     res.json({ 
                         success: true, 
                         message: 'Регистрация успешна!',
-                        user: { id: userId, username, uniqueCode }
+                        user: { id: userId, username, uniqueCode, avatar: '' }
                     });
                 }
             );
@@ -253,11 +373,12 @@ app.post('/api/login', (req, res) => {
         req.session.userId = user.id;
         req.session.username = user.username;
         req.session.uniqueCode = user.unique_code;
+        req.session.avatar = user.avatar || '';
 
         res.json({ 
             success: true, 
             message: 'Вход выполнен!',
-            user: { id: user.id, username: user.username, uniqueCode: user.unique_code }
+            user: { id: user.id, username: user.username, uniqueCode: user.unique_code, avatar: user.avatar || '' }
         });
     });
 });
@@ -276,7 +397,8 @@ app.get('/api/auth', (req, res) => {
             user: { 
                 id: req.session.userId, 
                 username: req.session.username,
-                uniqueCode: req.session.uniqueCode
+                uniqueCode: req.session.uniqueCode,
+                avatar: req.session.avatar || ''
             } 
         });
     } else {
@@ -290,7 +412,7 @@ app.get('/api/user', (req, res) => {
         return res.json({ success: false });
     }
 
-    db.get('SELECT id, unique_code, username, email, created_at FROM users WHERE id = ?', 
+    db.get('SELECT id, unique_code, username, email, avatar, created_at FROM users WHERE id = ?', 
         [req.session.userId], 
         (err, user) => {
             if (err || !user) {
@@ -302,12 +424,36 @@ app.get('/api/user', (req, res) => {
                     id: user.id,
                     uniqueCode: user.unique_code,
                     username: user.username,
+                    avatar: user.avatar || '',
                     email: user.email,
                     createdAt: user.created_at
                 }
             });
         }
     );
+});
+
+// Update current user's avatar
+app.post('/api/user/avatar', upload.single('avatar'), (req, res) => {
+    if (!req.session.userId) {
+        return res.json({ success: false, message: 'Не авторизован' });
+    }
+
+    const file = req.file;
+    if (!file) {
+        return res.json({ success: false, message: 'Файл не выбран' });
+    }
+
+    const sanitizedAvatar = `/uploads/${file.filename}`;
+
+    db.run('UPDATE users SET avatar = ? WHERE id = ?', [sanitizedAvatar, req.session.userId], function(err) {
+        if (err) {
+            return res.json({ success: false, message: 'Ошибка обновления аватара' });
+        }
+
+        req.session.avatar = sanitizedAvatar;
+        res.json({ success: true, avatar: sanitizedAvatar });
+    });
 });
 
 // Get chats
@@ -317,15 +463,14 @@ app.get('/api/chats', (req, res) => {
     }
 
     db.all(`
-        SELECT c.id, c.name, c.avatar, c.online, c.is_bot,
-               (SELECT text FROM messages WHERE chat_id = c.id ORDER BY id DESC LIMIT 1) as last_message,
-               (SELECT time FROM messages WHERE chat_id = c.id ORDER BY id DESC LIMIT 1) as last_time,
-               (SELECT COUNT(*) FROM messages m 
-                JOIN chats ch ON m.chat_id = ch.id 
-                WHERE ch.id = c.id AND m.sent = 0 AND m.status != 'read') as unread
+        SELECT c.id, c.name, c.avatar, c.online, c.is_bot, c.room_id, r.code as invite_code,
+               (SELECT text FROM messages WHERE ((c.room_id IS NOT NULL AND room_id = c.room_id) OR (c.room_id IS NULL AND chat_id = c.id)) ORDER BY id DESC LIMIT 1) as last_message,
+               (SELECT time FROM messages WHERE ((c.room_id IS NOT NULL AND room_id = c.room_id) OR (c.room_id IS NULL AND chat_id = c.id)) ORDER BY id DESC LIMIT 1) as last_time,
+               (SELECT COUNT(*) FROM messages m WHERE ((c.room_id IS NOT NULL AND m.room_id = c.room_id) OR (c.room_id IS NULL AND m.chat_id = c.id)) AND m.sent = 0 AND m.status != 'read') as unread
         FROM chats c
+        LEFT JOIN rooms r ON c.room_id = r.id
         WHERE c.user_id = ?
-        ORDER BY (SELECT MAX(id) FROM messages WHERE chat_id = c.id) DESC
+        ORDER BY (SELECT MAX(id) FROM messages WHERE ((c.room_id IS NOT NULL AND room_id = c.room_id) OR (c.room_id IS NULL AND chat_id = c.id))) DESC
     `, [req.session.userId], (err, chats) => {
         if (err) {
             return res.json({ success: false, message: 'Ошибка загрузки чатов' });
@@ -348,20 +493,28 @@ app.get('/api/messages/:chatId', (req, res) => {
             return res.json({ success: false, message: 'Чат не найден' });
         }
 
-        db.all('SELECT * FROM messages WHERE chat_id = ? ORDER BY id ASC', [chatId], (err, messages) => {
+        const selectQuery = chat.room_id
+            ? 'SELECT m.*, u.username as sender_username, u.avatar as sender_avatar FROM messages m JOIN users u ON m.user_id = u.id WHERE m.room_id = ? ORDER BY m.id ASC'
+            : 'SELECT m.*, u.username as sender_username, u.avatar as sender_avatar FROM messages m JOIN users u ON m.user_id = u.id WHERE m.chat_id = ? ORDER BY m.id ASC';
+        const selectParam = chat.room_id || chatId;
+
+        db.all(selectQuery, [selectParam], (err, messages) => {
             if (err) {
                 return res.json({ success: false, message: 'Ошибка загрузки сообщений' });
             }
 
-            // Mark messages as read
-            db.run('UPDATE messages SET status = ? WHERE chat_id = ? AND sent = 0', ['read', chatId]);
+            const updateQuery = chat.room_id
+                ? 'UPDATE messages SET status = ? WHERE room_id = ? AND sent = 0'
+                : 'UPDATE messages SET status = ? WHERE chat_id = ? AND sent = 0';
+
+            db.run(updateQuery, ['read', selectParam]);
 
             res.json({ success: true, messages, chat });
         });
     });
 });
 
-// Send message
+// Send text message
 app.post('/api/messages', (req, res) => {
     if (!req.session.userId) {
         return res.json({ success: false, message: 'Не авторизован' });
@@ -369,7 +522,7 @@ app.post('/api/messages', (req, res) => {
 
     const { chatId, text } = req.body;
 
-    if (!text || !chatId) {
+    if ((!text || text.trim() === '') || !chatId) {
         return res.json({ success: false, message: 'Введите текст сообщения' });
     }
 
@@ -380,10 +533,11 @@ app.post('/api/messages', (req, res) => {
         }
 
         const time = getCurrentTime();
+        const roomId = chat.room_id || null;
 
         db.run(
-            'INSERT INTO messages (chat_id, user_id, text, sent, time, status) VALUES (?, ?, ?, ?, ?, ?)',
-            [chatId, req.session.userId, text, 1, time, 'sent'],
+            'INSERT INTO messages (chat_id, room_id, user_id, text, message_type, sent, time, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [chatId, roomId, req.session.userId, text.trim(), 'text', 1, time, 'sent'],
             function(err) {
                 if (err) {
                     return res.json({ success: false, message: 'Ошибка отправки' });
@@ -406,8 +560,8 @@ app.post('/api/messages', (req, res) => {
                         const botTime = getCurrentTime();
 
                         db.run(
-                            'INSERT INTO messages (chat_id, user_id, text, sent, time, status) VALUES (?, ?, ?, ?, ?, ?)',
-                            [chatId, req.session.userId, randomResponse, 0, botTime, 'read']
+                            'INSERT INTO messages (chat_id, room_id, user_id, text, sent, time, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                            [chatId, roomId, req.session.userId, randomResponse, 0, botTime, 'read']
                         );
                     }, 1500);
                 }
@@ -423,15 +577,82 @@ app.post('/api/messages', (req, res) => {
 
                 res.json({ 
                     success: true, 
-                    message: { id: messageId, text, sent: true, time, status: 'sent' }
+                    message: { id: messageId, text: text.trim(), message_type: 'text', sent: true, time, status: 'sent' }
                 });
             }
         );
     });
 });
 
-// Create new chat
-app.post('/api/chats', (req, res) => {
+// Upload file message
+app.post('/api/messages/file', upload.single('file'), (req, res) => {
+    if (!req.session.userId) {
+        return res.json({ success: false, message: 'Не авторизован' });
+    }
+
+    const { chatId, text } = req.body;
+    const file = req.file;
+
+    if (!file || !chatId) {
+        return res.json({ success: false, message: 'Файл или чат не выбраны' });
+    }
+
+    db.get('SELECT * FROM chats WHERE id = ? AND user_id = ?', [chatId, req.session.userId], (err, chat) => {
+        if (err || !chat) {
+            return res.json({ success: false, message: 'Чат не найден' });
+        }
+
+        const time = getCurrentTime();
+        const roomId = chat.room_id || null;
+        const fileUrl = `/uploads/${file.filename}`;
+        const fileType = file.mimetype;
+        const fileName = file.originalname;
+        const messageType = fileType.startsWith('image/') ? 'image'
+            : fileType.startsWith('video/') ? 'video'
+            : fileType.startsWith('audio/') ? 'audio'
+            : 'file';
+        const messageText = text ? String(text).trim() : (messageType === 'audio' ? 'Голосовое сообщение' : fileName);
+
+        db.run(
+            'INSERT INTO messages (chat_id, room_id, user_id, text, file_url, file_name, file_type, message_type, sent, time, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [chatId, roomId, req.session.userId, messageText, fileUrl, fileName, fileType, messageType, 1, time, 'sent'],
+            function(err) {
+                if (err) {
+                    return res.json({ success: false, message: 'Ошибка отправки файла' });
+                }
+
+                const messageId = this.lastID;
+
+                // Simulate status updates
+                setTimeout(() => {
+                    db.run('UPDATE messages SET status = ? WHERE id = ?', ['delivered', messageId]);
+                }, 1000);
+
+                setTimeout(() => {
+                    db.run('UPDATE messages SET status = ? WHERE id = ?', ['read', messageId]);
+                }, 2000);
+
+                res.json({
+                    success: true,
+                    message: {
+                        id: messageId,
+                        text: messageText,
+                        file_url: fileUrl,
+                        file_name: fileName,
+                        file_type: fileType,
+                        message_type: messageType,
+                        sent: true,
+                        time,
+                        status: 'sent'
+                    }
+                });
+            }
+        );
+    });
+});
+
+// Create new chat with invite room code
+app.post('/api/chats', async (req, res) => {
     if (!req.session.userId) {
         return res.json({ success: false, message: 'Не авторизован' });
     }
@@ -444,19 +665,135 @@ app.post('/api/chats', (req, res) => {
 
     const avatar = name.charAt(0).toUpperCase();
 
-    db.run(
-        'INSERT INTO chats (user_id, name, avatar, online, is_bot) VALUES (?, ?, ?, ?, ?)',
-        [req.session.userId, name, avatar, 0, 0],
-        function(err) {
-            if (err) {
-                return res.json({ success: false, message: 'Ошибка создания чата' });
+    try {
+        const roomCode = await generateInviteCodeAsync();
+
+        db.run(
+            'INSERT INTO rooms (name, code) VALUES (?, ?)',
+            [name, roomCode],
+            function(err) {
+                if (err) {
+                    return res.json({ success: false, message: 'Ошибка создания комнаты' });
+                }
+
+                const roomId = this.lastID;
+
+                db.run(
+                    'INSERT INTO room_participants (room_id, user_id) VALUES (?, ?)',
+                    [roomId, req.session.userId],
+                    function(err) {
+                        if (err) {
+                            return res.json({ success: false, message: 'Ошибка добавления участника комнаты' });
+                        }
+
+                        db.run(
+                            'INSERT INTO chats (user_id, room_id, name, avatar, online, is_bot) VALUES (?, ?, ?, ?, ?, ?)',
+                            [req.session.userId, roomId, name, avatar, 0, 0],
+                            function(err) {
+                                if (err) {
+                                    return res.json({ success: false, message: 'Ошибка создания чата' });
+                                }
+                                res.json({ 
+                                    success: true, 
+                                    chat: { id: this.lastID, name, avatar, online: 0, is_bot: 0, room_id: roomId, invite_code: roomCode }
+                                });
+                            }
+                        );
+                    }
+                );
             }
-            res.json({ 
-                success: true, 
-                chat: { id: this.lastID, name, avatar, online: 0, is_bot: 0 }
-            });
+        );
+    } catch (error) {
+        res.json({ success: false, message: 'Ошибка создания кода приглашения' });
+    }
+});
+
+// Get invite code for current room chat
+app.get('/api/chats/invite/:chatId', (req, res) => {
+    if (!req.session.userId) {
+        return res.json({ success: false, message: 'Не авторизован' });
+    }
+
+    const chatId = req.params.chatId;
+
+    db.get('SELECT room_id FROM chats WHERE id = ? AND user_id = ?', [chatId, req.session.userId], (err, chat) => {
+        if (err || !chat) {
+            return res.json({ success: false, message: 'Чат не найден' });
         }
-    );
+
+        if (!chat.room_id) {
+            return res.json({ success: false, message: 'У этого чата нет кода приглашения' });
+        }
+
+        db.get('SELECT code FROM rooms WHERE id = ?', [chat.room_id], (err, room) => {
+            if (err || !room) {
+                return res.json({ success: false, message: 'Код не найден' });
+            }
+            res.json({ success: true, code: room.code });
+        });
+    });
+});
+
+// Join shared chat by invite code
+app.post('/api/chats/join', (req, res) => {
+    if (!req.session.userId) {
+        return res.json({ success: false, message: 'Не авторизован' });
+    }
+
+    const { code } = req.body;
+
+    if (!code) {
+        return res.json({ success: false, message: 'Введите код приглашения' });
+    }
+
+    db.get('SELECT * FROM rooms WHERE code = ?', [code], (err, room) => {
+        if (err || !room) {
+            return res.json({ success: false, message: 'Чат по этому коду не найден' });
+        }
+
+        db.get('SELECT id FROM room_participants WHERE room_id = ? AND user_id = ?', [room.id, req.session.userId], (err, participant) => {
+            if (err) {
+                return res.json({ success: false, message: 'Ошибка проверки доступа к чату' });
+            }
+
+            if (participant) {
+                db.get('SELECT id FROM chats WHERE room_id = ? AND user_id = ?', [room.id, req.session.userId], (err, chat) => {
+                    if (err || !chat) {
+                        return res.json({ success: false, message: 'Чат уже добавлен' });
+                    }
+                    return res.json({ success: true, chat: { id: chat.id } });
+                });
+                return;
+            }
+
+            // Determine chat name and avatar using room name or first other participant
+            db.get(
+                'SELECT u.username FROM users u JOIN room_participants rp ON u.id = rp.user_id WHERE rp.room_id = ? AND u.id != ? LIMIT 1',
+                [room.id, req.session.userId],
+                (err, otherUser) => {
+                    const chatName = otherUser ? `Чат с ${otherUser.username}` : room.name;
+                    const avatar = chatName.charAt(0).toUpperCase();
+
+                    db.run('INSERT INTO room_participants (room_id, user_id) VALUES (?, ?)', [room.id, req.session.userId], function(err) {
+                        if (err) {
+                            return res.json({ success: false, message: 'Ошибка добавления в чат' });
+                        }
+
+                        db.run(
+                            'INSERT INTO chats (user_id, room_id, name, avatar, online, is_bot) VALUES (?, ?, ?, ?, ?, ?)',
+                            [req.session.userId, room.id, chatName, avatar, 0, 0],
+                            function(err) {
+                                if (err) {
+                                    return res.json({ success: false, message: 'Ошибка создания чата' });
+                                }
+                                res.json({ success: true, chat: { id: this.lastID, name: chatName, avatar, online: 0, is_bot: 0, room_id: room.id, invite_code: room.code } });
+                            }
+                        );
+                    });
+                }
+            );
+        });
+    });
 });
 
 // Helper function
