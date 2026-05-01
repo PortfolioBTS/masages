@@ -4,10 +4,27 @@ const bcrypt = require('bcryptjs');
 const session = require('express-session');
 const bodyParser = require('body-parser');
 const path = require('path');
+const os = require('os');
 const crypto = require('crypto');
 
 const app = express();
 const PORT = 3000;
+const HOST = '0.0.0.0';
+
+function getLocalAddresses() {
+    const nets = os.networkInterfaces();
+    const addresses = [];
+
+    for (const name of Object.keys(nets)) {
+        for (const net of nets[name]) {
+            if (net.family === 'IPv4' && !net.internal) {
+                addresses.push(net.address);
+            }
+        }
+    }
+
+    return addresses;
+}
 
 // Initialize SQLite database
 const db = new sqlite3.Database('./messenger.db', (err) => {
@@ -71,6 +88,19 @@ app.use(session({
     saveUninitialized: false,
     cookie: { maxAge: 24 * 60 * 60 * 1000 } // 24 hours
 }));
+
+// Simple public link route
+app.get('/link.my', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
+});
+
+// Fallback for other non-API routes
+app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api/')) {
+        return next();
+    }
+    res.sendFile(path.join(__dirname, 'index.html'));
+});
 
 // Generate unique 8-character code
 function generateUniqueCode() {
@@ -436,6 +466,10 @@ function getCurrentTime() {
 }
 
 // Start server
-app.listen(PORT, () => {
+app.listen(PORT, HOST, () => {
     console.log(`Server running at http://localhost:${PORT}`);
+    const addresses = getLocalAddresses();
+    if (addresses.length > 0) {
+        console.log(`Accessible on local network at: ${addresses.map(ip => `http://${ip}:${PORT}`).join(', ')}`);
+    }
 });
