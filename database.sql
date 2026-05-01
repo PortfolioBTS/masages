@@ -16,10 +16,29 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS chats (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,            -- Ссылка на пользователя
+    room_id INTEGER,                     -- Ссылка на общую комнату чата
     name TEXT NOT NULL,                  -- Название чата
     avatar TEXT NOT NULL,                -- Аватар (первая буква имени)
     online INTEGER DEFAULT 0,            -- Онлайн статус (0/1)
     is_bot INTEGER DEFAULT 0,            -- Является ли ботом (0/1)
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (room_id) REFERENCES rooms(id)
+);
+
+-- Таблица комнат для общих чатов
+CREATE TABLE IF NOT EXISTS rooms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    code TEXT UNIQUE NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Таблица участников комнаты
+CREATE TABLE IF NOT EXISTS room_participants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    room_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    FOREIGN KEY (room_id) REFERENCES rooms(id),
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
@@ -27,12 +46,14 @@ CREATE TABLE IF NOT EXISTS chats (
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id INTEGER NOT NULL,            -- Ссылка на чат
+    room_id INTEGER,                     -- Ссылка на общую комнату чата
     user_id INTEGER NOT NULL,            -- Ссылка на пользователя
     text TEXT NOT NULL,                  -- Текст сообщения
     sent INTEGER DEFAULT 1,              -- Отправлено пользователем (1) или получено (0)
     time TEXT NOT NULL,                  -- Время отправки (ЧЧ:ММ)
     status TEXT DEFAULT 'sent',          -- Статус: sent, delivered, read
     FOREIGN KEY (chat_id) REFERENCES chats(id),
+    FOREIGN KEY (room_id) REFERENCES rooms(id),
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
