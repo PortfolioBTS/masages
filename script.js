@@ -132,7 +132,6 @@ function renderChatList() {
         chatItem.className = `chat-item ${chat.id === currentChatId ? 'active' : ''}`;
         chatItem.dataset.id = chat.id;
         
-        const statusIcon = getStatusIcon(chat.messages?.[chat.messages.length - 1]?.status);
         const avatarHtml = formatAvatarHtml(chat.avatar || chat.name);
         
         chatItem.innerHTML = `
@@ -148,9 +147,20 @@ function renderChatList() {
                     ${chat.unread > 0 ? `<span class="unread-badge">${chat.unread}</span>` : ''}
                 </div>
             </div>
+            <button class="delete-chat-btn" title="Удалить чат">🗑</button>
         `;
         
-        chatItem.addEventListener('click', () => selectChat(chat.id));
+        chatItem.addEventListener('click', (e) => {
+            if (e.target.closest('.delete-chat-btn')) return;
+            selectChat(chat.id);
+        });
+
+        const deleteBtn = chatItem.querySelector('.delete-chat-btn');
+        deleteBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            deleteChat(chat.id, chat.name);
+        });
+
         chatList.appendChild(chatItem);
     });
 }
@@ -236,21 +246,28 @@ function stopMessagePolling() {
 function createMessageElement(msg) {
     const isCurrentUser = currentUser && msg.user_id === currentUser.id;
     const userColor = getUserColor(msg.sender_username || '');
-    const bubbleColor = isCurrentUser ? '#6C5CE7' : userColor;
+    const bubbleColor = isCurrentUser ? '#667eea' : userColor;
     const textColor = '#ffffff';
-    const avatarValue = msg.sender_avatar || (msg.sender_username ? msg.sender_username.charAt(0).toUpperCase() : '?');
+    
+    // Получаем аватарку из сообщения или из текущего пользователя
+    let avatarValue = msg.sender_avatar || (msg.sender_username ? msg.sender_username.charAt(0).toUpperCase() : '?');
+    
+    // Если это сообщение текущего пользователя и нет аватарки в сообщении, используем его аватарку
+    if (isCurrentUser && !msg.sender_avatar && currentUser && currentUser.avatar) {
+        avatarValue = currentUser.avatar;
+    }
 
     const messageEl = document.createElement('div');
     messageEl.className = `message-row ${isCurrentUser ? 'sent' : 'received'}`;
 
     const avatarHtml = isImageUrl(avatarValue)
-        ? `<img src="${escapeHtml(avatarValue)}" alt="${escapeHtml(msg.sender_username || '')}" />`
+        ? `<img src="${escapeHtml(avatarValue)}" alt="${escapeHtml(msg.sender_username || '')}" loading="lazy" />`
         : `<span>${escapeHtml(String(avatarValue).charAt(0).toUpperCase())}</span>`;
 
     const statusIcon = isCurrentUser ? getStatusIcon(msg.status) : '';
     const attachmentHtml = msg.file_url
         ? (msg.message_type === 'image'
-            ? `<img class="message-attachment" src="${escapeHtml(msg.file_url)}" alt="${escapeHtml(msg.file_name || 'image')}" />`
+            ? `<img class="message-attachment" src="${escapeHtml(msg.file_url)}" alt="${escapeHtml(msg.file_name || 'image')}" loading="lazy" />`
             : msg.message_type === 'video'
                 ? `<video class="message-attachment" controls src="${escapeHtml(msg.file_url)}"></video>`
                 : msg.message_type === 'audio'
@@ -260,7 +277,7 @@ function createMessageElement(msg) {
     const messageText = msg.text && msg.message_type === 'text' ? `<div class="message-text">${escapeHtml(msg.text)}</div>` : '';
 
     messageEl.innerHTML = `
-        <div class="message-avatar">${avatarHtml}</div>
+        <div class="message-avatar" title="${escapeHtml(msg.sender_username || '')}">${avatarHtml}</div>
         <div class="message-bubble" style="background: ${bubbleColor}; color: ${textColor};">
             ${messageText}
             ${attachmentHtml}
@@ -386,17 +403,48 @@ async function saveUserAvatar() {
             if (avatarFileName) {
                 avatarFileName.textContent = 'Файл не выбран';
             }
+            // Перезагружаем сообщения, чтобы отобразить новую аватарку
             if (currentChatId) {
                 await loadMessages(currentChatId);
             }
+            // Перезагружаем список чатов
+            await loadChats();
         } else {
             console.error('Save avatar error:', data.message);
+            alert('Ошибка сохранения аватара: ' + (data.message || 'Неизвестная ошибка'));
         }
     } catch (error) {
         console.error('Save avatar error:', error);
+        alert('Ошибка соединения при сохранении аватара');
     }
 }
+async function deleteChat(chatId, chatName) {
+    if (!confirm(`Удалить чат «${chatName}»? Это действие нельзя отменить.`)) return;
 
+    try {
+        const response = await fetch(`/api/chats/${chatId}`, { method: 'DELETE' });
+        const data = await response.json();
+
+        if (data.success) {
+            if (currentChatId === chatId) {
+                currentChatId = null;
+                stopMessagePolling();
+                lastMessages = [];
+                messagesContainer.innerHTML = '<div class="no-chat-selected"><p>Выберите чат из списка</p></div>';
+                currentChatName.textContent = 'Выберите чат';
+                currentChatStatus.textContent = '';
+                currentAvatar.innerHTML = 'Б';
+                messageInput.disabled = true;
+                sendBtn.disabled = true;
+            }
+            await loadChats();
+        } else {
+            alert(data.message || 'Ошибка удаления чата');
+        }
+    } catch (error) {
+        console.error('Delete chat error:', error);
+    }
+}
 // Send message
 async function sendMessage() {
     const text = messageInput.value.trim();
@@ -706,6 +754,21 @@ function showInviteCode(code) {
 
 // Setup event listeners
 function setupEventListeners() {
+    const logoutSidebarBtn = document.getElementById('logoutSidebarBtn');
+if (logoutSidebarBtn) {
+    logoutSidebarBtn.addEventListener('click', async () => {
+        try {
+            await fetch('/api/logout', { method: 'POST' });
+            stopMessagePolling();
+            currentUser = null;
+            currentChatId = null;
+            chats = [];
+            showAuth();
+        } catch (error) {
+            console.error('Logout error:', error);
+        }
+    });
+}
     // Auth tabs
     document.querySelectorAll('.auth-tab').forEach(tab => {
         tab.addEventListener('click', () => {
