@@ -177,13 +177,7 @@ app.get('/link.my', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// Fallback for other non-API routes
-app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/api/')) {
-        return next();
-    }
-    res.sendFile(path.join(__dirname, 'index.html'));
-});
+
 
 // Generate unique 8-character code
 function generateUniqueCode() {
@@ -392,14 +386,18 @@ app.post('/api/logout', (req, res) => {
 // Check auth status
 app.get('/api/auth', (req, res) => {
     if (req.session.userId) {
-        res.json({ 
-            authenticated: true, 
-            user: { 
-                id: req.session.userId, 
-                username: req.session.username,
-                uniqueCode: req.session.uniqueCode,
-                avatar: req.session.avatar || ''
-            } 
+        db.get('SELECT avatar FROM users WHERE id = ?', [req.session.userId], (err, row) => {
+            const avatar = (!err && row) ? (row.avatar || '') : (req.session.avatar || '');
+            req.session.avatar = avatar;
+            res.json({
+                authenticated: true,
+                user: {
+                    id: req.session.userId,
+                    username: req.session.username,
+                    uniqueCode: req.session.uniqueCode,
+                    avatar: avatar
+                }
+            });
         });
     } else {
         res.json({ authenticated: false });
@@ -809,4 +807,47 @@ app.listen(PORT, HOST, () => {
     if (addresses.length > 0) {
         console.log(`Accessible on local network at: ${addresses.map(ip => `http://${ip}:${PORT}`).join(', ')}`);
     }
+});
+
+
+// Delete chat
+app.delete('/api/chats/:chatId', (req, res) => {
+    if (!req.session.userId) {
+        return res.json({ success: false, message: 'Не авторизован' });
+    }
+
+    const chatId = req.params.chatId;
+
+    db.get('SELECT * FROM chats WHERE id = ? AND user_id = ?', [chatId, req.session.userId], (err, chat) => {
+        if (err || !chat) {
+            return res.json({ success: false, message: 'Чат не найден' });
+        }
+
+        const deleteMessages = chat.room_id
+            ? new Promise((resolve, reject) => {
+                db.run('DELETE FROM messages WHERE room_id = ?', [chat.room_id], err => err ? reject(err) : resolve());
+              })
+            : new Promise((resolve, reject) => {
+                db.run('DELETE FROM messages WHERE chat_id = ?', [chatId], err => err ? reject(err) : resolve());
+              });
+
+        deleteMessages
+            .then(() => new Promise((resolve, reject) => {
+                db.run('DELETE FROM unread WHERE chat_id = ?', [chatId], err => err ? reject(err) : resolve());
+            }))
+            .then(() => new Promise((resolve, reject) => {
+                db.run('DELETE FROM chats WHERE id = ? AND user_id = ?', [chatId, req.session.userId], err => err ? reject(err) : resolve());
+            }))
+            .then(() => {
+                if (chat.room_id) {
+                    db.run('DELETE FROM room_participants WHERE room_id = ? AND user_id = ?', [chat.room_id, req.session.userId]);
+                }
+                res.json({ success: true });
+            })
+            .catch(() => res.json({ success: false, message: 'Ошибка удаления чата' }));
+    });
+});
+
+app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
 });
