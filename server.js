@@ -73,9 +73,13 @@ db.serialize(() => {
         sent INTEGER DEFAULT 1,
         time TEXT NOT NULL,
         status TEXT DEFAULT 'sent',
+        edited_at TEXT,
+        deleted INTEGER DEFAULT 0,
+        reply_to_id INTEGER,
         FOREIGN KEY (chat_id) REFERENCES chats(id),
         FOREIGN KEY (room_id) REFERENCES rooms(id),
-        FOREIGN KEY (user_id) REFERENCES users(id)
+        FOREIGN KEY (user_id) REFERENCES users(id),
+        FOREIGN KEY (reply_to_id) REFERENCES messages(id)
     )`);
 
     // Migrate existing messages table if needed
@@ -94,6 +98,15 @@ db.serialize(() => {
                     }
                     if (!columns.some(col => col.name === 'message_type')) {
                         db.run("ALTER TABLE messages ADD COLUMN message_type TEXT DEFAULT 'text'");
+                    }
+                    if (!columns.some(col => col.name === 'edited_at')) {
+                        db.run('ALTER TABLE messages ADD COLUMN edited_at TEXT');
+                    }
+                    if (!columns.some(col => col.name === 'deleted')) {
+                        db.run('ALTER TABLE messages ADD COLUMN deleted INTEGER DEFAULT 0');
+                    }
+                    if (!columns.some(col => col.name === 'reply_to_id')) {
+                        db.run('ALTER TABLE messages ADD COLUMN reply_to_id INTEGER');
                     }
                 }
             });
@@ -124,6 +137,17 @@ db.serialize(() => {
         room_id INTEGER NOT NULL,
         user_id INTEGER NOT NULL,
         FOREIGN KEY (room_id) REFERENCES rooms(id),
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    )`);
+
+    // Reactions table
+    db.run(`CREATE TABLE IF NOT EXISTS reactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        emoji TEXT NOT NULL,
+        UNIQUE(message_id, user_id, emoji),
+        FOREIGN KEY (message_id) REFERENCES messages(id),
         FOREIGN KEY (user_id) REFERENCES users(id)
     )`);
 
@@ -492,8 +516,8 @@ app.get('/api/messages/:chatId', (req, res) => {
         }
 
         const selectQuery = chat.room_id
-            ? 'SELECT m.*, u.username as sender_username, u.avatar as sender_avatar FROM messages m JOIN users u ON m.user_id = u.id WHERE m.room_id = ? ORDER BY m.id ASC'
-            : 'SELECT m.*, u.username as sender_username, u.avatar as sender_avatar FROM messages m JOIN users u ON m.user_id = u.id WHERE m.chat_id = ? ORDER BY m.id ASC';
+            ? 'SELECT m.*, u.username as sender_username, u.avatar as sender_avatar FROM messages m JOIN users u ON m.user_id = u.id WHERE m.room_id = ? AND m.deleted = 0 ORDER BY m.id ASC'
+            : 'SELECT m.*, u.username as sender_username, u.avatar as sender_avatar FROM messages m JOIN users u ON m.user_id = u.id WHERE m.chat_id = ? AND m.deleted = 0 ORDER BY m.id ASC';
         const selectParam = chat.room_id || chatId;
 
         db.all(selectQuery, [selectParam], (err, messages) => {
@@ -501,13 +525,42 @@ app.get('/api/messages/:chatId', (req, res) => {
                 return res.json({ success: false, message: 'Ошибка загрузки сообщений' });
             }
 
-            const updateQuery = chat.room_id
-                ? 'UPDATE messages SET status = ? WHERE room_id = ? AND sent = 0'
-                : 'UPDATE messages SET status = ? WHERE chat_id = ? AND sent = 0';
+            // Get reactions for all messages
+            const messageIds = messages.map(m => m.id);
+            if (messageIds.length === 0) {
+                const updateQuery = chat.room_id
+                    ? 'UPDATE messages SET status = ? WHERE room_id = ? AND sent = 0'
+                    : 'UPDATE messages SET status = ? WHERE chat_id = ? AND sent = 0';
+                db.run(updateQuery, ['read', selectParam]);
+                return res.json({ success: true, messages: [], chat });
+            }
 
-            db.run(updateQuery, ['read', selectParam]);
+            const placeholders = messageIds.map(() => '?').join(',');
+            db.all(
+                `SELECT message_id, GROUP_CONCAT(DISTINCT emoji) as emojis FROM reactions WHERE message_id IN (${placeholders}) GROUP BY message_id`,
+                messageIds,
+                (err, reactions) => {
+                    const reactionsMap = {};
+                    if (!err && reactions) {
+                        reactions.forEach(r => {
+                            reactionsMap[r.message_id] = r.emojis.split(',');
+                        });
+                    }
 
-            res.json({ success: true, messages, chat });
+                    messages = messages.map(m => ({
+                        ...m,
+                        reactions: reactionsMap[m.id] || []
+                    }));
+
+                    const updateQuery = chat.room_id
+                        ? 'UPDATE messages SET status = ? WHERE room_id = ? AND sent = 0'
+                        : 'UPDATE messages SET status = ? WHERE chat_id = ? AND sent = 0';
+
+                    db.run(updateQuery, ['read', selectParam]);
+
+                    res.json({ success: true, messages, chat });
+                }
+            );
         });
     });
 });
@@ -845,6 +898,188 @@ app.delete('/api/chats/:chatId', (req, res) => {
                 res.json({ success: true });
             })
             .catch(() => res.json({ success: false, message: 'Ошибка удаления чата' }));
+    });
+});
+
+// Edit message
+app.put('/api/messages/:messageId', (req, res) => {
+    if (!req.session.userId) {
+        return res.json({ success: false, message: 'Не авторизован' });
+    }
+
+    const { messageId } = req.params;
+    const { text } = req.body;
+
+    if (!text || text.trim() === '') {
+        return res.json({ success: false, message: 'Текст не может быть пустым' });
+    }
+
+    db.get('SELECT * FROM messages WHERE id = ? AND user_id = ?', [messageId, req.session.userId], (err, message) => {
+        if (err || !message) {
+            return res.json({ success: false, message: 'Сообщение не найдено' });
+        }
+
+        const editedAt = new Date().toISOString();
+        db.run(
+            'UPDATE messages SET text = ?, edited_at = ? WHERE id = ?',
+            [text.trim(), editedAt, messageId],
+            function(err) {
+                if (err) {
+                    return res.json({ success: false, message: 'Ошибка редактирования' });
+                }
+                res.json({ success: true, edited_at: editedAt });
+            }
+        );
+    });
+});
+
+// Delete message
+app.delete('/api/messages/:messageId', (req, res) => {
+    if (!req.session.userId) {
+        return res.json({ success: false, message: 'Не авторизован' });
+    }
+
+    const { messageId } = req.params;
+
+    db.get('SELECT * FROM messages WHERE id = ? AND user_id = ?', [messageId, req.session.userId], (err, message) => {
+        if (err || !message) {
+            return res.json({ success: false, message: 'Сообщение не найдено' });
+        }
+
+        db.run('UPDATE messages SET deleted = 1 WHERE id = ?', [messageId], function(err) {
+            if (err) {
+                return res.json({ success: false, message: 'Ошибка удаления' });
+            }
+            res.json({ success: true });
+        });
+    });
+});
+
+// Add reaction
+app.post('/api/reactions', (req, res) => {
+    if (!req.session.userId) {
+        return res.json({ success: false, message: 'Не авторизован' });
+    }
+
+    const { messageId, emoji } = req.body;
+
+    if (!messageId || !emoji) {
+        return res.json({ success: false, message: 'Параметры отсутствуют' });
+    }
+
+    db.run(
+        'INSERT OR IGNORE INTO reactions (message_id, user_id, emoji) VALUES (?, ?, ?)',
+        [messageId, req.session.userId, emoji],
+        function(err) {
+            if (err) {
+                return res.json({ success: false, message: 'Ошибка добавления реакции' });
+            }
+            res.json({ success: true });
+        }
+    );
+});
+
+// Remove reaction
+app.delete('/api/reactions/:messageId/:emoji', (req, res) => {
+    if (!req.session.userId) {
+        return res.json({ success: false, message: 'Не авторизован' });
+    }
+
+    const { messageId, emoji } = req.params;
+
+    db.run(
+        'DELETE FROM reactions WHERE message_id = ? AND user_id = ? AND emoji = ?',
+        [messageId, req.session.userId, emoji],
+        function(err) {
+            if (err) {
+                return res.json({ success: false, message: 'Ошибка удаления реакции' });
+            }
+            res.json({ success: true });
+        }
+    );
+});
+
+// Search chats and messages
+app.get('/api/search', (req, res) => {
+    if (!req.session.userId) {
+        return res.json({ success: false, message: 'Не авторизован' });
+    }
+
+    const query = req.query.q || '';
+
+    if (!query || query.length < 1) {
+        return res.json({ success: true, results: [] });
+    }
+
+    const searchTerm = `%${query}%`;
+
+    // Search chats by name
+    const chatPromise = new Promise((resolve) => {
+        db.all(
+            'SELECT id, name, avatar FROM chats WHERE user_id = ? AND name LIKE ? LIMIT 10',
+            [req.session.userId, searchTerm],
+            (err, rows) => resolve(err ? [] : rows || [])
+        );
+    });
+
+    // Search messages
+    const messagePromise = new Promise((resolve) => {
+        db.all(
+            `SELECT m.id, m.text, m.chat_id, c.name as chat_name FROM messages m 
+             JOIN chats c ON m.chat_id = c.id 
+             WHERE c.user_id = ? AND m.text LIKE ? AND m.deleted = 0 LIMIT 20`,
+            [req.session.userId, searchTerm],
+            (err, rows) => resolve(err ? [] : rows || [])
+        );
+    });
+
+    Promise.all([chatPromise, messagePromise])
+        .then(([chats, messages]) => {
+            res.json({ success: true, results: { chats, messages } });
+        });
+});
+
+// Change password
+app.post('/api/change-password', async (req, res) => {
+    if (!req.session.userId) {
+        return res.json({ success: false, message: 'Не авторизован' });
+    }
+
+    const { currentPassword, newPassword, confirmPassword } = req.body;
+
+    if (!currentPassword || !newPassword || !confirmPassword) {
+        return res.json({ success: false, message: 'Заполните все поля' });
+    }
+
+    if (newPassword !== confirmPassword) {
+        return res.json({ success: false, message: 'Новые пароли не совпадают' });
+    }
+
+    if (newPassword.length < 6) {
+        return res.json({ success: false, message: 'Пароль должен быть не менее 6 символов' });
+    }
+
+    db.get('SELECT password FROM users WHERE id = ?', [req.session.userId], async (err, user) => {
+        if (err || !user) {
+            return res.json({ success: false, message: 'Пользователь не найден' });
+        }
+
+        const validPassword = await bcrypt.compare(currentPassword, user.password);
+        if (!validPassword) {
+            return res.json({ success: false, message: 'Неверный текущий пароль' });
+        }
+
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+        db.run(
+            'UPDATE users SET password = ? WHERE id = ?',
+            [hashedPassword, req.session.userId],
+            function(err) {
+                if (err) {
+                    return res.json({ success: false, message: 'Ошибка изменения пароля' });
+                }
+                res.json({ success: true, message: 'Пароль успешно изменен' });
+            }
+        );
     });
 });
 
