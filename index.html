@@ -64,6 +64,7 @@
         <aside class="sidebar">
             <div class="sidebar-header">
                 <h2>Чаты</h2>
+                <input type="text" class="search-box" placeholder="Поиск..." />
                 <button class="new-chat-btn" id="newChatBtn">+</button>
             </div>
             
@@ -183,6 +184,8 @@
                 </div>
             </div>
             <div class="modal-actions">
+                <button type="button" class="settings-btn-secondary" id="profileBtn" onclick="showUserProfile()">Профиль</button>
+                <button type="button" class="settings-btn-secondary" id="changePasswordBtn" onclick="changePassword()">Сменить пароль</button>
                 <button type="button" class="settings-save-btn" id="settingsSaveBtn">Сохранить</button>
             </div>
         </div>
