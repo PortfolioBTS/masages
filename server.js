@@ -184,6 +184,36 @@ db.serialize(() => {
 
 // Middleware
 app.use(bodyParser.json());
+
+// ========== SECURITY HEADERS FOR ANTI-COPY PROTECTION ==========
+app.use((req, res, next) => {
+    // Prevent caching to protect content
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, private');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    res.set('Surrogate-Control', 'no-store');
+    
+    // Prevent search engines from indexing
+    res.set('X-Robots-Tag', 'noindex, nofollow');
+    
+    // Content Security Policy to prevent external script injection
+    res.set('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'");
+    
+    // Prevent framing (clickjacking protection)
+    res.set('X-Frame-Options', 'DENY');
+    
+    // Prevent MIME type sniffing
+    res.set('X-Content-Type-Options', 'nosniff');
+    
+    // Enable XSS protection
+    res.set('X-XSS-Protection', '1; mode=block');
+    
+    // Referrer Policy
+    res.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+    
+    next();
+});
+
 app.use(express.static(path.join(__dirname)));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 

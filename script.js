@@ -1406,3 +1406,101 @@ function setupSearch() {
 window.addEventListener('load', () => {
     requestNotificationPermission();
 });
+
+// ========== ANTI-COPY PROTECTION ==========
+
+// Disable right-click context menu
+document.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    return false;
+});
+
+// Disable text selection
+document.addEventListener('selectstart', (e) => {
+    e.preventDefault();
+    return false;
+});
+
+// Disable drag and drop
+document.addEventListener('dragstart', (e) => {
+    e.preventDefault();
+    return false;
+});
+
+document.addEventListener('drop', (e) => {
+    e.preventDefault();
+    return false;
+});
+
+// Disable copy, cut, paste
+document.addEventListener('copy', (e) => {
+    e.preventDefault();
+    return false;
+});
+
+document.addEventListener('cut', (e) => {
+    e.preventDefault();
+    return false;
+});
+
+document.addEventListener('paste', (e) => {
+    e.preventDefault();
+    return false;
+});
+
+// Disable developer tools shortcuts
+document.addEventListener('keydown', (e) => {
+    // Disable F12
+    if (e.key === 'F12') {
+        e.preventDefault();
+        return false;
+    }
+    // Disable Ctrl+Shift+I
+    if (e.ctrlKey && e.shiftKey && e.key === 'I') {
+        e.preventDefault();
+        return false;
+    }
+    // Disable Ctrl+Shift+J
+    if (e.ctrlKey && e.shiftKey && e.key === 'J') {
+        e.preventDefault();
+        return false;
+    }
+    // Disable Ctrl+Shift+C
+    if (e.ctrlKey && e.shiftKey && e.key === 'C') {
+        e.preventDefault();
+        return false;
+    }
+});
+
+// Disable CSS styling that allows text selection
+const style = document.createElement('style');
+style.textContent = `
+    * {
+        user-select: none;
+        -webkit-user-select: none;
+        -moz-user-select: none;
+        -ms-user-select: none;
+        -webkit-user-drag: none;
+        -webkit-touch-callout: none;
+    }
+    input, textarea {
+        user-select: text;
+        -webkit-user-select: text;
+    }
+`;
+document.head.appendChild(style);
+
+// Detect if developer tools are open
+setInterval(() => {
+    const devtools = { open: false, orientation: null };
+    const threshold = 160;
+    
+    devtools.open = window.outerHeight - window.innerHeight > threshold || window.outerWidth - window.innerWidth > threshold;
+    
+    if (devtools.open) {
+        // Alert user that dev tools are detected
+        console.clear();
+        console.log('%cWARNING!', 'color: red; font-size: 20px; font-weight: bold;');
+        console.log('%cOpening developer tools is not allowed on this site!', 'color: red; font-size: 14px;');
+    }
+}, 200);
