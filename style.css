@@ -1325,3 +1325,26 @@ body.dark-theme .settings-btn-secondary:hover {
     padding: 0 6px;
     margin-left: auto;
 }
+
+/* Copyright Watermark */
+.copyright-watermark {
+    position: fixed;
+    bottom: 0;
+    right: 0;
+    padding: 8px 12px;
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.25);
+    background: rgba(0, 0, 0, 0.15);
+    font-family: monospace;
+    letter-spacing: 0.5px;
+    user-select: none;
+    pointer-events: none;
+    z-index: 1;
+    border-top-left-radius: 4px;
+    font-weight: 500;
+    transition: color 0.3s ease;
+}
+
+.copyright-watermark:hover {
+    color: rgba(255, 255, 255, 0.35);
+}
