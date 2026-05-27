@@ -110,11 +110,20 @@
         <main class="chat-area">
             <div class="chat-header" id="chatHeader">
                 <div class="chat-header-info">
+                    <button class="back-btn" id="backBtn" style="display:none;">←</button>
                     <div class="avatar" id="currentAvatar">Б</div>
                     <div class="chat-header-text">
                         <h3 id="currentChatName">Выберите чат</h3>
                         <span class="chat-status" id="currentChatStatus">онлайн</span>
                     </div>
+                </div>
+                <div class="chat-search-row">
+                    <input type="text" id="chatSearchBox" class="chat-search-box" placeholder="Поиск сообщений в чате..." />
+                    <button id="chatSearchBtn" class="chat-search-btn">🔍</button>
+                    <span id="searchCounter" class="search-counter" style="display:none;"></span>
+                    <button id="searchPrev" class="search-nav-btn" style="display:none;" title="Предыдущее">▲</button>
+                    <button id="searchNext" class="search-nav-btn" style="display:none;" title="Следующее">▼</button>
+                    <button id="chatSearchClear" class="chat-search-clear" style="display:none;">✕</button>
                 </div>
             </div>
 
@@ -125,6 +134,10 @@
             </div>
 
             <div class="input-area" id="inputArea">
+                <div class="reply-preview hidden" id="replyPreview">
+                    <span id="replyPreviewText"></span>
+                    <button type="button" class="cancel-reply-btn" id="cancelReplyBtn">✕</button>
+                </div>
                 <button type="button" class="emoji-btn" id="emojiButton">😊</button>
                 <button type="button" class="file-btn" id="fileButton">📎</button>
                 <button type="button" class="voice-btn" id="voiceButton">🎤</button>
@@ -169,9 +182,11 @@
                 <div class="setting-item">
                     <label>Аватар</label>
                     <div class="avatar-upload">
-                        <button type="button" id="avatarSelectButton">Выбрать изображение</button>
-                        <span id="avatarFileName" class="avatar-file-name">Файл не выбран</span>
-                        <input type="file" id="avatarInput" accept="image/*" hidden>
+                        <div class="avatar-color-row">
+                            <input type="color" id="avatarColorInput" value="#667eea">
+                            <span id="avatarColorValue" class="avatar-color-value">#667EEA</span>
+                        </div>
+                        <div class="avatar-color-preview" id="avatarColorPreview">П</div>
                     </div>
                 </div>
                 <div class="setting-item">
@@ -197,9 +212,10 @@
         </div>
     </div>
 
+    <script src="/socket.io/socket.io.js"></script>
     <script src="script.js"></script>
     
     <!-- Copyright Watermark -->
-    <div class="copyright-watermark">Copyright © 2024 Online Messenger</div>
+    <div class="copyright-watermark">Copyright © 2026 Online Messenger</div>
 </body>
 </html>
