@@ -182,9 +182,11 @@
                 <div class="setting-item">
                     <label>Аватар</label>
                     <div class="avatar-upload">
-                        <button type="button" id="avatarSelectButton">Выбрать изображение</button>
-                        <span id="avatarFileName" class="avatar-file-name">Файл не выбран</span>
-                        <input type="file" id="avatarInput" accept="image/*" hidden>
+                        <div class="avatar-color-row">
+                            <input type="color" id="avatarColorInput" value="#667eea">
+                            <span id="avatarColorValue" class="avatar-color-value">#667EEA</span>
+                        </div>
+                        <div class="avatar-color-preview" id="avatarColorPreview">П</div>
                     </div>
                 </div>
                 <div class="setting-item">

@@ -16,8 +16,8 @@ const app = express();
 const server = http.createServer(app); // Теперь app уже существует
 const io = new Server(server);         // Теперь server уже существует
 
-const PORT = 3000;
-const HOST = '0.0.0.0';
+const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || '0.0.0.0';
 
 
 
@@ -38,6 +38,11 @@ function getLocalAddresses() {
     }
 
     return addresses;
+}
+
+function normalizeAvatarColor(value) {
+    const color = String(value || '').trim();
+    return /^#[0-9a-fA-F]{6}$/.test(color) ? color.toUpperCase() : '#667EEA';
 }
 
 
@@ -389,7 +394,7 @@ app.post('/api/register', async (req, res) => {
             // Insert user
             db.run(
                 'INSERT INTO users (unique_code, username, email, password, avatar) VALUES (?, ?, ?, ?, ?)',
-                [uniqueCode, username, email, hashedPassword, ''],
+                [uniqueCode, username, email, hashedPassword, '#667EEA'],
                 function(err) {
                     if (err) {
                         return res.json({ success: false, message: 'Ошибка при создании пользователя' });
@@ -416,12 +421,12 @@ app.post('/api/register', async (req, res) => {
                     req.session.userId = userId;
                     req.session.username = username;
                     req.session.uniqueCode = uniqueCode;
-                    req.session.avatar = '';
+                    req.session.avatar = '#667EEA';
 
                     res.json({ 
                         success: true, 
                         message: 'Регистрация успешна!',
-                        user: { id: userId, username, uniqueCode, avatar: '' }
+                        user: { id: userId, username, uniqueCode, avatar: '#667EEA' }
                     });
                 }
             );
@@ -521,26 +526,19 @@ app.get('/api/user', (req, res) => {
     );
 });
 
-// Update current user's avatar
-app.post('/api/user/avatar', upload.single('avatar'), (req, res) => {
+// Update current user's avatar color
+app.post('/api/user/avatar-color', (req, res) => {
     if (!req.session.userId) {
         return res.json({ success: false, message: 'Не авторизован' });
     }
 
-    const file = req.file;
-    if (!file) {
-        return res.json({ success: false, message: 'Файл не выбран' });
-    }
-
-    const sanitizedAvatar = `/uploads/${file.filename}`;
-
-    db.run('UPDATE users SET avatar = ? WHERE id = ?', [sanitizedAvatar, req.session.userId], function(err) {
+    const avatarColor = normalizeAvatarColor(req.body && req.body.avatarColor);
+    db.run('UPDATE users SET avatar = ? WHERE id = ?', [avatarColor, req.session.userId], function(err) {
         if (err) {
-            return res.json({ success: false, message: 'Ошибка обновления аватара' });
+            return res.json({ success: false, message: 'Ошибка обновления цвета аватара' });
         }
-
-        req.session.avatar = sanitizedAvatar;
-        res.json({ success: true, avatar: sanitizedAvatar });
+        req.session.avatar = avatarColor;
+        res.json({ success: true, avatar: avatarColor });
     });
 });
 
@@ -753,6 +751,7 @@ app.post('/api/messages', (req, res) => {
             }, 1500);
         }
     });
+});
 
 
 
@@ -1205,8 +1204,10 @@ app.get('*', (req, res) => {
 
 server.listen(PORT, HOST, () => {
     const addresses = getLocalAddresses();
-    console.log(`Сервер запущен на http://localhost:${PORT}`);
+    console.log('Сервер запущен на следующих адресах:');
+    // Перебор локальных адресов для подключения из сети (LAN)
     addresses.forEach(addr => {
         console.log(`Доступен в сети: http://${addr}:${PORT}`);
     });
+    console.log(`  http://localhost:${PORT}`);
 });
