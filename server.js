@@ -1,3 +1,4 @@
+// 1. ИМПОРТЫ (в самом верху)
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const bcrypt = require('bcryptjs');
@@ -7,10 +8,22 @@ const multer = require('multer');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const http = require('http'); // Импортируем http
+const { Server } = require('socket.io'); // Импортируем socket.io
 
+// 2. ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЙ
 const app = express();
+const server = http.createServer(app); // Теперь app уже существует
+const io = new Server(server);         // Теперь server уже существует
+
 const PORT = 3000;
 const HOST = '0.0.0.0';
+
+
+
+function getSocketRoomKey(chatId, roomId) {
+    return roomId ? `room:${roomId}` : `chat:${chatId}`;
+}
 
 function getLocalAddresses() {
     const nets = os.networkInterfaces();
@@ -27,10 +40,33 @@ function getLocalAddresses() {
     return addresses;
 }
 
-// Initialize SQLite database
+
+// 5. БАЗА ДАННЫХ И МАРШРУТЫ
 const db = new sqlite3.Database('./messenger.db', (err) => {
-    if (err) console.error('Database error:', err.message);
-    else console.log('Connected to SQLite database');
+    if (err) console.error('Ошибка БД:', err.message);
+});
+
+
+
+// const app = express();
+
+
+
+
+// Логика подключения WebSockets
+io.on('connection', (socket) => {
+    console.log('Пользователь подключился через WebSocket');
+
+    // Клиент передает ключ комнаты в формате room:<id> или chat:<id>
+    socket.on('joinChat', (roomKey) => {
+        if (typeof roomKey === 'string' && roomKey.length > 0) {
+            socket.join(roomKey);
+        }
+    });
+
+    socket.on('disconnect', () => {
+        console.log('Пользователь отключился');
+    });
 });
 
 // Create tables
@@ -220,7 +256,7 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 const upload = multer({ dest: path.join(__dirname, 'uploads') });
 
 app.use(session({
-    secret: 'messenger-secret-key-2024',
+    secret: process.env.SESSION_SECRET || 'messenger-secret-key-2024',
     resave: false,
     saveUninitialized: false,
     cookie: { maxAge: 24 * 60 * 60 * 1000 } // 24 hours
@@ -546,8 +582,22 @@ app.get('/api/messages/:chatId', (req, res) => {
         }
 
         const selectQuery = chat.room_id
-            ? 'SELECT m.*, u.username as sender_username, u.avatar as sender_avatar FROM messages m JOIN users u ON m.user_id = u.id WHERE m.room_id = ? AND m.deleted = 0 ORDER BY m.id ASC'
-            : 'SELECT m.*, u.username as sender_username, u.avatar as sender_avatar FROM messages m JOIN users u ON m.user_id = u.id WHERE m.chat_id = ? AND m.deleted = 0 ORDER BY m.id ASC';
+            ? `SELECT m.*, u.username as sender_username, u.avatar as sender_avatar,
+                      rt.id as reply_to_id, rt.text as reply_to_text, ru.username as reply_to_sender_username, ru.avatar as reply_to_sender_avatar
+               FROM messages m
+               JOIN users u ON m.user_id = u.id
+               LEFT JOIN messages rt ON m.reply_to_id = rt.id
+               LEFT JOIN users ru ON rt.user_id = ru.id
+               WHERE m.room_id = ? AND m.deleted = 0
+               ORDER BY m.id ASC`
+            : `SELECT m.*, u.username as sender_username, u.avatar as sender_avatar,
+                      rt.id as reply_to_id, rt.text as reply_to_text, ru.username as reply_to_sender_username, ru.avatar as reply_to_sender_avatar
+               FROM messages m
+               JOIN users u ON m.user_id = u.id
+               LEFT JOIN messages rt ON m.reply_to_id = rt.id
+               LEFT JOIN users ru ON rt.user_id = ru.id
+               WHERE m.chat_id = ? AND m.deleted = 0
+               ORDER BY m.id ASC`;
         const selectParam = chat.room_id || chatId;
 
         db.all(selectQuery, [selectParam], (err, messages) => {
@@ -579,7 +629,13 @@ app.get('/api/messages/:chatId', (req, res) => {
 
                     messages = messages.map(m => ({
                         ...m,
-                        reactions: reactionsMap[m.id] || []
+                        reactions: reactionsMap[m.id] || [],
+                        reply_to: m.reply_to_id ? {
+                            id: m.reply_to_id,
+                            text: m.reply_to_text,
+                            sender_username: m.reply_to_sender_username,
+                            sender_avatar: m.reply_to_sender_avatar
+                        } : null
                     }));
 
                     const updateQuery = chat.room_id
@@ -601,7 +657,8 @@ app.post('/api/messages', (req, res) => {
         return res.json({ success: false, message: 'Не авторизован' });
     }
 
-    const { chatId, text } = req.body;
+    const { chatId, text, replyToId } = req.body;
+    const replyTo = Number(replyToId) || null;
 
     if ((!text || text.trim() === '') || !chatId) {
         return res.json({ success: false, message: 'Введите текст сообщения' });
@@ -615,55 +672,89 @@ app.post('/api/messages', (req, res) => {
 
         const time = getCurrentTime();
         const roomId = chat.room_id || null;
+        const socketRoomKey = getSocketRoomKey(chatId, roomId);
 
         db.run(
-            'INSERT INTO messages (chat_id, room_id, user_id, text, message_type, sent, time, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [chatId, roomId, req.session.userId, text.trim(), 'text', 1, time, 'sent'],
+            'INSERT INTO messages (chat_id, room_id, user_id, text, message_type, sent, time, status, reply_to_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [chatId, roomId, req.session.userId, text.trim(), 'text', 1, time, 'sent', replyTo],
             function(err) {
                 if (err) {
                     return res.json({ success: false, message: 'Ошибка отправки' });
                 }
 
                 const messageId = this.lastID;
+                // Получаем созданное сообщение с данными пользователя для ответа
+                db.get(
+                    `SELECT m.*, u.username, u.avatar as user_avatar 
+                     FROM messages m 
+                     JOIN users u ON m.user_id = u.id 
+                     WHERE m.id = ?`,
+                    [messageId],
+                    (err, fullMessage) => {
+                        if (err) {
+                            return res.json({ success: false, message: 'Ошибка получения данных сообщения' });
+                        }
 
-                // Bot response for bot chat
-                if (chat.is_bot) {
-                    setTimeout(() => {
-                        const botResponses = [
-                            'Интересный вопрос! Расскажите подробнее.',
-                            'Я получил ваше сообщение!',
-                            'Хмм, дайте подумать...',
-                            'Отличное сообщение! Продолжайте.',
-                            'Я бот, но стараюсь быть полезным!',
-                            'Можете уточнить, что именно вас интересует?'
-                        ];
-                        const randomResponse = botResponses[Math.floor(Math.random() * botResponses.length)];
-                        const botTime = getCurrentTime();
+                        const messageForSocket = {
+                            ...fullMessage,
+                            sender_username: fullMessage.username,
+                            sender_avatar: fullMessage.user_avatar
+                        };
+                        io.to(socketRoomKey).emit('newMessage', messageForSocket);
 
-                        db.run(
-                            'INSERT INTO messages (chat_id, room_id, user_id, text, sent, time, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                            [chatId, roomId, req.session.userId, randomResponse, 0, botTime, 'read']
-                        );
-                    }, 1500);
-                }
-
-                // Simulate status updates
-                setTimeout(() => {
-                    db.run('UPDATE messages SET status = ? WHERE id = ?', ['delivered', messageId]);
-                }, 1000);
-
-                setTimeout(() => {
-                    db.run('UPDATE messages SET status = ? WHERE id = ?', ['read', messageId]);
-                }, 2000);
-
-                res.json({ 
-                    success: true, 
-                    message: { id: messageId, text: text.trim(), message_type: 'text', sent: true, time, status: 'sent' }
-                });
+                        res.json({ success: true, message: messageForSocket });
+                    }
+                );
             }
         );
+
+        // Bot response for bot chat (не отправляем второй HTTP-ответ)
+        if (chat.is_bot) {
+            setTimeout(() => {
+                const botResponses = [
+                    'Интересный вопрос! Расскажите подробнее.',
+                    'Я получил ваше сообщение!',
+                    'Хмм, дайте подумать...',
+                    'Отличное сообщение! Продолжайте.',
+                    'Я бот, но стараюсь быть полезным!',
+                    'Можете уточнить, что именно вас интересует?'
+                ];
+                const randomResponse = botResponses[Math.floor(Math.random() * botResponses.length)];
+                const botTime = getCurrentTime();
+
+                db.run(
+                    'INSERT INTO messages (chat_id, room_id, user_id, text, sent, time, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    [chatId, roomId, req.session.userId, randomResponse, 0, botTime, 'read'],
+                    function(insertErr) {
+                        if (insertErr) {
+                            return;
+                        }
+
+                        const botMessageId = this.lastID;
+                        db.get(
+                            `SELECT m.*, u.username, u.avatar as user_avatar
+                             FROM messages m
+                             JOIN users u ON m.user_id = u.id
+                             WHERE m.id = ?`,
+                            [botMessageId],
+                            (fetchErr, botMessage) => {
+                                if (fetchErr || !botMessage) {
+                                    return;
+                                }
+                                io.to(socketRoomKey).emit('newMessage', {
+                                    ...botMessage,
+                                    sender_username: botMessage.username,
+                                    sender_avatar: botMessage.user_avatar
+                                });
+                            }
+                        );
+                    }
+                );
+            }, 1500);
+        }
     });
-});
+
+
 
 // Upload file message
 app.post('/api/messages/file', upload.single('file'), (req, res) => {
@@ -685,6 +776,7 @@ app.post('/api/messages/file', upload.single('file'), (req, res) => {
 
         const time = getCurrentTime();
         const roomId = chat.room_id || null;
+        const socketRoomKey = getSocketRoomKey(chatId, roomId);
         const fileUrl = `/uploads/${file.filename}`;
         const fileType = file.mimetype;
         const fileName = file.originalname;
@@ -713,10 +805,13 @@ app.post('/api/messages/file', upload.single('file'), (req, res) => {
                     db.run('UPDATE messages SET status = ? WHERE id = ?', ['read', messageId]);
                 }, 2000);
 
-                res.json({
-                    success: true,
-                    message: {
+                const fileMessage = {
                         id: messageId,
+                        chat_id: Number(chatId),
+                        room_id: roomId,
+                        user_id: req.session.userId,
+                        sender_username: req.session.username,
+                        sender_avatar: req.session.avatar || '',
                         text: messageText,
                         file_url: fileUrl,
                         file_name: fileName,
@@ -725,8 +820,9 @@ app.post('/api/messages/file', upload.single('file'), (req, res) => {
                         sent: true,
                         time,
                         status: 'sent'
-                    }
-                });
+                };
+                io.to(socketRoomKey).emit('newMessage', fileMessage);
+                res.json({ success: true, message: fileMessage });
             }
         );
     });
@@ -881,17 +977,7 @@ app.post('/api/chats/join', (req, res) => {
 function getCurrentTime() {
     const now = new Date();
     return `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
-}
-
-// Start server
-app.listen(PORT, HOST, () => {
-    console.log(`Server running at http://localhost:${PORT}`);
-    const addresses = getLocalAddresses();
-    if (addresses.length > 0) {
-        console.log(`Accessible on local network at: ${addresses.map(ip => `http://${ip}:${PORT}`).join(', ')}`);
-    }
-});
-
+};
 
 // Delete chat
 app.delete('/api/chats/:chatId', (req, res) => {
@@ -1115,4 +1201,12 @@ app.post('/api/change-password', async (req, res) => {
 
 app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
+});
+
+server.listen(PORT, HOST, () => {
+    const addresses = getLocalAddresses();
+    console.log(`Сервер запущен на http://localhost:${PORT}`);
+    addresses.forEach(addr => {
+        console.log(`Доступен в сети: http://${addr}:${PORT}`);
+    });
 });
