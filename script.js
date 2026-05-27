@@ -45,9 +45,9 @@ const settingsModal = document.getElementById('settingsModal');
 const closeSettings = document.getElementById('closeSettings');
 const themeSelect = document.getElementById('themeSelect');
 const usernameInput = document.getElementById('usernameInput');
-const avatarSelectButton = document.getElementById('avatarSelectButton');
-const avatarInput = document.getElementById('avatarInput');
-const avatarFileName = document.getElementById('avatarFileName');
+const avatarColorInput = document.getElementById('avatarColorInput');
+const avatarColorValue = document.getElementById('avatarColorValue');
+const avatarColorPreview = document.getElementById('avatarColorPreview');
 const settingsSaveBtn = document.getElementById('settingsSaveBtn');
 const notificationsToggle = document.getElementById('notificationsToggle');
 const newChatBtn = document.getElementById('newChatBtn');
@@ -102,12 +102,7 @@ function showApp() {
     document.querySelector('.app').style.display = 'flex';
     displayUsername.textContent = currentUser.username;
     displayCode.textContent = currentUser.uniqueCode;
-    if (avatarInput) {
-        avatarInput.value = '';
-    }
-    if (avatarFileName) {
-        avatarFileName.textContent = 'Файл не выбран';
-    }
+    syncAvatarColorControls();
     getChatCodeBtn.disabled = false;
     showInviteCode('');
     loadChats();
@@ -130,13 +125,44 @@ async function loadChats() {
     }
 }
 
+function normalizeAvatarColor(value) {
+    const color = String(value || '').trim();
+    return /^#[0-9a-fA-F]{6}$/.test(color) ? color.toUpperCase() : '#667EEA';
+}
+
+function getAvatarInitial(source) {
+    const text = String(source || '').trim();
+    return text ? escapeHtml(text.charAt(0).toUpperCase()) : '?';
+}
+
 function formatAvatarHtml(value) {
-    const avatarValue = String(value || '').trim();
-    if (isImageUrl(avatarValue)) {
-        return `<img src="${escapeHtml(avatarValue)}" alt="avatar" />`;
+    const initial = getAvatarInitial(value);
+    return `<span style="background:#667EEA;color:#fff;width:100%;height:100%;display:grid;place-items:center;border-radius:50%;">${initial}</span>`;
+}
+
+function formatUserAvatarHtml(colorValue, fallbackName) {
+    const color = normalizeAvatarColor(colorValue);
+    const initial = getAvatarInitial(fallbackName);
+    return `<span style="background:${escapeHtml(color)};color:#fff;width:100%;height:100%;display:grid;place-items:center;border-radius:50%;">${initial}</span>`;
+}
+
+function updateAvatarColorPreview() {
+    if (!avatarColorInput || !avatarColorPreview) return;
+    const color = normalizeAvatarColor(avatarColorInput.value);
+    avatarColorInput.value = color;
+    if (avatarColorValue) {
+        avatarColorValue.textContent = color;
     }
-    const firstChar = avatarValue ? escapeHtml(avatarValue.charAt(0).toUpperCase()) : '?';
-    return `<span>${firstChar}</span>`;
+    const name = (usernameInput && usernameInput.value) || (currentUser && currentUser.username) || 'П';
+    avatarColorPreview.style.background = color;
+    avatarColorPreview.textContent = String(name).trim().charAt(0).toUpperCase() || 'П';
+}
+
+function syncAvatarColorControls() {
+    if (!avatarColorInput) return;
+    const color = normalizeAvatarColor(currentUser && currentUser.avatar);
+    avatarColorInput.value = color;
+    updateAvatarColorPreview();
 }
 
 // Render chat list
@@ -322,19 +348,13 @@ function createMessageElement(msg, highlightQuery = '') {
     const textColor = '#ffffff';
     
     // Получаем аватарку из сообщения или из текущего пользователя
-    let avatarValue = msg.sender_avatar || (msg.sender_username ? msg.sender_username.charAt(0).toUpperCase() : '?');
-    
-    // Если это сообщение текущего пользователя и нет аватарки в сообщении, используем его аватарку
-    if (isCurrentUser && !msg.sender_avatar && currentUser && currentUser.avatar) {
-        avatarValue = currentUser.avatar;
-    }
-
     const messageEl = document.createElement('div');
     messageEl.className = `message-row ${isCurrentUser ? 'sent' : 'received'}`;
 
-    const avatarHtml = isImageUrl(avatarValue)
-        ? `<img src="${escapeHtml(avatarValue)}" alt="${escapeHtml(msg.sender_username || '')}" loading="lazy" />`
-        : `<span>${escapeHtml(String(avatarValue).charAt(0).toUpperCase())}</span>`;
+    const avatarColor = isCurrentUser
+        ? normalizeAvatarColor(currentUser && currentUser.avatar)
+        : normalizeAvatarColor(msg.sender_avatar);
+    const avatarHtml = formatUserAvatarHtml(avatarColor, msg.sender_username || 'U');
 
     const statusIcon = isCurrentUser ? getStatusIcon(msg.status) : '';
     const attachmentHtml = msg.file_url
@@ -454,9 +474,7 @@ function escapeHtml(text) {
 }
 
 async function handleSettingsSave() {
-    if (avatarInput && avatarInput.files && avatarInput.files.length > 0) {
-        await saveUserAvatar();
-    }
+    await saveUserAvatarColor();
 
     saveSettings();
 
@@ -478,26 +496,30 @@ async function handleSettingsSave() {
     }
 }
 
-async function saveUserAvatar() {
-    if (!currentUser || !avatarInput || !avatarInput.files || avatarInput.files.length === 0) return;
-
-    const file = avatarInput.files[0];
-    const formData = new FormData();
-    formData.append('avatar', file);
+async function saveUserAvatarColor() {
+    if (!currentUser || !avatarColorInput) return;
+    const avatarColor = normalizeAvatarColor(avatarColorInput.value);
 
     try {
-        const response = await fetch('/api/user/avatar', {
+        const response = await fetch('/api/user/avatar-color', {
             method: 'POST',
-            body: formData
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ avatarColor })
         });
+        const rawText = await response.text();
+        let data = null;
+        try {
+            data = rawText ? JSON.parse(rawText) : null;
+        } catch (_parseErr) {
+            throw new Error('SERVER_NON_JSON_RESPONSE');
+        }
 
-        const data = await response.json();
+        if (!response.ok || !data) {
+            throw new Error('SERVER_BAD_RESPONSE');
+        }
         if (data.success) {
-            currentUser.avatar = data.avatar || '';
-            avatarInput.value = '';
-            if (avatarFileName) {
-                avatarFileName.textContent = 'Файл не выбран';
-            }
+            currentUser.avatar = normalizeAvatarColor(data.avatar || avatarColor);
+            syncAvatarColorControls();
             // Перезагружаем сообщения, чтобы отобразить новую аватарку
             if (currentChatId) {
                 scheduleCurrentChatReload();
@@ -505,12 +527,12 @@ async function saveUserAvatar() {
             // Перезагружаем список чатов
             scheduleChatsReload();
         } else {
-            console.error('Save avatar error:', data.message);
-            alert('Ошибка сохранения аватара: ' + (data.message || 'Неизвестная ошибка'));
+            console.error('Save avatar color error:', data && data.message);
+            alert('Ошибка сохранения цвета аватара: ' + (data.message || 'Неизвестная ошибка'));
         }
     } catch (error) {
-        console.error('Save avatar error:', error);
-        alert('Ошибка соединения при сохранении аватара');
+        console.error('Save avatar color error:', error);
+        alert('Не удалось сохранить цвет аватара. Перезапусти сервер и попробуй снова.');
     }
 }
 async function deleteChat(chatId, chatName) {
@@ -1150,27 +1172,10 @@ if (logoutSidebarBtn) {
     });
 
     // Avatar
-    if (avatarSelectButton && avatarInput) {
-        avatarSelectButton.addEventListener('click', () => {
-            avatarInput.click();
-        });
+    if (avatarColorInput) {
+        avatarColorInput.addEventListener('input', updateAvatarColorPreview);
     }
-
-    if (avatarInput) {
-        avatarInput.addEventListener('change', () => {
-            if (!avatarInput.files || avatarInput.files.length === 0) {
-                if (avatarFileName) {
-                    avatarFileName.textContent = 'Файл не выбран';
-                }
-                return;
-            }
-
-            const file = avatarInput.files[0];
-            if (avatarFileName) {
-                avatarFileName.textContent = file.name;
-            }
-        });
-    }
+    usernameInput.addEventListener('input', updateAvatarColorPreview);
 
     if (settingsSaveBtn) {
         settingsSaveBtn.addEventListener('click', async () => {
@@ -1190,7 +1195,8 @@ function saveSettings() {
     const settings = {
         theme: themeSelect.value,
         username: usernameInput.value,
-        notifications: notificationsToggle.checked
+        notifications: notificationsToggle.checked,
+        avatarColor: avatarColorInput ? normalizeAvatarColor(avatarColorInput.value) : '#667EEA'
     };
     localStorage.setItem('messengerSettings', JSON.stringify(settings));
     if (currentUser) {
@@ -1217,6 +1223,9 @@ function loadSettings() {
         themeSelect.value = settings.theme || 'light';
         usernameInput.value = settings.username || 'Пользователь';
         notificationsToggle.checked = settings.notifications !== false;
+        if (avatarColorInput && settings.avatarColor) {
+            avatarColorInput.value = normalizeAvatarColor(settings.avatarColor);
+        }
         
         if (settings.theme === 'dark') {
             document.body.classList.add('dark-theme');
@@ -1227,6 +1236,7 @@ function loadSettings() {
             displayUsername.textContent = settings.username;
         }
     }
+    syncAvatarColorControls();
 }
 
 function setReplyMode(message) {
@@ -1540,18 +1550,13 @@ window.createMessageElement = function(msg, highlightQuery = '') {
     const bubbleColor = isCurrentUser ? '#667eea' : userColor;
     const textColor = '#ffffff';
 
-    let avatarValue = msg.sender_avatar || (msg.sender_username ? msg.sender_username.charAt(0).toUpperCase() : '?');
-
-    if (isCurrentUser && !msg.sender_avatar && currentUser && currentUser.avatar) {
-        avatarValue = currentUser.avatar;
-    }
-
     const messageEl = document.createElement('div');
     messageEl.className = `message-row ${isCurrentUser ? 'sent' : 'received'}`;
 
-    const avatarHtml = isImageUrl(avatarValue)
-        ? `<img src="${escapeHtml(avatarValue)}" alt="${escapeHtml(msg.sender_username || '')}" loading="lazy" />`
-        : `<span>${escapeHtml(String(avatarValue).charAt(0).toUpperCase())}</span>`;
+    const avatarColor = isCurrentUser
+        ? normalizeAvatarColor(currentUser && currentUser.avatar)
+        : normalizeAvatarColor(msg.sender_avatar);
+    const avatarHtml = formatUserAvatarHtml(avatarColor, msg.sender_username || 'U');
 
     const statusIcon = isCurrentUser ? getStatusIcon(msg.status) : '';
     const attachmentHtml = msg.file_url

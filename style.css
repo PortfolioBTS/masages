@@ -1020,6 +1020,40 @@ body {
     gap: 10px;
 }
 
+.avatar-color-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+#avatarColorInput {
+    width: 44px;
+    height: 36px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: transparent;
+    cursor: pointer;
+    padding: 2px;
+}
+
+.avatar-color-value {
+    font-size: 13px;
+    color: var(--text-secondary);
+    font-family: 'Courier New', monospace;
+}
+
+.avatar-color-preview {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    color: #fff;
+    font-size: 24px;
+    font-weight: 700;
+    display: grid;
+    place-items: center;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.16);
+}
+
 .modal-actions {
     padding: 0 20px 20px;
     display: flex;
