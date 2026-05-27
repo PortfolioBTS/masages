@@ -8,7 +8,14 @@ let audioChunks = [];
 let isRecordingAudio = false;
 let messagePollInterval = null;
 let isPollingMessages = false;
+let replyToMessage = null; // Track reply mode
 const MESSAGE_POLL_INTERVAL = 3000;
+const RELOAD_DEBOUNCE_MS = 180;
+const socket = io();
+let chatsReloadTimer = null;
+let messagesReloadTimer = null;
+let chatsRequestId = 0;
+let messagesRequestId = 0;
 
 // DOM Elements
 const authModal = document.getElementById('authModal');
@@ -48,6 +55,12 @@ const getChatCodeBtn = document.getElementById('getChatCodeBtn');
 const joinCodeInput = document.getElementById('joinCodeInput');
 const joinChatBtn = document.getElementById('joinChatBtn');
 const inviteCodePreview = document.getElementById('inviteCodePreview');
+const chatSearchBox = document.getElementById('chatSearchBox');
+const replyPreview = document.getElementById('replyPreview');
+const replyPreviewText = document.getElementById('replyPreviewText');
+const cancelReplyBtn = document.getElementById('cancelReplyBtn');
+
+let currentMessageSearchQuery = '';
 
 // Initialize
 async function init() {
@@ -77,6 +90,7 @@ async function checkAuth() {
 // Show auth modal
 function showAuth() {
     stopMessagePolling();
+    clearReloadTimers();
     currentChatId = null;
     authModal.classList.remove('hidden');
     document.querySelector('.app').style.display = 'none';
@@ -101,9 +115,11 @@ function showApp() {
 
 // Load chats from server
 async function loadChats() {
+    const requestId = ++chatsRequestId;
     try {
         const response = await fetch('/api/chats');
         const data = await response.json();
+        if (requestId !== chatsRequestId) return;
         
         if (data.success) {
             chats = data.chats;
@@ -175,10 +191,19 @@ function getStatusIcon(status) {
     }
 }
 
+function getChatSocketRoomKey(chat) {
+    if (!chat) return null;
+    return chat.room_id ? `room:${chat.room_id}` : `chat:${chat.id}`;
+}
+
 // Select chat
 async function selectChat(chatId) {
     currentChatId = chatId;
     const chat = chats.find(c => c.id === chatId);
+    const roomKey = getChatSocketRoomKey(chat);
+    if (roomKey) {
+        socket.emit('joinChat', roomKey);
+    }
     
     if (chat) {
         // Update header
@@ -193,6 +218,9 @@ async function selectChat(chatId) {
             showInviteCode('');
         }
         
+        // Reset reply preview when switching chats
+        clearReplyMode();
+
         // Enable input
         messageInput.disabled = false;
         sendBtn.disabled = false;
@@ -202,22 +230,66 @@ async function selectChat(chatId) {
         await loadMessages(chatId);
         renderChatList();
         startMessagePolling();
+
+
+
+        // Мобильная навигация — показать чат
+        if (window.innerWidth <= 768) {
+            document.querySelector('.sidebar').classList.add('hidden-mobile');
+            document.querySelector('.chat-area').classList.add('active-mobile');
+        }
     }
 }
 
 // Load messages for chat
 async function loadMessages(chatId) {
     if (!chatId) return;
+    const requestId = ++messagesRequestId;
     try {
         const response = await fetch(`/api/messages/${chatId}`);
         const data = await response.json();
+        if (requestId !== messagesRequestId || chatId !== currentChatId) return;
         
         if (data.success) {
-            renderMessages(data.messages);
+            renderMessages(data.messages, currentMessageSearchQuery);
         }
     } catch (error) {
         console.error('Load messages error:', error);
     }
+}
+
+function clearReloadTimers() {
+    if (chatsReloadTimer) {
+        clearTimeout(chatsReloadTimer);
+        chatsReloadTimer = null;
+    }
+    if (messagesReloadTimer) {
+        clearTimeout(messagesReloadTimer);
+        messagesReloadTimer = null;
+    }
+}
+
+function scheduleChatsReload(delay = RELOAD_DEBOUNCE_MS) {
+    if (chatsReloadTimer) {
+        clearTimeout(chatsReloadTimer);
+    }
+    chatsReloadTimer = setTimeout(() => {
+        chatsReloadTimer = null;
+        loadChats();
+    }, delay);
+}
+
+function scheduleCurrentChatReload(delay = RELOAD_DEBOUNCE_MS) {
+    if (!currentChatId) return;
+    if (messagesReloadTimer) {
+        clearTimeout(messagesReloadTimer);
+    }
+    messagesReloadTimer = setTimeout(() => {
+        messagesReloadTimer = null;
+        if (currentChatId) {
+            loadMessages(currentChatId);
+        }
+    }, delay);
 }
 
 function startMessagePolling() {
@@ -243,7 +315,7 @@ function stopMessagePolling() {
 }
 
 // Render a single message element
-function createMessageElement(msg) {
+function createMessageElement(msg, highlightQuery = '') {
     const isCurrentUser = currentUser && msg.user_id === currentUser.id;
     const userColor = getUserColor(msg.sender_username || '');
     const bubbleColor = isCurrentUser ? '#667eea' : userColor;
@@ -274,11 +346,26 @@ function createMessageElement(msg) {
                     ? `<audio class="message-attachment" controls src="${escapeHtml(msg.file_url)}"></audio>`
                     : `<a class="message-file" href="${escapeHtml(msg.file_url)}" download="${escapeHtml(msg.file_name || '')}">${escapeHtml(msg.file_name || 'Файл')}</a>`)
         : '';
-    const messageText = msg.text && msg.message_type === 'text' ? `<div class="message-text">${escapeHtml(msg.text)}</div>` : '';
+    const messageText = msg.text && msg.message_type === 'text'
+        ? `<div class="message-text">${highlightText(msg.text, highlightQuery)}</div>`
+        : '';
+
+    // Build reply quote if message is a reply
+    let replyQuoteHtml = '';
+    if (msg.reply_to && msg.reply_to.sender_username) {
+        const quotedText = msg.reply_to.text ? msg.reply_to.text.substring(0, 100) : '[Медиа-файл]';
+        replyQuoteHtml = `
+            <div class="message-reply-quote">
+                <div class="reply-to-name">${escapeHtml(msg.reply_to.sender_username)}</div>
+                <div class="reply-to-text">${escapeHtml(quotedText)}</div>
+            </div>
+        `;
+    }
 
     messageEl.innerHTML = `
         <div class="message-avatar" title="${escapeHtml(msg.sender_username || '')}">${avatarHtml}</div>
         <div class="message-bubble" style="background: ${bubbleColor}; color: ${textColor};">
+            ${replyQuoteHtml}
             ${messageText}
             ${attachmentHtml}
             <div class="message-time">
@@ -287,6 +374,11 @@ function createMessageElement(msg) {
             </div>
         </div>
     `;
+
+    // Add context menu
+    messageEl.addEventListener('contextmenu', (e) => {
+        showMessageContextMenu(msg.id, e, isCurrentUser, msg);
+    });
 
     return messageEl;
 }
@@ -297,11 +389,14 @@ function messagesAreEqual(msgA, msgB) {
         && msgA.file_url === msgB.file_url
         && msgA.message_type === msgB.message_type
         && msgA.status === msgB.status
-        && msgA.time === msgB.time;
+        && msgA.time === msgB.time
+        && msgA.edited_at === msgB.edited_at
+        && msgA.deleted === msgB.deleted
+        && JSON.stringify(msgA.reactions || []) === JSON.stringify(msgB.reactions || []);
 }
 
 // Render messages
-function renderMessages(messages) {
+function renderMessages(messages, highlightQuery = '') {
     if (!messages || messages.length === 0) {
         lastMessages = [];
         messagesContainer.innerHTML = '<div class="no-chat-selected"><p>Нет сообщений</p></div>';
@@ -309,7 +404,7 @@ function renderMessages(messages) {
     }
 
     const sameLength = messages.length === lastMessages.length;
-    const sameContent = sameLength && messages.every((msg, index) => messagesAreEqual(msg, lastMessages[index]));
+    const sameContent = sameLength && messages.every((msg, index) => messagesAreEqual(msg, lastMessages[index])) && highlightQuery === currentMessageSearchQuery;
     if (sameContent) {
         return;
     }
@@ -320,7 +415,7 @@ function renderMessages(messages) {
 
     if (prefixMatches) {
         const newMessages = messages.slice(lastMessages.length);
-        newMessages.forEach(msg => messagesContainer.appendChild(createMessageElement(msg)));
+        newMessages.forEach(msg => messagesContainer.appendChild(createMessageElement(msg, highlightQuery)));
         lastMessages = messages.slice();
         if (isAtBottom) {
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
@@ -329,7 +424,7 @@ function renderMessages(messages) {
     }
 
     messagesContainer.innerHTML = '';
-    messages.forEach(msg => messagesContainer.appendChild(createMessageElement(msg)));
+    messages.forEach(msg => messagesContainer.appendChild(createMessageElement(msg, highlightQuery)));
     lastMessages = messages.slice();
     if (isAtBottom) {
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
@@ -405,10 +500,10 @@ async function saveUserAvatar() {
             }
             // Перезагружаем сообщения, чтобы отобразить новую аватарку
             if (currentChatId) {
-                await loadMessages(currentChatId);
+                scheduleCurrentChatReload();
             }
             // Перезагружаем список чатов
-            await loadChats();
+            scheduleChatsReload();
         } else {
             console.error('Save avatar error:', data.message);
             alert('Ошибка сохранения аватара: ' + (data.message || 'Неизвестная ошибка'));
@@ -437,7 +532,7 @@ async function deleteChat(chatId, chatName) {
                 messageInput.disabled = true;
                 sendBtn.disabled = true;
             }
-            await loadChats();
+            scheduleChatsReload();
         } else {
             alert(data.message || 'Ошибка удаления чата');
         }
@@ -455,18 +550,19 @@ async function sendMessage() {
         const response = await fetch('/api/messages', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chatId: currentChatId, text })
+            body: JSON.stringify({ chatId: currentChatId, text, replyToId: replyToMessage ? replyToMessage.id : null })
         });
         
         const data = await response.json();
         
         if (data.success) {
-            // Clear input
+            // Clear input and reply mode
             messageInput.value = '';
+            clearReplyMode();
             
-            // Reload messages
-            await loadMessages(currentChatId);
-            await loadChats();
+            // Debounced reload collapses with socket updates
+            scheduleCurrentChatReload();
+            scheduleChatsReload();
         }
     } catch (error) {
         console.error('Send message error:', error);
@@ -489,8 +585,8 @@ async function uploadFileMessage(file) {
         const data = await response.json();
 
         if (data.success) {
-            await loadMessages(currentChatId);
-            await loadChats();
+            scheduleCurrentChatReload();
+            scheduleChatsReload();
         } else {
             console.error('Upload file error:', data.message);
         }
@@ -516,8 +612,8 @@ async function uploadAudioMessage(blob) {
         const data = await response.json();
 
         if (data.success) {
-            await loadMessages(currentChatId);
-            await loadChats();
+            scheduleCurrentChatReload();
+            scheduleChatsReload();
         } else {
             console.error('Upload audio error:', data.message);
         }
@@ -671,9 +767,9 @@ async function sendCodeMessage(chatId, code) {
 
         if (data.success) {
             if (chatId === currentChatId) {
-                await loadMessages(chatId);
+                scheduleCurrentChatReload();
             }
-            await loadChats();
+            scheduleChatsReload();
         } else {
             console.error('Send code message failed:', data.message);
         }
@@ -916,6 +1012,113 @@ if (logoutSidebarBtn) {
     getChatCodeBtn.addEventListener('click', handleGetCodeClick);
     joinChatBtn.addEventListener('click', joinChatByCode);
 
+    if (chatSearchBox) {
+    const chatSearchBtn = document.getElementById('chatSearchBtn');
+    const chatSearchClear = document.getElementById('chatSearchClear');
+    const searchCounter = document.getElementById('searchCounter');
+    const searchPrev = document.getElementById('searchPrev');
+    const searchNext = document.getElementById('searchNext');
+
+    let searchMatches = [];
+    let searchIndex = 0;
+
+    function updateSearchCounter() {
+        if (!searchCounter) return;
+        if (searchMatches.length === 0) {
+            searchCounter.textContent = currentMessageSearchQuery ? 'Не найдено' : '';
+        } else {
+            searchCounter.textContent = `${searchIndex + 1} / ${searchMatches.length}`;
+        }
+    }
+
+    function scrollToMatch(index) {
+        if (searchMatches.length === 0) return;
+        // Снимаем активную подсветку со всех
+        searchMatches.forEach(el => el.classList.remove('message-highlight-active'));
+        // Ставим активную на текущий
+        searchMatches[index].classList.add('message-highlight-active');
+        searchMatches[index].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        updateSearchCounter();
+    }
+
+    function doMessageSearch() {
+    const query = chatSearchBox.value.trim();
+    searchMatches = [];
+    searchIndex = 0;
+
+    // Сбрасываем чтобы renderMessages не пропустил перерисовку
+    currentMessageSearchQuery = '';
+
+    if (currentChatId && lastMessages.length > 0) {
+        renderMessages(lastMessages, query);
+    }
+
+    // Устанавливаем после рендера
+    currentMessageSearchQuery = query;
+
+        if (currentMessageSearchQuery) {
+            // Собираем все найденные span-элементы подсветки
+            searchMatches = Array.from(messagesContainer.querySelectorAll('.message-highlight'));
+            if (searchMatches.length > 0) {
+                scrollToMatch(0);
+            }
+        }
+
+        updateSearchCounter();
+
+        if (chatSearchClear) {
+            chatSearchClear.style.display = currentMessageSearchQuery ? 'inline-block' : 'none';
+        }
+        if (searchPrev) searchPrev.style.display = currentMessageSearchQuery ? 'inline-flex' : 'none';
+        if (searchNext) searchNext.style.display = currentMessageSearchQuery ? 'inline-flex' : 'none';
+        if (searchCounter) searchCounter.style.display = currentMessageSearchQuery ? 'inline-block' : 'none';
+    }
+
+    if (chatSearchBtn) {
+        chatSearchBtn.addEventListener('click', doMessageSearch);
+    }
+
+    chatSearchBox.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') doMessageSearch();
+    });
+
+    if (searchNext) {
+        searchNext.addEventListener('click', () => {
+            if (searchMatches.length === 0) return;
+            searchIndex = (searchIndex + 1) % searchMatches.length;
+            scrollToMatch(searchIndex);
+        });
+    }
+
+    if (searchPrev) {
+        searchPrev.addEventListener('click', () => {
+            if (searchMatches.length === 0) return;
+            searchIndex = (searchIndex - 1 + searchMatches.length) % searchMatches.length;
+            scrollToMatch(searchIndex);
+        });
+    }
+
+    if (chatSearchClear) {
+        chatSearchClear.addEventListener('click', () => {
+            chatSearchBox.value = '';
+            currentMessageSearchQuery = '';
+            searchMatches = [];
+            searchIndex = 0;
+            chatSearchClear.style.display = 'none';
+            if (searchPrev) searchPrev.style.display = 'none';
+            if (searchNext) searchNext.style.display = 'none';
+            if (searchCounter) { searchCounter.textContent = ''; searchCounter.style.display = 'none'; }
+            if (currentChatId && lastMessages.length > 0) {
+                renderMessages(lastMessages, '');
+            }
+        });
+    }
+}
+
+    if (cancelReplyBtn) {
+        cancelReplyBtn.addEventListener('click', clearReplyMode);
+    }
+
     // Settings modal
     settingsBtn.addEventListener('click', () => {
         settingsModal.classList.add('active');
@@ -1026,6 +1229,45 @@ function loadSettings() {
     }
 }
 
+function setReplyMode(message) {
+    if (!message) return;
+    replyToMessage = message;
+    const senderName = message.sender_username || 'Собеседник';
+    const previewText = message.text ? message.text.trim().slice(0, 80) : 'Медиа-сообщение';
+    if (replyPreview && replyPreviewText) {
+        replyPreviewText.textContent = `Ответ ${senderName}: ${previewText}`;
+        replyPreview.classList.remove('hidden');
+    }
+    if (messageInput) {
+        messageInput.placeholder = `Ответ ${senderName}...`;
+        messageInput.focus();
+    }
+}
+
+function clearReplyMode() {
+    replyToMessage = null;
+    if (replyPreview && replyPreviewText) {
+        replyPreviewText.textContent = '';
+        replyPreview.classList.add('hidden');
+    }
+    if (messageInput) {
+        messageInput.placeholder = 'Введите сообщение...';
+    }
+}
+
+function escapeRegExp(value) {
+    return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function highlightText(text, query) {
+    const safeText = escapeHtml(text || '');
+    if (!query) return safeText;
+    const safeQuery = escapeRegExp(query.trim());
+    if (!safeQuery) return safeText;
+    const regex = new RegExp(`(${safeQuery})`, 'gi');
+    return safeText.replace(regex, '<span class="message-highlight">$1</span>');
+}
+
 // Initialize app
 init();
 
@@ -1066,8 +1308,8 @@ async function editMessage(messageId, text) {
 
         const data = await response.json();
         if (data.success) {
-            await loadMessages(currentChatId);
-            await loadChats();
+            scheduleCurrentChatReload();
+            scheduleChatsReload();
         } else {
             alert(data.message || 'Ошибка редактирования');
         }
@@ -1087,8 +1329,8 @@ async function deleteMessage(messageId) {
 
         const data = await response.json();
         if (data.success) {
-            await loadMessages(currentChatId);
-            await loadChats();
+            scheduleCurrentChatReload();
+            scheduleChatsReload();
         } else {
             alert(data.message || 'Ошибка удаления');
         }
@@ -1105,7 +1347,8 @@ async function addReaction(messageId, emoji) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ messageId, emoji })
         });
-        await loadMessages(currentChatId);
+        scheduleCurrentChatReload();
+        scheduleChatsReload();
     } catch (error) {
         console.error('Add reaction error:', error);
     }
@@ -1117,7 +1360,8 @@ async function removeReaction(messageId, emoji) {
         await fetch(`/api/reactions/${messageId}/${emoji}`, {
             method: 'DELETE'
         });
-        await loadMessages(currentChatId);
+        scheduleCurrentChatReload();
+        scheduleChatsReload();
     } catch (error) {
         console.error('Remove reaction error:', error);
     }
@@ -1169,7 +1413,7 @@ async function searchMessages(query) {
 }
 
 // Show message context menu
-function showMessageContextMenu(messageId, event, isCurrentUser) {
+function showMessageContextMenu(messageId, event, isCurrentUser, msg) {
     event.preventDefault();
 
     const existing = document.querySelector('.message-context-menu');
@@ -1190,6 +1434,24 @@ function showMessageContextMenu(messageId, event, isCurrentUser) {
     menu.style.minWidth = '150px';
 
     const items = [];
+
+    // Reply button
+    const replyBtn = document.createElement('button');
+    replyBtn.textContent = '↩️ Ответить';
+    replyBtn.style.display = 'block';
+    replyBtn.style.width = '100%';
+    replyBtn.style.padding = '8px';
+    replyBtn.style.border = 'none';
+    replyBtn.style.background = 'none';
+    replyBtn.style.textAlign = 'left';
+    replyBtn.style.cursor = 'pointer';
+    replyBtn.style.fontSize = '14px';
+    replyBtn.style.borderBottom = '1px solid #eee';
+    replyBtn.addEventListener('click', () => {
+        setReplyMode(msg);
+        menu.remove();
+    });
+    menu.appendChild(replyBtn);
 
     // Emoji reactions
     const emojiReactions = ['👍', '❤️', '😂', '😢', '🔥'];
@@ -1272,7 +1534,7 @@ function showMessageContextMenu(messageId, event, isCurrentUser) {
 
 // Update createMessageElement to support context menu and reactions
 const originalCreateMessageElement = window.createMessageElement;
-window.createMessageElement = function(msg) {
+window.createMessageElement = function(msg, highlightQuery = '') {
     const isCurrentUser = currentUser && msg.user_id === currentUser.id;
     const userColor = getUserColor(msg.sender_username || '');
     const bubbleColor = isCurrentUser ? '#667eea' : userColor;
@@ -1301,16 +1563,30 @@ window.createMessageElement = function(msg) {
                     ? `<audio class="message-attachment" controls src="${escapeHtml(msg.file_url)}"></audio>`
                     : `<a class="message-file" href="${escapeHtml(msg.file_url)}" download="${escapeHtml(msg.file_name || '')}">${escapeHtml(msg.file_name || 'Файл')}</a>`)
         : '';
-    const messageText = msg.text && msg.message_type === 'text' ? `<div class="message-text">${escapeHtml(msg.text)}</div>` : '';
+    const messageText = msg.text && msg.message_type === 'text'
+        ? `<div class="message-text">${highlightText(msg.text, highlightQuery || currentMessageSearchQuery)}</div>`
+        : '';
     const editedHtml = msg.edited_at ? `<span class="message-edited">(отредактировано)</span>` : '';
     const reactionsHtml = msg.reactions && msg.reactions.length > 0
         ? `<div class="message-reactions">${msg.reactions.map(emoji => `<span class="reaction-item">${emoji}</span>`).join('')}</div>`
         : '';
 
+    let replyQuoteHtml = '';
+    if (msg.reply_to && msg.reply_to.sender_username) {
+        const quotedText = msg.reply_to.text ? msg.reply_to.text.substring(0, 100) : '[Медиа-файл]';
+        replyQuoteHtml = `
+            <div class="message-reply-quote">
+                <div class="reply-to-name">${escapeHtml(msg.reply_to.sender_username)}</div>
+                <div class="reply-to-text">${escapeHtml(quotedText)}</div>
+            </div>
+        `;
+    }
+
     messageEl.innerHTML = `
         <div class="message-avatar" title="${escapeHtml(msg.sender_username || '')}">${avatarHtml}</div>
         <div class="message-content">
             <div class="message-bubble" style="background: ${bubbleColor}; color: ${textColor};">
+                ${replyQuoteHtml}
                 ${messageText}
                 ${editedHtml}
                 ${attachmentHtml}
@@ -1324,19 +1600,19 @@ window.createMessageElement = function(msg) {
     `;
 
     messageEl.addEventListener('contextmenu', (e) => {
-        showMessageContextMenu(msg.id, e, isCurrentUser);
+        showMessageContextMenu(msg.id, e, isCurrentUser, msg);
     });
 
     // Long touch for mobile
     let touchTimer;
-    messageEl.addEventListener('touchstart', () => {
+    messageEl.addEventListener('touchstart', (e) => {
         touchTimer = setTimeout(() => {
-            const touch = event.touches[0];
+            const touch = e.touches[0];
             showMessageContextMenu(msg.id, {
                 clientX: touch.clientX,
                 clientY: touch.clientY,
                 preventDefault: () => {}
-            }, isCurrentUser);
+            }, isCurrentUser, msg);
         }, 500);
     });
 
@@ -1411,12 +1687,15 @@ window.addEventListener('load', () => {
 
 // Disable right-click context menu
 document.addEventListener('contextmenu', (e) => {
+    // Разрешаем контекстное меню на сообщениях
+    if (e.target.closest('.message-row')) return;
     e.preventDefault();
     return false;
 });
 
 // Disable text selection
 document.addEventListener('selectstart', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
     e.preventDefault();
     return false;
 });
@@ -1444,6 +1723,8 @@ document.addEventListener('cut', (e) => {
 });
 
 document.addEventListener('paste', (e) => {
+    // Разрешаем вставку в поля ввода
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
     e.preventDefault();
     return false;
 });
@@ -1491,16 +1772,48 @@ style.textContent = `
 document.head.appendChild(style);
 
 // Detect if developer tools are open
-setInterval(() => {
-    const devtools = { open: false, orientation: null };
-    const threshold = 160;
+//setInterval(() => {
+    //const devtools = { open: false, orientation: null };
+    //const threshold = 160;
     
-    devtools.open = window.outerHeight - window.innerHeight > threshold || window.outerWidth - window.innerWidth > threshold;
+    //devtools.open = window.outerHeight - window.innerHeight > threshold || window.outerWidth - window.innerWidth > threshold;
     
-    if (devtools.open) {
+   // if (devtools.open) {
         // Alert user that dev tools are detected
-        console.clear();
-        console.log('%cWARNING!', 'color: red; font-size: 20px; font-weight: bold;');
-        console.log('%cOpening developer tools is not allowed on this site!', 'color: red; font-size: 14px;');
+//console.clear();
+   //     console.log('%cWARNING!', 'color: red; font-size: 20px; font-weight: bold;');
+    //    console.log('%cOpening developer tools is not allowed on this site!', 'color: red; font-size: 14px;');
+   // }
+//}, 200);
+
+
+// ========== МОБИЛЬНАЯ НАВИГАЦИЯ ==========
+const backBtn = document.getElementById('backBtn');
+
+function updateBackBtn() {
+    if (backBtn) {
+        backBtn.style.display = window.innerWidth <= 768 ? 'flex' : 'none';
     }
-}, 200);
+}
+
+if (backBtn) {
+    backBtn.addEventListener('click', () => {
+        document.querySelector('.sidebar').classList.remove('hidden-mobile');
+        document.querySelector('.chat-area').classList.remove('active-mobile');
+    });
+}
+
+window.addEventListener('resize', updateBackBtn);
+updateBackBtn();
+
+socket.on('newMessage', (message) => {
+    const selectedChat = chats.find(c => c.id === currentChatId);
+    if (!selectedChat) return;
+
+    const isSelectedPrivateChat = !selectedChat.room_id && message.chat_id === selectedChat.id;
+    const isSelectedSharedChat = Boolean(selectedChat.room_id) && message.room_id === selectedChat.room_id;
+    if (!isSelectedPrivateChat && !isSelectedSharedChat) return;
+
+    scheduleCurrentChatReload();
+    scheduleChatsReload();
+});
