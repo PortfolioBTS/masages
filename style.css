@@ -714,7 +714,8 @@ body {
 
 .message-text {
     white-space: pre-wrap;
-    word-wrap: break-word;
+    overflow-wrap: anywhere;
+    word-break: break-word;
     color: inherit;
     font-size: 14px;
     line-height: 1.6;

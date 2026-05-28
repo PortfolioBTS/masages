@@ -1,4 +1,4 @@
-// 1. ИМПОРТЫ (в самом верху)
+// 1. ИМПОРТЫ 
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const bcrypt = require('bcryptjs');
@@ -226,6 +226,29 @@ db.serialize(() => {
 // Middleware
 app.use(bodyParser.json());
 
+app.use((req, res, next) => {
+    const mutating = ['POST', 'PUT', 'DELETE', 'PATCH'];
+    if (!mutating.includes(req.method)) return next();
+    if (req.path.startsWith('/socket.io')) return next();
+
+    const origin = req.headers['origin'];
+    const referer = req.headers['referer'];
+    const host = req.headers['host'];
+
+    if (!origin && !referer) return next();
+
+    const allowed = `http://${host}`;
+    const allowedHttps = `https://${host}`;
+
+    const ok = (origin && (origin === allowed || origin === allowedHttps)) ||
+               (referer && (referer.startsWith(allowed) || referer.startsWith(allowedHttps)));
+
+    if (!ok) {
+        return res.status(403).json({ success: false, message: 'Запрещено: неверный источник запроса' });
+    }
+    next();
+});
+
 // ========== SECURITY HEADERS FOR ANTI-COPY PROTECTION ==========
 app.use((req, res, next) => {
     // Prevent caching to protect content
@@ -361,6 +384,12 @@ app.post('/api/register', async (req, res) => {
     if (!username || !email || !password || !confirmPassword) {
         return res.json({ success: false, message: 'Заполните все поля' });
     }
+    if (username.length > 32)
+        return res.json({ success: false, message: 'Имя не может быть длиннее 32 символов' });
+    if (email.length > 254)
+        return res.json({ success: false, message: 'Email слишком длинный' });
+    if (password.length > 128)
+        return res.json({ success: false, message: 'Пароль не может быть длиннее 128 символов' });
 
     if (password !== confirmPassword) {
         return res.json({ success: false, message: 'Пароли не совпадают' });
@@ -443,20 +472,24 @@ app.post('/api/login', (req, res) => {
     if (!email || !password) {
         return res.json({ success: false, message: 'Введите email и пароль' });
     }
+    if (email.length > 254 || password.length > 128)
+        return res.json({ success: false, message: 'Неверный email или пароль' });
 
     db.get('SELECT * FROM users WHERE email = ?', [email], async (err, user) => {
         if (err) {
             return res.json({ success: false, message: 'Ошибка базы данных' });
         }
 
-        if (!user) {
-            return res.json({ success: false, message: 'Пользователь не найден' });
+       if (!user) {
+            return res.json({ success: false, message: 'Неверный email или пароль' });
         }
 
         const validPassword = await bcrypt.compare(password, user.password);
         if (!validPassword) {
-            return res.json({ success: false, message: 'Неверный пароль' });
+            return res.json({ success: false, message: 'Неверный email или пароль' });
         }
+
+       
 
         // Set session
         req.session.userId = user.id;
@@ -570,6 +603,7 @@ app.get('/api/messages/:chatId', (req, res) => {
     if (!req.session.userId) {
         return res.json({ success: false, message: 'Не авторизован' });
     }
+    
 
     const chatId = req.params.chatId;
 
@@ -660,7 +694,8 @@ app.post('/api/messages', (req, res) => {
 
     if ((!text || text.trim() === '') || !chatId) {
         return res.json({ success: false, message: 'Введите текст сообщения' });
-    }
+    }if (text.length > 4000)
+        return res.json({ success: false, message: 'Сообщение не может быть длиннее 4000 символов' });
 
     // Verify chat belongs to user
     db.get('SELECT * FROM chats WHERE id = ? AND user_id = ?', [chatId, req.session.userId], (err, chat) => {
@@ -838,6 +873,8 @@ app.post('/api/chats', async (req, res) => {
     if (!name) {
         return res.json({ success: false, message: 'Введите имя чата' });
     }
+    if (name.length > 64)
+        return res.json({ success: false, message: 'Название чата не может быть длиннее 64 символов' });
 
     const avatar = name.charAt(0).toUpperCase();
 
@@ -1192,7 +1229,9 @@ app.post('/api/change-password', async (req, res) => {
                 if (err) {
                     return res.json({ success: false, message: 'Ошибка изменения пароля' });
                 }
-                res.json({ success: true, message: 'Пароль успешно изменен' });
+                req.session.destroy(() => {
+                    res.json({ success: true, message: 'Пароль успешно изменён. Войдите заново.' });
+                });
             }
         );
     });

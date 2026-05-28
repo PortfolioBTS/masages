@@ -1648,7 +1648,11 @@ async function changePassword() {
 
         const data = await response.json();
         if (data.success) {
-            alert('Пароль успешно изменен');
+            alert('Пароль успешно изменён. Войдите заново.');
+            currentUser = null;
+            currentChatId = null;
+            document.getElementById('settingsModal').style.display = 'none';
+            showAuthModal();
         } else {
             alert(data.message || 'Ошибка изменения пароля');
         }
