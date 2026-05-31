@@ -211,6 +211,33 @@
             </div>
         </div>
     </div>
+    <!-- Change Password Modal -->
+<div class="modal" id="changePasswordModal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>Смена пароля</h3>
+            <button class="close-btn" id="closeChangePassword">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="setting-item">
+                <label>Текущий пароль</label>
+                <input type="password" id="cpCurrent" placeholder="Введите текущий пароль">
+            </div>
+            <div class="setting-item">
+                <label>Новый пароль</label>
+                <input type="password" id="cpNew" placeholder="Минимум 6 символов">
+            </div>
+            <div class="setting-item">
+                <label>Повторите новый пароль</label>
+                <input type="password" id="cpConfirm" placeholder="Повторите пароль">
+            </div>
+            <div class="error-message" id="cpError"></div>
+        </div>
+        <div class="modal-actions">
+            <button type="button" class="settings-save-btn" id="cpSaveBtn">Сохранить</button>
+        </div>
+    </div>
+</div>
 
     <script src="/socket.io/socket.io.js"></script>
     <script src="script.js"></script>

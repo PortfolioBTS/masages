@@ -1,3 +1,4 @@
-﻿node_modules/
-uploads/
-masseger.bd/
+﻿.env
+*.pem
+node_modules/
+messenger.db

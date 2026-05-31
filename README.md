@@ -23,6 +23,8 @@
 npm install
 
 npm install socket.io
+
+npm install express-rate-limit
 ```
 
 ## Запуск
