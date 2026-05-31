@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 // 1. ИМПОРТЫ 
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
@@ -8,16 +10,24 @@ const multer = require('multer');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const http = require('http'); // Импортируем http
+const https = require('https');
+const fs = require('fs');
 const { Server } = require('socket.io'); // Импортируем socket.io
+const rateLimit = require('express-rate-limit');
 
 // 2. ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЙ
 const app = express();
-const server = http.createServer(app); // Теперь app уже существует
+const sslOptions = {
+    key: fs.readFileSync('./localhost+1-key.pem'),
+    cert: fs.readFileSync('./localhost+1.pem'),
+};
+const server = https.createServer(sslOptions, app);
 const io = new Server(server);         // Теперь server уже существует
 
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
+
+
 
 
 
@@ -261,7 +271,7 @@ app.use((req, res, next) => {
     res.set('X-Robots-Tag', 'noindex, nofollow');
     
     // Content Security Policy to prevent external script injection
-    res.set('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'");
+    res.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ws: wss:; media-src 'self' blob:; frame-ancestors 'none'");
     
     // Prevent framing (clickjacking protection)
     res.set('X-Frame-Options', 'DENY');
@@ -281,13 +291,52 @@ app.use((req, res, next) => {
 app.use(express.static(path.join(__dirname)));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-const upload = multer({ dest: path.join(__dirname, 'uploads') });
+const ALLOWED_MIME_TYPES = [
+    'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+    'video/mp4', 'video/webm',
+    'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/webm',
+    'application/pdf',
+    'text/plain',
+];
+
+const upload = multer({
+    dest: path.join(__dirname, 'uploads'),
+    limits: { fileSize: 20 * 1024 * 1024 },
+    fileFilter: (req, file, cb) => {
+        if (ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+            cb(null, true);
+        } else {
+            cb(new Error('Недопустимый тип файла'));
+        }
+    }
+});
+
+
+//обработчик ошибок multer
+app.use((err, req, res, next) => {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.json({ success: false, message: 'Файл слишком большой. Максимум 20 МБ.' });
+    }
+    if (err.message === 'Недопустимый тип файла') {
+        return res.json({ success: false, message: 'Недопустимый тип файла.' });
+    }
+    next(err);
+});
+
+
+const sessionSecret = process.env.SESSION_SECRET;
+if (!sessionSecret) throw new Error('SESSION_SECRET не задан в переменных окружения');
 
 app.use(session({
-    secret: process.env.SESSION_SECRET || 'messenger-secret-key-2024',
+    secret: sessionSecret,
     resave: false,
     saveUninitialized: false,
-    cookie: { maxAge: 24 * 60 * 60 * 1000 } // 24 hours
+    cookie: {
+        maxAge: 24 * 60 * 60 * 1000,
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax'
+    }
 }));
 
 // Simple public link route
@@ -300,11 +349,8 @@ app.get('/link.my', (req, res) => {
 // Generate unique 8-character code
 function generateUniqueCode() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    let code = '';
-    for (let i = 0; i < 8; i++) {
-        code += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return code;
+    const bytes = crypto.randomBytes(8);
+    return Array.from(bytes).map(b => chars[b % chars.length]).join('');
 }
 
 // Check if code is unique, if not generate again
@@ -318,10 +364,8 @@ function generateUniqueCodeAsync() {
                 return;
             }
             
-            let code = '';
-            for (let i = 0; i < 8; i++) {
-                code += chars.charAt(Math.floor(Math.random() * chars.length));
-            }
+            const bytes = crypto.randomBytes(8);
+const code = Array.from(bytes).map(b => chars[b % chars.length]).join('');
             
             db.get('SELECT id FROM users WHERE unique_code = ?', [code], (err, row) => {
                 if (err) {
@@ -342,12 +386,10 @@ function generateUniqueCodeAsync() {
 
 // Generate invite code for shared chat rooms
 function generateInviteCode() {
-    const chars = '0123456789';
-    let code = '';
-    for (let i = 0; i < 6; i++) {
-        code += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return code;
+    // 6 буквенно-цифровых символов = 36^6 ≈ 2.2 млрд комбинаций
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // без похожих символов 0/O, I/1
+    const bytes = crypto.randomBytes(6);
+    return Array.from(bytes).map(b => chars[b % chars.length]).join('');
 }
 
 function generateInviteCodeAsync() {
@@ -465,8 +507,17 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    message: { success: false, message: 'Слишком много попыток. Подождите 15 минут.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+
 // Login endpoint
-app.post('/api/login', (req, res) => {
+app.post('/api/login', loginLimiter, (req, res) => {
     const { email, password } = req.body;
 
     if (!email || !password) {
@@ -1244,9 +1295,8 @@ app.get('*', (req, res) => {
 server.listen(PORT, HOST, () => {
     const addresses = getLocalAddresses();
     console.log('Сервер запущен на следующих адресах:');
-    // Перебор локальных адресов для подключения из сети (LAN)
     addresses.forEach(addr => {
-        console.log(`Доступен в сети: http://${addr}:${PORT}`);
+        console.log(`Доступен в сети: https://${addr}:${PORT}`);
     });
-    console.log(`  http://localhost:${PORT}`);
+    console.log(`  https://localhost:${PORT}`);
 });

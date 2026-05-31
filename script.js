@@ -1630,36 +1630,39 @@ window.createMessageElement = function(msg, highlightQuery = '') {
 
 // Change password
 async function changePassword() {
-    const currentPassword = prompt('Введите текущий пароль:');
-    if (!currentPassword) return;
+    document.getElementById('changePasswordModal').classList.add('active');
+    document.getElementById('cpError').textContent = '';
 
-    const newPassword = prompt('Введите новый пароль (минимум 6 символов):');
-    if (!newPassword) return;
+    document.getElementById('cpSaveBtn').onclick = async () => {
+        const currentPassword = document.getElementById('cpCurrent').value;
+        const newPassword = document.getElementById('cpNew').value;
+        const confirmPassword = document.getElementById('cpConfirm').value;
+        const errorEl = document.getElementById('cpError');
 
-    const confirmPassword = prompt('Подтвердите новый пароль:');
-    if (!confirmPassword) return;
+        if (!currentPassword || !newPassword || !confirmPassword) {
+            errorEl.textContent = 'Заполните все поля';
+            return;
+        }
 
-    try {
         const response = await fetch('/api/change-password', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ currentPassword, newPassword, confirmPassword })
-        });
-
+    });
         const data = await response.json();
+
         if (data.success) {
-            alert('Пароль успешно изменён. Войдите заново.');
-            currentUser = null;
-            currentChatId = null;
-            document.getElementById('settingsModal').style.display = 'none';
+            document.getElementById('changePasswordModal').classList.remove('active');
+            alert('Пароль изменён. Войдите заново.');
             showAuthModal();
         } else {
-            alert(data.message || 'Ошибка изменения пароля');
+            errorEl.textContent = data.message || 'Ошибка';
         }
-    } catch (error) {
-        console.error('Change password error:', error);
-        alert('Ошибка соединения');
-    }
+    };
+
+    document.getElementById('closeChangePassword').onclick = () => {
+        document.getElementById('changePasswordModal').classList.remove('active');
+    };
 }
 
 // Show user profile modal
