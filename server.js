@@ -255,7 +255,7 @@ app.use((req, res, next) => {
     next();
 });
  
-app.use(express.static(path.join(__dirname)));
+app.use(express.static(path.join(__dirname, 'public')));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
  
 const ALLOWED_MIME_TYPES = [
@@ -301,7 +301,7 @@ app.use(session({
 }));
  
 app.get('/link.my', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
  
 // 8. API МАРШРУТЫ
@@ -822,7 +822,7 @@ app.post('/api/change-password', async (req, res) => {
 });
  
 app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
  
 server.listen(PORT, HOST, () => {
