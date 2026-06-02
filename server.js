@@ -17,6 +17,7 @@ const rateLimit = require('express-rate-limit');
  
 // 2. ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЙ
 const app = express();
+app.set('trust proxy', 1);
  
 let server;
 if (process.env.NODE_ENV === 'production') {
@@ -290,11 +291,12 @@ app.use(session({
     secret: sessionSecret,
     resave: false,
     saveUninitialized: false,
+    proxy: true,
     cookie: {
         maxAge: 24 * 60 * 60 * 1000,
         httpOnly: true,
         secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax'
+        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax'
     }
 }));
  
