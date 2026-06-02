@@ -14,6 +14,7 @@ const http = require('http');
 const fs = require('fs');
 const { Server } = require('socket.io');
 const rateLimit = require('express-rate-limit');
+const pgSession = require('connect-pg-simple')(session);
  
 // 2. ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЙ
 const app = express();
@@ -288,6 +289,11 @@ const sessionSecret = process.env.SESSION_SECRET;
 if (!sessionSecret) throw new Error('SESSION_SECRET не задан в переменных окружения');
  
 app.use(session({
+    store: new pgSession({
+        pool: pool,
+        tableName: 'session',
+        createTableIfMissing: true
+    }),
     secret: sessionSecret,
     resave: false,
     saveUninitialized: false,
@@ -299,7 +305,7 @@ app.use(session({
         sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax'
     }
 }));
- 
+
 app.get('/link.my', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
