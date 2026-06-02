@@ -1,8 +1,8 @@
 require('dotenv').config();
-
-// 1. ИМПОРТЫ 
+ 
+// 1. ИМПОРТЫ
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
+const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const session = require('express-session');
 const bodyParser = require('body-parser');
@@ -10,35 +10,152 @@ const multer = require('multer');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const https = require('https');
+const http = require('http');
 const fs = require('fs');
-const { Server } = require('socket.io'); // Импортируем socket.io
+const { Server } = require('socket.io');
 const rateLimit = require('express-rate-limit');
-
+ 
 // 2. ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЙ
 const app = express();
-const sslOptions = {
-    key: fs.readFileSync('./localhost+1-key.pem'),
-    cert: fs.readFileSync('./localhost+1.pem'),
-};
-const server = https.createServer(sslOptions, app);
-const io = new Server(server);         // Теперь server уже существует
-
+ 
+let server;
+if (process.env.NODE_ENV === 'production') {
+    server = http.createServer(app);
+} else {
+    const https = require('https');
+    const sslOptions = {
+        key: fs.readFileSync('./localhost+1-key.pem'),
+        cert: fs.readFileSync('./localhost+1.pem'),
+    };
+    server = https.createServer(sslOptions, app);
+}
+ 
+const io = new Server(server);
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
-
-
-
-
-
+ 
+// 3. ПОДКЛЮЧЕНИЕ К POSTGRESQL
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+});
+ 
+// Вспомогательная функция — аналог db.get (одна строка)
+async function dbGet(query, params = []) {
+    const result = await pool.query(query, params);
+    return result.rows[0] || null;
+}
+ 
+// Вспомогательная функция — аналог db.all (все строки)
+async function dbAll(query, params = []) {
+    const result = await pool.query(query, params);
+    return result.rows;
+}
+ 
+// Вспомогательная функция — аналог db.run (INSERT/UPDATE/DELETE)
+async function dbRun(query, params = []) {
+    const result = await pool.query(query, params);
+    return result;
+}
+ 
+// 4. СОЗДАНИЕ ТАБЛИЦ
+async function initDatabase() {
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            unique_code TEXT UNIQUE NOT NULL,
+            username TEXT UNIQUE NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            avatar TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+ 
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS rooms (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            code TEXT UNIQUE NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+ 
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS chats (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            room_id INTEGER REFERENCES rooms(id),
+            name TEXT NOT NULL,
+            avatar TEXT NOT NULL,
+            online INTEGER DEFAULT 0,
+            is_bot INTEGER DEFAULT 0
+        )
+    `);
+ 
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS messages (
+            id SERIAL PRIMARY KEY,
+            chat_id INTEGER NOT NULL REFERENCES chats(id),
+            room_id INTEGER REFERENCES rooms(id),
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            text TEXT NOT NULL,
+            file_url TEXT,
+            file_name TEXT,
+            file_type TEXT,
+            message_type TEXT DEFAULT 'text',
+            sent INTEGER DEFAULT 1,
+            time TEXT NOT NULL,
+            status TEXT DEFAULT 'sent',
+            edited_at TEXT,
+            deleted INTEGER DEFAULT 0,
+            reply_to_id INTEGER REFERENCES messages(id)
+        )
+    `);
+ 
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS unread (
+            id SERIAL PRIMARY KEY,
+            chat_id INTEGER NOT NULL REFERENCES chats(id),
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            count INTEGER DEFAULT 0
+        )
+    `);
+ 
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS room_participants (
+            id SERIAL PRIMARY KEY,
+            room_id INTEGER NOT NULL REFERENCES rooms(id),
+            user_id INTEGER NOT NULL REFERENCES users(id)
+        )
+    `);
+ 
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS reactions (
+            id SERIAL PRIMARY KEY,
+            message_id INTEGER NOT NULL REFERENCES messages(id),
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            emoji TEXT NOT NULL,
+            UNIQUE(message_id, user_id, emoji)
+        )
+    `);
+ 
+    console.log('База данных инициализирована');
+}
+ 
+initDatabase().catch(err => {
+    console.error('Ошибка инициализации БД:', err);
+    process.exit(1);
+});
+ 
+// 5. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 function getSocketRoomKey(chatId, roomId) {
     return roomId ? `room:${roomId}` : `chat:${chatId}`;
 }
-
+ 
 function getLocalAddresses() {
     const nets = os.networkInterfaces();
     const addresses = [];
-
     for (const name of Object.keys(nets)) {
         for (const net of nets[name]) {
             if (net.family === 'IPv4' && !net.internal) {
@@ -46,251 +163,100 @@ function getLocalAddresses() {
             }
         }
     }
-
     return addresses;
 }
-
+ 
 function normalizeAvatarColor(value) {
     const color = String(value || '').trim();
     return /^#[0-9a-fA-F]{6}$/.test(color) ? color.toUpperCase() : '#667EEA';
 }
-
-
-// 5. БАЗА ДАННЫХ И МАРШРУТЫ
-const db = new sqlite3.Database('./messenger.db', (err) => {
-    if (err) console.error('Ошибка БД:', err.message);
-});
-
-
-
-// const app = express();
-
-
-
-
-// Логика подключения WebSockets
+ 
+function getCurrentTime() {
+    const now = new Date();
+    return `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+}
+ 
+function generateUniqueCode() {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    const bytes = crypto.randomBytes(8);
+    return Array.from(bytes).map(b => chars[b % chars.length]).join('');
+}
+ 
+async function generateUniqueCodeAsync() {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    for (let attempts = 0; attempts < 100; attempts++) {
+        const bytes = crypto.randomBytes(8);
+        const code = Array.from(bytes).map(b => chars[b % chars.length]).join('');
+        const row = await dbGet('SELECT id FROM users WHERE unique_code = $1', [code]);
+        if (!row) return code;
+    }
+    throw new Error('Could not generate unique code');
+}
+ 
+function generateInviteCode() {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const bytes = crypto.randomBytes(6);
+    return Array.from(bytes).map(b => chars[b % chars.length]).join('');
+}
+ 
+async function generateInviteCodeAsync() {
+    for (let attempts = 0; attempts < 100; attempts++) {
+        const code = generateInviteCode();
+        const row = await dbGet('SELECT id FROM rooms WHERE code = $1', [code]);
+        if (!row) return code;
+    }
+    throw new Error('Could not generate invite code');
+}
+ 
+// 6. WEBSOCKET
 io.on('connection', (socket) => {
     console.log('Пользователь подключился через WebSocket');
-
-    // Клиент передает ключ комнаты в формате room:<id> или chat:<id>
     socket.on('joinChat', (roomKey) => {
         if (typeof roomKey === 'string' && roomKey.length > 0) {
             socket.join(roomKey);
         }
     });
-
     socket.on('disconnect', () => {
         console.log('Пользователь отключился');
     });
 });
-
-// Create tables
-db.serialize(() => {
-    // Users table
-    db.run(`CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        unique_code TEXT UNIQUE NOT NULL,
-        username TEXT UNIQUE NOT NULL,
-        email TEXT UNIQUE NOT NULL,
-        password TEXT NOT NULL,
-        avatar TEXT DEFAULT '',
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-
-    // Chats table
-    db.run(`CREATE TABLE IF NOT EXISTS chats (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        room_id INTEGER,
-        name TEXT NOT NULL,
-        avatar TEXT NOT NULL,
-        online INTEGER DEFAULT 0,
-        is_bot INTEGER DEFAULT 0,
-        FOREIGN KEY (user_id) REFERENCES users(id),
-        FOREIGN KEY (room_id) REFERENCES rooms(id)
-    )`);
-
-    // Messages table
-    db.run(`CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id INTEGER NOT NULL,
-        room_id INTEGER,
-        user_id INTEGER NOT NULL,
-        text TEXT NOT NULL,
-        file_url TEXT,
-        file_name TEXT,
-        file_type TEXT,
-        message_type TEXT DEFAULT 'text',
-        sent INTEGER DEFAULT 1,
-        time TEXT NOT NULL,
-        status TEXT DEFAULT 'sent',
-        edited_at TEXT,
-        deleted INTEGER DEFAULT 0,
-        reply_to_id INTEGER,
-        FOREIGN KEY (chat_id) REFERENCES chats(id),
-        FOREIGN KEY (room_id) REFERENCES rooms(id),
-        FOREIGN KEY (user_id) REFERENCES users(id),
-        FOREIGN KEY (reply_to_id) REFERENCES messages(id)
-    )`);
-
-    // Migrate existing messages table if needed
-    db.get("PRAGMA table_info(messages)", (err, row) => {
-        if (!err && row) {
-            db.all("PRAGMA table_info(messages)", (err, columns) => {
-                if (!err) {
-                    if (!columns.some(col => col.name === 'file_url')) {
-                        db.run('ALTER TABLE messages ADD COLUMN file_url TEXT');
-                    }
-                    if (!columns.some(col => col.name === 'file_name')) {
-                        db.run('ALTER TABLE messages ADD COLUMN file_name TEXT');
-                    }
-                    if (!columns.some(col => col.name === 'file_type')) {
-                        db.run('ALTER TABLE messages ADD COLUMN file_type TEXT');
-                    }
-                    if (!columns.some(col => col.name === 'message_type')) {
-                        db.run("ALTER TABLE messages ADD COLUMN message_type TEXT DEFAULT 'text'");
-                    }
-                    if (!columns.some(col => col.name === 'edited_at')) {
-                        db.run('ALTER TABLE messages ADD COLUMN edited_at TEXT');
-                    }
-                    if (!columns.some(col => col.name === 'deleted')) {
-                        db.run('ALTER TABLE messages ADD COLUMN deleted INTEGER DEFAULT 0');
-                    }
-                    if (!columns.some(col => col.name === 'reply_to_id')) {
-                        db.run('ALTER TABLE messages ADD COLUMN reply_to_id INTEGER');
-                    }
-                }
-            });
-        }
-    });
-
-    // Unread messages table
-    db.run(`CREATE TABLE IF NOT EXISTS unread (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id INTEGER NOT NULL,
-        user_id INTEGER NOT NULL,
-        count INTEGER DEFAULT 0,
-        FOREIGN KEY (chat_id) REFERENCES chats(id),
-        FOREIGN KEY (user_id) REFERENCES users(id)
-    )`);
-
-    // Rooms for shared chats
-    db.run(`CREATE TABLE IF NOT EXISTS rooms (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        code TEXT UNIQUE NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-
-    // Room participants
-    db.run(`CREATE TABLE IF NOT EXISTS room_participants (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        room_id INTEGER NOT NULL,
-        user_id INTEGER NOT NULL,
-        FOREIGN KEY (room_id) REFERENCES rooms(id),
-        FOREIGN KEY (user_id) REFERENCES users(id)
-    )`);
-
-    // Reactions table
-    db.run(`CREATE TABLE IF NOT EXISTS reactions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        message_id INTEGER NOT NULL,
-        user_id INTEGER NOT NULL,
-        emoji TEXT NOT NULL,
-        UNIQUE(message_id, user_id, emoji),
-        FOREIGN KEY (message_id) REFERENCES messages(id),
-        FOREIGN KEY (user_id) REFERENCES users(id)
-    )`);
-
-    db.get("PRAGMA table_info(chats)", (err, row) => {
-        if (!err && row) {
-            db.all("PRAGMA table_info(chats)", (err, columns) => {
-                if (!err && !columns.some(col => col.name === 'room_id')) {
-                    db.run('ALTER TABLE chats ADD COLUMN room_id INTEGER');
-                }
-            });
-        }
-    });
-
-    db.get("PRAGMA table_info(users)", (err, row) => {
-        if (!err && row) {
-            db.all("PRAGMA table_info(users)", (err, columns) => {
-                if (!err && !columns.some(col => col.name === 'avatar')) {
-                    db.run("ALTER TABLE users ADD COLUMN avatar TEXT DEFAULT ''");
-                }
-            });
-        }
-    });
-
-    db.get("PRAGMA table_info(messages)", (err, row) => {
-        if (!err && row) {
-            db.all("PRAGMA table_info(messages)", (err, columns) => {
-                if (!err && !columns.some(col => col.name === 'room_id')) {
-                    db.run('ALTER TABLE messages ADD COLUMN room_id INTEGER');
-                }
-            });
-        }
-    });
-});
-
-// Middleware
+ 
+// 7. MIDDLEWARE
 app.use(bodyParser.json());
-
+ 
 app.use((req, res, next) => {
     const mutating = ['POST', 'PUT', 'DELETE', 'PATCH'];
     if (!mutating.includes(req.method)) return next();
     if (req.path.startsWith('/socket.io')) return next();
-
     const origin = req.headers['origin'];
     const referer = req.headers['referer'];
     const host = req.headers['host'];
-
     if (!origin && !referer) return next();
-
     const allowed = `http://${host}`;
     const allowedHttps = `https://${host}`;
-
     const ok = (origin && (origin === allowed || origin === allowedHttps)) ||
                (referer && (referer.startsWith(allowed) || referer.startsWith(allowedHttps)));
-
-    if (!ok) {
-        return res.status(403).json({ success: false, message: 'Запрещено: неверный источник запроса' });
-    }
+    if (!ok) return res.status(403).json({ success: false, message: 'Запрещено: неверный источник запроса' });
     next();
 });
-
-// ========== SECURITY HEADERS FOR ANTI-COPY PROTECTION ==========
+ 
 app.use((req, res, next) => {
-    // Prevent caching to protect content
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, private');
     res.set('Pragma', 'no-cache');
     res.set('Expires', '0');
     res.set('Surrogate-Control', 'no-store');
-    
-    // Prevent search engines from indexing
     res.set('X-Robots-Tag', 'noindex, nofollow');
-    
-    // Content Security Policy to prevent external script injection
     res.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ws: wss:; media-src 'self' blob:; frame-ancestors 'none'");
-    
-    // Prevent framing (clickjacking protection)
     res.set('X-Frame-Options', 'DENY');
-    
-    // Prevent MIME type sniffing
     res.set('X-Content-Type-Options', 'nosniff');
-    
-    // Enable XSS protection
     res.set('X-XSS-Protection', '1; mode=block');
-    
-    // Referrer Policy
     res.set('Referrer-Policy', 'strict-origin-when-cross-origin');
-    
     next();
 });
-
+ 
 app.use(express.static(path.join(__dirname)));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-
+ 
 const ALLOWED_MIME_TYPES = [
     'image/jpeg', 'image/png', 'image/gif', 'image/webp',
     'video/mp4', 'video/webm',
@@ -298,7 +264,7 @@ const ALLOWED_MIME_TYPES = [
     'application/pdf',
     'text/plain',
 ];
-
+ 
 const upload = multer({
     dest: path.join(__dirname, 'uploads'),
     limits: { fileSize: 20 * 1024 * 1024 },
@@ -310,23 +276,16 @@ const upload = multer({
         }
     }
 });
-
-
-//обработчик ошибок multer
+ 
 app.use((err, req, res, next) => {
-    if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.json({ success: false, message: 'Файл слишком большой. Максимум 20 МБ.' });
-    }
-    if (err.message === 'Недопустимый тип файла') {
-        return res.json({ success: false, message: 'Недопустимый тип файла.' });
-    }
+    if (err.code === 'LIMIT_FILE_SIZE') return res.json({ success: false, message: 'Файл слишком большой. Максимум 20 МБ.' });
+    if (err.message === 'Недопустимый тип файла') return res.json({ success: false, message: 'Недопустимый тип файла.' });
     next(err);
 });
-
-
+ 
 const sessionSecret = process.env.SESSION_SECRET;
 if (!sessionSecret) throw new Error('SESSION_SECRET не задан в переменных окружения');
-
+ 
 app.use(session({
     secret: sessionSecret,
     resave: false,
@@ -338,175 +297,67 @@ app.use(session({
         sameSite: 'lax'
     }
 }));
-
-// Simple public link route
+ 
 app.get('/link.my', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
-
-
-
-// Generate unique 8-character code
-function generateUniqueCode() {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    const bytes = crypto.randomBytes(8);
-    return Array.from(bytes).map(b => chars[b % chars.length]).join('');
-}
-
-// Check if code is unique, if not generate again
-function generateUniqueCodeAsync() {
-    return new Promise((resolve, reject) => {
-        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-        
-        function tryGenerate(attempts = 0) {
-            if (attempts > 100) {
-                reject(new Error('Could not generate unique code'));
-                return;
-            }
-            
-            const bytes = crypto.randomBytes(8);
-const code = Array.from(bytes).map(b => chars[b % chars.length]).join('');
-            
-            db.get('SELECT id FROM users WHERE unique_code = ?', [code], (err, row) => {
-                if (err) {
-                    reject(err);
-                    return;
-                }
-                if (row) {
-                    tryGenerate(attempts + 1);
-                } else {
-                    resolve(code);
-                }
-            });
-        }
-        
-        tryGenerate();
-    });
-}
-
-// Generate invite code for shared chat rooms
-function generateInviteCode() {
-    // 6 буквенно-цифровых символов = 36^6 ≈ 2.2 млрд комбинаций
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // без похожих символов 0/O, I/1
-    const bytes = crypto.randomBytes(6);
-    return Array.from(bytes).map(b => chars[b % chars.length]).join('');
-}
-
-function generateInviteCodeAsync() {
-    return new Promise((resolve, reject) => {
-        function tryGenerate(attempts = 0) {
-            if (attempts > 100) {
-                reject(new Error('Could not generate invite code'));
-                return;
-            }
-
-            const code = generateInviteCode();
-            db.get('SELECT id FROM rooms WHERE code = ?', [code], (err, row) => {
-                if (err) {
-                    reject(err);
-                    return;
-                }
-                if (row) {
-                    tryGenerate(attempts + 1);
-                } else {
-                    resolve(code);
-                }
-            });
-        }
-
-        tryGenerate();
-    });
-}
-
-// Register endpoint
+ 
+// 8. API МАРШРУТЫ
+ 
+// Register
 app.post('/api/register', async (req, res) => {
     const { username, email, password, confirmPassword } = req.body;
-
-    // Validation
-    if (!username || !email || !password || !confirmPassword) {
+    if (!username || !email || !password || !confirmPassword)
         return res.json({ success: false, message: 'Заполните все поля' });
-    }
     if (username.length > 32)
         return res.json({ success: false, message: 'Имя не может быть длиннее 32 символов' });
     if (email.length > 254)
         return res.json({ success: false, message: 'Email слишком длинный' });
     if (password.length > 128)
         return res.json({ success: false, message: 'Пароль не может быть длиннее 128 символов' });
-
-    if (password !== confirmPassword) {
+    if (password !== confirmPassword)
         return res.json({ success: false, message: 'Пароли не совпадают' });
-    }
-
-    if (password.length < 6) {
+    if (password.length < 6)
         return res.json({ success: false, message: 'Пароль должен быть не менее 6 символов' });
-    }
-
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
         return res.json({ success: false, message: 'Введите корректный email' });
-    }
-
+ 
     try {
-        // Check if user exists
-        db.get('SELECT id FROM users WHERE email = ? OR username = ?', [email, username], async (err, row) => {
-            if (err) {
-                return res.json({ success: false, message: 'Ошибка базы данных' });
-            }
-
-            if (row) {
-                return res.json({ success: false, message: 'Пользователь с таким email или именем уже существует' });
-            }
-
-            // Generate unique code
-            const uniqueCode = await generateUniqueCodeAsync();
-
-            // Hash password
-            const hashedPassword = await bcrypt.hash(password, 10);
-
-            // Insert user
-            db.run(
-                'INSERT INTO users (unique_code, username, email, password, avatar) VALUES (?, ?, ?, ?, ?)',
-                [uniqueCode, username, email, hashedPassword, '#667EEA'],
-                function(err) {
-                    if (err) {
-                        return res.json({ success: false, message: 'Ошибка при создании пользователя' });
-                    }
-
-                    const userId = this.lastID;
-
-                    // Create bot chat for new user
-                    db.run(
-                        'INSERT INTO chats (user_id, name, avatar, online, is_bot) VALUES (?, ?, ?, ?, ?)',
-                        [userId, 'Бот Помощник', 'Б', 1, 1],
-                        function(err) {
-                            if (!err) {
-                                const botChatId = this.lastID;
-                                db.run(
-                                    'INSERT INTO messages (chat_id, user_id, text, sent, time, status) VALUES (?, ?, ?, ?, ?, ?)',
-                                    [botChatId, userId, 'Привет! Я бот-помощник. Чем могу помочь?', 0, getCurrentTime(), 'read']
-                                );
-                            }
-                        }
-                    );
-
-                    // Set session
-                    req.session.userId = userId;
-                    req.session.username = username;
-                    req.session.uniqueCode = uniqueCode;
-                    req.session.avatar = '#667EEA';
-
-                    res.json({ 
-                        success: true, 
-                        message: 'Регистрация успешна!',
-                        user: { id: userId, username, uniqueCode, avatar: '#667EEA' }
-                    });
-                }
-            );
-        });
+        const existing = await dbGet('SELECT id FROM users WHERE email = $1 OR username = $2', [email, username]);
+        if (existing) return res.json({ success: false, message: 'Пользователь с таким email или именем уже существует' });
+ 
+        const uniqueCode = await generateUniqueCodeAsync();
+        const hashedPassword = await bcrypt.hash(password, 10);
+ 
+        const userResult = await pool.query(
+            'INSERT INTO users (unique_code, username, email, password, avatar) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+            [uniqueCode, username, email, hashedPassword, '#667EEA']
+        );
+        const userId = userResult.rows[0].id;
+ 
+        // Создать бота для нового пользователя
+        const botResult = await pool.query(
+            'INSERT INTO chats (user_id, name, avatar, online, is_bot) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+            [userId, 'Бот Помощник', 'Б', 1, 1]
+        );
+        const botChatId = botResult.rows[0].id;
+        await pool.query(
+            'INSERT INTO messages (chat_id, user_id, text, sent, time, status) VALUES ($1, $2, $3, $4, $5, $6)',
+            [botChatId, userId, 'Привет! Я бот-помощник. Чем могу помочь?', 0, getCurrentTime(), 'read']
+        );
+ 
+        req.session.userId = userId;
+        req.session.username = username;
+        req.session.uniqueCode = uniqueCode;
+        req.session.avatar = '#667EEA';
+ 
+        res.json({ success: true, message: 'Регистрация успешна!', user: { id: userId, username, uniqueCode, avatar: '#667EEA' } });
     } catch (error) {
+        console.error('Register error:', error);
         res.json({ success: false, message: 'Ошибка сервера' });
     }
 });
-
+ 
 const loginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 10,
@@ -514,156 +365,106 @@ const loginLimiter = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
 });
-
-
-// Login endpoint
-app.post('/api/login', loginLimiter, (req, res) => {
+ 
+// Login
+app.post('/api/login', loginLimiter, async (req, res) => {
     const { email, password } = req.body;
-
-    if (!email || !password) {
-        return res.json({ success: false, message: 'Введите email и пароль' });
-    }
-    if (email.length > 254 || password.length > 128)
-        return res.json({ success: false, message: 'Неверный email или пароль' });
-
-    db.get('SELECT * FROM users WHERE email = ?', [email], async (err, user) => {
-        if (err) {
-            return res.json({ success: false, message: 'Ошибка базы данных' });
-        }
-
-       if (!user) {
-            return res.json({ success: false, message: 'Неверный email или пароль' });
-        }
-
+    if (!email || !password) return res.json({ success: false, message: 'Введите email и пароль' });
+    if (email.length > 254 || password.length > 128) return res.json({ success: false, message: 'Неверный email или пароль' });
+ 
+    try {
+        const user = await dbGet('SELECT * FROM users WHERE email = $1', [email]);
+        if (!user) return res.json({ success: false, message: 'Неверный email или пароль' });
+ 
         const validPassword = await bcrypt.compare(password, user.password);
-        if (!validPassword) {
-            return res.json({ success: false, message: 'Неверный email или пароль' });
-        }
-
-       
-
-        // Set session
+        if (!validPassword) return res.json({ success: false, message: 'Неверный email или пароль' });
+ 
         req.session.userId = user.id;
         req.session.username = user.username;
         req.session.uniqueCode = user.unique_code;
         req.session.avatar = user.avatar || '';
-
-        res.json({ 
-            success: true, 
-            message: 'Вход выполнен!',
-            user: { id: user.id, username: user.username, uniqueCode: user.unique_code, avatar: user.avatar || '' }
-        });
-    });
+ 
+        res.json({ success: true, message: 'Вход выполнен!', user: { id: user.id, username: user.username, uniqueCode: user.unique_code, avatar: user.avatar || '' } });
+    } catch (error) {
+        console.error('Login error:', error);
+        res.json({ success: false, message: 'Ошибка базы данных' });
+    }
 });
-
-// Logout endpoint
+ 
+// Logout
 app.post('/api/logout', (req, res) => {
     req.session.destroy();
     res.json({ success: true });
 });
-
-// Check auth status
-app.get('/api/auth', (req, res) => {
-    if (req.session.userId) {
-        db.get('SELECT avatar FROM users WHERE id = ?', [req.session.userId], (err, row) => {
-            const avatar = (!err && row) ? (row.avatar || '') : (req.session.avatar || '');
-            req.session.avatar = avatar;
-            res.json({
-                authenticated: true,
-                user: {
-                    id: req.session.userId,
-                    username: req.session.username,
-                    uniqueCode: req.session.uniqueCode,
-                    avatar: avatar
-                }
-            });
-        });
-    } else {
+ 
+// Check auth
+app.get('/api/auth', async (req, res) => {
+    if (!req.session.userId) return res.json({ authenticated: false });
+    try {
+        const row = await dbGet('SELECT avatar FROM users WHERE id = $1', [req.session.userId]);
+        const avatar = row ? (row.avatar || '') : (req.session.avatar || '');
+        req.session.avatar = avatar;
+        res.json({ authenticated: true, user: { id: req.session.userId, username: req.session.username, uniqueCode: req.session.uniqueCode, avatar } });
+    } catch (error) {
         res.json({ authenticated: false });
     }
 });
-
-// Get user data
-app.get('/api/user', (req, res) => {
-    if (!req.session.userId) {
-        return res.json({ success: false });
+ 
+// Get user
+app.get('/api/user', async (req, res) => {
+    if (!req.session.userId) return res.json({ success: false });
+    try {
+        const user = await dbGet('SELECT id, unique_code, username, email, avatar, created_at FROM users WHERE id = $1', [req.session.userId]);
+        if (!user) return res.json({ success: false });
+        res.json({ success: true, user: { id: user.id, uniqueCode: user.unique_code, username: user.username, avatar: user.avatar || '', email: user.email, createdAt: user.created_at } });
+    } catch (error) {
+        res.json({ success: false });
     }
-
-    db.get('SELECT id, unique_code, username, email, avatar, created_at FROM users WHERE id = ?', 
-        [req.session.userId], 
-        (err, user) => {
-            if (err || !user) {
-                return res.json({ success: false });
-            }
-            res.json({ 
-                success: true, 
-                user: {
-                    id: user.id,
-                    uniqueCode: user.unique_code,
-                    username: user.username,
-                    avatar: user.avatar || '',
-                    email: user.email,
-                    createdAt: user.created_at
-                }
-            });
-        }
-    );
 });
-
-// Update current user's avatar color
-app.post('/api/user/avatar-color', (req, res) => {
-    if (!req.session.userId) {
-        return res.json({ success: false, message: 'Не авторизован' });
-    }
-
+ 
+// Update avatar color
+app.post('/api/user/avatar-color', async (req, res) => {
+    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const avatarColor = normalizeAvatarColor(req.body && req.body.avatarColor);
-    db.run('UPDATE users SET avatar = ? WHERE id = ?', [avatarColor, req.session.userId], function(err) {
-        if (err) {
-            return res.json({ success: false, message: 'Ошибка обновления цвета аватара' });
-        }
+    try {
+        await dbRun('UPDATE users SET avatar = $1 WHERE id = $2', [avatarColor, req.session.userId]);
         req.session.avatar = avatarColor;
         res.json({ success: true, avatar: avatarColor });
-    });
+    } catch (error) {
+        res.json({ success: false, message: 'Ошибка обновления цвета аватара' });
+    }
 });
-
+ 
 // Get chats
-app.get('/api/chats', (req, res) => {
-    if (!req.session.userId) {
-        return res.json({ success: false, message: 'Не авторизован' });
-    }
-
-    db.all(`
-        SELECT c.id, c.name, c.avatar, c.online, c.is_bot, c.room_id, r.code as invite_code,
-               (SELECT text FROM messages WHERE ((c.room_id IS NOT NULL AND room_id = c.room_id) OR (c.room_id IS NULL AND chat_id = c.id)) ORDER BY id DESC LIMIT 1) as last_message,
-               (SELECT time FROM messages WHERE ((c.room_id IS NOT NULL AND room_id = c.room_id) OR (c.room_id IS NULL AND chat_id = c.id)) ORDER BY id DESC LIMIT 1) as last_time,
-               (SELECT COUNT(*) FROM messages m WHERE ((c.room_id IS NOT NULL AND m.room_id = c.room_id) OR (c.room_id IS NULL AND m.chat_id = c.id)) AND m.sent = 0 AND m.status != 'read') as unread
-        FROM chats c
-        LEFT JOIN rooms r ON c.room_id = r.id
-        WHERE c.user_id = ?
-        ORDER BY (SELECT MAX(id) FROM messages WHERE ((c.room_id IS NOT NULL AND room_id = c.room_id) OR (c.room_id IS NULL AND chat_id = c.id))) DESC
-    `, [req.session.userId], (err, chats) => {
-        if (err) {
-            return res.json({ success: false, message: 'Ошибка загрузки чатов' });
-        }
+app.get('/api/chats', async (req, res) => {
+    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
+    try {
+        const chats = await dbAll(`
+            SELECT c.id, c.name, c.avatar, c.online, c.is_bot, c.room_id, r.code as invite_code,
+                   (SELECT text FROM messages WHERE ((c.room_id IS NOT NULL AND room_id = c.room_id) OR (c.room_id IS NULL AND chat_id = c.id)) ORDER BY id DESC LIMIT 1) as last_message,
+                   (SELECT time FROM messages WHERE ((c.room_id IS NOT NULL AND room_id = c.room_id) OR (c.room_id IS NULL AND chat_id = c.id)) ORDER BY id DESC LIMIT 1) as last_time,
+                   (SELECT COUNT(*) FROM messages m WHERE ((c.room_id IS NOT NULL AND m.room_id = c.room_id) OR (c.room_id IS NULL AND m.chat_id = c.id)) AND m.sent = 0 AND m.status != 'read') as unread
+            FROM chats c
+            LEFT JOIN rooms r ON c.room_id = r.id
+            WHERE c.user_id = $1
+            ORDER BY (SELECT MAX(id) FROM messages WHERE ((c.room_id IS NOT NULL AND room_id = c.room_id) OR (c.room_id IS NULL AND chat_id = c.id))) DESC NULLS LAST
+        `, [req.session.userId]);
         res.json({ success: true, chats });
-    });
-});
-
-// Get messages for a chat
-app.get('/api/messages/:chatId', (req, res) => {
-    if (!req.session.userId) {
-        return res.json({ success: false, message: 'Не авторизован' });
+    } catch (error) {
+        console.error('Get chats error:', error);
+        res.json({ success: false, message: 'Ошибка загрузки чатов' });
     }
-    
-
+});
+ 
+// Get messages
+app.get('/api/messages/:chatId', async (req, res) => {
+    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const chatId = req.params.chatId;
-
-    // Verify chat belongs to user
-    db.get('SELECT * FROM chats WHERE id = ? AND user_id = ?', [chatId, req.session.userId], (err, chat) => {
-        if (err || !chat) {
-            return res.json({ success: false, message: 'Чат не найден' });
-        }
-
+    try {
+        const chat = await dbGet('SELECT * FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
+        if (!chat) return res.json({ success: false, message: 'Чат не найден' });
+ 
+        const selectParam = chat.room_id || chatId;
         const selectQuery = chat.room_id
             ? `SELECT m.*, u.username as sender_username, u.avatar as sender_avatar,
                       rt.id as reply_to_id, rt.text as reply_to_text, ru.username as reply_to_sender_username, ru.avatar as reply_to_sender_avatar
@@ -671,7 +472,7 @@ app.get('/api/messages/:chatId', (req, res) => {
                JOIN users u ON m.user_id = u.id
                LEFT JOIN messages rt ON m.reply_to_id = rt.id
                LEFT JOIN users ru ON rt.user_id = ru.id
-               WHERE m.room_id = ? AND m.deleted = 0
+               WHERE m.room_id = $1 AND m.deleted = 0
                ORDER BY m.id ASC`
             : `SELECT m.*, u.username as sender_username, u.avatar as sender_avatar,
                       rt.id as reply_to_id, rt.text as reply_to_text, ru.username as reply_to_sender_username, ru.avatar as reply_to_sender_avatar
@@ -679,619 +480,349 @@ app.get('/api/messages/:chatId', (req, res) => {
                JOIN users u ON m.user_id = u.id
                LEFT JOIN messages rt ON m.reply_to_id = rt.id
                LEFT JOIN users ru ON rt.user_id = ru.id
-               WHERE m.chat_id = ? AND m.deleted = 0
+               WHERE m.chat_id = $1 AND m.deleted = 0
                ORDER BY m.id ASC`;
-        const selectParam = chat.room_id || chatId;
-
-        db.all(selectQuery, [selectParam], (err, messages) => {
-            if (err) {
-                return res.json({ success: false, message: 'Ошибка загрузки сообщений' });
-            }
-
-            // Get reactions for all messages
-            const messageIds = messages.map(m => m.id);
-            if (messageIds.length === 0) {
-                const updateQuery = chat.room_id
-                    ? 'UPDATE messages SET status = ? WHERE room_id = ? AND sent = 0'
-                    : 'UPDATE messages SET status = ? WHERE chat_id = ? AND sent = 0';
-                db.run(updateQuery, ['read', selectParam]);
-                return res.json({ success: true, messages: [], chat });
-            }
-
-            const placeholders = messageIds.map(() => '?').join(',');
-            db.all(
-                `SELECT message_id, GROUP_CONCAT(DISTINCT emoji) as emojis FROM reactions WHERE message_id IN (${placeholders}) GROUP BY message_id`,
-                messageIds,
-                (err, reactions) => {
-                    const reactionsMap = {};
-                    if (!err && reactions) {
-                        reactions.forEach(r => {
-                            reactionsMap[r.message_id] = r.emojis.split(',');
-                        });
-                    }
-
-                    messages = messages.map(m => ({
-                        ...m,
-                        reactions: reactionsMap[m.id] || [],
-                        reply_to: m.reply_to_id ? {
-                            id: m.reply_to_id,
-                            text: m.reply_to_text,
-                            sender_username: m.reply_to_sender_username,
-                            sender_avatar: m.reply_to_sender_avatar
-                        } : null
-                    }));
-
-                    const updateQuery = chat.room_id
-                        ? 'UPDATE messages SET status = ? WHERE room_id = ? AND sent = 0'
-                        : 'UPDATE messages SET status = ? WHERE chat_id = ? AND sent = 0';
-
-                    db.run(updateQuery, ['read', selectParam]);
-
-                    res.json({ success: true, messages, chat });
-                }
-            );
-        });
-    });
-});
-
-// Send text message
-app.post('/api/messages', (req, res) => {
-    if (!req.session.userId) {
-        return res.json({ success: false, message: 'Не авторизован' });
+ 
+        let messages = await dbAll(selectQuery, [selectParam]);
+ 
+        if (messages.length === 0) {
+            const updateQuery = chat.room_id
+                ? 'UPDATE messages SET status = $1 WHERE room_id = $2 AND sent = 0'
+                : 'UPDATE messages SET status = $1 WHERE chat_id = $2 AND sent = 0';
+            await dbRun(updateQuery, ['read', selectParam]);
+            return res.json({ success: true, messages: [], chat });
+        }
+ 
+        const messageIds = messages.map(m => m.id);
+        const placeholders = messageIds.map((_, i) => `$${i + 1}`).join(',');
+        const reactions = await dbAll(
+            `SELECT message_id, STRING_AGG(DISTINCT emoji, ',') as emojis FROM reactions WHERE message_id IN (${placeholders}) GROUP BY message_id`,
+            messageIds
+        );
+ 
+        const reactionsMap = {};
+        reactions.forEach(r => { reactionsMap[r.message_id] = r.emojis.split(','); });
+ 
+        messages = messages.map(m => ({
+            ...m,
+            reactions: reactionsMap[m.id] || [],
+            reply_to: m.reply_to_id ? { id: m.reply_to_id, text: m.reply_to_text, sender_username: m.reply_to_sender_username, sender_avatar: m.reply_to_sender_avatar } : null
+        }));
+ 
+        const updateQuery = chat.room_id
+            ? 'UPDATE messages SET status = $1 WHERE room_id = $2 AND sent = 0'
+            : 'UPDATE messages SET status = $1 WHERE chat_id = $2 AND sent = 0';
+        await dbRun(updateQuery, ['read', selectParam]);
+ 
+        res.json({ success: true, messages, chat });
+    } catch (error) {
+        console.error('Get messages error:', error);
+        res.json({ success: false, message: 'Ошибка загрузки сообщений' });
     }
-
+});
+ 
+// Send message
+app.post('/api/messages', async (req, res) => {
+    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { chatId, text, replyToId } = req.body;
     const replyTo = Number(replyToId) || null;
-
-    if ((!text || text.trim() === '') || !chatId) {
-        return res.json({ success: false, message: 'Введите текст сообщения' });
-    }if (text.length > 4000)
-        return res.json({ success: false, message: 'Сообщение не может быть длиннее 4000 символов' });
-
-    // Verify chat belongs to user
-    db.get('SELECT * FROM chats WHERE id = ? AND user_id = ?', [chatId, req.session.userId], (err, chat) => {
-        if (err || !chat) {
-            return res.json({ success: false, message: 'Чат не найден' });
-        }
-
+    if (!text || text.trim() === '' || !chatId) return res.json({ success: false, message: 'Введите текст сообщения' });
+    if (text.length > 4000) return res.json({ success: false, message: 'Сообщение не может быть длиннее 4000 символов' });
+ 
+    try {
+        const chat = await dbGet('SELECT * FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
+        if (!chat) return res.json({ success: false, message: 'Чат не найден' });
+ 
         const time = getCurrentTime();
         const roomId = chat.room_id || null;
         const socketRoomKey = getSocketRoomKey(chatId, roomId);
-
-        db.run(
-            'INSERT INTO messages (chat_id, room_id, user_id, text, message_type, sent, time, status, reply_to_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [chatId, roomId, req.session.userId, text.trim(), 'text', 1, time, 'sent', replyTo],
-            function(err) {
-                if (err) {
-                    return res.json({ success: false, message: 'Ошибка отправки' });
-                }
-
-                const messageId = this.lastID;
-                // Получаем созданное сообщение с данными пользователя для ответа
-                db.get(
-                    `SELECT m.*, u.username, u.avatar as user_avatar 
-                     FROM messages m 
-                     JOIN users u ON m.user_id = u.id 
-                     WHERE m.id = ?`,
-                    [messageId],
-                    (err, fullMessage) => {
-                        if (err) {
-                            return res.json({ success: false, message: 'Ошибка получения данных сообщения' });
-                        }
-
-                        const messageForSocket = {
-                            ...fullMessage,
-                            sender_username: fullMessage.username,
-                            sender_avatar: fullMessage.user_avatar
-                        };
-                        io.to(socketRoomKey).emit('newMessage', messageForSocket);
-
-                        res.json({ success: true, message: messageForSocket });
-                    }
-                );
-            }
+ 
+        const result = await pool.query(
+            'INSERT INTO messages (chat_id, room_id, user_id, text, message_type, sent, time, status, reply_to_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id',
+            [chatId, roomId, req.session.userId, text.trim(), 'text', 1, time, 'sent', replyTo]
         );
-
-        // Bot response for bot chat (не отправляем второй HTTP-ответ)
+        const messageId = result.rows[0].id;
+ 
+        const fullMessage = await dbGet(
+            'SELECT m.*, u.username, u.avatar as user_avatar FROM messages m JOIN users u ON m.user_id = u.id WHERE m.id = $1',
+            [messageId]
+        );
+ 
+        const messageForSocket = { ...fullMessage, sender_username: fullMessage.username, sender_avatar: fullMessage.user_avatar };
+        io.to(socketRoomKey).emit('newMessage', messageForSocket);
+        res.json({ success: true, message: messageForSocket });
+ 
+        // Ответ бота
         if (chat.is_bot) {
-            setTimeout(() => {
-                const botResponses = [
-                    'Интересный вопрос! Расскажите подробнее.',
-                    'Я получил ваше сообщение!',
-                    'Хмм, дайте подумать...',
-                    'Отличное сообщение! Продолжайте.',
-                    'Я бот, но стараюсь быть полезным!',
-                    'Можете уточнить, что именно вас интересует?'
-                ];
+            setTimeout(async () => {
+                const botResponses = ['Интересный вопрос! Расскажите подробнее.', 'Я получил ваше сообщение!', 'Хмм, дайте подумать...', 'Отличное сообщение! Продолжайте.', 'Я бот, но стараюсь быть полезным!', 'Можете уточнить, что именно вас интересует?'];
                 const randomResponse = botResponses[Math.floor(Math.random() * botResponses.length)];
                 const botTime = getCurrentTime();
-
-                db.run(
-                    'INSERT INTO messages (chat_id, room_id, user_id, text, sent, time, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                    [chatId, roomId, req.session.userId, randomResponse, 0, botTime, 'read'],
-                    function(insertErr) {
-                        if (insertErr) {
-                            return;
-                        }
-
-                        const botMessageId = this.lastID;
-                        db.get(
-                            `SELECT m.*, u.username, u.avatar as user_avatar
-                             FROM messages m
-                             JOIN users u ON m.user_id = u.id
-                             WHERE m.id = ?`,
-                            [botMessageId],
-                            (fetchErr, botMessage) => {
-                                if (fetchErr || !botMessage) {
-                                    return;
-                                }
-                                io.to(socketRoomKey).emit('newMessage', {
-                                    ...botMessage,
-                                    sender_username: botMessage.username,
-                                    sender_avatar: botMessage.user_avatar
-                                });
-                            }
-                        );
+                try {
+                    const botResult = await pool.query(
+                        'INSERT INTO messages (chat_id, room_id, user_id, text, sent, time, status) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
+                        [chatId, roomId, req.session.userId, randomResponse, 0, botTime, 'read']
+                    );
+                    const botMessageId = botResult.rows[0].id;
+                    const botMessage = await dbGet(
+                        'SELECT m.*, u.username, u.avatar as user_avatar FROM messages m JOIN users u ON m.user_id = u.id WHERE m.id = $1',
+                        [botMessageId]
+                    );
+                    if (botMessage) {
+                        io.to(socketRoomKey).emit('newMessage', { ...botMessage, sender_username: botMessage.username, sender_avatar: botMessage.user_avatar });
                     }
-                );
+                } catch (e) { console.error('Bot error:', e); }
             }, 1500);
         }
-    });
-});
-
-
-
-// Upload file message
-app.post('/api/messages/file', upload.single('file'), (req, res) => {
-    if (!req.session.userId) {
-        return res.json({ success: false, message: 'Не авторизован' });
+    } catch (error) {
+        console.error('Send message error:', error);
+        res.json({ success: false, message: 'Ошибка отправки' });
     }
-
+});
+ 
+// Upload file
+app.post('/api/messages/file', upload.single('file'), async (req, res) => {
+    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { chatId, text } = req.body;
     const file = req.file;
-
-    if (!file || !chatId) {
-        return res.json({ success: false, message: 'Файл или чат не выбраны' });
-    }
-
-    db.get('SELECT * FROM chats WHERE id = ? AND user_id = ?', [chatId, req.session.userId], (err, chat) => {
-        if (err || !chat) {
-            return res.json({ success: false, message: 'Чат не найден' });
-        }
-
+    if (!file || !chatId) return res.json({ success: false, message: 'Файл или чат не выбраны' });
+ 
+    try {
+        const chat = await dbGet('SELECT * FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
+        if (!chat) return res.json({ success: false, message: 'Чат не найден' });
+ 
         const time = getCurrentTime();
         const roomId = chat.room_id || null;
         const socketRoomKey = getSocketRoomKey(chatId, roomId);
         const fileUrl = `/uploads/${file.filename}`;
         const fileType = file.mimetype;
         const fileName = file.originalname;
-        const messageType = fileType.startsWith('image/') ? 'image'
-            : fileType.startsWith('video/') ? 'video'
-            : fileType.startsWith('audio/') ? 'audio'
-            : 'file';
+        const messageType = fileType.startsWith('image/') ? 'image' : fileType.startsWith('video/') ? 'video' : fileType.startsWith('audio/') ? 'audio' : 'file';
         const messageText = text ? String(text).trim() : (messageType === 'audio' ? 'Голосовое сообщение' : fileName);
-
-        db.run(
-            'INSERT INTO messages (chat_id, room_id, user_id, text, file_url, file_name, file_type, message_type, sent, time, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [chatId, roomId, req.session.userId, messageText, fileUrl, fileName, fileType, messageType, 1, time, 'sent'],
-            function(err) {
-                if (err) {
-                    return res.json({ success: false, message: 'Ошибка отправки файла' });
-                }
-
-                const messageId = this.lastID;
-
-                // Simulate status updates
-                setTimeout(() => {
-                    db.run('UPDATE messages SET status = ? WHERE id = ?', ['delivered', messageId]);
-                }, 1000);
-
-                setTimeout(() => {
-                    db.run('UPDATE messages SET status = ? WHERE id = ?', ['read', messageId]);
-                }, 2000);
-
-                const fileMessage = {
-                        id: messageId,
-                        chat_id: Number(chatId),
-                        room_id: roomId,
-                        user_id: req.session.userId,
-                        sender_username: req.session.username,
-                        sender_avatar: req.session.avatar || '',
-                        text: messageText,
-                        file_url: fileUrl,
-                        file_name: fileName,
-                        file_type: fileType,
-                        message_type: messageType,
-                        sent: true,
-                        time,
-                        status: 'sent'
-                };
-                io.to(socketRoomKey).emit('newMessage', fileMessage);
-                res.json({ success: true, message: fileMessage });
-            }
+ 
+        const result = await pool.query(
+            'INSERT INTO messages (chat_id, room_id, user_id, text, file_url, file_name, file_type, message_type, sent, time, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id',
+            [chatId, roomId, req.session.userId, messageText, fileUrl, fileName, fileType, messageType, 1, time, 'sent']
         );
-    });
+        const messageId = result.rows[0].id;
+ 
+        setTimeout(() => dbRun('UPDATE messages SET status = $1 WHERE id = $2', ['delivered', messageId]), 1000);
+        setTimeout(() => dbRun('UPDATE messages SET status = $1 WHERE id = $2', ['read', messageId]), 2000);
+ 
+        const fileMessage = { id: messageId, chat_id: Number(chatId), room_id: roomId, user_id: req.session.userId, sender_username: req.session.username, sender_avatar: req.session.avatar || '', text: messageText, file_url: fileUrl, file_name: fileName, file_type: fileType, message_type: messageType, sent: true, time, status: 'sent' };
+        io.to(socketRoomKey).emit('newMessage', fileMessage);
+        res.json({ success: true, message: fileMessage });
+    } catch (error) {
+        console.error('Upload file error:', error);
+        res.json({ success: false, message: 'Ошибка отправки файла' });
+    }
 });
-
-// Create new chat with invite room code
+ 
+// Create chat
 app.post('/api/chats', async (req, res) => {
-    if (!req.session.userId) {
-        return res.json({ success: false, message: 'Не авторизован' });
-    }
-
+    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { name } = req.body;
-
-    if (!name) {
-        return res.json({ success: false, message: 'Введите имя чата' });
-    }
-    if (name.length > 64)
-        return res.json({ success: false, message: 'Название чата не может быть длиннее 64 символов' });
-
+    if (!name) return res.json({ success: false, message: 'Введите имя чата' });
+    if (name.length > 64) return res.json({ success: false, message: 'Название чата не может быть длиннее 64 символов' });
+ 
     const avatar = name.charAt(0).toUpperCase();
-
     try {
         const roomCode = await generateInviteCodeAsync();
-
-        db.run(
-            'INSERT INTO rooms (name, code) VALUES (?, ?)',
-            [name, roomCode],
-            function(err) {
-                if (err) {
-                    return res.json({ success: false, message: 'Ошибка создания комнаты' });
-                }
-
-                const roomId = this.lastID;
-
-                db.run(
-                    'INSERT INTO room_participants (room_id, user_id) VALUES (?, ?)',
-                    [roomId, req.session.userId],
-                    function(err) {
-                        if (err) {
-                            return res.json({ success: false, message: 'Ошибка добавления участника комнаты' });
-                        }
-
-                        db.run(
-                            'INSERT INTO chats (user_id, room_id, name, avatar, online, is_bot) VALUES (?, ?, ?, ?, ?, ?)',
-                            [req.session.userId, roomId, name, avatar, 0, 0],
-                            function(err) {
-                                if (err) {
-                                    return res.json({ success: false, message: 'Ошибка создания чата' });
-                                }
-                                res.json({ 
-                                    success: true, 
-                                    chat: { id: this.lastID, name, avatar, online: 0, is_bot: 0, room_id: roomId, invite_code: roomCode }
-                                });
-                            }
-                        );
-                    }
-                );
-            }
+        const roomResult = await pool.query('INSERT INTO rooms (name, code) VALUES ($1, $2) RETURNING id', [name, roomCode]);
+        const roomId = roomResult.rows[0].id;
+        await pool.query('INSERT INTO room_participants (room_id, user_id) VALUES ($1, $2)', [roomId, req.session.userId]);
+        const chatResult = await pool.query(
+            'INSERT INTO chats (user_id, room_id, name, avatar, online, is_bot) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
+            [req.session.userId, roomId, name, avatar, 0, 0]
         );
+        res.json({ success: true, chat: { id: chatResult.rows[0].id, name, avatar, online: 0, is_bot: 0, room_id: roomId, invite_code: roomCode } });
     } catch (error) {
-        res.json({ success: false, message: 'Ошибка создания кода приглашения' });
+        console.error('Create chat error:', error);
+        res.json({ success: false, message: 'Ошибка создания чата' });
     }
 });
-
-// Get invite code for current room chat
-app.get('/api/chats/invite/:chatId', (req, res) => {
-    if (!req.session.userId) {
-        return res.json({ success: false, message: 'Не авторизован' });
-    }
-
+ 
+// Get invite code
+app.get('/api/chats/invite/:chatId', async (req, res) => {
+    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const chatId = req.params.chatId;
-
-    db.get('SELECT room_id FROM chats WHERE id = ? AND user_id = ?', [chatId, req.session.userId], (err, chat) => {
-        if (err || !chat) {
-            return res.json({ success: false, message: 'Чат не найден' });
-        }
-
-        if (!chat.room_id) {
-            return res.json({ success: false, message: 'У этого чата нет кода приглашения' });
-        }
-
-        db.get('SELECT code FROM rooms WHERE id = ?', [chat.room_id], (err, room) => {
-            if (err || !room) {
-                return res.json({ success: false, message: 'Код не найден' });
-            }
-            res.json({ success: true, code: room.code });
-        });
-    });
-});
-
-// Join shared chat by invite code
-app.post('/api/chats/join', (req, res) => {
-    if (!req.session.userId) {
-        return res.json({ success: false, message: 'Не авторизован' });
+    try {
+        const chat = await dbGet('SELECT room_id FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
+        if (!chat) return res.json({ success: false, message: 'Чат не найден' });
+        if (!chat.room_id) return res.json({ success: false, message: 'У этого чата нет кода приглашения' });
+        const room = await dbGet('SELECT code FROM rooms WHERE id = $1', [chat.room_id]);
+        if (!room) return res.json({ success: false, message: 'Код не найден' });
+        res.json({ success: true, code: room.code });
+    } catch (error) {
+        res.json({ success: false, message: 'Ошибка получения кода' });
     }
-
+});
+ 
+// Join chat by code
+app.post('/api/chats/join', async (req, res) => {
+    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { code } = req.body;
-
-    if (!code) {
-        return res.json({ success: false, message: 'Введите код приглашения' });
-    }
-
-    db.get('SELECT * FROM rooms WHERE code = ?', [code], (err, room) => {
-        if (err || !room) {
-            return res.json({ success: false, message: 'Чат по этому коду не найден' });
+    if (!code) return res.json({ success: false, message: 'Введите код приглашения' });
+ 
+    try {
+        const room = await dbGet('SELECT * FROM rooms WHERE code = $1', [code]);
+        if (!room) return res.json({ success: false, message: 'Чат по этому коду не найден' });
+ 
+        const participant = await dbGet('SELECT id FROM room_participants WHERE room_id = $1 AND user_id = $2', [room.id, req.session.userId]);
+        if (participant) {
+            const chat = await dbGet('SELECT id FROM chats WHERE room_id = $1 AND user_id = $2', [room.id, req.session.userId]);
+            if (!chat) return res.json({ success: false, message: 'Чат уже добавлен' });
+            return res.json({ success: true, chat: { id: chat.id } });
         }
-
-        db.get('SELECT id FROM room_participants WHERE room_id = ? AND user_id = ?', [room.id, req.session.userId], (err, participant) => {
-            if (err) {
-                return res.json({ success: false, message: 'Ошибка проверки доступа к чату' });
-            }
-
-            if (participant) {
-                db.get('SELECT id FROM chats WHERE room_id = ? AND user_id = ?', [room.id, req.session.userId], (err, chat) => {
-                    if (err || !chat) {
-                        return res.json({ success: false, message: 'Чат уже добавлен' });
-                    }
-                    return res.json({ success: true, chat: { id: chat.id } });
-                });
-                return;
-            }
-
-            // Determine chat name and avatar using room name or first other participant
-            db.get(
-                'SELECT u.username FROM users u JOIN room_participants rp ON u.id = rp.user_id WHERE rp.room_id = ? AND u.id != ? LIMIT 1',
-                [room.id, req.session.userId],
-                (err, otherUser) => {
-                    const chatName = otherUser ? `Чат с ${otherUser.username}` : room.name;
-                    const avatar = chatName.charAt(0).toUpperCase();
-
-                    db.run('INSERT INTO room_participants (room_id, user_id) VALUES (?, ?)', [room.id, req.session.userId], function(err) {
-                        if (err) {
-                            return res.json({ success: false, message: 'Ошибка добавления в чат' });
-                        }
-
-                        db.run(
-                            'INSERT INTO chats (user_id, room_id, name, avatar, online, is_bot) VALUES (?, ?, ?, ?, ?, ?)',
-                            [req.session.userId, room.id, chatName, avatar, 0, 0],
-                            function(err) {
-                                if (err) {
-                                    return res.json({ success: false, message: 'Ошибка создания чата' });
-                                }
-                                res.json({ success: true, chat: { id: this.lastID, name: chatName, avatar, online: 0, is_bot: 0, room_id: room.id, invite_code: room.code } });
-                            }
-                        );
-                    });
-                }
-            );
-        });
-    });
+ 
+        const otherUser = await dbGet('SELECT u.username FROM users u JOIN room_participants rp ON u.id = rp.user_id WHERE rp.room_id = $1 AND u.id != $2 LIMIT 1', [room.id, req.session.userId]);
+        const chatName = otherUser ? `Чат с ${otherUser.username}` : room.name;
+        const avatar = chatName.charAt(0).toUpperCase();
+ 
+        await pool.query('INSERT INTO room_participants (room_id, user_id) VALUES ($1, $2)', [room.id, req.session.userId]);
+        const chatResult = await pool.query(
+            'INSERT INTO chats (user_id, room_id, name, avatar, online, is_bot) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
+            [req.session.userId, room.id, chatName, avatar, 0, 0]
+        );
+        res.json({ success: true, chat: { id: chatResult.rows[0].id, name: chatName, avatar, online: 0, is_bot: 0, room_id: room.id, invite_code: room.code } });
+    } catch (error) {
+        console.error('Join chat error:', error);
+        res.json({ success: false, message: 'Ошибка входа в чат' });
+    }
 });
-
-// Helper function
-function getCurrentTime() {
-    const now = new Date();
-    return `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
-};
-
+ 
 // Delete chat
-app.delete('/api/chats/:chatId', (req, res) => {
-    if (!req.session.userId) {
-        return res.json({ success: false, message: 'Не авторизован' });
-    }
-
+app.delete('/api/chats/:chatId', async (req, res) => {
+    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const chatId = req.params.chatId;
-
-    db.get('SELECT * FROM chats WHERE id = ? AND user_id = ?', [chatId, req.session.userId], (err, chat) => {
-        if (err || !chat) {
-            return res.json({ success: false, message: 'Чат не найден' });
+    try {
+        const chat = await dbGet('SELECT * FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
+        if (!chat) return res.json({ success: false, message: 'Чат не найден' });
+ 
+        if (chat.room_id) {
+            await dbRun('DELETE FROM messages WHERE room_id = $1', [chat.room_id]);
+        } else {
+            await dbRun('DELETE FROM messages WHERE chat_id = $1', [chatId]);
         }
-
-        const deleteMessages = chat.room_id
-            ? new Promise((resolve, reject) => {
-                db.run('DELETE FROM messages WHERE room_id = ?', [chat.room_id], err => err ? reject(err) : resolve());
-              })
-            : new Promise((resolve, reject) => {
-                db.run('DELETE FROM messages WHERE chat_id = ?', [chatId], err => err ? reject(err) : resolve());
-              });
-
-        deleteMessages
-            .then(() => new Promise((resolve, reject) => {
-                db.run('DELETE FROM unread WHERE chat_id = ?', [chatId], err => err ? reject(err) : resolve());
-            }))
-            .then(() => new Promise((resolve, reject) => {
-                db.run('DELETE FROM chats WHERE id = ? AND user_id = ?', [chatId, req.session.userId], err => err ? reject(err) : resolve());
-            }))
-            .then(() => {
-                if (chat.room_id) {
-                    db.run('DELETE FROM room_participants WHERE room_id = ? AND user_id = ?', [chat.room_id, req.session.userId]);
-                }
-                res.json({ success: true });
-            })
-            .catch(() => res.json({ success: false, message: 'Ошибка удаления чата' }));
-    });
-});
-
-// Edit message
-app.put('/api/messages/:messageId', (req, res) => {
-    if (!req.session.userId) {
-        return res.json({ success: false, message: 'Не авторизован' });
+        await dbRun('DELETE FROM unread WHERE chat_id = $1', [chatId]);
+        await dbRun('DELETE FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
+        if (chat.room_id) {
+            await dbRun('DELETE FROM room_participants WHERE room_id = $1 AND user_id = $2', [chat.room_id, req.session.userId]);
+        }
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Delete chat error:', error);
+        res.json({ success: false, message: 'Ошибка удаления чата' });
     }
-
+});
+ 
+// Edit message
+app.put('/api/messages/:messageId', async (req, res) => {
+    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { messageId } = req.params;
     const { text } = req.body;
-
-    if (!text || text.trim() === '') {
-        return res.json({ success: false, message: 'Текст не может быть пустым' });
-    }
-
-    db.get('SELECT * FROM messages WHERE id = ? AND user_id = ?', [messageId, req.session.userId], (err, message) => {
-        if (err || !message) {
-            return res.json({ success: false, message: 'Сообщение не найдено' });
-        }
-
+    if (!text || text.trim() === '') return res.json({ success: false, message: 'Текст не может быть пустым' });
+ 
+    try {
+        const message = await dbGet('SELECT * FROM messages WHERE id = $1 AND user_id = $2', [messageId, req.session.userId]);
+        if (!message) return res.json({ success: false, message: 'Сообщение не найдено' });
         const editedAt = new Date().toISOString();
-        db.run(
-            'UPDATE messages SET text = ?, edited_at = ? WHERE id = ?',
-            [text.trim(), editedAt, messageId],
-            function(err) {
-                if (err) {
-                    return res.json({ success: false, message: 'Ошибка редактирования' });
-                }
-                res.json({ success: true, edited_at: editedAt });
-            }
-        );
-    });
+        await dbRun('UPDATE messages SET text = $1, edited_at = $2 WHERE id = $3', [text.trim(), editedAt, messageId]);
+        res.json({ success: true, edited_at: editedAt });
+    } catch (error) {
+        res.json({ success: false, message: 'Ошибка редактирования' });
+    }
 });
-
+ 
 // Delete message
-app.delete('/api/messages/:messageId', (req, res) => {
-    if (!req.session.userId) {
-        return res.json({ success: false, message: 'Не авторизован' });
-    }
-
+app.delete('/api/messages/:messageId', async (req, res) => {
+    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { messageId } = req.params;
-
-    db.get('SELECT * FROM messages WHERE id = ? AND user_id = ?', [messageId, req.session.userId], (err, message) => {
-        if (err || !message) {
-            return res.json({ success: false, message: 'Сообщение не найдено' });
-        }
-
-        db.run('UPDATE messages SET deleted = 1 WHERE id = ?', [messageId], function(err) {
-            if (err) {
-                return res.json({ success: false, message: 'Ошибка удаления' });
-            }
-            res.json({ success: true });
-        });
-    });
+    try {
+        const message = await dbGet('SELECT * FROM messages WHERE id = $1 AND user_id = $2', [messageId, req.session.userId]);
+        if (!message) return res.json({ success: false, message: 'Сообщение не найдено' });
+        await dbRun('UPDATE messages SET deleted = 1 WHERE id = $1', [messageId]);
+        res.json({ success: true });
+    } catch (error) {
+        res.json({ success: false, message: 'Ошибка удаления' });
+    }
 });
-
+ 
 // Add reaction
-app.post('/api/reactions', (req, res) => {
-    if (!req.session.userId) {
-        return res.json({ success: false, message: 'Не авторизован' });
-    }
-
+app.post('/api/reactions', async (req, res) => {
+    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { messageId, emoji } = req.body;
-
-    if (!messageId || !emoji) {
-        return res.json({ success: false, message: 'Параметры отсутствуют' });
+    if (!messageId || !emoji) return res.json({ success: false, message: 'Параметры отсутствуют' });
+    if (typeof emoji !== 'string' || emoji.length > 10) return res.json({ success: false, message: 'Недопустимый emoji' });
+ 
+    try {
+        await pool.query('INSERT INTO reactions (message_id, user_id, emoji) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [messageId, req.session.userId, emoji]);
+        res.json({ success: true });
+    } catch (error) {
+        res.json({ success: false, message: 'Ошибка добавления реакции' });
     }
-
-    db.run(
-        'INSERT OR IGNORE INTO reactions (message_id, user_id, emoji) VALUES (?, ?, ?)',
-        [messageId, req.session.userId, emoji],
-        function(err) {
-            if (err) {
-                return res.json({ success: false, message: 'Ошибка добавления реакции' });
-            }
-            res.json({ success: true });
-        }
-    );
 });
-
+ 
 // Remove reaction
-app.delete('/api/reactions/:messageId/:emoji', (req, res) => {
-    if (!req.session.userId) {
-        return res.json({ success: false, message: 'Не авторизован' });
-    }
-
+app.delete('/api/reactions/:messageId/:emoji', async (req, res) => {
+    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { messageId, emoji } = req.params;
-
-    db.run(
-        'DELETE FROM reactions WHERE message_id = ? AND user_id = ? AND emoji = ?',
-        [messageId, req.session.userId, emoji],
-        function(err) {
-            if (err) {
-                return res.json({ success: false, message: 'Ошибка удаления реакции' });
-            }
-            res.json({ success: true });
-        }
-    );
+    try {
+        await dbRun('DELETE FROM reactions WHERE message_id = $1 AND user_id = $2 AND emoji = $3', [messageId, req.session.userId, emoji]);
+        res.json({ success: true });
+    } catch (error) {
+        res.json({ success: false, message: 'Ошибка удаления реакции' });
+    }
 });
-
-// Search chats and messages
-app.get('/api/search', (req, res) => {
-    if (!req.session.userId) {
-        return res.json({ success: false, message: 'Не авторизован' });
-    }
-
+ 
+// Search
+app.get('/api/search', async (req, res) => {
+    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const query = req.query.q || '';
-
-    if (!query || query.length < 1) {
-        return res.json({ success: true, results: [] });
-    }
-
+    if (!query || query.length < 1) return res.json({ success: true, results: [] });
+ 
     const searchTerm = `%${query}%`;
-
-    // Search chats by name
-    const chatPromise = new Promise((resolve) => {
-        db.all(
-            'SELECT id, name, avatar FROM chats WHERE user_id = ? AND name LIKE ? LIMIT 10',
-            [req.session.userId, searchTerm],
-            (err, rows) => resolve(err ? [] : rows || [])
-        );
-    });
-
-    // Search messages
-    const messagePromise = new Promise((resolve) => {
-        db.all(
+    try {
+        const chats = await dbAll('SELECT id, name, avatar FROM chats WHERE user_id = $1 AND name ILIKE $2 LIMIT 10', [req.session.userId, searchTerm]);
+        const messages = await dbAll(
             `SELECT m.id, m.text, m.chat_id, c.name as chat_name FROM messages m 
              JOIN chats c ON m.chat_id = c.id 
-             WHERE c.user_id = ? AND m.text LIKE ? AND m.deleted = 0 LIMIT 20`,
-            [req.session.userId, searchTerm],
-            (err, rows) => resolve(err ? [] : rows || [])
+             WHERE c.user_id = $1 AND m.text ILIKE $2 AND m.deleted = 0 LIMIT 20`,
+            [req.session.userId, searchTerm]
         );
-    });
-
-    Promise.all([chatPromise, messagePromise])
-        .then(([chats, messages]) => {
-            res.json({ success: true, results: { chats, messages } });
-        });
+        res.json({ success: true, results: { chats, messages } });
+    } catch (error) {
+        res.json({ success: false, message: 'Ошибка поиска' });
+    }
 });
-
+ 
 // Change password
 app.post('/api/change-password', async (req, res) => {
-    if (!req.session.userId) {
-        return res.json({ success: false, message: 'Не авторизован' });
-    }
-
+    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { currentPassword, newPassword, confirmPassword } = req.body;
-
-    if (!currentPassword || !newPassword || !confirmPassword) {
-        return res.json({ success: false, message: 'Заполните все поля' });
-    }
-
-    if (newPassword !== confirmPassword) {
-        return res.json({ success: false, message: 'Новые пароли не совпадают' });
-    }
-
-    if (newPassword.length < 6) {
-        return res.json({ success: false, message: 'Пароль должен быть не менее 6 символов' });
-    }
-
-    db.get('SELECT password FROM users WHERE id = ?', [req.session.userId], async (err, user) => {
-        if (err || !user) {
-            return res.json({ success: false, message: 'Пользователь не найден' });
-        }
-
+    if (!currentPassword || !newPassword || !confirmPassword) return res.json({ success: false, message: 'Заполните все поля' });
+    if (newPassword !== confirmPassword) return res.json({ success: false, message: 'Новые пароли не совпадают' });
+    if (newPassword.length < 6) return res.json({ success: false, message: 'Пароль должен быть не менее 6 символов' });
+ 
+    try {
+        const user = await dbGet('SELECT password FROM users WHERE id = $1', [req.session.userId]);
+        if (!user) return res.json({ success: false, message: 'Пользователь не найден' });
         const validPassword = await bcrypt.compare(currentPassword, user.password);
-        if (!validPassword) {
-            return res.json({ success: false, message: 'Неверный текущий пароль' });
-        }
-
+        if (!validPassword) return res.json({ success: false, message: 'Неверный текущий пароль' });
         const hashedPassword = await bcrypt.hash(newPassword, 10);
-        db.run(
-            'UPDATE users SET password = ? WHERE id = ?',
-            [hashedPassword, req.session.userId],
-            function(err) {
-                if (err) {
-                    return res.json({ success: false, message: 'Ошибка изменения пароля' });
-                }
-                req.session.destroy(() => {
-                    res.json({ success: true, message: 'Пароль успешно изменён. Войдите заново.' });
-                });
-            }
-        );
-    });
+        await dbRun('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, req.session.userId]);
+        req.session.destroy(() => {
+            res.json({ success: true, message: 'Пароль успешно изменён. Войдите заново.' });
+        });
+    } catch (error) {
+        res.json({ success: false, message: 'Ошибка изменения пароля' });
+    }
 });
-
+ 
 app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
-
+ 
 server.listen(PORT, HOST, () => {
     const addresses = getLocalAddresses();
     console.log('Сервер запущен на следующих адресах:');
