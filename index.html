@@ -238,7 +238,25 @@
         </div>
     </div>
 </div>
-
+    <!-- New Chat Modal -->
+<div class="modal" id="newChatModal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>Новый чат</h3>
+            <button class="close-btn" id="newChatCancelBtn">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="setting-item">
+                <label>Название чата</label>
+                <input type="text" id="newChatNameInput" placeholder="Введите название..." maxlength="64" autocomplete="off">
+            </div>
+            <div class="error-message" id="newChatError"></div>
+        </div>
+        <div class="modal-actions">
+            <button type="button" class="settings-save-btn" id="newChatConfirmBtn">Создать</button>
+        </div>
+    </div>
+</div>
     <script src="/socket.io/socket.io.js"></script>
     <script src="script.js"></script>
     
