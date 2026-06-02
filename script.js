@@ -697,33 +697,26 @@ function updateVoiceRecordingState() {
 
 // Create new chat
 async function createNewChat() {
-    const name = prompt('Введите имя нового чата:');
-    
-    if (!name) return;
-    
-    try {
-        const response = await fetch('/api/chats', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name })
-        });
-        
-        const data = await response.json();
-        
-        if (data.success) {
-            await loadChats();
-            if (data.chat && data.chat.id) {
-                await selectChat(data.chat.id);
+    showNewChatModal(async (name) => {
+        if (!name) return;
+        try {
+            const response = await fetch('/api/chats', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name })
+            });
+            const data = await response.json();
+            if (data.success) {
+                await loadChats();
+                if (data.chat && data.chat.id) await selectChat(data.chat.id);
+                if (data.chat && data.chat.invite_code) showInviteCode(data.chat.invite_code);
+            } else {
+                alert(data.message || 'Ошибка создания чата');
             }
-            if (data.chat && data.chat.invite_code) {
-                showInviteCode(data.chat.invite_code);
-            }
-        } else {
-            alert(data.message || 'Ошибка создания чата');
+        } catch (error) {
+            console.error('Create chat error:', error);
         }
-    } catch (error) {
-        console.error('Create chat error:', error);
-    }
+    });
 }
 
 async function fetchInviteCodeForChat(chatId) {
@@ -758,8 +751,10 @@ async function handleGetCodeClick() {
         return showInviteCode(code);
     }
 
-    const name = selectedChat ? selectedChat.name : prompt('Введите название нового чата для создания кода:');
+    showNewChatModal(async (name) => {
     if (!name) return;
+    await createChatWithCode(name);
+});
 
     await createChatWithCode(name);
 }
@@ -1278,6 +1273,49 @@ function highlightText(text, query) {
     return safeText.replace(regex, '<span class="message-highlight">$1</span>');
 }
 
+
+function showNewChatModal(callback) {
+    const modal = document.getElementById('newChatModal');
+    const input = document.getElementById('newChatNameInput');
+    const error = document.getElementById('newChatError');
+    const confirmBtn = document.getElementById('newChatConfirmBtn');
+    const cancelBtn = document.getElementById('newChatCancelBtn');
+
+    input.value = '';
+    error.textContent = '';
+    modal.classList.add('active');
+    setTimeout(() => input.focus(), 50);
+
+    function confirm() {
+        const name = input.value.trim();
+        if (!name) { error.textContent = 'Введите название чата'; return; }
+        if (name.length > 64) { error.textContent = 'Максимум 64 символа'; return; }
+        modal.classList.remove('active');
+        cleanup();
+        callback(name);
+    }
+
+    function cancel() {
+        modal.classList.remove('active');
+        cleanup();
+        callback(null);
+    }
+
+    function onKey(e) {
+        if (e.key === 'Enter') confirm();
+        if (e.key === 'Escape') cancel();
+    }
+
+    function cleanup() {
+        confirmBtn.removeEventListener('click', confirm);
+        cancelBtn.removeEventListener('click', cancel);
+        input.removeEventListener('keydown', onKey);
+    }
+
+    confirmBtn.addEventListener('click', confirm);
+    cancelBtn.addEventListener('click', cancel);
+    input.addEventListener('keydown', onKey);
+}
 // Initialize app
 init();
 
