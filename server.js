@@ -11,11 +11,13 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const http = require('http');
+const https = require('https'); // Изменено: явный импорт https
 const fs = require('fs');
 const { Server } = require('socket.io');
 const rateLimit = require('express-rate-limit');
 const pgSession = require('connect-pg-simple')(session);
- 
+const cookieParser = require('@socket.io/cookie-parser'); // Добавлено для защиты WebSocket
+
 // 2. ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЙ
 const app = express();
 app.set('trust proxy', 1);
@@ -24,12 +26,18 @@ let server;
 if (process.env.NODE_ENV === 'production') {
     server = http.createServer(app);
 } else {
-    const https = require('https');
+    // Проверка существования файлов SSL для dev-режима
     const sslOptions = {
-        key: fs.readFileSync('./localhost+1-key.pem'),
-        cert: fs.readFileSync('./localhost+1.pem'),
+        key: fs.existsSync('./localhost+1-key.pem') ? fs.readFileSync('./localhost+1-key.pem') : null,
+        cert: fs.existsSync('./localhost+1.pem') ? fs.readFileSync('./localhost+1.pem') : null,
     };
-    server = https.createServer(sslOptions, app);
+    
+    if (sslOptions.key && sslOptions.cert) {
+        server = https.createServer(sslOptions, app);
+    } else {
+        console.warn('SSL сертификаты не найдены. Запуск HTTP сервера.');
+        server = http.createServer(app);
+    }
 }
  
 const io = new Server(server);
@@ -58,6 +66,15 @@ async function dbAll(query, params = []) {
 async function dbRun(query, params = []) {
     const result = await pool.query(query, params);
     return result;
+}
+
+// Санитизация ввода (защита от XSS)
+function sanitizeInput(str) {
+    if (typeof str !== 'string') return str;
+    return str.replace(/[<>&"']/g, (c) => {
+        const escape = { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;' };
+        return escape[c];
+    });
 }
  
 // 4. СОЗДАНИЕ ТАБЛИЦ
@@ -210,9 +227,21 @@ async function generateInviteCodeAsync() {
     throw new Error('Could not generate invite code');
 }
  
-// 6. WEBSOCKET
+// 6. WEBSOCKET (ИСПРАВЛЕНО: Добавлена аутентификация)
+io.use((socket, next) => {
+    cookieParser(socket.handshake.headers.cookie, socket.handshake, (err) => {
+        if (err) return next(new Error('Ошибка парсинга cookie'));
+        // Проверяем, есть ли сессия и пользователь
+        if (socket.handshake.session && socket.handshake.session.userId) {
+            next();
+        } else {
+            next(new Error('Unauthorized'));
+        }
+    });
+});
+
 io.on('connection', (socket) => {
-    console.log('Пользователь подключился через WebSocket');
+    console.log('Пользователь подключился через WebSocket:', socket.handshake.session.userId);
     socket.on('joinChat', (roomKey) => {
         if (typeof roomKey === 'string' && roomKey.length > 0) {
             socket.join(roomKey);
@@ -226,6 +255,7 @@ io.on('connection', (socket) => {
 // 7. MIDDLEWARE
 app.use(bodyParser.json());
  
+// Middleware проверки CORS/Referrer
 app.use((req, res, next) => {
     const mutating = ['POST', 'PUT', 'DELETE', 'PATCH'];
     if (!mutating.includes(req.method)) return next();
@@ -242,17 +272,27 @@ app.use((req, res, next) => {
     next();
 });
  
+// Middleware безопасности (ИСПРАВЛЕНО: Обновлен CSP и добавлен Nonce)
 app.use((req, res, next) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, private');
     res.set('Pragma', 'no-cache');
     res.set('Expires', '0');
     res.set('Surrogate-Control', 'no-store');
     res.set('X-Robots-Tag', 'noindex, nofollow');
-    res.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ws: wss:; media-src 'self' blob:; frame-ancestors 'none'");
+    
+    // Генерация Nonce для CSP
+    const nonce = crypto.randomBytes(16).toString('base64');
+    res.locals.cspNonce = nonce;
+
+    // Обновленная политика безопасности: убраны unsafe-inline там где можно, добавлен nonce
+    res.set('Content-Security-Policy', `default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'nonce-${nonce}'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ws: wss:; media-src 'self' blob:; frame-ancestors 'none'`);
+    
     res.set('X-Frame-Options', 'DENY');
     res.set('X-Content-Type-Options', 'nosniff');
-    res.set('X-XSS-Protection', '1; mode=block');
+    // Устаревший заголовок убран, так как он не работает в современных браузерах и может мешать CSP
+    // res.set('X-XSS-Protection', '1; mode=block'); 
     res.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+    
     next();
 });
  
@@ -312,8 +352,16 @@ app.get('/link.my', (req, res) => {
  
 // 8. API МАРШРУТЫ
  
-// Register
-app.post('/api/register', async (req, res) => {
+// Register (ИСПРАВЛЕНО: Добавлен Rate Limiting)
+const generalLimiter = rateLimit({
+    windowMs: 5 * 60 * 1000, // 5 минут
+    max: 20,
+    message: { success: false, message: 'Слишком много запросов. Подождите.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+app.post('/api/register', generalLimiter, async (req, res) => {
     const { username, email, password, confirmPassword } = req.body;
     if (!username || !email || !password || !confirmPassword)
         return res.json({ success: false, message: 'Заполните все поля' });
@@ -374,7 +422,7 @@ const loginLimiter = rateLimit({
     legacyHeaders: false,
 });
  
-// Login
+// Login (ИСПРАВЛЕНО: Добавлена регенерация сессии)
 app.post('/api/login', loginLimiter, async (req, res) => {
     const { email, password } = req.body;
     if (!email || !password) return res.json({ success: false, message: 'Введите email и пароль' });
@@ -387,12 +435,17 @@ app.post('/api/login', loginLimiter, async (req, res) => {
         const validPassword = await bcrypt.compare(password, user.password);
         if (!validPassword) return res.json({ success: false, message: 'Неверный email или пароль' });
  
-        req.session.userId = user.id;
-        req.session.username = user.username;
-        req.session.uniqueCode = user.unique_code;
-        req.session.avatar = user.avatar || '';
- 
-        res.json({ success: true, message: 'Вход выполнен!', user: { id: user.id, username: user.username, uniqueCode: user.unique_code, avatar: user.avatar || '' } });
+        // Регенерация сессии для защиты от Session Fixation
+        req.session.regenerate((err) => {
+            if (err) return res.json({ success: false, message: 'Ошибка инициализации сессии' });
+            
+            req.session.userId = user.id;
+            req.session.username = user.username;
+            req.session.uniqueCode = user.unique_code;
+            req.session.avatar = user.avatar || '';
+            
+            res.json({ success: true, message: 'Вход выполнен!', user: { id: user.id, username: user.username, uniqueCode: user.unique_code, avatar: user.avatar || '' } });
+        });
     } catch (error) {
         console.error('Login error:', error);
         res.json({ success: false, message: 'Ошибка базы данных' });
@@ -529,7 +582,7 @@ app.get('/api/messages/:chatId', async (req, res) => {
     }
 });
  
-// Send message
+// Send message (ИСПРАВЛЕНО: Санитизация ввода)
 app.post('/api/messages', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { chatId, text, replyToId } = req.body;
@@ -544,10 +597,13 @@ app.post('/api/messages', async (req, res) => {
         const time = getCurrentTime();
         const roomId = chat.room_id || null;
         const socketRoomKey = getSocketRoomKey(chatId, roomId);
+        
+        // Санитизация текста перед сохранением
+        const safeText = sanitizeInput(text.trim());
  
         const result = await pool.query(
             'INSERT INTO messages (chat_id, room_id, user_id, text, message_type, sent, time, status, reply_to_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id',
-            [chatId, roomId, req.session.userId, text.trim(), 'text', 1, time, 'sent', replyTo]
+            [chatId, roomId, req.session.userId, safeText, 'text', 1, time, 'sent', replyTo]
         );
         const messageId = result.rows[0].id;
  
@@ -588,8 +644,8 @@ app.post('/api/messages', async (req, res) => {
     }
 });
  
-// Upload file
-app.post('/api/messages/file', upload.single('file'), async (req, res) => {
+// Upload file (ИСПРАВЛЕНО: Санитизация имени файла)
+app.post('/api/messages/file', generalLimiter, upload.single('file'), async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { chatId, text } = req.body;
     const file = req.file;
@@ -604,7 +660,11 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
         const socketRoomKey = getSocketRoomKey(chatId, roomId);
         const fileUrl = `/uploads/${file.filename}`;
         const fileType = file.mimetype;
-        const fileName = file.originalname;
+        
+        // Санитизация имени файла (оставляем только безопасные символы)
+        const safeFileName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const fileName = safeFileName;
+        
         const messageType = fileType.startsWith('image/') ? 'image' : fileType.startsWith('video/') ? 'video' : fileType.startsWith('audio/') ? 'audio' : 'file';
         const messageText = text ? String(text).trim() : (messageType === 'audio' ? 'Голосовое сообщение' : fileName);
  
@@ -783,8 +843,8 @@ app.delete('/api/reactions/:messageId/:emoji', async (req, res) => {
     }
 });
  
-// Search
-app.get('/api/search', async (req, res) => {
+// Search (ИСПРАВЛЕНО: Добавлен Rate Limiting)
+app.get('/api/search', generalLimiter, async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const query = req.query.q || '';
     if (!query || query.length < 1) return res.json({ success: true, results: [] });
@@ -804,8 +864,8 @@ app.get('/api/search', async (req, res) => {
     }
 });
  
-// Change password
-app.post('/api/change-password', async (req, res) => {
+// Change password (ИСПРАВЛЕНО: Добавлен Rate Limiting)
+app.post('/api/change-password', generalLimiter, async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { currentPassword, newPassword, confirmPassword } = req.body;
     if (!currentPassword || !newPassword || !confirmPassword) return res.json({ success: false, message: 'Заполните все поля' });
