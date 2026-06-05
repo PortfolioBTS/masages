@@ -340,45 +340,12 @@ function stopMessagePolling() {
     }
 }
 
-function getThemeColor(variableName, fallback) {
-    return getComputedStyle(document.body).getPropertyValue(variableName).trim() || fallback;
-}
-
-function getReadableTextColor(backgroundColor) {
-    const normalized = String(backgroundColor || '').trim();
-    let r = 255;
-    let g = 255;
-    let b = 255;
-
-    if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(normalized)) {
-        const hex = normalized.slice(1);
-        const fullHex = hex.length === 3
-            ? hex.split('').map(ch => ch + ch).join('')
-            : hex;
-        r = parseInt(fullHex.slice(0, 2), 16);
-        g = parseInt(fullHex.slice(2, 4), 16);
-        b = parseInt(fullHex.slice(4, 6), 16);
-    } else if (/^rgb\((.+)\)$/i.test(normalized)) {
-        const parts = normalized.match(/\d+/g) || [];
-        r = Number(parts[0]) || 255;
-        g = Number(parts[1]) || 255;
-        b = Number(parts[2]) || 255;
-    }
-
-    const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
-    return luminance > 0.62 ? '#111111' : '#ffffff';
-}
-
 // Render a single message element
 function createMessageElement(msg, highlightQuery = '') {
     const isCurrentUser = currentUser && msg.user_id === currentUser.id;
     const userColor = getUserColor(msg.sender_username || '');
-    const bubbleColor = isCurrentUser
-        ? getThemeColor('--sent-msg-bg', '#667eea')
-        : userColor;
-    const textColor = isCurrentUser
-        ? getThemeColor('--sent-msg-text', '#ffffff')
-        : getReadableTextColor(bubbleColor);
+    const bubbleColor = isCurrentUser ? '#667eea' : userColor;
+    const textColor = '#ffffff';
     
     // Получаем аватарку из сообщения или из текущего пользователя
     const messageEl = document.createElement('div');

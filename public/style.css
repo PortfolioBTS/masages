@@ -263,7 +263,6 @@
 :root {
     --primary-color: #4a90d9;
     --primary-hover: #3a7bc8;
-    --button-text: #ffffff;
     --bg-color: #f5f5f5;
     --sidebar-bg: #ffffff;
     --chat-bg: #ffffff;
@@ -323,7 +322,7 @@ body {
     max-width: 37px;
     border: none;
     background: var(--primary-color);
-    color: var(--button-text);
+    color: white;
     font-size: 24px;
     cursor: pointer;
     display: flex;
@@ -351,7 +350,7 @@ body {
     border: none;
     border-radius: 10px;
     background: var(--primary-color);
-    color: var(--button-text);
+    color: #fff;
     font-weight: 600;
     cursor: pointer;
     transition: background 0.2s;
@@ -894,7 +893,7 @@ body {
     border-radius: 50%;
     border: none;
     background: var(--primary-color);
-    color: var(--button-text);
+    color: white;
     cursor: pointer;
     display: flex;
     align-items: center;
@@ -1152,11 +1151,8 @@ body.dark-theme {
     --border-color: #404040;
     --text-primary: #ffffff;
     --text-secondary: #aaaaaa;
-    --button-text: #ffffff;
-    --sent-msg-bg: #7c83fd;
-    --sent-msg-text: #ffffff;
     --received-msg-bg: #404040;
-    --received-msg-text: #f0f0ff;
+    --received-msg-text: #ffffff;
 }
 
 body.dark-theme .chat-item:hover {
@@ -1694,7 +1690,6 @@ body.dark-theme .settings-btn-secondary:hover {
 body.theme-night {
     --bg-color: #1a1a2e;
     --sidebar-bg: #16213e;
-    --button-text: #ffffff;
     --chat-bg: #1a1a2e;
     --border-color: #0f3460;
     --text-primary: #e0e0ff;
@@ -1783,7 +1778,6 @@ body.theme-forest .logout-sidebar-btn:hover { background: #d8e8d8; }
 body.theme-mono {
     --bg-color: #111111;
     --sidebar-bg: #1c1c1c;
-    --button-text: #111111;
     --chat-bg: #111111;
     --border-color: #2a2a2a;
     --text-primary: #e0e0e0;
