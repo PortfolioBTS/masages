@@ -1152,14 +1152,10 @@ if (logoutSidebarBtn) {
     });
     
     // Theme
-    themeSelect.addEventListener('change', (e) => {
-        if (e.target.value === 'dark') {
-            document.body.classList.add('dark-theme');
-        } else {
-            document.body.classList.remove('dark-theme');
-        }
-        saveSettings();
-    });
+   themeSelect.addEventListener('change', (e) => {
+    applyTheme(e.target.value);
+    saveSettings();
+});
     
     // Username
     usernameInput.addEventListener('change', (e) => {
@@ -1198,6 +1194,15 @@ function saveSettings() {
         currentUser.username = usernameInput.value;
         displayUsername.textContent = currentUser.username;
     }
+}function applyTheme(theme) {
+    document.body.classList.remove(
+        'dark-theme', 'theme-night', 'theme-warm', 'theme-forest', 'theme-mono'
+    );
+    if (theme === 'dark')   document.body.classList.add('dark-theme');
+    if (theme === 'night')  document.body.classList.add('theme-night');
+    if (theme === 'warm')   document.body.classList.add('theme-warm');
+    if (theme === 'forest') document.body.classList.add('theme-forest');
+    if (theme === 'mono')   document.body.classList.add('theme-mono');
 }
 
 // Load settings
@@ -1222,9 +1227,9 @@ function loadSettings() {
             avatarColorInput.value = normalizeAvatarColor(settings.avatarColor);
         }
         
-        if (settings.theme === 'dark') {
-            document.body.classList.add('dark-theme');
-        }
+        if (settings.theme) {
+    applyTheme(settings.theme);
+}
 
         if (settings.username && currentUser) {
             currentUser.username = settings.username;
