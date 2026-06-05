@@ -4,7 +4,6 @@
     padding: 0;
     box-sizing: border-box;
 }
-
 /* Auth Modal Styles */
 .auth-modal {
     position: fixed;
@@ -12,12 +11,11 @@
     left: 0;
     width: 100%;
     height: 100%;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: #f4f4f2;
     display: flex;
     align-items: center;
     justify-content: center;
     z-index: 2000;
-    backdrop-filter: blur(5px);
 }
 
 .auth-modal.hidden {
@@ -25,84 +23,92 @@
 }
 
 .auth-container {
-    background: white;
-    border-radius: 24px;
-    padding: 50px 40px;
-    width: 420px;
-    max-width: 90%;
-    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.25);
-    animation: slideUp 0.5s ease;
-    position: relative;
+    background: #ffffff;
+    border-radius: 12px;
+    width: 380px;
+    max-width: 92%;
+    border: 1px solid #e2e2e0;
+    animation: authFadeIn 0.25s ease;
     overflow: hidden;
 }
 
-.auth-container::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: 6px;
-    background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+@keyframes authFadeIn {
+    from { opacity: 0; transform: translateY(12px); }
+    to   { opacity: 1; transform: translateY(0); }
 }
 
-@keyframes slideUp {
-    from {
-        opacity: 0;
-        transform: translateY(30px);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
+.auth-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 28px 28px 0;
+    margin-bottom: 24px;
+}
+
+.auth-brand-icon {
+    width: 28px;
+    height: 28px;
+    background: #1a1a1a;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.auth-brand-icon svg {
+    width: 15px;
+    height: 15px;
+    stroke: #ffffff;
+    fill: none;
+}
+
+.auth-brand-name {
+    font-size: 15px;
+    font-weight: 500;
+    color: #1a1a1a;
+    letter-spacing: -0.2px;
 }
 
 .auth-tabs {
     display: flex;
-    margin-bottom: 35px;
-    border-bottom: 2px solid #f0f0f0;
-    gap: 5px;
+    padding: 0 28px;
+    margin-bottom: 24px;
+    border-bottom: 1px solid #ebebeb;
+    gap: 0;
 }
 
 .auth-tab {
     flex: 1;
-    padding: 14px 0;
+    padding: 10px 0;
     border: none;
+    border-bottom: 2px solid transparent;
     background: transparent;
-    font-size: 16px;
-    font-weight: 600;
-    color: #aaa;
+    font-size: 13px;
+    font-weight: 400;
+    color: #999;
     cursor: pointer;
-    transition: all 0.3s ease;
-    position: relative;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
+    transition: color 0.2s, border-color 0.2s;
+    letter-spacing: 0.2px;
+    margin-bottom: -1px;
 }
 
 .auth-tab:hover {
-    color: #667eea;
+    color: #1a1a1a;
 }
 
 .auth-tab.active {
-    color: #667eea;
-}
-
-.auth-tab.active::after {
-    content: '';
-    position: absolute;
-    bottom: -2px;
-    left: 0;
-    width: 100%;
-    height: 3px;
-    background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-    border-radius: 2px;
+    color: #1a1a1a;
+    font-weight: 500;
+    border-bottom-color: #1a1a1a;
 }
 
 .auth-form {
     display: flex;
     flex-direction: column;
-    gap: 18px;
-    animation: fadeIn 0.3s ease;
+    gap: 14px;
+    padding: 0 28px 28px;
+    animation: authFadeIn 0.2s ease;
 }
 
 .auth-form.hidden {
@@ -112,91 +118,82 @@
 .form-group {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 5px;
 }
 
 .form-group label {
-    font-size: 14px;
-    font-weight: 600;
-    color: #333;
+    font-size: 11px;
+    font-weight: 500;
+    color: #888;
     text-transform: uppercase;
-    letter-spacing: 0.3px;
+    letter-spacing: 0.6px;
 }
 
 .form-group input {
-    padding: 14px 16px;
-    border: 2px solid #e8e8e8;
-    border-radius: 10px;
-    font-size: 15px;
+    padding: 10px 12px;
+    border: 1px solid #e2e2e0;
+    border-radius: 8px;
+    font-size: 14px;
     outline: none;
-    transition: all 0.3s ease;
-    background: #fafafa;
+    transition: border-color 0.2s;
+    background: #fafaf9;
     font-family: inherit;
+    color: #1a1a1a;
 }
 
 .form-group input::placeholder {
-    color: #ccc;
+    color: #c0c0bc;
 }
 
 .form-group input:focus {
-    border-color: #667eea;
-    background: white;
-    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+    border-color: #1a1a1a;
+    background: #ffffff;
 }
 
 .error-message {
-    color: #ff6b6b;
-    font-size: 13px;
-    min-height: 20px;
-    font-weight: 500;
-    animation: slideDown 0.3s ease;
+    color: #c0392b;
+    font-size: 12px;
+    min-height: 18px;
+    font-weight: 400;
     padding: 6px 10px;
     border-radius: 6px;
-    background: rgba(255, 107, 107, 0.1);
-    border-left: 3px solid #ff6b6b;
+    background: #fdf2f2;
+    border-left: 2px solid #c0392b;
+    border-radius: 0;
 }
 
 @keyframes slideDown {
-    from {
-        opacity: 0;
-        transform: translateY(-8px);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
+    from { opacity: 0; transform: translateY(-6px); }
+    to   { opacity: 1; transform: translateY(0); }
 }
 
 .auth-submit {
-    padding: 15px;
+    padding: 11px;
     border: none;
-    border-radius: 10px;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    color: white;
-    font-size: 16px;
-    font-weight: 700;
+    border-radius: 8px;
+    background: #1a1a1a;
+    color: #ffffff;
+    font-size: 14px;
+    font-weight: 500;
     cursor: pointer;
-    transition: all 0.3s ease;
-    margin-top: 15px;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    box-shadow: 0 8px 20px rgba(102, 126, 234, 0.3);
+    transition: background 0.2s;
+    margin-top: 6px;
+    letter-spacing: 0.2px;
+    font-family: inherit;
 }
 
 .auth-submit:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 12px 30px rgba(102, 126, 234, 0.4);
+    background: #333333;
 }
 
 .auth-submit:active {
-    transform: translateY(0);
-    box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+    background: #000000;
 }
 
 .user-info {
     text-align: center;
-    padding: 25px 0;
-    animation: fadeIn 0.3s ease;
+    padding: 24px 28px 28px;
+    animation: authFadeIn 0.2s ease;
 }
 
 .user-info.hidden {
@@ -204,60 +201,60 @@
 }
 
 .user-info p {
-    margin-bottom: 12px;
-    font-size: 15px;
-    color: #333;
+    margin-bottom: 10px;
+    font-size: 14px;
+    color: #444;
     line-height: 1.6;
 }
 
 .user-info strong {
-    font-weight: 700;
-    color: #667eea;
+    font-weight: 500;
+    color: #1a1a1a;
 }
 
 .user-info .unique-code {
-    font-size: 13px;
+    font-size: 12px;
     color: #888;
-    background: #f5f5f5;
-    padding: 12px 15px;
-    border-radius: 8px;
-    margin: 15px 0;
-    border-left: 4px solid #667eea;
+    background: #f7f7f5;
+    padding: 10px 14px;
+    border-radius: 6px;
+    margin: 12px 0;
+    border-left: 2px solid #1a1a1a;
+    border-radius: 0;
+    text-align: left;
 }
 
 .user-info .unique-code strong {
     font-family: 'Courier New', monospace;
-    background: white;
-    padding: 4px 10px;
-    border-radius: 6px;
+    background: #ffffff;
+    padding: 3px 8px;
     display: inline-block;
-    margin: 5px 0;
-    border: 1px solid #e0e0e0;
-    color: #667eea;
+    margin: 4px 0;
+    border: 1px solid #e2e2e0;
+    color: #1a1a1a;
     letter-spacing: 1px;
+    font-size: 12px;
 }
 
 .logout-btn {
-    padding: 12px 28px;
-    border: none;
-    border-radius: 10px;
-    background: linear-gradient(135deg, #ff6b6b 0%, #ee5a52 100%);
-    color: white;
+    padding: 10px 24px;
+    border: 1px solid #e2e2e0;
+    border-radius: 8px;
+    background: #ffffff;
+    color: #c0392b;
     cursor: pointer;
-    font-weight: 600;
-    font-size: 14px;
-    transition: all 0.3s ease;
-    margin-top: 15px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    box-shadow: 0 6px 15px rgba(255, 107, 107, 0.3);
+    font-weight: 500;
+    font-size: 13px;
+    transition: all 0.2s;
+    margin-top: 12px;
+    letter-spacing: 0.2px;
+    font-family: inherit;
 }
 
 .logout-btn:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 10px 25px rgba(255, 107, 107, 0.4);
+    background: #fdf2f2;
+    border-color: #c0392b;
 }
-
 .logout-btn:active {
     transform: translateY(0);
     box-shadow: 0 4px 12px rgba(255, 107, 107, 0.3);
