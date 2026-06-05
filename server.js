@@ -297,7 +297,18 @@ app.use((req, res, next) => {
 });
  
 app.use(express.static(path.join(__dirname, 'public')));
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// Защищённая раздача файлов — только для авторизованных
+app.get('/uploads/:filename', (req, res) => {
+    if (!req.session.userId) {
+        return res.status(401).json({ success: false, message: 'Не авторизован' });
+    }
+    const filename = path.basename(req.params.filename);
+    const filePath = path.join(__dirname, 'uploads', filename);
+    if (!fs.existsSync(filePath)) {
+        return res.status(404).json({ success: false, message: 'Файл не найден' });
+    }
+    res.sendFile(filePath);
+});
  
 const ALLOWED_MIME_TYPES = [
     'image/jpeg', 'image/png', 'image/gif', 'image/webp',
