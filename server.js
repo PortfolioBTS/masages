@@ -16,7 +16,7 @@ const fs = require('fs');
 const { Server } = require('socket.io');
 const rateLimit = require('express-rate-limit');
 const pgSession = require('connect-pg-simple')(session);
-const cookieParser = require('@socket.io/cookie-parser'); // Добавлено для защиты WebSocket
+const cookieParser = require('cookie-parser');
 
 // 2. ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЙ
 const app = express();
