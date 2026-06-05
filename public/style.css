@@ -1152,8 +1152,11 @@ body.dark-theme {
     --border-color: #404040;
     --text-primary: #ffffff;
     --text-secondary: #aaaaaa;
+    --button-text: #ffffff;
+    --sent-msg-bg: #7c83fd;
+    --sent-msg-text: #ffffff;
     --received-msg-bg: #404040;
-    --received-msg-text: #ffffff;
+    --received-msg-text: #f0f0ff;
 }
 
 body.dark-theme .chat-item:hover {
