@@ -345,7 +345,7 @@ function createMessageElement(msg, highlightQuery = '') {
     const isCurrentUser = currentUser && msg.user_id === currentUser.id;
     const userColor = getUserColor(msg.sender_username || '');
     const bubbleColor = isCurrentUser ? '#667eea' : userColor;
-    const textColor = getReadableTextColor(bubbleColor);
+    const textColor = isDarkThemeActive() ? '#ffffff' : getReadableTextColor(bubbleColor);
     
     // Получаем аватарку из сообщения или из текущего пользователя
     const messageEl = document.createElement('div');
@@ -458,6 +458,10 @@ function getUserColor(name) {
         hash = (hash * 31 + name.charCodeAt(i)) % palette.length;
     }
     return palette[Math.abs(hash) % palette.length];
+}
+
+function isDarkThemeActive() {
+    return document.body.classList.contains('dark-theme') || document.body.classList.contains('theme-night');
 }
 
 function getReadableTextColor(hexColor) {
@@ -1608,7 +1612,7 @@ window.createMessageElement = function(msg, highlightQuery = '') {
     const isCurrentUser = currentUser && msg.user_id === currentUser.id;
     const userColor = getUserColor(msg.sender_username || '');
     const bubbleColor = isCurrentUser ? '#667eea' : userColor;
-    const textColor = getReadableTextColor(bubbleColor);
+    const textColor = isDarkThemeActive() ? '#ffffff' : getReadableTextColor(bubbleColor);
 
     const messageEl = document.createElement('div');
     messageEl.className = `message-row ${isCurrentUser ? 'sent' : 'received'}`;
