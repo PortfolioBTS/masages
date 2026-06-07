@@ -1758,3 +1758,62 @@ body.theme-mono .close-btn:hover { background: #222222; color: #e0e0e0; }
 body.theme-mono .emoji-btn,
 body.theme-mono .file-btn,
 body.theme-mono .voice-btn { color: #888888; }
+
+/* Dark theme variants restored */
+body.dark-theme {
+    --bg-color: #121212;
+    --sidebar-bg: #1a1a1a;
+    --chat-bg: #161616;
+    --border-color: #2f2f2f;
+    --text-primary: #f5f7fa;
+    --text-secondary: #b3b9c5;
+}
+
+body.dark-theme .sidebar,
+body.dark-theme .chat-header,
+body.dark-theme .messages,
+body.dark-theme .input-area,
+body.dark-theme .modal-content {
+    background-color: var(--sidebar-bg);
+    color: var(--text-primary);
+    border-color: var(--border-color);
+}
+
+body.dark-theme .input-area input,
+body.dark-theme .search-box,
+body.dark-theme .setting-item input,
+body.dark-theme .setting-item select,
+body.dark-theme #joinCodeInput {
+    background: #1f1f1f;
+    color: var(--text-primary);
+    border-color: var(--border-color);
+}
+
+body.theme-night {
+    --bg-color: #111827;
+    --sidebar-bg: #172132;
+    --chat-bg: #131b2b;
+    --border-color: #273449;
+    --text-primary: #edf2ff;
+    --text-secondary: #aab6d5;
+}
+
+body.theme-night .sidebar,
+body.theme-night .chat-header,
+body.theme-night .messages,
+body.theme-night .input-area,
+body.theme-night .modal-content {
+    background-color: var(--sidebar-bg);
+    color: var(--text-primary);
+    border-color: var(--border-color);
+}
+
+body.theme-night .input-area input,
+body.theme-night .search-box,
+body.theme-night .setting-item input,
+body.theme-night .setting-item select,
+body.theme-night #joinCodeInput {
+    background: #1b2637;
+    color: var(--text-primary);
+    border-color: var(--border-color);
+}
