@@ -1179,7 +1179,11 @@ if (logoutSidebarBtn) {
     
     // Search
     setupSearch();
-} 
+} // Привязка кнопок профиля и смены пароля
+const profileBtn = document.getElementById('profileBtn');
+const changePasswordBtn = document.getElementById('changePasswordBtn');
+if (profileBtn) profileBtn.addEventListener('click', showUserProfile);
+if (changePasswordBtn) changePasswordBtn.addEventListener('click', changePassword);
 
 // Save settings
 function saveSettings() {
