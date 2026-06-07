@@ -1151,7 +1151,7 @@ body.dark-theme {
     --border-color: #404040;
     --text-primary: #ffffff;
     --text-secondary: #aaaaaa;
-    --received-msg-bg: #404040;
+    --received-msg-bg: #ffffff;
     --received-msg-text: #ffffff;
 }
 
