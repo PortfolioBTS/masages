@@ -345,7 +345,7 @@ function createMessageElement(msg, highlightQuery = '') {
     const isCurrentUser = currentUser && msg.user_id === currentUser.id;
     const userColor = getUserColor(msg.sender_username || '');
     const bubbleColor = isCurrentUser ? '#667eea' : userColor;
-    const textColor = getReadableTextColor(bubbleColor);
+    const textColor = isDarkThemeActive() ? '#ffffff' : getReadableTextColor(bubbleColor);
     
     // Получаем аватарку из сообщения или из текущего пользователя
     const messageEl = document.createElement('div');
@@ -458,6 +458,10 @@ function getUserColor(name) {
         hash = (hash * 31 + name.charCodeAt(i)) % palette.length;
     }
     return palette[Math.abs(hash) % palette.length];
+}
+
+function isDarkThemeActive() {
+    return document.body.classList.contains('dark-theme') || document.body.classList.contains('theme-night');
 }
 
 function getReadableTextColor(hexColor) {
@@ -1211,16 +1215,15 @@ function saveSettings() {
         currentUser.username = usernameInput.value;
         displayUsername.textContent = currentUser.username;
     }
-}
-
-function applyTheme(theme) {
-    document.body.classList.remove('dark-theme', 'theme-night', 'theme-warm', 'theme-forest', 'theme-mono');
-
-    if (theme === 'dark') document.body.classList.add('dark-theme');
-    if (theme === 'night') document.body.classList.add('theme-night');
-    if (theme === 'warm') document.body.classList.add('theme-warm');
+}function applyTheme(theme) {
+    document.body.classList.remove(
+        'dark-theme', 'theme-night', 'theme-warm', 'theme-forest', 'theme-mono'
+    );
+    if (theme === 'dark')   document.body.classList.add('dark-theme');
+    if (theme === 'night')  document.body.classList.add('theme-night');
+    if (theme === 'warm')   document.body.classList.add('theme-warm');
     if (theme === 'forest') document.body.classList.add('theme-forest');
-    if (theme === 'mono') document.body.classList.add('theme-mono');
+    if (theme === 'mono')   document.body.classList.add('theme-mono');
 }
 
 // Load settings
@@ -1238,8 +1241,7 @@ function loadSettings() {
     const settings = JSON.parse(localStorage.getItem('messengerSettings'));
     
     if (settings) {
-        const normalizedTheme = ['dark', 'night', 'warm', 'forest', 'mono'].includes(settings.theme) ? settings.theme : 'light';
-        themeSelect.value = normalizedTheme;
+        themeSelect.value = settings.theme || 'light';
         usernameInput.value = settings.username || 'Пользователь';
         notificationsToggle.checked = settings.notifications !== false;
         if (avatarColorInput && settings.avatarColor) {
@@ -1247,8 +1249,8 @@ function loadSettings() {
         }
         
         if (settings.theme) {
-            applyTheme(normalizedTheme);
-        }
+    applyTheme(settings.theme);
+}
 
         if (settings.username && currentUser) {
             currentUser.username = settings.username;
@@ -1610,7 +1612,7 @@ window.createMessageElement = function(msg, highlightQuery = '') {
     const isCurrentUser = currentUser && msg.user_id === currentUser.id;
     const userColor = getUserColor(msg.sender_username || '');
     const bubbleColor = isCurrentUser ? '#667eea' : userColor;
-    const textColor = getReadableTextColor(bubbleColor);
+    const textColor = isDarkThemeActive() ? '#ffffff' : getReadableTextColor(bubbleColor);
 
     const messageEl = document.createElement('div');
     messageEl.className = `message-row ${isCurrentUser ? 'sent' : 'received'}`;
