@@ -461,7 +461,7 @@ function getUserColor(name) {
 }
 
 function isDarkThemeActive() {
-    return document.body.classList.contains('dark-theme') || document.body.classList.contains('theme-night');
+    return document.body.classList.contains('theme-night');
 }
 
 function getReadableTextColor(hexColor) {
@@ -1217,9 +1217,8 @@ function saveSettings() {
     }
 }function applyTheme(theme) {
     document.body.classList.remove(
-        'dark-theme', 'theme-night', 'theme-warm', 'theme-forest', 'theme-mono'
+        'theme-night', 'theme-warm', 'theme-forest', 'theme-mono'
     );
-    if (theme === 'dark')   document.body.classList.add('dark-theme');
     if (theme === 'night')  document.body.classList.add('theme-night');
     if (theme === 'warm')   document.body.classList.add('theme-warm');
     if (theme === 'forest') document.body.classList.add('theme-forest');
