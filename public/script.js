@@ -1214,12 +1214,13 @@ function saveSettings() {
 }
 
 function applyTheme(theme) {
-    document.body.classList.remove('theme-warm', 'theme-forest', 'theme-mono');
+    document.body.classList.remove('dark-theme', 'theme-night', 'theme-warm', 'theme-forest', 'theme-mono');
 
-    const themeName = ['warm', 'forest', 'mono'].includes(theme) ? theme : 'light';
-    if (themeName === 'warm') document.body.classList.add('theme-warm');
-    if (themeName === 'forest') document.body.classList.add('theme-forest');
-    if (themeName === 'mono') document.body.classList.add('theme-mono');
+    if (theme === 'dark') document.body.classList.add('dark-theme');
+    if (theme === 'night') document.body.classList.add('theme-night');
+    if (theme === 'warm') document.body.classList.add('theme-warm');
+    if (theme === 'forest') document.body.classList.add('theme-forest');
+    if (theme === 'mono') document.body.classList.add('theme-mono');
 }
 
 // Load settings
@@ -1237,7 +1238,7 @@ function loadSettings() {
     const settings = JSON.parse(localStorage.getItem('messengerSettings'));
     
     if (settings) {
-        const normalizedTheme = ['warm', 'forest', 'mono'].includes(settings.theme) ? settings.theme : 'light';
+        const normalizedTheme = ['dark', 'night', 'warm', 'forest', 'mono'].includes(settings.theme) ? settings.theme : 'light';
         themeSelect.value = normalizedTheme;
         usernameInput.value = settings.username || 'Пользователь';
         notificationsToggle.checked = settings.notifications !== false;
