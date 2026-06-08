@@ -1804,10 +1804,23 @@ body.theme-mono .file-btn,
 body.theme-mono .voice-btn { color: #888888; }
 
 
-/* Принудительный белый текст в названиях чатов для тёмных тем */
-.theme-night .chat-name,
-.theme-monochrome .chat-name,
+/*  Принудительный белый текст в названиях чатов для тёмных тем */
+body.theme-night .chat-name,
+body.theme-mono .chat-name {
+    color: #ffffff !important;
+    -webkit-text-fill-color: #ffffff !important; /* Для Safari / iOS */
+}
+
+/*  Принудительный override системной тёмной темы браузера */
+@media (prefers-color-scheme: dark) {
+    body.theme-night .chat-name,
+    body.theme-mono .chat-name {
+        color: #ffffff !important;
+    }
+}
+
+/*  Дополнительная страховка: если тема применяется не к <body>, а к контейнеру */
 [data-theme="night"] .chat-name,
 [data-theme="monochrome"] .chat-name {
-  color: #ffffff !important;
+    color: #ffffff !important;
 }
