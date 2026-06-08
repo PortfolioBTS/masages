@@ -1,49 +1,5 @@
 require('dotenv').config();
 
-const path = require('path');
-const fs = require('fs');
-
-// Папка для загрузки файлов
-const UPLOAD_DIR = path.join(__dirname, 'uploads');
-if (!fs.existsSync(UPLOAD_DIR)) {
-    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-}
-
-// Разрешённые MIME-типы (фото, видео, аудио, PDF)
-const ALLOWED_MIME_TYPES = [
-    'image/jpeg', 'image/png', 'image/gif', 'image/webp',
-    'video/mp4', 'video/webm', 'video/quicktime',
-    'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/webm',
-    'application/pdf'
-];
-
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        cb(null, UPLOAD_DIR);
-    },
-    filename: (req, file, cb) => {
-        // Уникальное имя, чтобы файлы не перезаписывались
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-        const ext = path.extname(file.originalname).toLowerCase();
-        cb(null, `${uniqueSuffix}${ext}`);
-    }
-});
-
-const fileFilter = (req, file, cb) => {
-    if (ALLOWED_MIME_TYPES.includes(file.mimetype)) {
-        cb(null, true);
-    } else {
-        cb(new Error('Неподдерживаемый тип файла. Разрешены только фото, видео, аудио и PDF.'), false);
-    }
-};
-
-const upload = multer({
-    storage: storage,
-    limits: { fileSize: 50 * 1024 * 1024 }, // Лимит 50 МБ
-    fileFilter: fileFilter
-});
-
- 
 // 1. ИМПОРТЫ
 const express = require('express');
 const { Pool } = require('pg');
@@ -61,6 +17,36 @@ const { Server } = require('socket.io');
 const rateLimit = require('express-rate-limit');
 const pgSession = require('connect-pg-simple')(session);
 const cookieParser = require('cookie-parser');
+
+// Конфигурация загрузки файлов
+const ALLOWED_MIME_TYPES = [
+    'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+    'video/mp4', 'video/webm', 'video/quicktime',
+    'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/webm',
+    'application/pdf', 'text/plain',
+];
+const upload = multer({
+    storage: multer.diskStorage({
+        destination: (req, file, cb) => {
+            const dir = path.join(__dirname, 'uploads');
+            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+            cb(null, dir);
+        },
+        filename: (req, file, cb) => {
+            const ext = path.extname(file.originalname).toLowerCase();
+            const safeName = `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+            cb(null, safeName);
+        }
+    }),
+    limits: { fileSize: 50 * 1024 * 1024 },
+    fileFilter: (req, file, cb) => {
+        if (ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+            cb(null, true);
+        } else {
+            cb(new Error('Неподдерживаемый тип файла'), false);
+        }
+    }
+});
 
 // 2. ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЙ
 const app = express();
@@ -112,15 +98,7 @@ async function dbRun(query, params = []) {
     return result;
 }
 
-// Санитизация ввода (защита от XSS)
-function sanitizeInput(str) {
-    if (typeof str !== 'string') return str;
-    return str.replace(/[<>&"']/g, (c) => {
-        const escape = { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;' };
-        return escape[c];
-    });
-}
- 
+
 // 4. СОЗДАНИЕ ТАБЛИЦ
 async function initDatabase() {
     await pool.query(`
@@ -290,10 +268,6 @@ async function generateInviteCodeAsync() {
     throw new Error('Could not generate invite code');
 }
  
-// Загрузите pgStore в область видимости (если ещё не загружен)
-const pgStore = require('connect-pg-simple')(session);
-const sessionStore = new pgStore({ pool: pool, tableName: 'session' });
-
 io.use((socket, next) => {
     const cookies = socket.handshake.headers.cookie;
     if (!cookies) return next(new Error('Unauthorized'));
@@ -385,37 +359,6 @@ app.get('/uploads/:filename', async (req, res) => {
 });
 
  
-const ALLOWED_MIME_TYPES = [
-    'image/jpeg', 'image/png', 'image/gif', 'image/webp',
-    'video/mp4', 'video/webm',
-    'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/webm',
-    'application/pdf',
-    'text/plain',
-];
- 
-const upload = multer({
-    storage: multer.diskStorage({
-        destination: (req, file, cb) => {
-            const dir = path.join(__dirname, 'uploads');
-            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-            cb(null, dir);
-        },
-        filename: (req, file, cb) => {
-            const ext = path.extname(file.originalname);
-            const safeName = `${Date.now()}-${Math.round(Math.random() * 1E9)}${ext}`;
-            cb(null, safeName);
-        }
-    }),
-    limits: { fileSize: 50 * 1024 * 1024 }, // 50 МБ
-    fileFilter: (req, file, cb) => {
-        if (ALLOWED_MIME_TYPES.includes(file.mimetype)) {
-            cb(null, true);
-        } else {
-            cb(new Error('Неподдерживаемый тип файла'), false);
-        }
-    }
-});
-
 app.use(express.static(path.join(__dirname, 'public')));
  
 app.use((err, req, res, next) => {
