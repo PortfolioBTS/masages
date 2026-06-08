@@ -1621,12 +1621,12 @@ body.theme-night .input-area input::placeholder { color: #6666aa; }
 body.theme-night .chat-item { color: #e0e0ff; }
 body.theme-night .chat-item:hover { background: #0f3460; }
 body.theme-night .chat-item.active { background: #0f3460; border-left: 3px solid #7c83fd; }
-body.theme-night .chat-item .chat-name { color: #e0e0ff; }
+body.theme-night .chat-item .chat-name { color: #ffffff; }
 body.theme-night .chat-item .chat-preview { color: #8888cc; }
 body.theme-night .chat-item .chat-time { color: #6666aa; }
 body.theme-night .message-bubble { background: #16213e; color: #c8c8e8; }
 body.theme-night .message-bubble.sent { background: #7c83fd; color: #ffffff; }
-body.theme-night #currentChatName { color: #e0e0ff; }
+body.theme-night #currentChatName { color: #ffffff; }
 body.theme-night .chat-status { color: #7c83fd; }
 body.theme-night .sidebar-header h2 { color: #e0e0ff; }
 body.theme-night .settings-btn { color: #8888cc; }
@@ -1765,12 +1765,12 @@ body.theme-mono .input-area input::placeholder { color: #555555; }
 body.theme-mono .chat-item { color: #e0e0e0; }
 body.theme-mono .chat-item:hover { background: #222222; }
 body.theme-mono .chat-item.active { background: #252525; border-left: 3px solid #e0e0e0; }
-body.theme-mono .chat-item .chat-name { color: #e0e0e0; }
+body.theme-mono .chat-item .chat-name { color: #ffffff; }
 body.theme-mono .chat-item .chat-preview { color: #888888; }
 body.theme-mono .chat-item .chat-time { color: #555555; }
 body.theme-mono .message-bubble { background: #2a2a2a; color: #c8c8c8; }
 body.theme-mono .message-bubble.sent { background: #e0e0e0; color: #111111; }
-body.theme-mono #currentChatName { color: #e0e0e0; }
+body.theme-mono #currentChatName { color: #ffffff; }
 body.theme-mono .chat-status { color: #888888; }
 body.theme-mono .sidebar-header h2 { color: #e0e0e0; }
 body.theme-mono .settings-btn { color: #888888; }
