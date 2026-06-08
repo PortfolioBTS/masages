@@ -1802,3 +1802,12 @@ body.theme-mono .close-btn:hover { background: #222222; color: #e0e0e0; }
 body.theme-mono .emoji-btn,
 body.theme-mono .file-btn,
 body.theme-mono .voice-btn { color: #888888; }
+
+
+/* Принудительный белый текст в названиях чатов для тёмных тем */
+.theme-night .chat-name,
+.theme-monochrome .chat-name,
+[data-theme="night"] .chat-name,
+[data-theme="monochrome"] .chat-name {
+  color: #ffffff !important;
+}
