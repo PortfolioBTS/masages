@@ -1804,23 +1804,25 @@ body.theme-mono .file-btn,
 body.theme-mono .voice-btn { color: #888888; }
 
 
-/*  Принудительный белый текст в названиях чатов для тёмных тем */
-body.theme-night .chat-name,
-body.theme-mono .chat-name {
+/*  Универсальный принудительный белый цвет для названий чатов */
+.theme-night .chat-name,
+.theme-mono .chat-name,
+[data-theme="night"] .chat-name,
+[data-theme="monochrome"] .chat-name {
     color: #ffffff !important;
-    -webkit-text-fill-color: #ffffff !important; /* Для Safari / iOS */
+    -webkit-text-fill-color: #ffffff !important; /* Для Safari / iOS / WebKit-артефактов */
 }
 
-/*  Принудительный override системной тёмной темы браузера */
+/*  Принудительный override системной тёмной темы ОС/браузера */
 @media (prefers-color-scheme: dark) {
-    body.theme-night .chat-name,
-    body.theme-mono .chat-name {
+    .theme-night .chat-name,
+    .theme-mono .chat-name {
         color: #ffffff !important;
     }
 }
 
-/*  Дополнительная страховка: если тема применяется не к <body>, а к контейнеру */
-[data-theme="night"] .chat-name,
-[data-theme="monochrome"] .chat-name {
-    color: #ffffff !important;
+/*  Страховка: если чат-элемент оборачивается в другой контейнер */
+.sidebar .chat-name,
+.chat-list .chat-name {
+    color: inherit; /* Сброс возможных глобальных переопределений */
 }
