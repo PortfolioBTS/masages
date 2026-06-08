@@ -177,18 +177,18 @@ function renderChatList() {
         const avatarHtml = formatAvatarHtml(chat.avatar || chat.name);
         
         chatItem.innerHTML = `
-            <div class="avatar">${avatarHtml}</div>
-            <div class="chat-item-info">
-                <div class="chat-item-header">
-                    <span class="chat-item-name">${chat.name}</span>
-                    <span class="chat-item-time">${chat.last_time || ''}</span>
-                </div>
-                <div class="chat-item-preview">
-                    ${chat.last_message || 'Нет сообщений'}
-                    ${chat.invite_code ? `<span class="chat-code">Код: ${chat.invite_code}</span>` : ''}
-                    ${chat.unread > 0 ? `<span class="unread-badge">${chat.unread}</span>` : ''}
-                </div>
-            </div>
+    <div class="avatar">${avatarHtml}</div>
+    <div class="chat-item-info">
+        <div class="chat-item-header">
+            <span class="chat-item-name">${chat.name}</span>       // ← ОПАСНО: chat.name без escapeHtml
+            <span class="chat-item-time">${chat.last_time || ''}</span>
+        </div>
+        <div class="chat-item-preview">
+            ${chat.last_message || 'Нет сообщений'}               // ← ОПАСНО: last_message без escapeHtml
+            ${chat.invite_code ? `<span class="chat-code">Код: ${chat.invite_code}</span>` : ''}
+            ${chat.unread > 0 ? `<span class="unread-badge">${chat.unread}</span>` : ''}
+        </div>
+    </div>
             <button class="delete-chat-btn" title="Удалить чат">🗑</button>
         `;
         
