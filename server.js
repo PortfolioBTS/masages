@@ -269,21 +269,13 @@ async function generateInviteCodeAsync() {
 }
  
 io.use((socket, next) => {
-    const cookies = socket.handshake.headers.cookie;
-    if (!cookies) return next(new Error('Unauthorized'));
-    
-    const sessionCookie = cookies.split(';').find(c => c.trim().startsWith('connect.sid='));
-    if (!sessionCookie) return next(new Error('Unauthorized'));
-    
-    // Сохраняем сессию для middleware Express
-    socket.handshake.headers.cookie = `connect.sid=${sessionCookie.split('=')[1]}`;
-    next();
+    sessionMiddleware(socket.request, socket.request.res || {}, next);
 });
 
 
 
 io.on('connection', (socket) => {
-    console.log('Пользователь подключился через WebSocket:', socket.handshake.session.userId);
+    console.log('Пользователь подключился через WebSocket:', socket.handshake.auth?.userId ?? 'неизвестен');
     socket.on('joinChat', (roomKey) => {
         if (typeof roomKey === 'string' && roomKey.length > 0) {
             socket.join(roomKey);
@@ -371,7 +363,7 @@ app.use(express.urlencoded({ extended: true }));
 const sessionSecret = process.env.SESSION_SECRET;
 if (!sessionSecret) throw new Error('SESSION_SECRET не задан в переменных окружения');
  
-app.use(session({
+const sessionMiddleware = session({
     store: new pgSession({
         pool: pool,
         tableName: 'session',
@@ -387,7 +379,9 @@ app.use(session({
         secure: process.env.NODE_ENV === 'production',
         sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax'
     }
-}));
+});
+
+app.use(sessionMiddleware);
 
 app.get('/link.my', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
