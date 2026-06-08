@@ -179,15 +179,11 @@ function renderChatList() {
         chatItem.innerHTML = `
     <div class="avatar">${avatarHtml}</div>
     <div class="chat-item-info">
-        <div class="chat-item-header">
-            <span class="chat-item-name">${chat.name}</span>       // ← ОПАСНО: chat.name без escapeHtml
-            <span class="chat-item-time">${chat.last_time || ''}</span>
-        </div>
-        <div class="chat-item-preview">
-            ${chat.last_message || 'Нет сообщений'}               // ← ОПАСНО: last_message без escapeHtml
-            ${chat.invite_code ? `<span class="chat-code">Код: ${chat.invite_code}</span>` : ''}
-            ${chat.unread > 0 ? `<span class="unread-badge">${chat.unread}</span>` : ''}
-        </div>
+        <span class="chat-item-name">${escapeHtml(chat.name)}</span>
+        <span class="chat-item-time">${escapeHtml(chat.last_time || '')}</span>
+        ${escapeHtml(chat.last_message || 'Нет сообщений')}
+        <span class="chat-code">Код: ${escapeHtml(chat.invite_code)}</span>
+        <span class="unread-badge">${escapeHtml(String(chat.unread))}</span>
     </div>
             <button class="delete-chat-btn" title="Удалить чат">🗑</button>
         `;
@@ -1635,7 +1631,7 @@ window.createMessageElement = function(msg, highlightQuery = '') {
         : '';
     const editedHtml = msg.edited_at ? `<span class="message-edited">(отредактировано)</span>` : '';
     const reactionsHtml = msg.reactions && msg.reactions.length > 0
-        ? `<div class="message-reactions">${msg.reactions.map(emoji => `<span class="reaction-item">${emoji}</span>`).join('')}</div>`
+        ? `<div class="message-reactions">${msg.reactions.map(emoji => `<span class="reaction-item">${escapeHtml(emoji)}</span>`).join('')}</div>`
         : '';
 
     let replyQuoteHtml = '';
