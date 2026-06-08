@@ -1,4 +1,48 @@
 require('dotenv').config();
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+
+// Папка для загрузки файлов
+const UPLOAD_DIR = path.join(__dirname, 'uploads');
+if (!fs.existsSync(UPLOAD_DIR)) {
+    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+}
+
+// Разрешённые MIME-типы (фото, видео, аудио, PDF)
+const ALLOWED_MIME_TYPES = [
+    'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+    'video/mp4', 'video/webm', 'video/quicktime',
+    'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/webm',
+    'application/pdf'
+];
+
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, UPLOAD_DIR);
+    },
+    filename: (req, file, cb) => {
+        // Уникальное имя, чтобы файлы не перезаписывались
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+        const ext = path.extname(file.originalname).toLowerCase();
+        cb(null, `${uniqueSuffix}${ext}`);
+    }
+});
+
+const fileFilter = (req, file, cb) => {
+    if (ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+        cb(null, true);
+    } else {
+        cb(new Error('Неподдерживаемый тип файла. Разрешены только фото, видео, аудио и PDF.'), false);
+    }
+};
+
+const upload = multer({
+    storage: storage,
+    limits: { fileSize: 50 * 1024 * 1024 }, // Лимит 50 МБ
+    fileFilter: fileFilter
+});
+
  
 // 1. ИМПОРТЫ
 const express = require('express');
@@ -308,13 +352,16 @@ app.use((req, res, next) => {
     
     next();
 });
- 
-app.use(express.static(path.join(__dirname, 'public')));
+
 // Защищённая раздача файлов — только для авторизованных
 app.get('/uploads/:filename', (req, res) => {
     if (!req.session.userId) {
         return res.status(401).json({ success: false, message: 'Не авторизован' });
     }
+
+    
+app.use(express.static(path.join(__dirname, 'public')));
+
     const filename = path.basename(req.params.filename);
     const filePath = path.join(__dirname, 'uploads', filename);
     if (!fs.existsSync(filePath)) {
@@ -332,22 +379,35 @@ const ALLOWED_MIME_TYPES = [
 ];
  
 const upload = multer({
-    dest: path.join(__dirname, 'uploads'),
-    limits: { fileSize: 20 * 1024 * 1024 },
+    storage: multer.diskStorage({
+        destination: (req, file, cb) => {
+            const dir = path.join(__dirname, 'uploads');
+            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+            cb(null, dir);
+        },
+        filename: (req, file, cb) => {
+            const ext = path.extname(file.originalname);
+            const safeName = `${Date.now()}-${Math.round(Math.random() * 1E9)}${ext}`;
+            cb(null, safeName);
+        }
+    }),
+    limits: { fileSize: 50 * 1024 * 1024 }, // 50 МБ
     fileFilter: (req, file, cb) => {
         if (ALLOWED_MIME_TYPES.includes(file.mimetype)) {
             cb(null, true);
         } else {
-            cb(new Error('Недопустимый тип файла'));
+            cb(new Error('Неподдерживаемый тип файла'), false);
         }
     }
 });
+
  
 app.use((err, req, res, next) => {
     if (err.code === 'LIMIT_FILE_SIZE') return res.json({ success: false, message: 'Файл слишком большой. Максимум 20 МБ.' });
     if (err.message === 'Недопустимый тип файла') return res.json({ success: false, message: 'Недопустимый тип файла.' });
     next(err);
 });
+app.use(express.urlencoded({ extended: true }));
  
 const sessionSecret = process.env.SESSION_SECRET;
 if (!sessionSecret) throw new Error('SESSION_SECRET не задан в переменных окружения');
@@ -668,47 +728,7 @@ app.post('/api/messages', async (req, res) => {
     }
 });
  
-// Upload file (ИСПРАВЛЕНО: Санитизация имени файла)
-app.post('/api/messages/file', generalLimiter, upload.single('file'), async (req, res) => {
-    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
-    const { chatId, text } = req.body;
-    const file = req.file;
-    if (!file || !chatId) return res.json({ success: false, message: 'Файл или чат не выбраны' });
- 
-    try {
-        const chat = await dbGet('SELECT * FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
-        if (!chat) return res.json({ success: false, message: 'Чат не найден' });
- 
-        const time = getCurrentTime();
-        const roomId = chat.room_id || null;
-        const socketRoomKey = getSocketRoomKey(chatId, roomId);
-        const fileUrl = `/uploads/${file.filename}`;
-        const fileType = file.mimetype;
-        
-        // Санитизация имени файла (оставляем только безопасные символы)
-        const safeFileName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
-        const fileName = safeFileName;
-        
-        const messageType = fileType.startsWith('image/') ? 'image' : fileType.startsWith('video/') ? 'video' : fileType.startsWith('audio/') ? 'audio' : 'file';
-        const messageText = text ? String(text).trim() : (messageType === 'audio' ? 'Голосовое сообщение' : fileName);
- 
-        const result = await pool.query(
-            'INSERT INTO messages (chat_id, room_id, user_id, text, file_url, file_name, file_type, message_type, sent, time, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id',
-            [chatId, roomId, req.session.userId, messageText, fileUrl, fileName, fileType, messageType, 1, time, 'sent']
-        );
-        const messageId = result.rows[0].id;
- 
-        setTimeout(() => dbRun('UPDATE messages SET status = $1 WHERE id = $2', ['delivered', messageId]), 1000);
-        setTimeout(() => dbRun('UPDATE messages SET status = $1 WHERE id = $2', ['read', messageId]), 2000);
- 
-        const fileMessage = { id: messageId, chat_id: Number(chatId), room_id: roomId, user_id: req.session.userId, sender_username: req.session.username, sender_avatar: req.session.avatar || '', text: messageText, file_url: fileUrl, file_name: fileName, file_type: fileType, message_type: messageType, sent: true, time, status: 'sent' };
-        io.to(socketRoomKey).emit('newMessage', fileMessage);
-        res.json({ success: true, message: fileMessage });
-    } catch (error) {
-        console.error('Upload file error:', error);
-        res.json({ success: false, message: 'Ошибка отправки файла' });
-    }
-});
+
  
 // Create chat
 app.post('/api/chats', async (req, res) => {
@@ -839,6 +859,52 @@ app.delete('/api/messages/:messageId', async (req, res) => {
         res.json({ success: false, message: 'Ошибка удаления' });
     }
 });
+// Загрузка фото/видео/аудио
+app.post('/api/messages/file', generalLimiter, upload.single('file'), async (req, res) => {
+    if (!req.session.userId) return res.status(401).json({ success: false, message: 'Не авторизован' });
+    
+    const { chatId, text } = req.body;
+    const file = req.file;
+
+    if (!file) return res.status(400).json({ success: false, message: 'Файл не выбран' });
+    if (!chatId) return res.status(400).json({ success: false, message: 'Указан чат' });
+
+    try {
+        const chat = await dbGet('SELECT * FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
+        if (!chat) return res.status(404).json({ success: false, message: 'Чат не найден' });
+
+        const time = getCurrentTime();
+        const roomId = chat.room_id || null;
+        const socketRoomKey = getSocketRoomKey(chatId, roomId);
+        const fileUrl = `/uploads/${file.filename}`;
+        const fileType = file.mimetype;
+
+        const messageType = fileType.startsWith('image/') ? 'image' : fileType.startsWith('video/') ? 'video' : fileType.startsWith('audio/') ? 'audio' : 'file';
+        const messageText = text ? String(text).trim() : (messageType === 'audio' ? 'Голосовое сообщение' : file.originalname);
+
+        const result = await pool.query(
+            'INSERT INTO messages (chat_id, room_id, user_id, text, file_url, file_name, file_type, message_type, sent, time, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id',
+            [chatId, roomId, req.session.userId, messageText, fileUrl, file.originalname, fileType, messageType, 1, time, 'sent']
+        );
+        const messageId = result.rows[0].id;
+
+        setTimeout(() => dbRun('UPDATE messages SET status = $1 WHERE id = $2', ['delivered', messageId]), 1000);
+        setTimeout(() => dbRun('UPDATE messages SET status = $1 WHERE id = $2', ['read', messageId]), 2000);
+
+        const fileMessage = { 
+            id: messageId, chat_id: Number(chatId), room_id: roomId, user_id: req.session.userId, 
+            sender_username: req.session.username, sender_avatar: req.session.avatar || '', 
+            text: messageText, file_url: fileUrl, file_name: file.originalname, 
+            file_type: fileType, message_type: messageType, sent: true, time, status: 'sent' 
+        };
+        io.to(socketRoomKey).emit('newMessage', fileMessage);
+        res.json({ success: true, message: fileMessage });
+    } catch (error) {
+        console.error('Upload file error:', error);
+        res.status(500).json({ success: false, message: 'Ошибка отправки файла' });
+    }
+});
+
  
 // Add reaction
 app.post('/api/reactions', async (req, res) => {
@@ -901,7 +967,22 @@ app.post('/api/change-password', generalLimiter, async (req, res) => {
         res.json({ success: false, message: 'Ошибка изменения пароля' });
     }
 });
- 
+
+
+// Обработка ошибок загрузки файлов
+app.use((err, req, res, next) => {
+    if (err instanceof multer.MulterError) {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+            return res.status(413).json({ success: false, message: 'Файл слишком большой (макс. 50 МБ)' });
+        }
+        return res.status(400).json({ success: false, message: `Ошибка загрузки: ${err.message}` });
+    }
+    if (err.message === 'Неподдерживаемый тип файла') {
+        return res.status(400).json({ success: false, message: 'Разрешены только фото, видео, аудио и PDF' });
+    }
+    next(err);
+});
+
 app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
