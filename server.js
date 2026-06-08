@@ -194,7 +194,20 @@ function getCurrentTime() {
     const now = new Date();
     return `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
 }
- 
+
+
+function sanitizeInput(str) {
+    if (typeof str !== 'string') return '';
+    return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#x27;')
+        .trim();
+}
+
+
 function generateUniqueCode() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
     const bytes = crypto.randomBytes(8);
@@ -843,24 +856,15 @@ app.post('/api/reactions', async (req, res) => {
 });
  
 // Remove reaction
-app.delete('/api/reactions/:messageId/:emoji', async (req, res) => {
-    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
-    const { messageId, emoji } = req.params;
-    try {
-        await dbRun('DELETE FROM reactions WHERE message_id = $1 AND user_id = $2 AND emoji = $3', [messageId, req.session.userId, emoji]);
-        res.json({ success: true });
-    } catch (error) {
-        res.json({ success: false, message: 'Ошибка удаления реакции' });
-    }
-});
- 
-// Search (ИСПРАВЛЕНО: Добавлен Rate Limiting)
 app.get('/api/search', generalLimiter, async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const query = req.query.q || '';
     if (!query || query.length < 1) return res.json({ success: true, results: [] });
- 
-    const searchTerm = `%${query}%`;
+    if (query.length > 100) return res.json({ success: false, message: 'Запрос слишком длинный' });
+
+    // Экранируем спецсимволы LIKE: % и _ имеют особое значение
+    const safeTerm = query.replace(/[%_\\]/g, '\\$&');
+    const searchTerm = `%${safeTerm}%`;
     try {
         const chats = await dbAll('SELECT id, name, avatar FROM chats WHERE user_id = $1 AND name ILIKE $2 LIMIT 10', [req.session.userId, searchTerm]);
         const messages = await dbAll(
