@@ -224,16 +224,7 @@ function getCurrentTime() {
 }
 
 
-function sanitizeInput(str) {
-    if (typeof str !== 'string') return '';
-    return str
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#x27;')
-        .trim();
-}
+
 
 
 function generateUniqueCode() {
@@ -636,7 +627,7 @@ app.post('/api/messages', async (req, res) => {
         const socketRoomKey = getSocketRoomKey(chatId, roomId);
         
         // Санитизация текста перед сохранением
-        const safeText = sanitizeInput(text.trim());
+        const safeText = text.trim();
  
         const result = await pool.query(
             'INSERT INTO messages (chat_id, room_id, user_id, text, message_type, sent, time, status, reply_to_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id',
