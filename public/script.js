@@ -760,21 +760,20 @@ async function handleGetCodeClick() {
 
     if (selectedChat && selectedChat.room_id) {
         const code = await fetchInviteCodeForChat(currentChatId);
-        if (!code) {
-            return alert('Не удалось получить код приглашения для этого чата');
-        }
-
+        if (!code) return alert('Не удалось получить код приглашения для этого чата');
         await sendCodeMessage(currentChatId, code);
-        return showInviteCode(code);
+        showInviteCode(code);
+        return; //  Важно: завершаем выполнение
     }
 
+    // вызываем только внутри колбэка
     showNewChatModal(async (name) => {
-    if (!name) return;
-    await createChatWithCode(name);
-});
-
-    await createChatWithCode(name);
+        if (!name) return;
+        await createChatWithCode(name);
+    });
 }
+
+
 
 async function getInviteCode() {
     if (!currentChatId) {
@@ -1597,12 +1596,12 @@ function showMessageContextMenu(messageId, event, isCurrentUser, msg) {
     document.body.appendChild(menu);
 
     // Close menu on click outside
-    setTimeout(() => {
-        document.addEventListener('click', function closeMenu() {
-            menu.remove();
-            document.removeEventListener('click', closeMenu);
-        });
-    }, 0);
+    document.addEventListener('click', function closeMenu(e) {
+    if (!menu.contains(e.target)) {
+        menu.remove();
+        document.removeEventListener('click', closeMenu);
+    }
+}, { once: true });
 }
 
 // Update createMessageElement to support context menu and reactions
@@ -1696,7 +1695,8 @@ async function changePassword() {
     document.getElementById('changePasswordModal').classList.add('active');
     document.getElementById('cpError').textContent = '';
 
-    document.getElementById('cpSaveBtn').onclick = async () => {
+    document.getElementById('cpSaveBtn').replaceWith(document.getElementById('cpSaveBtn').cloneNode(true));
+    document.getElementById('cpSaveBtn').addEventListener('click', async () => {
         const currentPassword = document.getElementById('cpCurrent').value;
         const newPassword = document.getElementById('cpNew').value;
         const confirmPassword = document.getElementById('cpConfirm').value;
@@ -1714,14 +1714,16 @@ async function changePassword() {
     });
         const data = await response.json();
 
-        if (data.success) {
-            document.getElementById('changePasswordModal').classList.remove('active');
-            alert('Пароль изменён. Войдите заново.');
-            showAuthModal();
-        } else {
+        // Внутри changePassword()
+if (data.success) {
+    document.getElementById('changePasswordModal').classList.remove('active');
+    alert('Пароль изменён. Войдите заново.');
+    showAuth(); 
+}
+ else {
             errorEl.textContent = data.message || 'Ошибка';
         }
-    };
+    });
 
     document.getElementById('closeChangePassword').onclick = () => {
         document.getElementById('changePasswordModal').classList.remove('active');
