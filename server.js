@@ -259,6 +259,25 @@ async function generateInviteCodeAsync() {
     throw new Error('Could not generate invite code');
 }
  
+
+const sessionMiddleware = session({
+    store: new pgSession({
+        pool: pool,
+        tableName: 'session',
+        createTableIfMissing: true
+    }),
+    secret: sessionSecret,
+    resave: false,
+    saveUninitialized: false,
+    proxy: true,
+    cookie: {
+        maxAge: 24 * 60 * 60 * 1000,
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax'
+    }
+});
+
 io.use((socket, next) => {
     sessionMiddleware(socket.request, socket.request.res || {}, next);
 });
@@ -325,12 +344,7 @@ app.use((req, res, next) => {
 // Защищённая раздача файлов — только для авторизованных
 // 1. Глобально раздача статики (ДО роутов)
 app.use(express.static(path.join(__dirname, 'public')));
-app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
-    setHeaders: (res, filePath) => {
-        // Запрещаем кэш и проверяем сессию через middleware
-        res.set('Cache-Control', 'no-store');
-    }
-}));
+
 
 // 2. Защищённый роут
 app.get('/uploads/:filename', async (req, res) => {
@@ -344,35 +358,22 @@ app.get('/uploads/:filename', async (req, res) => {
  
 app.use(express.static(path.join(__dirname, 'public')));
  
+
+
+ 
+const sessionSecret = process.env.SESSION_SECRET;
+if (!sessionSecret) throw new Error('SESSION_SECRET не задан в переменных окружения');
+ 
+
+
+app.use(sessionMiddleware);
+
 app.use((err, req, res, next) => {
     if (err.code === 'LIMIT_FILE_SIZE') return res.json({ success: false, message: 'Файл слишком большой. Максимум 20 МБ.' });
     if (err.message === 'Недопустимый тип файла') return res.json({ success: false, message: 'Недопустимый тип файла.' });
     next(err);
 });
-app.use(express.urlencoded({ extended: true }));
- 
-const sessionSecret = process.env.SESSION_SECRET;
-if (!sessionSecret) throw new Error('SESSION_SECRET не задан в переменных окружения');
- 
-const sessionMiddleware = session({
-    store: new pgSession({
-        pool: pool,
-        tableName: 'session',
-        createTableIfMissing: true
-    }),
-    secret: sessionSecret,
-    resave: false,
-    saveUninitialized: false,
-    proxy: true,
-    cookie: {
-        maxAge: 24 * 60 * 60 * 1000,
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax'
-    }
-});
 
-app.use(sessionMiddleware);
 
 app.get('/link.my', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -626,7 +627,7 @@ app.post('/api/messages', async (req, res) => {
         const roomId = chat.room_id || null;
         const socketRoomKey = getSocketRoomKey(chatId, roomId);
         
-        // Санитизация текста перед сохранением
+        
         const safeText = text.trim();
  
         const result = await pool.query(
