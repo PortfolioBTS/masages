@@ -1,5 +1,5 @@
 require('dotenv').config();
-const multer = require('multer');
+
 const path = require('path');
 const fs = require('fs');
 
@@ -202,6 +202,12 @@ async function initDatabase() {
             UNIQUE(message_id, user_id, emoji)
         )
     `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id);`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_room_id ON messages(room_id);`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id);`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_chats_user_id ON chats(user_id);`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_reactions_msg_user ON reactions(message_id, user_id);`);
+
  
     console.log('База данных инициализирована');
 }
@@ -284,18 +290,23 @@ async function generateInviteCodeAsync() {
     throw new Error('Could not generate invite code');
 }
  
-// 6. WEBSOCKET (ИСПРАВЛЕНО: Добавлена аутентификация)
+// Загрузите pgStore в область видимости (если ещё не загружен)
+const pgStore = require('connect-pg-simple')(session);
+const sessionStore = new pgStore({ pool: pool, tableName: 'session' });
+
 io.use((socket, next) => {
-    cookieParser(socket.handshake.headers.cookie, socket.handshake, (err) => {
-        if (err) return next(new Error('Ошибка парсинга cookie'));
-        // Проверяем, есть ли сессия и пользователь
-        if (socket.handshake.session && socket.handshake.session.userId) {
-            next();
-        } else {
-            next(new Error('Unauthorized'));
-        }
-    });
+    const cookies = socket.handshake.headers.cookie;
+    if (!cookies) return next(new Error('Unauthorized'));
+    
+    const sessionCookie = cookies.split(';').find(c => c.trim().startsWith('connect.sid='));
+    if (!sessionCookie) return next(new Error('Unauthorized'));
+    
+    // Сохраняем сессию для middleware Express
+    socket.handshake.headers.cookie = `connect.sid=${sessionCookie.split('=')[1]}`;
+    next();
 });
+
+
 
 io.on('connection', (socket) => {
     console.log('Пользователь подключился через WebSocket:', socket.handshake.session.userId);
@@ -310,7 +321,8 @@ io.on('connection', (socket) => {
 });
  
 // 7. MIDDLEWARE
-app.use(bodyParser.json());
+app.use(express.json());
+
  
 // Middleware проверки CORS/Referrer
 app.use((req, res, next) => {
@@ -354,21 +366,24 @@ app.use((req, res, next) => {
 });
 
 // Защищённая раздача файлов — только для авторизованных
-app.get('/uploads/:filename', (req, res) => {
-    if (!req.session.userId) {
-        return res.status(401).json({ success: false, message: 'Не авторизован' });
-    }
-
-    
+// 1. Глобально раздача статики (ДО роутов)
 app.use(express.static(path.join(__dirname, 'public')));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
+    setHeaders: (res, filePath) => {
+        // Запрещаем кэш и проверяем сессию через middleware
+        res.set('Cache-Control', 'no-store');
+    }
+}));
 
+// 2. Защищённый роут
+app.get('/uploads/:filename', async (req, res) => {
+    if (!req.session.userId) return res.status(401).json({ success: false, message: 'Не авторизован' });
     const filename = path.basename(req.params.filename);
     const filePath = path.join(__dirname, 'uploads', filename);
-    if (!fs.existsSync(filePath)) {
-        return res.status(404).json({ success: false, message: 'Файл не найден' });
-    }
+    if (!fs.existsSync(filePath)) return res.status(404).json({ success: false, message: 'Файл не найден' });
     res.sendFile(filePath);
 });
+
  
 const ALLOWED_MIME_TYPES = [
     'image/jpeg', 'image/png', 'image/gif', 'image/webp',
@@ -401,6 +416,7 @@ const upload = multer({
     }
 });
 
+app.use(express.static(path.join(__dirname, 'public')));
  
 app.use((err, req, res, next) => {
     if (err.code === 'LIMIT_FILE_SIZE') return res.json({ success: false, message: 'Файл слишком большой. Максимум 20 МБ.' });
