@@ -5,7 +5,7 @@ const express = require('express');
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const session = require('express-session');
-const bodyParser = require('body-parser');
+
 const multer = require('multer');
 const path = require('path');
 const os = require('os');
@@ -16,7 +16,7 @@ const fs = require('fs');
 const { Server } = require('socket.io');
 const rateLimit = require('express-rate-limit');
 const pgSession = require('connect-pg-simple')(session);
-const cookieParser = require('cookie-parser');
+
 
 // Конфигурация загрузки файлов
 const ALLOWED_MIME_TYPES = [
@@ -251,11 +251,7 @@ function getCurrentTime() {
 
 
 
-function generateUniqueCode() {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    const bytes = crypto.randomBytes(8);
-    return Array.from(bytes).map(b => chars[b % chars.length]).join('');
-}
+
  
 async function generateUniqueCodeAsync() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -367,10 +363,21 @@ app.use((req, res, next) => {
     next();
 });
 
+
+app.use(sessionMiddleware);
 // Защищённая раздача файлов — только для авторизованных
 // 1. Глобально раздача статики (ДО роутов)
 app.use(express.static(path.join(__dirname, 'public')));
 
+
+
+
+ 
+
+ 
+
+
+ 
 
 // 2. Защищённый роут
 app.get('/uploads/:filename', async (req, res) => {
@@ -381,16 +388,8 @@ app.get('/uploads/:filename', async (req, res) => {
     res.sendFile(filePath);
 });
 
- 
-
- 
 
 
- 
-
-
-
-app.use(sessionMiddleware);
 
 
 
