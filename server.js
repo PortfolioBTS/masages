@@ -71,6 +71,30 @@ if (process.env.NODE_ENV === 'production') {
 }
  
 const io = new Server(server);
+// Максимум 5 одновременных WebSocket-соединений с одного IP
+const ipConnectionCount = new Map();
+
+io.use((socket, next) => {
+    const ip = socket.handshake.address;
+    const count = ipConnectionCount.get(ip) || 0;
+
+    if (count >= 5) {
+        return next(new Error('Слишком много подключений с вашего IP'));
+    }
+
+    ipConnectionCount.set(ip, count + 1);
+
+    socket.on('disconnect', () => {
+        const current = ipConnectionCount.get(ip) || 1;
+        if (current <= 1) {
+            ipConnectionCount.delete(ip);
+        } else {
+            ipConnectionCount.set(ip, current - 1);
+        }
+    });
+
+    next();
+});
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
  
@@ -259,7 +283,9 @@ async function generateInviteCodeAsync() {
     throw new Error('Could not generate invite code');
 }
  
-
+const sessionSecret = process.env.SESSION_SECRET;
+if (!sessionSecret) throw new Error('SESSION_SECRET не задан в переменных окружения');
+ 
 const sessionMiddleware = session({
     store: new pgSession({
         pool: pool,
@@ -356,23 +382,17 @@ app.get('/uploads/:filename', async (req, res) => {
 });
 
  
-app.use(express.static(path.join(__dirname, 'public')));
+
  
 
 
  
-const sessionSecret = process.env.SESSION_SECRET;
-if (!sessionSecret) throw new Error('SESSION_SECRET не задан в переменных окружения');
- 
+
 
 
 app.use(sessionMiddleware);
 
-app.use((err, req, res, next) => {
-    if (err.code === 'LIMIT_FILE_SIZE') return res.json({ success: false, message: 'Файл слишком большой. Максимум 20 МБ.' });
-    if (err.message === 'Недопустимый тип файла') return res.json({ success: false, message: 'Недопустимый тип файла.' });
-    next(err);
-});
+
 
 
 app.get('/link.my', (req, res) => {
