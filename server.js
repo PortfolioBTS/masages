@@ -558,7 +558,7 @@ app.get('/api/chats', async (req, res) => {
             WHERE c.user_id = $1
             ORDER BY (SELECT MAX(id) FROM messages WHERE ((c.room_id IS NOT NULL AND room_id = c.room_id) OR (c.room_id IS NULL AND chat_id = c.id))) DESC NULLS LAST
         `, [req.session.userId]);
-        res.json({ success: true, chats });
+        res.json({ success: true, chats: chats.map(c => ({ ...c, unread: Number(c.unread) })) });
     } catch (error) {
         console.error('Get chats error:', error);
         res.json({ success: false, message: 'Ошибка загрузки чатов' });
