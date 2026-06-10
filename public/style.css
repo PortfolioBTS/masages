@@ -792,40 +792,45 @@ body {
 .emoji-btn,
 .file-btn,
 .voice-btn {
-    width: 36px;
-    height: 36px;
+    width: 44px;
+    height: 44px;
     border: none;
-    border-radius: 10px;
-    background: transparent;
+    border-radius: 50%;
+    background: #ffffff;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.13), 0 1.5px 4px rgba(0,0,0,0.08);
     font-size: 20px;
     cursor: pointer;
     display: grid;
     place-items: center;
-    transition: background 0.15s, transform 0.15s;
-    opacity: 0.55;
+    transition: box-shadow 0.18s, transform 0.15s;
     flex-shrink: 0;
+    color: #2d3142;
 }
 
 .emoji-btn:hover,
 .file-btn:hover,
 .voice-btn:hover {
-    background: rgba(0, 0, 0, 0.06);
-    transform: scale(1.15);
-    opacity: 1;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18), 0 2px 6px rgba(0,0,0,0.10);
+    transform: translateY(-1px) scale(1.06);
 }
 
 .emoji-btn:active,
 .file-btn:active,
 .voice-btn:active {
-    transform: scale(0.92);
-    opacity: 1;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.10);
+    transform: scale(0.94);
 }
 
 .voice-btn.recording {
-    background: rgba(255, 71, 87, 0.12);
+    background: #fff0f0;
+    box-shadow: 0 4px 14px rgba(255, 71, 87, 0.25);
     color: #ff4757;
-    opacity: 1;
     animation: recordPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes recordPulse {
+    0%, 100% { box-shadow: 0 4px 14px rgba(255, 71, 87, 0.25); }
+    50%       { box-shadow: 0 4px 22px rgba(255, 71, 87, 0.50); }
 }
 
 @keyframes recordPulse {
