@@ -792,29 +792,45 @@ body {
 .emoji-btn,
 .file-btn,
 .voice-btn {
-    width: 44px;
-    height: 44px;
-    border: 1px solid var(--border-color);
-    border-radius: 50%;
-    background: white;
-    font-size: 18px;
+    width: 36px;
+    height: 36px;
+    border: none;
+    border-radius: 10px;
+    background: transparent;
+    font-size: 20px;
     cursor: pointer;
     display: grid;
     place-items: center;
-    transition: transform 0.2s, background 0.2s, color 0.2s;
+    transition: background 0.15s, transform 0.15s;
+    opacity: 0.55;
+    flex-shrink: 0;
 }
 
 .emoji-btn:hover,
 .file-btn:hover,
 .voice-btn:hover {
-    background: #f0f0f0;
-    transform: translateY(-1px);
+    background: rgba(0, 0, 0, 0.06);
+    transform: scale(1.15);
+    opacity: 1;
+}
+
+.emoji-btn:active,
+.file-btn:active,
+.voice-btn:active {
+    transform: scale(0.92);
+    opacity: 1;
 }
 
 .voice-btn.recording {
-    background: #ff7675;
-    border-color: #ff7675;
-    color: #ffffff;
+    background: rgba(255, 71, 87, 0.12);
+    color: #ff4757;
+    opacity: 1;
+    animation: recordPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes recordPulse {
+    0%, 100% { background: rgba(255, 71, 87, 0.12); }
+    50%       { background: rgba(255, 71, 87, 0.25); }
 }
 
 .record-indicator {
