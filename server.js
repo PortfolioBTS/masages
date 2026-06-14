@@ -200,9 +200,6 @@ const sslConfig = (() => {
     return { rejectUnauthorized: true };
 })();
 
-// Запускаем дамп сертификата до создания пула (если DUMP_CA=true)
-await maybeDumpCa().catch(err => { console.error('[DUMP_CA] Ошибка:', err.message); process.exit(1); });
-
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: sslConfig,
@@ -229,6 +226,9 @@ async function dbRun(query, params = []) {
 
 // 4. СОЗДАНИЕ ТАБЛИЦ
 async function initDatabase() {
+    // Если DUMP_CA=true — выводим сертификат в лог и выходим
+    await maybeDumpCa().catch(err => { console.error('[DUMP_CA] Ошибка:', err.message); process.exit(1); });
+
     await pool.query(`
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
