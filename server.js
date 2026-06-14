@@ -136,15 +136,72 @@ const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
  
 // 3. ПОДКЛЮЧЕНИЕ К POSTGRESQL
+
+// Если установлена переменная DUMP_CA=true — выводим сертификат в лог и завершаем работу
+async function maybeDumpCa() {
+    if (process.env.DUMP_CA !== 'true') return;
+    const tls = require('tls');
+    const net = require('net');
+    const dbUrl = process.env.DATABASE_URL;
+    if (!dbUrl) { console.error('DATABASE_URL не задан'); process.exit(1); }
+    const parsed = new URL(dbUrl);
+    const host = parsed.hostname;
+    const port = parseInt(parsed.port) || 5432;
+    console.log(`[DUMP_CA] Подключаемся к ${host}:${port} для получения сертификата...`);
+    await new Promise((resolve, reject) => {
+        const socket = net.createConnection(port, host, () => {
+            socket.write(Buffer.from([0x00,0x00,0x00,0x08,0x04,0xd2,0x16,0x2f]));
+        });
+        socket.once('data', (data) => {
+            if (data[0] !== 0x53) { reject(new Error('Сервер не поддерживает SSL')); return; }
+            const tlsSocket = tls.connect({ socket, host, rejectUnauthorized: false }, () => {
+                const cert = tlsSocket.getPeerCertificate(true);
+                let root = cert;
+                const seen = new Set();
+                while (root.issuerCertificate && root.issuerCertificate !== root) {
+                    if (seen.has(root.fingerprint)) break;
+                    seen.add(root.fingerprint);
+                    root = root.issuerCertificate;
+                }
+                const pem = [
+                    '-----BEGIN CERTIFICATE-----',
+                    root.raw.toString('base64').match(/.{1,64}/g).join('\n'),
+                    '-----END CERTIFICATE-----'
+                ].join('\n');
+                console.log('\n[DUMP_CA] ========= СКОПИРУЙ ЭТО В ПЕРЕМЕННУЮ DB_CA_CERT =========');
+                console.log(pem);
+                console.log('[DUMP_CA] ===================== КОНЕЦ =====================\n');
+                tlsSocket.destroy();
+                resolve();
+            });
+            tlsSocket.on('error', reject);
+        });
+        socket.on('error', reject);
+        socket.setTimeout(10000, () => { socket.destroy(); reject(new Error('Таймаут')); });
+    });
+    process.exit(0);
+}
+
 const sslConfig = (() => {
     if (process.env.NODE_ENV !== 'production') return false;
-    // В production: проверяем сертификат. Если задан CA — используем его.
-    // Иначе — доверяем системным CA (Railway, Supabase используют публично доверенные CA).
+
+    // Если задан CA-сертификат — используем его (самый безопасный вариант)
     if (process.env.DB_CA_CERT) {
+        console.log('[SSL] Используем кастомный CA-сертификат из DB_CA_CERT');
         return { rejectUnauthorized: true, ca: process.env.DB_CA_CERT };
     }
+
+    // Разрешаем self-signed через явную переменную
+    if (process.env.DB_SSL_REJECT_UNAUTHORIZED === 'false') {
+        console.warn('[SSL] rejectUnauthorized=false — TLS шифруется, но сертификат не проверяется.');
+        return { rejectUnauthorized: false };
+    }
+
     return { rejectUnauthorized: true };
 })();
+
+// Запускаем дамп сертификата до создания пула (если DUMP_CA=true)
+await maybeDumpCa().catch(err => { console.error('[DUMP_CA] Ошибка:', err.message); process.exit(1); });
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
