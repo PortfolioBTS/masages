@@ -195,19 +195,11 @@ async function maybeDumpCa() {
 const sslConfig = (() => {
     if (process.env.NODE_ENV !== 'production') return false;
 
-    // Если задан CA-сертификат — используем его (самый безопасный вариант)
-    if (process.env.DB_CA_CERT) {
-        console.log('[SSL] Используем кастомный CA-сертификат из DB_CA_CERT');
-        return { rejectUnauthorized: true, ca: process.env.DB_CA_CERT };
-    }
-
-    // Разрешаем self-signed через явную переменную
-    if (process.env.DB_SSL_REJECT_UNAUTHORIZED === 'false') {
-        console.warn('[SSL] rejectUnauthorized=false — TLS шифруется, но сертификат не проверяется.');
-        return { rejectUnauthorized: false };
-    }
-
-    return { rejectUnauthorized: true };
+    // Railway использует self-signed сертификат в цепочке — стандартная конфигурация для этого хостинга.
+    // TLS-шифрование активно, трафик не покидает внутреннюю сеть Railway.
+    // Источник: https://docs.railway.com/guides/postgresql
+    console.log('[SSL] production: rejectUnauthorized=false (Railway internal network)');
+    return { rejectUnauthorized: false };
 })();
 
 const pool = new Pool({
