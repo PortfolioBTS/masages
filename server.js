@@ -137,7 +137,7 @@ const HOST = process.env.HOST || '0.0.0.0';
  
 // 3. ПОДКЛЮЧЕНИЕ К POSTGRESQL
 
-// Если установлена переменная DUMP_CA=true — выводим сертификат в лог и завершаем работу
+// Если установлена переменная DUMP_CA=true — выводим ВСЮ цепочку сертификатов и завершаем работу
 async function maybeDumpCa() {
     if (process.env.DUMP_CA !== 'true') return;
     const tls = require('tls');
@@ -147,7 +147,7 @@ async function maybeDumpCa() {
     const parsed = new URL(dbUrl);
     const host = parsed.hostname;
     const port = parseInt(parsed.port) || 5432;
-    console.log(`[DUMP_CA] Подключаемся к ${host}:${port} для получения сертификата...`);
+    console.log(`[DUMP_CA] Подключаемся к ${host}:${port}...`);
     await new Promise((resolve, reject) => {
         const socket = net.createConnection(port, host, () => {
             socket.write(Buffer.from([0x00,0x00,0x00,0x08,0x04,0xd2,0x16,0x2f]));
@@ -155,21 +155,31 @@ async function maybeDumpCa() {
         socket.once('data', (data) => {
             if (data[0] !== 0x53) { reject(new Error('Сервер не поддерживает SSL')); return; }
             const tlsSocket = tls.connect({ socket, host, rejectUnauthorized: false }, () => {
-                const cert = tlsSocket.getPeerCertificate(true);
-                let root = cert;
+                // Собираем ВСЮ цепочку сертификатов (leaf → intermediate → root)
+                const chain = [];
+                let current = tlsSocket.getPeerCertificate(true);
                 const seen = new Set();
-                while (root.issuerCertificate && root.issuerCertificate !== root) {
-                    if (seen.has(root.fingerprint)) break;
-                    seen.add(root.fingerprint);
-                    root = root.issuerCertificate;
+                while (current && !seen.has(current.fingerprint)) {
+                    seen.add(current.fingerprint);
+                    chain.push(current);
+                    if (!current.issuerCertificate || current.issuerCertificate === current) break;
+                    current = current.issuerCertificate;
                 }
-                const pem = [
+
+                // Конвертируем каждый сертификат в PEM
+                const pemChain = chain.map(c => [
                     '-----BEGIN CERTIFICATE-----',
-                    root.raw.toString('base64').match(/.{1,64}/g).join('\n'),
+                    c.raw.toString('base64').match(/.{1,64}/g).join('\n'),
                     '-----END CERTIFICATE-----'
-                ].join('\n');
-                console.log('\n[DUMP_CA] ========= СКОПИРУЙ ЭТО В ПЕРЕМЕННУЮ DB_CA_CERT =========');
-                console.log(pem);
+                ].join('\n')).join('\n');
+
+                console.log('\n[DUMP_CA] Найдено сертификатов в цепочке: ' + chain.length);
+                chain.forEach((c, i) => {
+                    console.log('[DUMP_CA] [' + i + '] subject:', JSON.stringify(c.subject));
+                    console.log('[DUMP_CA] [' + i + '] issuer:', JSON.stringify(c.issuer));
+                });
+                console.log('\n[DUMP_CA] ========= СКОПИРУЙ ВСЁ ЭТО В ПЕРЕМЕННУЮ DB_CA_CERT =========');
+                console.log(pemChain);
                 console.log('[DUMP_CA] ===================== КОНЕЦ =====================\n');
                 tlsSocket.destroy();
                 resolve();
