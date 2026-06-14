@@ -1,3 +1,24 @@
+// ========== CSRF ЗАЩИТА ==========
+// Читаем токен из cookie csrf_token (устанавливается сервером, httpOnly: false)
+function getCsrfToken() {
+    return document.cookie
+        .split('; ')
+        .find(row => row.startsWith('csrf_token='))
+        ?.split('=')[1] || '';
+}
+
+// Обёртка над fetch: автоматически добавляет X-CSRF-Token для мутирующих методов
+async function csrfFetch(url, options = {}) {
+    const method = (options.method || 'GET').toUpperCase();
+    const mutating = ['POST', 'PUT', 'DELETE', 'PATCH'];
+    if (mutating.includes(method)) {
+        options.headers = options.headers || {};
+        // FormData: не перезаписываем Content-Type (браузер ставит его сам с boundary)
+        options.headers['X-CSRF-Token'] = getCsrfToken();
+    }
+    return fetch(url, options);
+}
+
 // State
 let currentChatId = null;
 let currentUser = null;
@@ -72,7 +93,7 @@ async function init() {
 // Check authentication
 async function checkAuth() {
     try {
-        const response = await fetch('/api/auth');
+        const response = await csrfFetch('/api/auth');
         const data = await response.json();
         
         if (data.authenticated) {
@@ -112,7 +133,7 @@ function showApp() {
 async function loadChats() {
     const requestId = ++chatsRequestId;
     try {
-        const response = await fetch('/api/chats');
+        const response = await csrfFetch('/api/chats');
         const data = await response.json();
         if (requestId !== chatsRequestId) return;
         
@@ -268,7 +289,7 @@ async function loadMessages(chatId) {
     if (!chatId) return;
     const requestId = ++messagesRequestId;
     try {
-        const response = await fetch(`/api/messages/${chatId}`);
+        const response = await csrfFetch(`/api/messages/${chatId}`);
         const data = await response.json();
         if (requestId !== messagesRequestId || chatId !== currentChatId) return;
         
@@ -514,7 +535,7 @@ async function saveUserAvatarColor() {
     const avatarColor = normalizeAvatarColor(avatarColorInput.value);
 
     try {
-        const response = await fetch('/api/user/avatar-color', {
+        const response = await csrfFetch('/api/user/avatar-color', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ avatarColor })
@@ -552,7 +573,7 @@ async function deleteChat(chatId, chatName) {
     if (!confirm(`Удалить чат «${chatName}»? Это действие нельзя отменить.`)) return;
 
     try {
-        const response = await fetch(`/api/chats/${chatId}`, { method: 'DELETE' });
+        const response = await csrfFetch(`/api/chats/${chatId}`, { method: 'DELETE' });
         const data = await response.json();
 
         if (data.success) {
@@ -582,7 +603,7 @@ async function sendMessage() {
     if (!text || !currentChatId) return;
     
     try {
-        const response = await fetch('/api/messages', {
+        const response = await csrfFetch('/api/messages', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ chatId: currentChatId, text, replyToId: replyToMessage ? replyToMessage.id : null })
@@ -612,7 +633,7 @@ async function uploadFileMessage(file) {
         formData.append('chatId', currentChatId);
         formData.append('file', file);
 
-        const response = await fetch('/api/messages/file', {
+        const response = await csrfFetch('/api/messages/file', {
             method: 'POST',
             body: formData
         });
@@ -639,7 +660,7 @@ async function uploadAudioMessage(blob) {
         formData.append('chatId', currentChatId);
         formData.append('file', audioFile);
 
-        const response = await fetch('/api/messages/file', {
+        const response = await csrfFetch('/api/messages/file', {
             method: 'POST',
             body: formData
         });
@@ -713,7 +734,7 @@ async function createNewChat() {
     showNewChatModal(async (name) => {
         if (!name) return;
         try {
-            const response = await fetch('/api/chats', {
+            const response = await csrfFetch('/api/chats', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ name })
@@ -736,7 +757,7 @@ async function fetchInviteCodeForChat(chatId) {
     if (!chatId) return null;
 
     try {
-        const response = await fetch(`/api/chats/invite/${chatId}`);
+        const response = await csrfFetch(`/api/chats/invite/${chatId}`);
         const data = await response.json();
 
         if (data.success) {
@@ -786,7 +807,7 @@ async function getInviteCode() {
 
 async function sendCodeMessage(chatId, code) {
     try {
-        const response = await fetch('/api/messages', {
+        const response = await csrfFetch('/api/messages', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ chatId, text: `Код: ${code}` })
@@ -809,7 +830,7 @@ async function sendCodeMessage(chatId, code) {
 
 async function createChatWithCode(name) {
     try {
-        const response = await fetch('/api/chats', {
+        const response = await csrfFetch('/api/chats', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name })
@@ -843,7 +864,7 @@ async function joinChatByCode() {
     }
 
     try {
-        const response = await fetch('/api/chats/join', {
+        const response = await csrfFetch('/api/chats/join', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ code })
@@ -883,7 +904,7 @@ function setupEventListeners() {
 if (logoutSidebarBtn) {
     logoutSidebarBtn.addEventListener('click', async () => {
         try {
-            await fetch('/api/logout', { method: 'POST' });
+            await csrfFetch('/api/logout', { method: 'POST' });
             stopMessagePolling();
             currentUser = null;
             currentChatId = null;
@@ -921,7 +942,7 @@ if (logoutSidebarBtn) {
         const password = document.getElementById('loginPassword').value;
         
         try {
-            const response = await fetch('/api/login', {
+            const response = await csrfFetch('/api/login', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email, password })
@@ -951,7 +972,7 @@ if (logoutSidebarBtn) {
         const confirmPassword = document.getElementById('regConfirmPassword').value;
         
         try {
-            const response = await fetch('/api/register', {
+            const response = await csrfFetch('/api/register', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ username, email, password, confirmPassword })
@@ -973,7 +994,7 @@ if (logoutSidebarBtn) {
     // Logout
     logoutBtn.addEventListener('click', async () => {
         try {
-            await fetch('/api/logout', { method: 'POST' });
+            await csrfFetch('/api/logout', { method: 'POST' });
             stopMessagePolling();
             currentUser = null;
             currentChatId = null;
@@ -1197,19 +1218,15 @@ const changePasswordBtn = document.getElementById('changePasswordBtn');
 if (profileBtn) profileBtn.addEventListener('click', showUserProfile);
 if (changePasswordBtn) changePasswordBtn.addEventListener('click', changePassword);
 
-// Save settings
+// Save settings (только UI-настройки, не данные пользователя)
 function saveSettings() {
     const settings = {
         theme: themeSelect.value,
-        username: usernameInput.value,
         notifications: notificationsToggle.checked,
         avatarColor: avatarColorInput ? normalizeAvatarColor(avatarColorInput.value) : '#667EEA'
     };
     localStorage.setItem('messengerSettings', JSON.stringify(settings));
-    if (currentUser) {
-        currentUser.username = usernameInput.value;
-        displayUsername.textContent = currentUser.username;
-    }
+    // username НЕ сохраняем в localStorage — источник истины только /api/auth
 }function applyTheme(theme) {
     document.body.classList.remove(
         'theme-night', 'theme-warm', 'theme-forest', 'theme-mono'
@@ -1236,20 +1253,16 @@ function loadSettings() {
     
     if (settings) {
         themeSelect.value = settings.theme || 'light';
-        usernameInput.value = settings.username || 'Пользователь';
+        // username НЕ берём из localStorage — он приходит из /api/auth
         notificationsToggle.checked = settings.notifications !== false;
         if (avatarColorInput && settings.avatarColor) {
             avatarColorInput.value = normalizeAvatarColor(settings.avatarColor);
         }
         
         if (settings.theme) {
-    applyTheme(settings.theme);
-}
-
-        if (settings.username && currentUser) {
-            currentUser.username = settings.username;
-            displayUsername.textContent = settings.username;
+            applyTheme(settings.theme);
         }
+        // currentUser.username и displayUsername устанавливаются только из /api/auth
     }
     syncAvatarColorControls();
 }
@@ -1289,8 +1302,23 @@ function highlightText(text, query) {
     if (!query) return safeText;
     const safeQuery = escapeRegExp(query.trim());
     if (!safeQuery) return safeText;
+    // Используем DOM API вместо innerHTML для безопасного выделения
+    const container = document.createElement('span');
     const regex = new RegExp(`(${safeQuery})`, 'gi');
-    return safeText.replace(regex, '<span class="message-highlight">$1</span>');
+    const parts = (text || '').split(regex);
+    parts.forEach(part => {
+        if (regex.test(part)) {
+            regex.lastIndex = 0; // сбрасываем после test()
+            const span = document.createElement('span');
+            span.className = 'message-highlight';
+            span.textContent = part;
+            container.appendChild(span);
+        } else {
+            regex.lastIndex = 0;
+            container.appendChild(document.createTextNode(part));
+        }
+    });
+    return container.innerHTML;
 }
 
 
@@ -1368,7 +1396,7 @@ async function editMessage(messageId, text) {
     }
 
     try {
-        const response = await fetch(`/api/messages/${messageId}`, {
+        const response = await csrfFetch(`/api/messages/${messageId}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text })
@@ -1391,7 +1419,7 @@ async function deleteMessage(messageId) {
     if (!confirm('Удалить это сообщение?')) return;
 
     try {
-        const response = await fetch(`/api/messages/${messageId}`, {
+        const response = await csrfFetch(`/api/messages/${messageId}`, {
             method: 'DELETE'
         });
 
@@ -1410,7 +1438,7 @@ async function deleteMessage(messageId) {
 // Add reaction
 async function addReaction(messageId, emoji) {
     try {
-        await fetch('/api/reactions', {
+        await csrfFetch('/api/reactions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ messageId, emoji })
@@ -1425,7 +1453,7 @@ async function addReaction(messageId, emoji) {
 // Remove reaction
 async function removeReaction(messageId, emoji) {
     try {
-        await fetch(`/api/reactions/${messageId}/${emoji}`, {
+        await csrfFetch(`/api/reactions/${messageId}/${emoji}`, {
             method: 'DELETE'
         });
         scheduleCurrentChatReload();
@@ -1443,7 +1471,7 @@ async function searchMessages(query) {
     }
 
     try {
-        const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+        const response = await csrfFetch(`/api/search?q=${encodeURIComponent(query)}`);
         const data = await response.json();
 
         if (data.success && data.results) {
@@ -1703,7 +1731,7 @@ async function changePassword() {
             return;
         }
 
-        const response = await fetch('/api/change-password', {
+        const response = await csrfFetch('/api/change-password', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ currentPassword, newPassword, confirmPassword })
@@ -1729,7 +1757,7 @@ if (data.success) {
 // Show user profile modal
 async function showUserProfile() {
     try {
-        const response = await fetch('/api/user');
+        const response = await csrfFetch('/api/user');
         const data = await response.json();
 
         if (data.success) {
@@ -1801,64 +1829,6 @@ document.addEventListener('paste', (e) => {
     e.preventDefault();
     return false;
 });
-
-// Disable developer tools shortcuts
-document.addEventListener('keydown', (e) => {
-    // Disable F12
-    if (e.key === 'F12') {
-        e.preventDefault();
-        return false;
-    }
-    // Disable Ctrl+Shift+I
-    if (e.ctrlKey && e.shiftKey && e.key === 'I') {
-        e.preventDefault();
-        return false;
-    }
-    // Disable Ctrl+Shift+J
-    if (e.ctrlKey && e.shiftKey && e.key === 'J') {
-        e.preventDefault();
-        return false;
-    }
-    // Disable Ctrl+Shift+C
-    if (e.ctrlKey && e.shiftKey && e.key === 'C') {
-        e.preventDefault();
-        return false;
-    }
-});
-
-// Disable CSS styling that allows text selection
-const style = document.createElement('style');
-style.textContent = `
-    * {
-        user-select: none;
-        -webkit-user-select: none;
-        -moz-user-select: none;
-        -ms-user-select: none;
-        -webkit-user-drag: none;
-        -webkit-touch-callout: none;
-    }
-    input, textarea {
-        user-select: text;
-        -webkit-user-select: text;
-    }
-`;
-document.head.appendChild(style);
-
-// Detect if developer tools are open
-//setInterval(() => {
-    //const devtools = { open: false, orientation: null };
-    //const threshold = 160;
-    
-    //devtools.open = window.outerHeight - window.innerHeight > threshold || window.outerWidth - window.innerWidth > threshold;
-    
-   // if (devtools.open) {
-        // Alert user that dev tools are detected
-//console.clear();
-   //     console.log('%cWARNING!', 'color: red; font-size: 20px; font-weight: bold;');
-    //    console.log('%cOpening developer tools is not allowed on this site!', 'color: red; font-size: 14px;');
-   // }
-//}, 200);
-
 
 // ========== МОБИЛЬНАЯ НАВИГАЦИЯ ==========
 const backBtn = document.getElementById('backBtn');
