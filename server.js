@@ -16,6 +16,7 @@ const fs = require('fs');
 const { Server } = require('socket.io');
 const rateLimit = require('express-rate-limit');
 const pgSession = require('connect-pg-simple')(session);
+const cookieParser = require('cookie-parser');
 
 
 // Конфигурация загрузки файлов
@@ -25,6 +26,30 @@ const ALLOWED_MIME_TYPES = [
     'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/webm',
     'application/pdf', 'text/plain',
 ];
+
+// Запрещённые расширения (независимо от MIME-типа)
+const BLOCKED_EXTENSIONS = new Set(['.html', '.htm', '.php', '.exe', '.js', '.sh', '.py', '.rb', '.pl', '.bat', '.cmd', '.ps1', '.vbs', '.jar', '.msi']);
+
+// Magic bytes для проверки реального типа содержимого
+function checkMagicBytes(buffer, mimetype) {
+    if (!buffer || buffer.length < 4) return false;
+    const b = buffer;
+    if (mimetype === 'image/jpeg') return b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF;
+    if (mimetype === 'image/png')  return b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47;
+    if (mimetype === 'image/gif')  return b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46;
+    if (mimetype === 'image/webp') return b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46;
+    if (mimetype === 'application/pdf') return b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46;
+    if (mimetype === 'video/mp4')  return (b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) || (b[0] === 0x00 && b[1] === 0x00);
+    if (mimetype === 'audio/mpeg') return (b[0] === 0xFF && (b[1] & 0xE0) === 0xE0) || (b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33);
+    if (mimetype === 'audio/ogg' || mimetype === 'video/webm' || mimetype === 'audio/webm') {
+        return (b[0] === 0x4F && b[1] === 0x67 && b[2] === 0x67) || (b[0] === 0x1A && b[1] === 0x45 && b[2] === 0xDF && b[3] === 0xA3);
+    }
+    if (mimetype === 'audio/wav') return b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46;
+    if (mimetype === 'text/plain') return true; // текст не имеет фиксированной сигнатуры
+    if (mimetype === 'video/quicktime') return b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70;
+    return true; // если тип не в списке проверки — разрешаем (уже отфильтровано по MIME)
+}
+
 const upload = multer({
     storage: multer.diskStorage({
         destination: (req, file, cb) => {
@@ -40,11 +65,16 @@ const upload = multer({
     }),
     limits: { fileSize: 50 * 1024 * 1024 },
     fileFilter: (req, file, cb) => {
-        if (ALLOWED_MIME_TYPES.includes(file.mimetype)) {
-            cb(null, true);
-        } else {
-            cb(new Error('Неподдерживаемый тип файла'), false);
+        // 1. Проверяем расширение
+        const ext = path.extname(file.originalname).toLowerCase();
+        if (BLOCKED_EXTENSIONS.has(ext)) {
+            return cb(new Error('Неподдерживаемый тип файла'), false);
         }
+        // 2. Проверяем MIME-тип из заголовка (первичная фильтрация)
+        if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+            return cb(new Error('Неподдерживаемый тип файла'), false);
+        }
+        cb(null, true);
     }
 });
 
@@ -74,6 +104,13 @@ const io = new Server(server);
 // Максимум 5 одновременных WebSocket-соединений с одного IP
 const ipConnectionCount = new Map();
 
+// Очищаем записи с нулевым счётчиком каждые 10 минут, чтобы не копился мусор
+setInterval(() => {
+    for (const [ip, count] of ipConnectionCount.entries()) {
+        if (count <= 0) ipConnectionCount.delete(ip);
+    }
+}, 10 * 60 * 1000);
+
 io.use((socket, next) => {
     const ip = socket.handshake.address;
     const count = ipConnectionCount.get(ip) || 0;
@@ -99,9 +136,19 @@ const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
  
 // 3. ПОДКЛЮЧЕНИЕ К POSTGRESQL
+const sslConfig = (() => {
+    if (process.env.NODE_ENV !== 'production') return false;
+    // В production: проверяем сертификат. Если задан CA — используем его.
+    // Иначе — доверяем системным CA (Railway, Supabase используют публично доверенные CA).
+    if (process.env.DB_CA_CERT) {
+        return { rejectUnauthorized: true, ca: process.env.DB_CA_CERT };
+    }
+    return { rejectUnauthorized: true };
+})();
+
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+    ssl: sslConfig,
 });
  
 // Вспомогательная функция — аналог db.get (одна строка)
@@ -307,35 +354,78 @@ io.use((socket, next) => {
 
 
 io.on('connection', (socket) => {
-    console.log('Пользователь подключился через WebSocket:', socket.handshake.auth?.userId ?? 'неизвестен');
-    socket.on('joinChat', (roomKey) => {
-        if (typeof roomKey === 'string' && roomKey.length > 0) {
+    const userId = socket.request.session?.userId;
+    if (!userId) {
+        socket.disconnect(true);
+        return;
+    }
+    console.log('Пользователь подключился через WebSocket, userId:', userId);
+
+    socket.on('joinChat', async (roomKey) => {
+        if (typeof roomKey !== 'string' || roomKey.length === 0) return;
+
+        try {
+            // Проверяем принадлежность комнаты/чата текущему пользователю
+            if (roomKey.startsWith('room:')) {
+                const roomId = parseInt(roomKey.slice(5), 10);
+                if (!Number.isFinite(roomId)) return;
+                const participant = await dbGet(
+                    'SELECT id FROM room_participants WHERE room_id = $1 AND user_id = $2',
+                    [roomId, userId]
+                );
+                if (!participant) return; // Пользователь не участник этой комнаты
+            } else if (roomKey.startsWith('chat:')) {
+                const chatId = parseInt(roomKey.slice(5), 10);
+                if (!Number.isFinite(chatId)) return;
+                const chat = await dbGet(
+                    'SELECT id FROM chats WHERE id = $1 AND user_id = $2',
+                    [chatId, userId]
+                );
+                if (!chat) return; // Чат не принадлежит пользователю
+            } else {
+                return; // Неизвестный формат ключа
+            }
             socket.join(roomKey);
+        } catch (err) {
+            console.error('joinChat error:', err);
         }
     });
+
     socket.on('disconnect', () => {
-        console.log('Пользователь отключился');
+        console.log('Пользователь отключился, userId:', userId);
     });
 });
  
 // 7. MIDDLEWARE
 app.use(express.json());
+app.use(cookieParser()); // Нужен для чтения req.cookies в CSRF middleware
 
  
-// Middleware проверки CORS/Referrer
+// CSRF-защита через double-submit cookie pattern
+// Клиент должен отправлять заголовок X-CSRF-Token со значением cookie csrf_token
 app.use((req, res, next) => {
-    const mutating = ['POST', 'PUT', 'DELETE', 'PATCH'];
-    if (!mutating.includes(req.method)) return next();
+    const safeMethods = ['GET', 'HEAD', 'OPTIONS'];
+    if (safeMethods.includes(req.method)) return next();
     if (req.path.startsWith('/socket.io')) return next();
-    const origin = req.headers['origin'];
-    const referer = req.headers['referer'];
-    const host = req.headers['host'];
-    if (!origin && !referer) return next();
-    const allowed = `http://${host}`;
-    const allowedHttps = `https://${host}`;
-    const ok = (origin && (origin === allowed || origin === allowedHttps)) ||
-               (referer && (referer.startsWith(allowed) || referer.startsWith(allowedHttps)));
-    if (!ok) return res.status(403).json({ success: false, message: 'Запрещено: неверный источник запроса' });
+
+    // Генерируем и выставляем CSRF-cookie если его нет
+    if (!req.cookies['csrf_token']) {
+        const csrfToken = crypto.randomBytes(32).toString('hex');
+        res.cookie('csrf_token', csrfToken, {
+            httpOnly: false, // должен быть доступен JS для отправки в заголовке
+            sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+            secure: process.env.NODE_ENV === 'production',
+            maxAge: 24 * 60 * 60 * 1000
+        });
+        return next(); // первый запрос пропускаем, cookie только что установлено
+    }
+
+    const cookieToken = req.cookies['csrf_token'];
+    const headerToken = req.headers['x-csrf-token'];
+
+    if (!cookieToken || !headerToken || cookieToken !== headerToken) {
+        return res.status(403).json({ success: false, message: 'Запрещено: неверный CSRF-токен' });
+    }
     next();
 });
  
@@ -395,7 +485,7 @@ app.get('/uploads/:filename', async (req, res) => {
 
 
 app.get('/link.my', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+    serveIndexWithNonce(req, res);
 });
  
 // 8. API МАРШРУТЫ
@@ -408,6 +498,9 @@ const generalLimiter = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
 });
+
+// Применяем лимитер глобально ко всем /api/ маршрутам
+app.use('/api/', generalLimiter);
 
 app.post('/api/register', generalLimiter, async (req, res) => {
     const { username, email, password, confirmPassword } = req.body;
@@ -428,10 +521,10 @@ app.post('/api/register', generalLimiter, async (req, res) => {
  
     try {
         const existing = await dbGet('SELECT id FROM users WHERE email = $1 OR username = $2', [email, username]);
-        if (existing) return res.json({ success: false, message: 'Пользователь с таким email или именем уже существует' });
+        if (existing) return res.json({ success: false, message: 'Ошибка регистрации. Проверьте введённые данные.' });
  
         const uniqueCode = await generateUniqueCodeAsync();
-        const hashedPassword = await bcrypt.hash(password, 10);
+        const hashedPassword = await bcrypt.hash(password, 12);
  
         const userResult = await pool.query(
             'INSERT INTO users (unique_code, username, email, password, avatar) VALUES ($1, $2, $3, $4, $5) RETURNING id',
@@ -502,8 +595,13 @@ app.post('/api/login', loginLimiter, async (req, res) => {
  
 // Logout
 app.post('/api/logout', (req, res) => {
-    req.session.destroy();
-    res.json({ success: true });
+    req.session.destroy((err) => {
+        res.clearCookie('connect.sid');
+        if (err) {
+            console.error('Logout session destroy error:', err);
+        }
+        res.json({ success: true });
+    });
 });
  
 // Check auth
@@ -776,15 +874,20 @@ app.delete('/api/chats/:chatId', async (req, res) => {
         if (!chat) return res.json({ success: false, message: 'Чат не найден' });
  
         if (chat.room_id) {
-            await dbRun('DELETE FROM messages WHERE room_id = $1', [chat.room_id]);
+            // Удаляем запись участника
+            await dbRun('DELETE FROM room_participants WHERE room_id = $1 AND user_id = $2', [chat.room_id, req.session.userId]);
+            // Проверяем, остались ли ещё участники в комнате
+            const remaining = await dbGet('SELECT COUNT(*) as cnt FROM room_participants WHERE room_id = $1', [chat.room_id]);
+            if (!remaining || Number(remaining.cnt) === 0) {
+                // Последний участник вышел — удаляем сообщения и комнату
+                await dbRun('DELETE FROM messages WHERE room_id = $1', [chat.room_id]);
+                await dbRun('DELETE FROM rooms WHERE id = $1', [chat.room_id]);
+            }
         } else {
             await dbRun('DELETE FROM messages WHERE chat_id = $1', [chatId]);
         }
         await dbRun('DELETE FROM unread WHERE chat_id = $1', [chatId]);
         await dbRun('DELETE FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
-        if (chat.room_id) {
-            await dbRun('DELETE FROM room_participants WHERE room_id = $1 AND user_id = $2', [chat.room_id, req.session.userId]);
-        }
         res.json({ success: true });
     } catch (error) {
         console.error('Delete chat error:', error);
@@ -833,6 +936,21 @@ app.post('/api/messages/file', generalLimiter, upload.single('file'), async (req
     if (!file) return res.status(400).json({ success: false, message: 'Файл не выбран' });
     if (!chatId) return res.status(400).json({ success: false, message: 'Указан чат' });
 
+    // Проверяем magic bytes сохранённого файла
+    try {
+        const filePath = path.join(__dirname, 'uploads', file.filename);
+        const buffer = Buffer.alloc(8);
+        const fd = fs.openSync(filePath, 'r');
+        fs.readSync(fd, buffer, 0, 8, 0);
+        fs.closeSync(fd);
+        if (!checkMagicBytes(buffer, file.mimetype)) {
+            fs.unlinkSync(filePath); // удаляем подозрительный файл
+            return res.status(400).json({ success: false, message: 'Содержимое файла не соответствует его типу' });
+        }
+    } catch (magicErr) {
+        console.error('Magic bytes check error:', magicErr);
+    }
+
     try {
         const chat = await dbGet('SELECT * FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
         if (!chat) return res.status(404).json({ success: false, message: 'Чат не найден' });
@@ -842,23 +960,29 @@ app.post('/api/messages/file', generalLimiter, upload.single('file'), async (req
         const socketRoomKey = getSocketRoomKey(chatId, roomId);
         const fileUrl = `/uploads/${file.filename}`;
         const fileType = file.mimetype;
+        const sanitizedFileName = path.basename(file.originalname).slice(0, 200).replace(/[<>&"']/g, '');
 
         const messageType = fileType.startsWith('image/') ? 'image' : fileType.startsWith('video/') ? 'video' : fileType.startsWith('audio/') ? 'audio' : 'file';
         const messageText = text ? String(text).trim() : (messageType === 'audio' ? 'Голосовое сообщение' : file.originalname);
 
         const result = await pool.query(
             'INSERT INTO messages (chat_id, room_id, user_id, text, file_url, file_name, file_type, message_type, sent, time, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id',
-            [chatId, roomId, req.session.userId, messageText, fileUrl, file.originalname, fileType, messageType, 1, time, 'sent']
+            [chatId, roomId, req.session.userId, messageText, fileUrl, sanitizedFileName, fileType, messageType, 1, time, 'sent']
         );
         const messageId = result.rows[0].id;
+
+        // Берём username и avatar из БД, а не из сессии
+        const senderUser = await dbGet('SELECT username, avatar FROM users WHERE id = $1', [req.session.userId]);
+        const senderUsername = senderUser ? senderUser.username : '';
+        const senderAvatar = senderUser ? (senderUser.avatar || '') : '';
 
         setTimeout(() => dbRun('UPDATE messages SET status = $1 WHERE id = $2', ['delivered', messageId]), 1000);
         setTimeout(() => dbRun('UPDATE messages SET status = $1 WHERE id = $2', ['read', messageId]), 2000);
 
         const fileMessage = { 
             id: messageId, chat_id: Number(chatId), room_id: roomId, user_id: req.session.userId, 
-            sender_username: req.session.username, sender_avatar: req.session.avatar || '', 
-            text: messageText, file_url: fileUrl, file_name: file.originalname, 
+            sender_username: senderUsername, sender_avatar: senderAvatar, 
+            text: messageText, file_url: fileUrl, file_name: sanitizedFileName, 
             file_type: fileType, message_type: messageType, sent: true, time, status: 'sent' 
         };
         io.to(socketRoomKey).emit('newMessage', fileMessage);
@@ -922,9 +1046,16 @@ app.post('/api/change-password', generalLimiter, async (req, res) => {
         if (!user) return res.json({ success: false, message: 'Пользователь не найден' });
         const validPassword = await bcrypt.compare(currentPassword, user.password);
         if (!validPassword) return res.json({ success: false, message: 'Неверный текущий пароль' });
-        const hashedPassword = await bcrypt.hash(newPassword, 10);
-        await dbRun('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, req.session.userId]);
-        req.session.destroy(() => {
+        const hashedPassword = await bcrypt.hash(newPassword, 12);
+        // Сначала уничтожаем сессию, потом обновляем пароль
+        req.session.destroy(async (err) => {
+            res.clearCookie('connect.sid');
+            if (err) console.error('Session destroy error on password change:', err);
+            try {
+                await dbRun('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, req.session.userId]);
+            } catch (dbErr) {
+                console.error('Password update error:', dbErr);
+            }
             res.json({ success: true, message: 'Пароль успешно изменён. Войдите заново.' });
         });
     } catch (error) {
@@ -944,11 +1075,29 @@ app.use((err, req, res, next) => {
     if (err.message === 'Неподдерживаемый тип файла') {
         return res.status(400).json({ success: false, message: 'Разрешены только фото, видео, аудио и PDF' });
     }
-    next(err);
+    // Глобальный обработчик — скрываем детали ошибки от клиента
+    console.error('Unhandled error:', err);
+    res.status(500).json({ success: false, message: 'Внутренняя ошибка сервера' });
 });
 
+// Вспомогательная функция: отдаёт index.html с подставленным CSP-nonce
+function serveIndexWithNonce(req, res) {
+    const nonce = res.locals.cspNonce || '';
+    const indexPath = path.join(__dirname, 'public', 'index.html');
+    fs.readFile(indexPath, 'utf8', (err, html) => {
+        if (err) return res.status(500).send('Server error');
+        // Вставляем nonce во все теги <script> и <link rel="stylesheet"> / <style>
+        const injected = html
+            .replace(/<script(?![^>]*\bnonce=)/g, `<script nonce="${nonce}"`)
+            .replace(/<style(?![^>]*\bnonce=)/g, `<style nonce="${nonce}"`)
+            .replace(/<link([^>]*rel=["']stylesheet["'][^>]*)(?![^>]*\bnonce=)>/g, `<link$1 nonce="${nonce}">`);
+        res.setHeader('Content-Type', 'text/html');
+        res.send(injected);
+    });
+}
+
 app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+    serveIndexWithNonce(req, res);
 });
  
 server.listen(PORT, HOST, () => {
