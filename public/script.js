@@ -30,7 +30,8 @@ let isRecordingAudio = false;
 let messagePollInterval = null;
 let isPollingMessages = false;
 let replyToMessage = null; // Track reply mode
-const MESSAGE_POLL_INTERVAL = 3000;
+
+const MESSAGE_POLL_INTERVAL = 15000;
 const RELOAD_DEBOUNCE_MS = 180;
 const socket = io();
 let chatsReloadTimer = null;

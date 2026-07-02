@@ -558,8 +558,50 @@ const generalLimiter = rateLimit({
     legacyHeaders: false,
 });
 
-// Применяем лимитер глобально ко всем /api/ маршрутам
-app.use('/api/', generalLimiter);
+// Отдельный, более щедрый лимитер для "тяжёлых по частоте" операций чтения
+// (поллинг сообщений раз в 3 сек + рефетч по каждому событию сокета).
+// Ключуем по userId, а не по IP: иначе все пользователи за одним NAT/прокси
+// делят один и тот же лимит и легитимный трафик начинает 429-иться.
+const readLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1 минута
+    max: 120,            // с запасом на поллинг (3с) + сокет-рефетчи
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req, res) => (req.session && req.session.userId) ? `u:${req.session.userId}` : req.ip,
+    message: { success: false, message: 'Слишком много запросов. Подождите.' },
+});
+
+// ВАЖНО: старый generalLimiter (20 запросов/5 мин) больше НЕ вешается
+// на все /api/ одним махом — при поллинге сообщений раз в 3 сек он
+// выжирался за первую же минуту и легитимные запросы начинали 429-иться.
+// Вместо этого: точечный generalLimiter — на чувствительные маршруты
+// (register, message/file, search, change-password), readLimiter — на
+// частые GET (messages/chats), и общий "предохранитель" ниже — на всё
+// остальное, с запасом по лимиту и ключом по userId, а не по IP, чтобы
+// пользователи за одним NAT/прокси не делили один лимит на всех.
+const safetyNetLimiter = rateLimit({
+    windowMs: 5 * 60 * 1000,
+    max: 300,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req, res) => (req.session && req.session.userId) ? `u:${req.session.userId}` : req.ip,
+    message: { success: false, message: 'Слишком много запросов. Подождите.' },
+});
+// "Предохранитель" по userId (см. выше) ловит абьюз залогиненных пользователей.
+// А вот это — отдельный лимитер именно под DDoS/скрипт-атаки (curl, PowerShell,
+// Invoke-WebRequest в цикле и т.п.): они шлют запросы БЕЗ пауз, пачками,
+// в отличие от браузера, который у нас опрашивает раз в 3-15 сек.
+// Короткое окно + не слишком большой max ловит именно всплеск скорости,
+// не трогая обычный, размеренный трафик приложения.
+// Ключуем строго по IP (а не по userId) — атака может идти вообще без сессии.
+const burstLimiter = rateLimit({
+    windowMs: 10 * 1000, // 10 секунд
+    max: 40,             // человек/браузер физически не выжмет столько за 10с
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, message: 'Слишком много запросов подряд.' },
+});
+app.use('/api/', burstLimiter);
 
 app.post('/api/register', generalLimiter, async (req, res) => {
     const { username, email, password, confirmPassword } = req.body;
@@ -702,7 +744,7 @@ app.post('/api/user/avatar-color', async (req, res) => {
 });
  
 // Get chats
-app.get('/api/chats', async (req, res) => {
+app.get('/api/chats', readLimiter, async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     try {
         const chats = await dbAll(`
@@ -723,7 +765,7 @@ app.get('/api/chats', async (req, res) => {
 });
  
 // Get messages
-app.get('/api/messages/:chatId', async (req, res) => {
+app.get('/api/messages/:chatId', readLimiter, async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const chatId = req.params.chatId;
     try {
