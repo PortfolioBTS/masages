@@ -517,7 +517,12 @@ app.use((req, res, next) => {
     res.locals.cspNonce = nonce;
 
     // Обновленная политика безопасности: убраны unsafe-inline там где можно, добавлен nonce
-    res.set('Content-Security-Policy', `default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'nonce-${nonce}'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ws: wss:; media-src 'self' blob:; frame-ancestors 'none'`);
+    // style-src: 'unsafe-inline' нужен, потому что script.js генерирует HTML с
+    // динамическими inline style="..." (цвет аватарки/пузырька сообщения — свой
+    // для каждого юзера/сообщения, поэтому nonce/hash сюда не подходят: они
+    // считаются от точного статичного содержимого). script-src при этом
+    // остаётся строгим (только 'self' + nonce) — это где XSS реально опасен.
+    res.set('Content-Security-Policy', `default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ws: wss:; media-src 'self' blob:; frame-ancestors 'none'`);
     
     res.set('X-Frame-Options', 'DENY');
     res.set('X-Content-Type-Options', 'nosniff');
