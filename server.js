@@ -81,6 +81,23 @@ const upload = multer({
 // 2. ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЙ
 const app = express();
 app.set('trust proxy', 1);
+
+// Если сайт стоит за Cloudflare (Security → Proxied/оранжевое облачко),
+// Cloudflare добавляет ещё один хоп перед хостинг-платформой, из-за чего
+// req.ip может показывать IP хостинга, а не реального клиента.
+// CF-Connecting-IP — это заголовок, который выставляет сам Cloudflare
+// (клиент не может его подделать, Cloudflare перезаписывает его на границе
+// своей сети), поэтому это самый надёжный источник настоящего IP.
+app.use((req, res, next) => {
+    const cfIp = req.headers['cf-connecting-ip'];
+    if (cfIp) {
+        req.realIp = cfIp;
+    } else {
+        req.realIp = req.ip;
+    }
+    next();
+});
+
  
 let server;
 if (process.env.NODE_ENV === 'production') {
@@ -567,7 +584,7 @@ const readLimiter = rateLimit({
     max: 120,            // с запасом на поллинг (3с) + сокет-рефетчи
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req, res) => (req.session && req.session.userId) ? `u:${req.session.userId}` : req.ip,
+    keyGenerator: (req, res) => (req.session && req.session.userId) ? `u:${req.session.userId}` : (req.realIp || req.ip),
     message: { success: false, message: 'Слишком много запросов. Подождите.' },
 });
 
@@ -584,7 +601,7 @@ const safetyNetLimiter = rateLimit({
     max: 300,
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req, res) => (req.session && req.session.userId) ? `u:${req.session.userId}` : req.ip,
+    keyGenerator: (req, res) => (req.session && req.session.userId) ? `u:${req.session.userId}` : (req.realIp || req.ip),
     message: { success: false, message: 'Слишком много запросов. Подождите.' },
 });
 // "Предохранитель" по userId (см. выше) ловит абьюз залогиненных пользователей.
@@ -599,6 +616,7 @@ const burstLimiter = rateLimit({
     max: 40,             // человек/браузер физически не выжмет столько за 10с
     standardHeaders: true,
     legacyHeaders: false,
+    keyGenerator: (req, res) => req.realIp || req.ip,
     message: { success: false, message: 'Слишком много запросов подряд.' },
 });
 app.use('/api/', burstLimiter);
