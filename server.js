@@ -14,7 +14,7 @@ const http = require('http');
 const https = require('https'); // Изменено: явный импорт https
 const fs = require('fs');
 const { Server } = require('socket.io');
-const rateLimit = require('express-rate-limit');
+const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const pgSession = require('connect-pg-simple')(session);
 const cookieParser = require('cookie-parser');
 
@@ -584,7 +584,7 @@ const readLimiter = rateLimit({
     max: 120,            // с запасом на поллинг (3с) + сокет-рефетчи
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req, res) => (req.session && req.session.userId) ? `u:${req.session.userId}` : (req.realIp || req.ip),
+    keyGenerator: (req, res) => (req.session && req.session.userId) ? `u:${req.session.userId}` : ipKeyGenerator(req.realIp || req.ip),
     message: { success: false, message: 'Слишком много запросов. Подождите.' },
 });
 
@@ -601,7 +601,7 @@ const safetyNetLimiter = rateLimit({
     max: 300,
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req, res) => (req.session && req.session.userId) ? `u:${req.session.userId}` : (req.realIp || req.ip),
+    keyGenerator: (req, res) => (req.session && req.session.userId) ? `u:${req.session.userId}` : ipKeyGenerator(req.realIp || req.ip),
     message: { success: false, message: 'Слишком много запросов. Подождите.' },
 });
 // "Предохранитель" по userId (см. выше) ловит абьюз залогиненных пользователей.
@@ -616,7 +616,7 @@ const burstLimiter = rateLimit({
     max: 40,             // человек/браузер физически не выжмет столько за 10с
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req, res) => req.realIp || req.ip,
+    keyGenerator: (req, res) => ipKeyGenerator(req.realIp || req.ip),
     message: { success: false, message: 'Слишком много запросов подряд.' },
 });
 app.use('/api/', burstLimiter);
