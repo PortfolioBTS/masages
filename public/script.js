@@ -30,7 +30,10 @@ let isRecordingAudio = false;
 let messagePollInterval = null;
 let isPollingMessages = false;
 let replyToMessage = null; // Track reply mode
-
+// Раз новые сообщения и так приходят через Socket.IO (см. socket.on('newMessage')),
+// частый поллинг раз в 3с был избыточен и вместе с сокет-рефетчем быстро выжирал
+// общий rate-limit на /api/. Оставляем поллинг реже — как подстраховку на случай
+// обрыва сокета, а не как основной канал доставки.
 const MESSAGE_POLL_INTERVAL = 15000;
 const RELOAD_DEBOUNCE_MS = 180;
 const socket = io();
