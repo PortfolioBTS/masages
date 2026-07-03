@@ -14,7 +14,6 @@ const http = require('http');
 const https = require('https'); // Изменено: явный импорт https
 const fs = require('fs');
 const { Server } = require('socket.io');
-const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const pgSession = require('connect-pg-simple')(session);
 const cookieParser = require('cookie-parser');
 
@@ -565,63 +564,8 @@ app.get('/link.my', (req, res) => {
 });
  
 // 8. API МАРШРУТЫ
- 
-// Register (ИСПРАВЛЕНО: Добавлен Rate Limiting)
-const generalLimiter = rateLimit({
-    windowMs: 5 * 60 * 1000, // 5 минут
-    max: 20,
-    message: { success: false, message: 'Слишком много запросов. Подождите.' },
-    standardHeaders: true,
-    legacyHeaders: false,
-});
 
-// Отдельный, более щедрый лимитер для "тяжёлых по частоте" операций чтения
-// (поллинг сообщений раз в 3 сек + рефетч по каждому событию сокета).
-// Ключуем по userId, а не по IP: иначе все пользователи за одним NAT/прокси
-// делят один и тот же лимит и легитимный трафик начинает 429-иться.
-const readLimiter = rateLimit({
-    windowMs: 60 * 1000, // 1 минута
-    max: 120,            // с запасом на поллинг (3с) + сокет-рефетчи
-    standardHeaders: true,
-    legacyHeaders: false,
-    keyGenerator: (req, res) => (req.session && req.session.userId) ? `u:${req.session.userId}` : ipKeyGenerator(req.realIp || req.ip),
-    message: { success: false, message: 'Слишком много запросов. Подождите.' },
-});
-
-// ВАЖНО: старый generalLimiter (20 запросов/5 мин) больше НЕ вешается
-// на все /api/ одним махом — при поллинге сообщений раз в 3 сек он
-// выжирался за первую же минуту и легитимные запросы начинали 429-иться.
-// Вместо этого: точечный generalLimiter — на чувствительные маршруты
-// (register, message/file, search, change-password), readLimiter — на
-// частые GET (messages/chats), и общий "предохранитель" ниже — на всё
-// остальное, с запасом по лимиту и ключом по userId, а не по IP, чтобы
-// пользователи за одним NAT/прокси не делили один лимит на всех.
-const safetyNetLimiter = rateLimit({
-    windowMs: 5 * 60 * 1000,
-    max: 300,
-    standardHeaders: true,
-    legacyHeaders: false,
-    keyGenerator: (req, res) => (req.session && req.session.userId) ? `u:${req.session.userId}` : ipKeyGenerator(req.realIp || req.ip),
-    message: { success: false, message: 'Слишком много запросов. Подождите.' },
-});
-// "Предохранитель" по userId (см. выше) ловит абьюз залогиненных пользователей.
-// А вот это — отдельный лимитер именно под DDoS/скрипт-атаки (curl, PowerShell,
-// Invoke-WebRequest в цикле и т.п.): они шлют запросы БЕЗ пауз, пачками,
-// в отличие от браузера, который у нас опрашивает раз в 3-15 сек.
-// Короткое окно + не слишком большой max ловит именно всплеск скорости,
-// не трогая обычный, размеренный трафик приложения.
-// Ключуем строго по IP (а не по userId) — атака может идти вообще без сессии.
-const burstLimiter = rateLimit({
-    windowMs: 10 * 1000, // 10 секунд
-    max: 40,             // человек/браузер физически не выжмет столько за 10с
-    standardHeaders: true,
-    legacyHeaders: false,
-    keyGenerator: (req, res) => ipKeyGenerator(req.realIp || req.ip),
-    message: { success: false, message: 'Слишком много запросов подряд.' },
-});
-app.use('/api/', burstLimiter);
-
-app.post('/api/register', generalLimiter, async (req, res) => {
+app.post('/api/register', async (req, res) => {
     const { username, email, password, confirmPassword } = req.body;
     if (!username || !email || !password || !confirmPassword)
         return res.json({ success: false, message: 'Заполните все поля' });
@@ -674,16 +618,8 @@ app.post('/api/register', generalLimiter, async (req, res) => {
     }
 });
  
-const loginLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 10,
-    message: { success: false, message: 'Слишком много попыток. Подождите 15 минут.' },
-    standardHeaders: true,
-    legacyHeaders: false,
-});
- 
 // Login (ИСПРАВЛЕНО: Добавлена регенерация сессии)
-app.post('/api/login', loginLimiter, async (req, res) => {
+app.post('/api/login', async (req, res) => {
     const { email, password } = req.body;
     if (!email || !password) return res.json({ success: false, message: 'Введите email и пароль' });
     if (email.length > 254 || password.length > 128) return res.json({ success: false, message: 'Неверный email или пароль' });
@@ -762,7 +698,7 @@ app.post('/api/user/avatar-color', async (req, res) => {
 });
  
 // Get chats
-app.get('/api/chats', readLimiter, async (req, res) => {
+app.get('/api/chats', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     try {
         const chats = await dbAll(`
@@ -783,7 +719,7 @@ app.get('/api/chats', readLimiter, async (req, res) => {
 });
  
 // Get messages
-app.get('/api/messages/:chatId', readLimiter, async (req, res) => {
+app.get('/api/messages/:chatId', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const chatId = req.params.chatId;
     try {
@@ -1046,7 +982,7 @@ app.delete('/api/messages/:messageId', async (req, res) => {
     }
 });
 // Загрузка фото/видео/аудио
-app.post('/api/messages/file', generalLimiter, upload.single('file'), async (req, res) => {
+app.post('/api/messages/file', upload.single('file'), async (req, res) => {
     if (!req.session.userId) return res.status(401).json({ success: false, message: 'Не авторизован' });
     
     const { chatId, text } = req.body;
@@ -1129,7 +1065,7 @@ app.post('/api/reactions', async (req, res) => {
 });
  
 // Remove reaction
-app.get('/api/search', generalLimiter, async (req, res) => {
+app.get('/api/search', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const query = req.query.q || '';
     if (!query || query.length < 1) return res.json({ success: true, results: [] });
@@ -1153,7 +1089,7 @@ app.get('/api/search', generalLimiter, async (req, res) => {
 });
  
 // Change password (ИСПРАВЛЕНО: Добавлен Rate Limiting)
-app.post('/api/change-password', generalLimiter, async (req, res) => {
+app.post('/api/change-password', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { currentPassword, newPassword, confirmPassword } = req.body;
     if (!currentPassword || !newPassword || !confirmPassword) return res.json({ success: false, message: 'Заполните все поля' });
