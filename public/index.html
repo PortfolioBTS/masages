@@ -14,8 +14,16 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <!-- Auth Modal -->
+    <!-- Auth Screen (полноценная отдельная страница, не модалка) -->
     <div class="auth-modal" id="authModal">
+        <div class="auth-page-header">
+            <div class="auth-page-logo">
+                <span class="auth-page-logo-dot"></span> Nyxo
+            </div>
+            <span class="auth-page-header-note">Приватный мессенджер</span>
+        </div>
+
+        <div class="auth-page-main">
         <div class="auth-container">
             <div class="auth-brand">
     <div class="auth-brand-icon">
@@ -74,6 +82,11 @@
                 <p class="unique-code">Ваш уникальный код: <strong id="displayCode"></strong></p>
                 <button class="logout-btn" id="logoutBtn">Выйти</button>
             </div>
+        </div>
+        </div>
+
+        <div class="auth-page-footer">
+            Nyxo — сообщения без следа
         </div>
     </div>
 

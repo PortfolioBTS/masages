@@ -15,14 +15,85 @@
     height: 100%;
     background: #0A0B10;
     display: flex;
-    align-items: center;
-    justify-content: center;
+    flex-direction: column;
     z-index: 2000;
     font-family: 'Manrope', sans-serif;
+    overflow-y: auto;
+}
+
+.auth-modal::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background:
+        radial-gradient(ellipse 70% 50% at 15% 0%, rgba(110, 91, 214, 0.10), transparent 65%),
+        radial-gradient(ellipse 50% 40% at 90% 100%, rgba(184, 84, 122, 0.08), transparent 60%);
+    pointer-events: none;
+    z-index: 0;
 }
 
 .auth-modal.hidden {
     display: none;
+}
+
+.auth-page-header {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 20px 32px;
+    border-bottom: 1px solid #1A1B24;
+    flex-shrink: 0;
+}
+
+.auth-page-logo {
+    font-family: 'Unbounded', sans-serif;
+    font-size: 15px;
+    font-weight: 700;
+    color: #E7E4EF;
+    letter-spacing: 0.4px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.auth-page-logo-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #6E5BD6;
+    display: inline-block;
+}
+
+.auth-page-header-note {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: #6A6976;
+    letter-spacing: 0.3px;
+}
+
+.auth-page-main {
+    position: relative;
+    z-index: 1;
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 40px 20px;
+}
+
+.auth-page-footer {
+    position: relative;
+    z-index: 1;
+    text-align: center;
+    padding: 16px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: #4A4A55;
+    letter-spacing: 0.5px;
+    border-top: 1px solid #1A1B24;
+    flex-shrink: 0;
 }
 
 .auth-container {
@@ -33,6 +104,7 @@
     border: 1px solid #23242F;
     animation: authFadeIn 0.25s ease;
     overflow: hidden;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
 }
 
 @keyframes authFadeIn {
