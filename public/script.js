@@ -936,6 +936,37 @@ if (logoutSidebarBtn) {
             }
         });
     });
+
+    // Индикатор силы пароля (чисто фронтенд, ни на что не влияет на бэкенде)
+    const regPasswordInput = document.getElementById('regPassword');
+    const regStrengthFill = document.getElementById('regStrengthFill');
+    const regStrengthLabel = document.getElementById('regStrengthLabel');
+    if (regPasswordInput && regStrengthFill && regStrengthLabel) {
+        regPasswordInput.addEventListener('input', () => {
+            const val = regPasswordInput.value;
+            if (!val) {
+                regStrengthFill.style.width = '0%';
+                regStrengthLabel.textContent = '';
+                return;
+            }
+            let s = 0;
+            if (val.length >= 6) s++;
+            if (val.length >= 10) s++;
+            if (/[A-Z]/.test(val)) s++;
+            if (/[0-9]/.test(val)) s++;
+            if (/[^A-Za-z0-9]/.test(val)) s++;
+            const levels = [
+                { w: '14%', bg: '#B8547A', t: 'Очень слабый' },
+                { w: '30%', bg: '#C97B63', t: 'Слабый' },
+                { w: '54%', bg: '#C9A84C', t: 'Средний' },
+                { w: '76%', bg: '#6ED6B8', t: 'Хороший' },
+                { w: '100%', bg: '#6E5BD6', t: 'Отличный' },
+            ][Math.min(s, 4)];
+            regStrengthFill.style.width = levels.w;
+            regStrengthFill.style.background = levels.bg;
+            regStrengthLabel.textContent = levels.t;
+        });
+    }
     
     // Login form
     loginForm.addEventListener('submit', async (e) => {

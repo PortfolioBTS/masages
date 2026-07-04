@@ -4,18 +4,21 @@
     padding: 0;
     box-sizing: border-box;
 }
-/* Auth Modal Styles */
+/* ============================================================
+   Auth screen — "Signal in the dark" theme
+   ============================================================ */
 .auth-modal {
     position: fixed;
     top: 0;
     left: 0;
     width: 100%;
     height: 100%;
-    background: #f4f4f2;
+    background: #0A0B10;
     display: flex;
     align-items: center;
     justify-content: center;
     z-index: 2000;
+    font-family: 'Manrope', sans-serif;
 }
 
 .auth-modal.hidden {
@@ -23,11 +26,11 @@
 }
 
 .auth-container {
-    background: #ffffff;
-    border-radius: 12px;
+    background: #15161E;
+    border-radius: 14px;
     width: 380px;
     max-width: 92%;
-    border: 1px solid #e2e2e0;
+    border: 1px solid #23242F;
     animation: authFadeIn 0.25s ease;
     overflow: hidden;
 }
@@ -39,68 +42,96 @@
 
 .auth-brand {
     display: flex;
+    flex-direction: column;
     align-items: center;
     gap: 10px;
-    padding: 28px 28px 0;
-    margin-bottom: 24px;
+    padding: 32px 28px 20px;
 }
 
 .auth-brand-icon {
-    width: 28px;
-    height: 28px;
-    background: #1a1a1a;
-    border-radius: 6px;
+    position: relative;
+    width: 64px;
+    height: 64px;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
+    margin-bottom: 4px;
 }
 
-.auth-brand-icon svg {
-    width: 15px;
-    height: 15px;
-    stroke: #ffffff;
-    fill: none;
+.auth-brand-icon .signal-ring {
+    position: absolute;
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    border: 1px solid rgba(110, 91, 214, 0.35);
+    animation: signalPing 2.6s ease-out infinite;
+}
+
+.auth-brand-icon .signal-ring.delay {
+    animation-delay: 1.3s;
+}
+
+.auth-brand-icon .signal-core {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #8B7EE8, #4E3FA8);
+}
+
+@keyframes signalPing {
+    0%   { transform: scale(0.6); opacity: 0.9; }
+    100% { transform: scale(1.5); opacity: 0; }
 }
 
 .auth-brand-name {
-    font-size: 15px;
-    font-weight: 500;
-    color: #1a1a1a;
-    letter-spacing: -0.2px;
+    font-family: 'Unbounded', sans-serif;
+    font-size: 20px;
+    font-weight: 700;
+    color: #E7E4EF;
+    letter-spacing: 0.5px;
+}
+
+.auth-brand-tagline {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: #6E5BD6;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    margin-top: -4px;
 }
 
 .auth-tabs {
     display: flex;
-    padding: 0 28px;
-    margin-bottom: 24px;
-    border-bottom: 1px solid #ebebeb;
-    gap: 0;
+    padding: 4px;
+    margin: 0 28px 20px;
+    background: #0F1017;
+    border-radius: 10px;
+    gap: 4px;
 }
 
 .auth-tab {
     flex: 1;
-    padding: 10px 0;
+    padding: 9px 0;
     border: none;
-    border-bottom: 2px solid transparent;
+    border-radius: 7px;
     background: transparent;
     font-size: 13px;
-    font-weight: 400;
-    color: #999;
+    font-weight: 500;
+    font-family: 'Manrope', sans-serif;
+    color: #8A8798;
     cursor: pointer;
-    transition: color 0.2s, border-color 0.2s;
+    transition: color 0.2s, background 0.2s;
     letter-spacing: 0.2px;
-    margin-bottom: -1px;
 }
 
 .auth-tab:hover {
-    color: #1a1a1a;
+    color: #E7E4EF;
 }
 
 .auth-tab.active {
-    color: #1a1a1a;
-    font-weight: 500;
-    border-bottom-color: #1a1a1a;
+    color: #ffffff;
+    background: #6E5BD6;
 }
 
 .auth-form {
@@ -118,60 +149,85 @@
 .form-group {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 6px;
 }
 
 .form-group label {
     font-size: 11px;
     font-weight: 500;
-    color: #888;
+    color: #8A8798;
     text-transform: uppercase;
     letter-spacing: 0.6px;
 }
 
 .form-group input {
     padding: 10px 12px;
-    border: 1px solid #e2e2e0;
+    border: 1px solid #23242F;
     border-radius: 8px;
     font-size: 14px;
     outline: none;
-    transition: border-color 0.2s;
-    background: #fafaf9;
+    transition: border-color 0.2s, background 0.2s;
+    background: #0F1017;
     font-family: inherit;
-    color: #1a1a1a;
+    color: #E7E4EF;
 }
 
 .form-group input::placeholder {
-    color: #c0c0bc;
+    color: #4A4A55;
 }
 
 .form-group input:focus {
-    border-color: #1a1a1a;
-    background: #ffffff;
+    border-color: #6E5BD6;
+    background: #15161E;
+}
+
+/* Password strength meter (registration only, frontend-only signal) */
+.strength-bar {
+    height: 3px;
+    border-radius: 2px;
+    margin-top: 2px;
+    background: #23242F;
+    overflow: hidden;
+}
+
+.strength-fill {
+    height: 100%;
+    width: 0%;
+    border-radius: 2px;
+    background: #6E5BD6;
+    transition: width 0.25s ease, background 0.25s ease;
+}
+
+.strength-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: #6A6976;
+    margin-top: 2px;
+    letter-spacing: 0.3px;
 }
 
 .error-message {
-    color: #c0392b;
+    color: #E0879E;
     font-size: 12px;
     min-height: 18px;
     font-weight: 400;
     padding: 6px 10px;
-    border-radius: 6px;
-    background: #fdf2f2;
-    border-left: 2px solid #c0392b;
     border-radius: 0;
+    background: rgba(184, 84, 122, 0.1);
+    border-left: 2px solid #B8547A;
 }
 
-@keyframes slideDown {
-    from { opacity: 0; transform: translateY(-6px); }
-    to   { opacity: 1; transform: translateY(0); }
+.error-message:empty {
+    padding: 0;
+    background: transparent;
+    border-left: none;
 }
 
 .auth-submit {
     padding: 11px;
     border: none;
     border-radius: 8px;
-    background: #1a1a1a;
+    background: #6E5BD6;
     color: #ffffff;
     font-size: 14px;
     font-weight: 500;
@@ -179,15 +235,15 @@
     transition: background 0.2s;
     margin-top: 6px;
     letter-spacing: 0.2px;
-    font-family: inherit;
+    font-family: 'Manrope', sans-serif;
 }
 
 .auth-submit:hover {
-    background: #333333;
+    background: #7E6EE0;
 }
 
 .auth-submit:active {
-    background: #000000;
+    background: #5D4CC0;
 }
 
 .user-info {
@@ -203,61 +259,58 @@
 .user-info p {
     margin-bottom: 10px;
     font-size: 14px;
-    color: #444;
+    color: #B4B1BE;
     line-height: 1.6;
 }
 
 .user-info strong {
     font-weight: 500;
-    color: #1a1a1a;
+    color: #E7E4EF;
 }
 
 .user-info .unique-code {
     font-size: 12px;
-    color: #888;
-    background: #f7f7f5;
+    color: #8A8798;
+    background: #0F1017;
     padding: 10px 14px;
-    border-radius: 6px;
     margin: 12px 0;
-    border-left: 2px solid #1a1a1a;
-    border-radius: 0;
+    border-left: 2px solid #6E5BD6;
     text-align: left;
 }
 
 .user-info .unique-code strong {
-    font-family: 'Courier New', monospace;
-    background: #ffffff;
+    font-family: 'JetBrains Mono', monospace;
+    background: #15161E;
     padding: 3px 8px;
     display: inline-block;
     margin: 4px 0;
-    border: 1px solid #e2e2e0;
-    color: #1a1a1a;
+    border: 1px solid #23242F;
+    color: #6E5BD6;
     letter-spacing: 1px;
     font-size: 12px;
 }
 
 .logout-btn {
     padding: 10px 24px;
-    border: 1px solid #e2e2e0;
+    border: 1px solid #23242F;
     border-radius: 8px;
-    background: #ffffff;
-    color: #c0392b;
+    background: transparent;
+    color: #B8547A;
     cursor: pointer;
     font-weight: 500;
     font-size: 13px;
     transition: all 0.2s;
     margin-top: 12px;
     letter-spacing: 0.2px;
-    font-family: inherit;
+    font-family: 'Manrope', sans-serif;
 }
 
 .logout-btn:hover {
-    background: #fdf2f2;
-    border-color: #c0392b;
+    background: rgba(184, 84, 122, 0.1);
+    border-color: #B8547A;
 }
 .logout-btn:active {
-    transform: translateY(0);
-    box-shadow: 0 4px 12px rgba(255, 107, 107, 0.3);
+    transform: scale(0.98);
 }
 
 :root {

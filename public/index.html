@@ -9,7 +9,8 @@
     <meta http-equiv="pragma" content="no-cache">
     <meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="expires" content="0">
-    <title>Мессенджер</title>
+    <title>Nyxo</title>
+    <link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700&family=Manrope:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -18,11 +19,12 @@
         <div class="auth-container">
             <div class="auth-brand">
     <div class="auth-brand-icon">
-        <svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-        </svg>
+        <div class="signal-ring"></div>
+        <div class="signal-ring delay"></div>
+        <div class="signal-core"></div>
     </div>
-    <span class="auth-brand-name">Messenger</span>
+    <span class="auth-brand-name">Nyxo</span>
+    <span class="auth-brand-tagline">Сигнал защищён</span>
 </div>
             <div class="auth-tabs">
                 <button class="auth-tab active" data-tab="login">Вход</button>
@@ -56,6 +58,8 @@
                 <div class="form-group">
                     <label>Пароль</label>
                     <input type="password" id="regPassword" placeholder="Минимум 6 символов" required minlength="6">
+                    <div class="strength-bar"><div class="strength-fill" id="regStrengthFill"></div></div>
+                    <div class="strength-label" id="regStrengthLabel"></div>
                 </div>
                 <div class="form-group">
                     <label>Подтвердите пароль</label>
