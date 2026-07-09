@@ -16,6 +16,7 @@ const fs = require('fs');
 const { Server } = require('socket.io');
 const pgSession = require('connect-pg-simple')(session);
 const cookieParser = require('cookie-parser');
+const rateLimit = require('express-rate-limit');
 
 
 // Конфигурация загрузки файлов
@@ -46,7 +47,10 @@ function checkMagicBytes(buffer, mimetype) {
     if (mimetype === 'audio/wav') return b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46;
     if (mimetype === 'text/plain') return true; // текст не имеет фиксированной сигнатуры
     if (mimetype === 'video/quicktime') return b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70;
-    return true; // если тип не в списке проверки — разрешаем (уже отфильтровано по MIME)
+    // По умолчанию ОТКАЗЫВАЕМ: MIME-заголовок клиент подделывает, поэтому всё,
+    // что не распознали явно, считаем подозрительным. Раньше здесь было `return true`,
+    // что пропускало любой бинарник с подменённым типом.
+    return false;
 }
 
 const upload = multer({
@@ -97,6 +101,48 @@ app.use((req, res, next) => {
     next();
 });
 
+// === RATE LIMITING ===
+// За Cloudflare/Railway req.ip = адрес прокси, поэтому ключуемся по реальному
+// клиентскому IP (cf-connecting-ip → x-forwarded-for → req.ip), который middleware
+// выше уже положил в req.realIp. Без этого весь сайт получит один общий лимит.
+const rateLimitKeyGenerator = (req) => req.realIp || req.ip;
+
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,     // 15 минут
+    max: 5,                        // 5 попыток входа
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: rateLimitKeyGenerator,
+    message: { success: false, message: 'Слишком много попыток входа. Попробуйте позже.' }
+});
+
+const registerLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000,     // 1 час
+    max: 3,                        // 3 регистрации
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: rateLimitKeyGenerator,
+    message: { success: false, message: 'Слишком много регистраций. Попробуйте позже.' }
+});
+
+const passwordLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,     // 15 минут
+    max: 3,                        // 3 смены пароля
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: rateLimitKeyGenerator,
+    message: { success: false, message: 'Слишком много попыток смены пароля. Попробуйте позже.' }
+});
+
+const apiLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,     // 15 минут
+    max: 300,                     // 300 запросов на произвольный /api/* (защита от спама)
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: rateLimitKeyGenerator,
+    message: { success: false, message: 'Слишком много запросов. Попробуйте позже.' }
+});
+
  
 let server;
 if (process.env.NODE_ENV === 'production') {
@@ -127,8 +173,24 @@ setInterval(() => {
     }
 }, 10 * 60 * 1000);
 
+// Извлекает настоящий клиентский IP из заголовков прокси-цепочки.
+// За Cloudflare+Railway socket.handshake.address показывает адрес прокси, а не клиента.
+// Порядок: cf-connecting-ip (Cloudflare, перезаписывается на границе сети) →
+// x-forwarded-for (стандартный заголовок прокси, берём первый = исходный клиент) →
+// handshake.address (TCP-сокет, фоллбэк для прямого подключения).
+function getClientIp(handshake) {
+    const headers = handshake.headers || {};
+    if (headers['cf-connecting-ip']) {
+        return headers['cf-connecting-ip'].trim().split(',')[0];
+    }
+    if (headers['x-forwarded-for']) {
+        return headers['x-forwarded-for'].trim().split(',')[0];
+    }
+    return handshake.address;
+}
+
 io.use((socket, next) => {
-    const ip = socket.handshake.address;
+    const ip = getClientIp(socket.handshake);
     const count = ipConnectionCount.get(ip) || 0;
 
     if (count >= 5) {
@@ -332,7 +394,24 @@ async function initDatabase() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_chats_user_id ON chats(user_id);`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_reactions_msg_user ON reactions(message_id, user_id);`);
 
- 
+    // Миграция: поддержка анонимных аккаунтов (без email/пароля).
+    // Idempotent — проверяем текущую nullability через information_schema и
+    // выполняем DROP NOT NULL только один раз. UNIQUE на email при этом остаётся,
+    // но PostgreSQL разрешает несколько NULL в UNIQUE-колонке (в отличие от SQLite).
+    const cols = await dbAll(`
+        SELECT column_name, is_nullable
+        FROM information_schema.columns
+        WHERE table_name = 'users' AND column_name IN ('email', 'password')
+    `);
+    const colMap = {};
+    cols.forEach(c => { colMap[c.column_name] = c.is_nullable; });
+    if (colMap.email === 'NO') {
+        await pool.query('ALTER TABLE users ALTER COLUMN email DROP NOT NULL');
+    }
+    if (colMap.password === 'NO') {
+        await pool.query('ALTER TABLE users ALTER COLUMN password DROP NOT NULL');
+    }
+
     console.log('База данных инициализирована');
 }
  
@@ -384,6 +463,20 @@ async function generateUniqueCodeAsync() {
         if (!row) return code;
     }
     throw new Error('Could not generate unique code');
+}
+
+// Генерирует уникальное анонимное имя вида «Гость-AB3X9». Коллизии маловероятны,
+// но проверяем на всякий случай, т.к. username = UNIQUE.
+async function generateAnonymousUsernameAsync() {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    for (let attempts = 0; attempts < 100; attempts++) {
+        const bytes = crypto.randomBytes(4);
+        const suffix = Array.from(bytes).map(b => chars[b % chars.length]).join('');
+        const username = `Гость-${suffix}`;
+        const row = await dbGet('SELECT id FROM users WHERE username = $1', [username]);
+        if (!row) return username;
+    }
+    throw new Error('Could not generate anonymous username');
 }
  
 function generateInviteCode() {
@@ -567,10 +660,13 @@ app.get('/uploads/:filename', async (req, res) => {
 app.get('/link.my', (req, res) => {
     serveIndexWithNonce(req, res);
 });
- 
-// 8. API МАРШРУТЫ
 
-app.post('/api/register', async (req, res) => {
+// 8. API МАРШРУТЫ
+// Глобальный лимит на все /api/* — защита от спама/абуза (поверх точечных лимитов ниже).
+// Устанавливается ДО первого api-роута.
+app.use('/api/', apiLimiter);
+
+app.post('/api/register', registerLimiter, async (req, res) => {
     const { username, email, password, confirmPassword } = req.body;
     if (!username || !email || !password || !confirmPassword)
         return res.json({ success: false, message: 'Заполните все поля' });
@@ -590,41 +686,102 @@ app.post('/api/register', async (req, res) => {
     try {
         const existing = await dbGet('SELECT id FROM users WHERE email = $1 OR username = $2', [email, username]);
         if (existing) return res.json({ success: false, message: 'Ошибка регистрации. Проверьте введённые данные.' });
- 
+
         const uniqueCode = await generateUniqueCodeAsync();
         const hashedPassword = await bcrypt.hash(password, 12);
- 
-        const userResult = await pool.query(
-            'INSERT INTO users (unique_code, username, email, password, avatar) VALUES ($1, $2, $3, $4, $5) RETURNING id',
-            [uniqueCode, username, email, hashedPassword, '#667EEA']
-        );
-        const userId = userResult.rows[0].id;
- 
-        // Создать бота для нового пользователя
-        const botResult = await pool.query(
-            'INSERT INTO chats (user_id, name, avatar, online, is_bot) VALUES ($1, $2, $3, $4, $5) RETURNING id',
-            [userId, 'Бот Помощник', 'Б', 1, 1]
-        );
-        const botChatId = botResult.rows[0].id;
-        await pool.query(
-            'INSERT INTO messages (chat_id, user_id, text, sent, time, status) VALUES ($1, $2, $3, $4, $5, $6)',
-            [botChatId, userId, 'Привет! Я бот-помощник. Чем могу помочь?', 0, getCurrentTime(), 'read']
-        );
- 
+
+        // Транзакция: пользователь + чат бота + приветственное сообщение — атомарны.
+        // Если хоть один INSERT упадёт, откатятся все, не останется «пользователя без бота».
+        const client = await pool.connect();
+        let userId;
+        try {
+            await client.query('BEGIN');
+            const userResult = await client.query(
+                'INSERT INTO users (unique_code, username, email, password, avatar) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+                [uniqueCode, username, email, hashedPassword, '#667EEA']
+            );
+            userId = userResult.rows[0].id;
+
+            const botResult = await client.query(
+                'INSERT INTO chats (user_id, name, avatar, online, is_bot) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+                [userId, 'Бот Помощник', 'Б', 1, 1]
+            );
+            const botChatId = botResult.rows[0].id;
+            await client.query(
+                'INSERT INTO messages (chat_id, user_id, text, sent, time, status) VALUES ($1, $2, $3, $4, $5, $6)',
+                [botChatId, userId, 'Привет! Я бот-помощник. Чем могу помочь?', 0, getCurrentTime(), 'read']
+            );
+            await client.query('COMMIT');
+        } catch (txErr) {
+            await client.query('ROLLBACK');
+            throw txErr;
+        } finally {
+            client.release();
+        }
+
         req.session.userId = userId;
         req.session.username = username;
         req.session.uniqueCode = uniqueCode;
         req.session.avatar = '#667EEA';
- 
+
         res.json({ success: true, message: 'Регистрация успешна!', user: { id: userId, username, uniqueCode, avatar: '#667EEA' } });
     } catch (error) {
         console.error('Register error:', error);
         res.json({ success: false, message: 'Ошибка сервера' });
     }
 });
- 
+
+// Anonymous registration — без email и пароля, только unique_code + случайное имя.
+// Аккаунт «привязан» к текущей сессии/браузеру; восстановить доступ с другого
+// устройства нельзя (нет email для сброса). Это и есть «анонимность».
+app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
+    try {
+        const username = await generateAnonymousUsernameAsync();
+        const uniqueCode = await generateUniqueCodeAsync();
+
+        // Та же транзакция, что и в обычной регистрации: пользователь + чат бота + приветствие.
+        const client = await pool.connect();
+        let userId;
+        try {
+            await client.query('BEGIN');
+            const userResult = await client.query(
+                'INSERT INTO users (unique_code, username, email, password, avatar) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+                [uniqueCode, username, null, null, '#667EEA']
+            );
+            userId = userResult.rows[0].id;
+
+            const botResult = await client.query(
+                'INSERT INTO chats (user_id, name, avatar, online, is_bot) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+                [userId, 'Бот Помощник', 'Б', 1, 1]
+            );
+            const botChatId = botResult.rows[0].id;
+            await client.query(
+                'INSERT INTO messages (chat_id, user_id, text, sent, time, status) VALUES ($1, $2, $3, $4, $5, $6)',
+                [botChatId, userId, 'Привет! Ты вошёл как анонимный гость. Чаты доступны, пока активна эта сессия.', 0, getCurrentTime(), 'read']
+            );
+            await client.query('COMMIT');
+        } catch (txErr) {
+            await client.query('ROLLBACK');
+            throw txErr;
+        } finally {
+            client.release();
+        }
+
+        req.session.userId = userId;
+        req.session.username = username;
+        req.session.uniqueCode = uniqueCode;
+        req.session.avatar = '#667EEA';
+        req.session.isAnonymous = true;
+
+        res.json({ success: true, message: 'Анонимная регистрация успешна!', user: { id: userId, username, uniqueCode, avatar: '#667EEA', isAnonymous: true } });
+    } catch (error) {
+        console.error('Anonymous register error:', error);
+        res.json({ success: false, message: 'Ошибка сервера' });
+    }
+});
+
 // Login (ИСПРАВЛЕНО: Добавлена регенерация сессии)
-app.post('/api/login', async (req, res) => {
+app.post('/api/login', loginLimiter, async (req, res) => {
     const { email, password } = req.body;
     if (!email || !password) return res.json({ success: false, message: 'Введите email и пароль' });
     if (email.length > 254 || password.length > 128) return res.json({ success: false, message: 'Неверный email или пароль' });
@@ -824,14 +981,23 @@ app.post('/api/messages', async (req, res) => {
  
         // Ответ бота
         if (chat.is_bot) {
+            const botUserId = req.session.userId;
             setTimeout(async () => {
+                // За 1.5с чат могли удалить — проверяем, что он ещё существует и принадлежит тому же юзеру,
+                // иначе INSERT ответа упадёт в несуществующий/чужой chat_id (нарушение FK или мусор).
+                const stillExists = await dbGet(
+                    'SELECT id FROM chats WHERE id = $1 AND user_id = $2 AND is_bot = 1',
+                    [chatId, botUserId]
+                );
+                if (!stillExists) return;
+
                 const botResponses = ['Интересный вопрос! Расскажите подробнее.', 'Я получил ваше сообщение!', 'Хмм, дайте подумать...', 'Отличное сообщение! Продолжайте.', 'Я бот, но стараюсь быть полезным!', 'Можете уточнить, что именно вас интересует?'];
                 const randomResponse = botResponses[Math.floor(Math.random() * botResponses.length)];
                 const botTime = getCurrentTime();
                 try {
                     const botResult = await pool.query(
                         'INSERT INTO messages (chat_id, room_id, user_id, text, sent, time, status) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
-                        [chatId, roomId, req.session.userId, randomResponse, 0, botTime, 'read']
+                        [chatId, roomId, botUserId, randomResponse, 0, botTime, 'read']
                     );
                     const botMessageId = botResult.rows[0].id;
                     const botMessage = await dbGet(
@@ -862,14 +1028,29 @@ app.post('/api/chats', async (req, res) => {
     const avatar = name.charAt(0).toUpperCase();
     try {
         const roomCode = await generateInviteCodeAsync();
-        const roomResult = await pool.query('INSERT INTO rooms (name, code) VALUES ($1, $2) RETURNING id', [name, roomCode]);
-        const roomId = roomResult.rows[0].id;
-        await pool.query('INSERT INTO room_participants (room_id, user_id) VALUES ($1, $2)', [roomId, req.session.userId]);
-        const chatResult = await pool.query(
-            'INSERT INTO chats (user_id, room_id, name, avatar, online, is_bot) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
-            [req.session.userId, roomId, name, avatar, 0, 0]
-        );
-        res.json({ success: true, chat: { id: chatResult.rows[0].id, name, avatar, online: 0, is_bot: 0, room_id: roomId, invite_code: roomCode } });
+
+        // Транзакция: комната + участник + чат — атомарны. Иначе при сбое на 2-м шаге
+        // останется «комната без владельца» или «участник без чата».
+        const client = await pool.connect();
+        let roomId, chatId;
+        try {
+            await client.query('BEGIN');
+            const roomResult = await client.query('INSERT INTO rooms (name, code) VALUES ($1, $2) RETURNING id', [name, roomCode]);
+            roomId = roomResult.rows[0].id;
+            await client.query('INSERT INTO room_participants (room_id, user_id) VALUES ($1, $2)', [roomId, req.session.userId]);
+            const chatResult = await client.query(
+                'INSERT INTO chats (user_id, room_id, name, avatar, online, is_bot) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
+                [req.session.userId, roomId, name, avatar, 0, 0]
+            );
+            chatId = chatResult.rows[0].id;
+            await client.query('COMMIT');
+        } catch (txErr) {
+            await client.query('ROLLBACK');
+            throw txErr;
+        } finally {
+            client.release();
+        }
+        res.json({ success: true, chat: { id: chatId, name, avatar, online: 0, is_bot: 0, room_id: roomId, invite_code: roomCode } });
     } catch (error) {
         console.error('Create chat error:', error);
         res.json({ success: false, message: 'Ошибка создания чата' });
@@ -1053,23 +1234,77 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
     }
 });
 
- 
+
+// Проверяет, что пользователь является участником чата/комнаты, к которой
+// относится сообщение. Без этой проверки любой авторизованный мог бы ставить
+// реакции на чужие сообщения по id.
+async function userCanAccessMessage(userId, messageId) {
+    const row = await dbGet(
+        `SELECT m.room_id, c.room_id AS chat_room_id, c.user_id AS chat_owner_id
+         FROM messages m
+         JOIN chats c ON m.chat_id = c.id
+         WHERE m.id = $1`,
+        [messageId]
+    );
+    if (!row) return false;
+
+    // Личный чат (без room_id): сообщение должно принадлежать чату этого пользователя
+    if (!row.chat_room_id && !row.room_id) {
+        return row.chat_owner_id === userId;
+    }
+    // Общий чат (room): пользователь должен быть участником комнаты
+    const roomId = row.room_id || row.chat_room_id;
+    const participant = await dbGet(
+        'SELECT id FROM room_participants WHERE room_id = $1 AND user_id = $2',
+        [roomId, userId]
+    );
+    return Boolean(participant);
+}
+
 // Add reaction
 app.post('/api/reactions', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { messageId, emoji } = req.body;
     if (!messageId || !emoji) return res.json({ success: false, message: 'Параметры отсутствуют' });
     if (typeof emoji !== 'string' || emoji.length > 10) return res.json({ success: false, message: 'Недопустимый emoji' });
- 
+
     try {
+        if (!(await userCanAccessMessage(req.session.userId, messageId))) {
+            return res.json({ success: false, message: 'Сообщение недоступно' });
+        }
         await pool.query('INSERT INTO reactions (message_id, user_id, emoji) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [messageId, req.session.userId, emoji]);
         res.json({ success: true });
     } catch (error) {
+        console.error('Add reaction error:', error);
         res.json({ success: false, message: 'Ошибка добавления реакции' });
     }
 });
- 
+
 // Remove reaction
+app.delete('/api/reactions/:messageId/:emoji', async (req, res) => {
+    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
+    const messageId = Number(req.params.messageId);
+    const emoji = decodeURIComponent(req.params.emoji);
+    if (!Number.isFinite(messageId) || !emoji || emoji.length > 10) {
+        return res.json({ success: false, message: 'Недопустимые параметры' });
+    }
+
+    try {
+        if (!(await userCanAccessMessage(req.session.userId, messageId))) {
+            return res.json({ success: false, message: 'Сообщение недоступно' });
+        }
+        await dbRun(
+            'DELETE FROM reactions WHERE message_id = $1 AND user_id = $2 AND emoji = $3',
+            [messageId, req.session.userId, emoji]
+        );
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Remove reaction error:', error);
+        res.json({ success: false, message: 'Ошибка удаления реакции' });
+    }
+});
+
+// Search chats and messages
 app.get('/api/search', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const query = req.query.q || '';
@@ -1093,32 +1328,37 @@ app.get('/api/search', async (req, res) => {
     }
 });
  
-// Change password (ИСПРАВЛЕНО: Добавлен Rate Limiting)
-app.post('/api/change-password', async (req, res) => {
+// Change password (ИСПРАВЛЕНО: Добавлен Rate Limiting + фикс бага с userId)
+app.post('/api/change-password', passwordLimiter, async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { currentPassword, newPassword, confirmPassword } = req.body;
     if (!currentPassword || !newPassword || !confirmPassword) return res.json({ success: false, message: 'Заполните все поля' });
     if (newPassword !== confirmPassword) return res.json({ success: false, message: 'Новые пароли не совпадают' });
     if (newPassword.length < 6) return res.json({ success: false, message: 'Пароль должен быть не менее 6 символов' });
- 
+
     try {
         const user = await dbGet('SELECT password FROM users WHERE id = $1', [req.session.userId]);
         if (!user) return res.json({ success: false, message: 'Пользователь не найден' });
+        // Анонимные аккаунты не имеют пароля
+        if (!user.password) return res.json({ success: false, message: 'У этого аккаунта нет пароля (анонимный режим)' });
         const validPassword = await bcrypt.compare(currentPassword, user.password);
         if (!validPassword) return res.json({ success: false, message: 'Неверный текущий пароль' });
         const hashedPassword = await bcrypt.hash(newPassword, 12);
-        // Сначала уничтожаем сессию, потом обновляем пароль
-        req.session.destroy(async (err) => {
+
+        // ВАЖНО: сохраняем userId ДО destroy(), потому что после destroy()
+        // req.session.userId становится undefined и UPDATE падал в никуда (WHERE id = NULL).
+        const userId = req.session.userId;
+
+        // Сначала обновляем пароль (пока сессия ещё жива и userId валиден), потом уничтожаем сессию.
+        await dbRun('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, userId]);
+
+        req.session.destroy((err) => {
             res.clearCookie('connect.sid');
             if (err) console.error('Session destroy error on password change:', err);
-            try {
-                await dbRun('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, req.session.userId]);
-            } catch (dbErr) {
-                console.error('Password update error:', dbErr);
-            }
             res.json({ success: true, message: 'Пароль успешно изменён. Войдите заново.' });
         });
     } catch (error) {
+        console.error('Change password error:', error);
         res.json({ success: false, message: 'Ошибка изменения пароля' });
     }
 });
