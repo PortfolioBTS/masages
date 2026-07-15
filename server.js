@@ -212,6 +212,15 @@ io.use((socket, next) => {
 });
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
+
+// Внутренний сервис ① — E2EE Key Exchange (Rust, отдельный процесс на loopback).
+// Node сюда не подключается напрямую к БД сервиса — только HTTP по localhost,
+// после того как сам уже проверил req.session.userId как обычно.
+const KEY_SERVER_URL = process.env.KEY_SERVER_URL || 'http://127.0.0.1:7420';
+const KEY_SERVER_SECRET = process.env.INTERNAL_KEY_SERVER_SECRET;
+if (!KEY_SERVER_SECRET) {
+    console.warn('[keys] INTERNAL_KEY_SERVER_SECRET не задан — роуты /api/keys/* будут возвращать 503');
+}
  
 // 3. ПОДКЛЮЧЕНИЕ К POSTGRESQL
 
@@ -322,19 +331,9 @@ async function initDatabase() {
     `);
  
     await pool.query(`
-        CREATE TABLE IF NOT EXISTS rooms (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            code TEXT UNIQUE NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    `);
- 
-    await pool.query(`
         CREATE TABLE IF NOT EXISTS chats (
             id SERIAL PRIMARY KEY,
             user_id INTEGER NOT NULL REFERENCES users(id),
-            room_id INTEGER REFERENCES rooms(id),
             name TEXT NOT NULL,
             avatar TEXT NOT NULL,
             online INTEGER DEFAULT 0,
@@ -346,7 +345,6 @@ async function initDatabase() {
         CREATE TABLE IF NOT EXISTS messages (
             id SERIAL PRIMARY KEY,
             chat_id INTEGER NOT NULL REFERENCES chats(id),
-            room_id INTEGER REFERENCES rooms(id),
             user_id INTEGER NOT NULL REFERENCES users(id),
             text TEXT NOT NULL,
             file_url TEXT,
@@ -372,14 +370,6 @@ async function initDatabase() {
     `);
  
     await pool.query(`
-        CREATE TABLE IF NOT EXISTS room_participants (
-            id SERIAL PRIMARY KEY,
-            room_id INTEGER NOT NULL REFERENCES rooms(id),
-            user_id INTEGER NOT NULL REFERENCES users(id)
-        )
-    `);
- 
-    await pool.query(`
         CREATE TABLE IF NOT EXISTS reactions (
             id SERIAL PRIMARY KEY,
             message_id INTEGER NOT NULL REFERENCES messages(id),
@@ -389,10 +379,18 @@ async function initDatabase() {
         )
     `);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id);`);
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_room_id ON messages(room_id);`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id);`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_chats_user_id ON chats(user_id);`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_reactions_msg_user ON reactions(message_id, user_id);`);
+
+    // Миграция: удаление rooms-инфраструктуры (переход на модель 1-на-1).
+    // Idempotent — IF EXISTS/COLUMN IF EXISTS позволяют запускать многократно.
+    // Бета: прод-данных нет, поэтому деструктивный DROP приемлем.
+    await pool.query(`DROP INDEX IF EXISTS idx_messages_room_id;`);
+    await pool.query(`DROP TABLE IF EXISTS room_participants CASCADE;`);
+    await pool.query(`DROP TABLE IF EXISTS rooms CASCADE;`);
+    await pool.query(`ALTER TABLE messages DROP COLUMN IF EXISTS room_id;`);
+    await pool.query(`ALTER TABLE chats DROP COLUMN IF EXISTS room_id;`);
 
     // Миграция: поддержка анонимных аккаунтов (без email/пароля).
     // Idempotent — проверяем текущую nullability через information_schema и
@@ -421,10 +419,6 @@ initDatabase().catch(err => {
 });
  
 // 5. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-function getSocketRoomKey(chatId, roomId) {
-    return roomId ? `room:${roomId}` : `chat:${chatId}`;
-}
- 
 function getLocalAddresses() {
     const nets = os.networkInterfaces();
     const addresses = [];
@@ -478,22 +472,7 @@ async function generateAnonymousUsernameAsync() {
     }
     throw new Error('Could not generate anonymous username');
 }
- 
-function generateInviteCode() {
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    const bytes = crypto.randomBytes(6);
-    return Array.from(bytes).map(b => chars[b % chars.length]).join('');
-}
- 
-async function generateInviteCodeAsync() {
-    for (let attempts = 0; attempts < 100; attempts++) {
-        const code = generateInviteCode();
-        const row = await dbGet('SELECT id FROM rooms WHERE code = $1', [code]);
-        if (!row) return code;
-    }
-    throw new Error('Could not generate invite code');
-}
- 
+
 const sessionSecret = process.env.SESSION_SECRET;
 if (!sessionSecret) throw new Error('SESSION_SECRET не задан в переменных окружения');
  
@@ -531,28 +510,16 @@ io.on('connection', (socket) => {
 
     socket.on('joinChat', async (roomKey) => {
         if (typeof roomKey !== 'string' || roomKey.length === 0) return;
+        if (!roomKey.startsWith('chat:')) return; // Поддерживается только личный чат (1-на-1)
 
         try {
-            // Проверяем принадлежность комнаты/чата текущему пользователю
-            if (roomKey.startsWith('room:')) {
-                const roomId = parseInt(roomKey.slice(5), 10);
-                if (!Number.isFinite(roomId)) return;
-                const participant = await dbGet(
-                    'SELECT id FROM room_participants WHERE room_id = $1 AND user_id = $2',
-                    [roomId, userId]
-                );
-                if (!participant) return; // Пользователь не участник этой комнаты
-            } else if (roomKey.startsWith('chat:')) {
-                const chatId = parseInt(roomKey.slice(5), 10);
-                if (!Number.isFinite(chatId)) return;
-                const chat = await dbGet(
-                    'SELECT id FROM chats WHERE id = $1 AND user_id = $2',
-                    [chatId, userId]
-                );
-                if (!chat) return; // Чат не принадлежит пользователю
-            } else {
-                return; // Неизвестный формат ключа
-            }
+            const chatId = parseInt(roomKey.slice(5), 10);
+            if (!Number.isFinite(chatId)) return;
+            const chat = await dbGet(
+                'SELECT id FROM chats WHERE id = $1 AND user_id = $2',
+                [chatId, userId]
+            );
+            if (!chat) return; // Чат не принадлежит пользователю
             socket.join(roomKey);
         } catch (err) {
             console.error('joinChat error:', err);
@@ -858,20 +825,85 @@ app.post('/api/user/avatar-color', async (req, res) => {
         res.json({ success: false, message: 'Ошибка обновления цвета аватара' });
     }
 });
- 
+
+// ===== E2EE Key Exchange (сервис ①, отдельный Rust-процесс на loopback) =====
+// Node здесь только проверяет сессию как обычно и форвардит запрос дальше,
+// подставляя X-Internal-Secret и X-User-Id. Сам key-server из интернета
+// не виден — единственная точка входа для браузера это роуты ниже.
+// Криптографии тут нет: Node просто перекладывает JSON туда-обратно.
+async function forwardToKeyServer(req, res, method, internalPath) {
+    if (!req.session.userId) {
+        return res.json({ success: false, message: 'Не авторизован' });
+    }
+    if (!KEY_SERVER_SECRET) {
+        return res.status(503).json({ success: false, message: 'Сервис обмена ключами временно недоступен' });
+    }
+
+    try {
+        const fetchOptions = {
+            method,
+            headers: {
+                'X-Internal-Secret': KEY_SERVER_SECRET,
+                'X-User-Id': String(req.session.userId),
+            },
+        };
+        if (method === 'PUT' || method === 'POST') {
+            fetchOptions.headers['Content-Type'] = 'application/json';
+            fetchOptions.body = JSON.stringify(req.body || {});
+        }
+
+        const upstream = await fetch(`${KEY_SERVER_URL}${internalPath}`, fetchOptions);
+        const data = await upstream.json().catch(() => ({ success: false, message: 'Некорректный ответ сервиса ключей' }));
+        res.status(upstream.status).json(data);
+    } catch (error) {
+        console.error('[keys] key-server unreachable:', error.message);
+        res.status(502).json({ success: false, message: 'Сервис обмена ключами недоступен' });
+    }
+}
+
+// Зарегистрировать/заменить identity-ключи (Ed25519 signing + X25519 DH, base64).
+// Приватные ключи сюда не попадают — только публичные, генерируются на клиенте.
+app.put('/api/keys/identity', (req, res) =>
+    forwardToKeyServer(req, res, 'PUT', '/internal/v1/keys/identity'));
+
+// Ротация Signed PreKey (подпись проверяется на key-server).
+app.put('/api/keys/signed-prekey', (req, res) =>
+    forwardToKeyServer(req, res, 'PUT', '/internal/v1/keys/signed-prekey'));
+
+// Пополнение пула one-time prekeys батчем.
+app.post('/api/keys/one-time-prekeys', (req, res) =>
+    forwardToKeyServer(req, res, 'POST', '/internal/v1/keys/one-time-prekeys'));
+
+// Сколько one-time prekeys осталось у себя — клиент решает, пора ли пополнять.
+app.get('/api/keys/one-time-prekeys/count', (req, res) =>
+    forwardToKeyServer(req, res, 'GET', '/internal/v1/keys/one-time-prekeys/count'));
+
+// Забрать bundle собеседника, чтобы начать X3DH-сессию с ним.
+app.get('/api/keys/bundle/:targetUserId', (req, res) => {
+    const targetUserId = Number.parseInt(req.params.targetUserId, 10);
+    if (!Number.isInteger(targetUserId) || targetUserId <= 0) {
+        return res.status(400).json({ success: false, message: 'Некорректный targetUserId' });
+    }
+    return forwardToKeyServer(req, res, 'GET', `/internal/v1/keys/bundle/${targetUserId}`);
+});
+
+// Полностью стереть свой ключевой материал (например, перед удалением аккаунта).
+app.delete('/api/keys', (req, res) =>
+    forwardToKeyServer(req, res, 'DELETE', '/internal/v1/keys'));
+// ===== конец E2EE Key Exchange =====
+
 // Get chats
 app.get('/api/chats', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     try {
         const chats = await dbAll(`
-            SELECT c.id, c.name, c.avatar, c.online, c.is_bot, c.room_id, r.code as invite_code,
-                   (SELECT text FROM messages WHERE ((c.room_id IS NOT NULL AND room_id = c.room_id) OR (c.room_id IS NULL AND chat_id = c.id)) ORDER BY id DESC LIMIT 1) as last_message,
-                   (SELECT time FROM messages WHERE ((c.room_id IS NOT NULL AND room_id = c.room_id) OR (c.room_id IS NULL AND chat_id = c.id)) ORDER BY id DESC LIMIT 1) as last_time,
-                   (SELECT COUNT(*) FROM messages m WHERE ((c.room_id IS NOT NULL AND m.room_id = c.room_id) OR (c.room_id IS NULL AND m.chat_id = c.id)) AND m.sent = 0 AND m.status != 'read') as unread
+            SELECT c.id, c.name, c.avatar, c.online, c.is_bot,
+                   (SELECT text FROM messages WHERE chat_id = c.id ORDER BY id DESC LIMIT 1) as last_message,
+                   (SELECT time FROM messages WHERE chat_id = c.id ORDER BY id DESC LIMIT 1) as last_time,
+                   (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id AND m.sent = 0 AND m.status != 'read') as unread
             FROM chats c
-            LEFT JOIN rooms r ON c.room_id = r.id
             WHERE c.user_id = $1
-            ORDER BY (SELECT MAX(id) FROM messages WHERE ((c.room_id IS NOT NULL AND room_id = c.room_id) OR (c.room_id IS NULL AND chat_id = c.id))) DESC NULLS LAST
+            ORDER BY (SELECT MAX(id) FROM messages WHERE chat_id = c.id) DESC NULLS LAST
         `, [req.session.userId]);
         res.json({ success: true, chats: chats.map(c => ({ ...c, unread: Number(c.unread) })) });
     } catch (error) {
@@ -887,18 +919,8 @@ app.get('/api/messages/:chatId', async (req, res) => {
     try {
         const chat = await dbGet('SELECT * FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
         if (!chat) return res.json({ success: false, message: 'Чат не найден' });
- 
-        const selectParam = chat.room_id || chatId;
-        const selectQuery = chat.room_id
-            ? `SELECT m.*, u.username as sender_username, u.avatar as sender_avatar,
-                      rt.id as reply_to_id, rt.text as reply_to_text, ru.username as reply_to_sender_username, ru.avatar as reply_to_sender_avatar
-               FROM messages m
-               JOIN users u ON m.user_id = u.id
-               LEFT JOIN messages rt ON m.reply_to_id = rt.id
-               LEFT JOIN users ru ON rt.user_id = ru.id
-               WHERE m.room_id = $1 AND m.deleted = 0
-               ORDER BY m.id ASC`
-            : `SELECT m.*, u.username as sender_username, u.avatar as sender_avatar,
+
+        const selectQuery = `SELECT m.*, u.username as sender_username, u.avatar as sender_avatar,
                       rt.id as reply_to_id, rt.text as reply_to_text, ru.username as reply_to_sender_username, ru.avatar as reply_to_sender_avatar
                FROM messages m
                JOIN users u ON m.user_id = u.id
@@ -906,37 +928,31 @@ app.get('/api/messages/:chatId', async (req, res) => {
                LEFT JOIN users ru ON rt.user_id = ru.id
                WHERE m.chat_id = $1 AND m.deleted = 0
                ORDER BY m.id ASC`;
- 
-        let messages = await dbAll(selectQuery, [selectParam]);
- 
+
+        let messages = await dbAll(selectQuery, [chatId]);
+
         if (messages.length === 0) {
-            const updateQuery = chat.room_id
-                ? 'UPDATE messages SET status = $1 WHERE room_id = $2 AND sent = 0'
-                : 'UPDATE messages SET status = $1 WHERE chat_id = $2 AND sent = 0';
-            await dbRun(updateQuery, ['read', selectParam]);
+            await dbRun('UPDATE messages SET status = $1 WHERE chat_id = $2 AND sent = 0', ['read', chatId]);
             return res.json({ success: true, messages: [], chat });
         }
- 
+
         const messageIds = messages.map(m => m.id);
         const placeholders = messageIds.map((_, i) => `$${i + 1}`).join(',');
         const reactions = await dbAll(
             `SELECT message_id, STRING_AGG(DISTINCT emoji, ',') as emojis FROM reactions WHERE message_id IN (${placeholders}) GROUP BY message_id`,
             messageIds
         );
- 
+
         const reactionsMap = {};
         reactions.forEach(r => { reactionsMap[r.message_id] = r.emojis.split(','); });
- 
+
         messages = messages.map(m => ({
             ...m,
             reactions: reactionsMap[m.id] || [],
             reply_to: m.reply_to_id ? { id: m.reply_to_id, text: m.reply_to_text, sender_username: m.reply_to_sender_username, sender_avatar: m.reply_to_sender_avatar } : null
         }));
- 
-        const updateQuery = chat.room_id
-            ? 'UPDATE messages SET status = $1 WHERE room_id = $2 AND sent = 0'
-            : 'UPDATE messages SET status = $1 WHERE chat_id = $2 AND sent = 0';
-        await dbRun(updateQuery, ['read', selectParam]);
+
+        await dbRun('UPDATE messages SET status = $1 WHERE chat_id = $2 AND sent = 0', ['read', chatId]);
  
         res.json({ success: true, messages, chat });
     } catch (error) {
@@ -956,29 +972,27 @@ app.post('/api/messages', async (req, res) => {
     try {
         const chat = await dbGet('SELECT * FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
         if (!chat) return res.json({ success: false, message: 'Чат не найден' });
- 
+
         const time = getCurrentTime();
-        const roomId = chat.room_id || null;
-        const socketRoomKey = getSocketRoomKey(chatId, roomId);
-        
-        
+        const socketRoomKey = `chat:${chatId}`;
+
         const safeText = text.trim();
- 
+
         const result = await pool.query(
-            'INSERT INTO messages (chat_id, room_id, user_id, text, message_type, sent, time, status, reply_to_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id',
-            [chatId, roomId, req.session.userId, safeText, 'text', 1, time, 'sent', replyTo]
+            'INSERT INTO messages (chat_id, user_id, text, message_type, sent, time, status, reply_to_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id',
+            [chatId, req.session.userId, safeText, 'text', 1, time, 'sent', replyTo]
         );
         const messageId = result.rows[0].id;
- 
+
         const fullMessage = await dbGet(
             'SELECT m.*, u.username, u.avatar as user_avatar FROM messages m JOIN users u ON m.user_id = u.id WHERE m.id = $1',
             [messageId]
         );
- 
+
         const messageForSocket = { ...fullMessage, sender_username: fullMessage.username, sender_avatar: fullMessage.user_avatar };
         io.to(socketRoomKey).emit('newMessage', messageForSocket);
         res.json({ success: true, message: messageForSocket });
- 
+
         // Ответ бота
         if (chat.is_bot) {
             const botUserId = req.session.userId;
@@ -996,8 +1010,8 @@ app.post('/api/messages', async (req, res) => {
                 const botTime = getCurrentTime();
                 try {
                     const botResult = await pool.query(
-                        'INSERT INTO messages (chat_id, room_id, user_id, text, sent, time, status) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
-                        [chatId, roomId, botUserId, randomResponse, 0, botTime, 'read']
+                        'INSERT INTO messages (chat_id, user_id, text, sent, time, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
+                        [chatId, botUserId, randomResponse, 0, botTime, 'read']
                     );
                     const botMessageId = botResult.rows[0].id;
                     const botMessage = await dbGet(
@@ -1015,97 +1029,8 @@ app.post('/api/messages', async (req, res) => {
         res.json({ success: false, message: 'Ошибка отправки' });
     }
 });
- 
 
- 
-// Create chat
-app.post('/api/chats', async (req, res) => {
-    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
-    const { name } = req.body;
-    if (!name) return res.json({ success: false, message: 'Введите имя чата' });
-    if (name.length > 64) return res.json({ success: false, message: 'Название чата не может быть длиннее 64 символов' });
- 
-    const avatar = name.charAt(0).toUpperCase();
-    try {
-        const roomCode = await generateInviteCodeAsync();
 
-        // Транзакция: комната + участник + чат — атомарны. Иначе при сбое на 2-м шаге
-        // останется «комната без владельца» или «участник без чата».
-        const client = await pool.connect();
-        let roomId, chatId;
-        try {
-            await client.query('BEGIN');
-            const roomResult = await client.query('INSERT INTO rooms (name, code) VALUES ($1, $2) RETURNING id', [name, roomCode]);
-            roomId = roomResult.rows[0].id;
-            await client.query('INSERT INTO room_participants (room_id, user_id) VALUES ($1, $2)', [roomId, req.session.userId]);
-            const chatResult = await client.query(
-                'INSERT INTO chats (user_id, room_id, name, avatar, online, is_bot) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
-                [req.session.userId, roomId, name, avatar, 0, 0]
-            );
-            chatId = chatResult.rows[0].id;
-            await client.query('COMMIT');
-        } catch (txErr) {
-            await client.query('ROLLBACK');
-            throw txErr;
-        } finally {
-            client.release();
-        }
-        res.json({ success: true, chat: { id: chatId, name, avatar, online: 0, is_bot: 0, room_id: roomId, invite_code: roomCode } });
-    } catch (error) {
-        console.error('Create chat error:', error);
-        res.json({ success: false, message: 'Ошибка создания чата' });
-    }
-});
- 
-// Get invite code
-app.get('/api/chats/invite/:chatId', async (req, res) => {
-    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
-    const chatId = req.params.chatId;
-    try {
-        const chat = await dbGet('SELECT room_id FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
-        if (!chat) return res.json({ success: false, message: 'Чат не найден' });
-        if (!chat.room_id) return res.json({ success: false, message: 'У этого чата нет кода приглашения' });
-        const room = await dbGet('SELECT code FROM rooms WHERE id = $1', [chat.room_id]);
-        if (!room) return res.json({ success: false, message: 'Код не найден' });
-        res.json({ success: true, code: room.code });
-    } catch (error) {
-        res.json({ success: false, message: 'Ошибка получения кода' });
-    }
-});
- 
-// Join chat by code
-app.post('/api/chats/join', async (req, res) => {
-    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
-    const { code } = req.body;
-    if (!code) return res.json({ success: false, message: 'Введите код приглашения' });
- 
-    try {
-        const room = await dbGet('SELECT * FROM rooms WHERE code = $1', [code]);
-        if (!room) return res.json({ success: false, message: 'Чат по этому коду не найден' });
- 
-        const participant = await dbGet('SELECT id FROM room_participants WHERE room_id = $1 AND user_id = $2', [room.id, req.session.userId]);
-        if (participant) {
-            const chat = await dbGet('SELECT id FROM chats WHERE room_id = $1 AND user_id = $2', [room.id, req.session.userId]);
-            if (!chat) return res.json({ success: false, message: 'Чат уже добавлен' });
-            return res.json({ success: true, chat: { id: chat.id } });
-        }
- 
-        const otherUser = await dbGet('SELECT u.username FROM users u JOIN room_participants rp ON u.id = rp.user_id WHERE rp.room_id = $1 AND u.id != $2 LIMIT 1', [room.id, req.session.userId]);
-        const chatName = otherUser ? `Чат с ${otherUser.username}` : room.name;
-        const avatar = chatName.charAt(0).toUpperCase();
- 
-        await pool.query('INSERT INTO room_participants (room_id, user_id) VALUES ($1, $2)', [room.id, req.session.userId]);
-        const chatResult = await pool.query(
-            'INSERT INTO chats (user_id, room_id, name, avatar, online, is_bot) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
-            [req.session.userId, room.id, chatName, avatar, 0, 0]
-        );
-        res.json({ success: true, chat: { id: chatResult.rows[0].id, name: chatName, avatar, online: 0, is_bot: 0, room_id: room.id, invite_code: room.code } });
-    } catch (error) {
-        console.error('Join chat error:', error);
-        res.json({ success: false, message: 'Ошибка входа в чат' });
-    }
-});
- 
 // Delete chat
 app.delete('/api/chats/:chatId', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
@@ -1113,20 +1038,8 @@ app.delete('/api/chats/:chatId', async (req, res) => {
     try {
         const chat = await dbGet('SELECT * FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
         if (!chat) return res.json({ success: false, message: 'Чат не найден' });
- 
-        if (chat.room_id) {
-            // Удаляем запись участника
-            await dbRun('DELETE FROM room_participants WHERE room_id = $1 AND user_id = $2', [chat.room_id, req.session.userId]);
-            // Проверяем, остались ли ещё участники в комнате
-            const remaining = await dbGet('SELECT COUNT(*) as cnt FROM room_participants WHERE room_id = $1', [chat.room_id]);
-            if (!remaining || Number(remaining.cnt) === 0) {
-                // Последний участник вышел — удаляем сообщения и комнату
-                await dbRun('DELETE FROM messages WHERE room_id = $1', [chat.room_id]);
-                await dbRun('DELETE FROM rooms WHERE id = $1', [chat.room_id]);
-            }
-        } else {
-            await dbRun('DELETE FROM messages WHERE chat_id = $1', [chatId]);
-        }
+
+        await dbRun('DELETE FROM messages WHERE chat_id = $1', [chatId]);
         await dbRun('DELETE FROM unread WHERE chat_id = $1', [chatId]);
         await dbRun('DELETE FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
         res.json({ success: true });
@@ -1197,8 +1110,7 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
         if (!chat) return res.status(404).json({ success: false, message: 'Чат не найден' });
 
         const time = getCurrentTime();
-        const roomId = chat.room_id || null;
-        const socketRoomKey = getSocketRoomKey(chatId, roomId);
+        const socketRoomKey = `chat:${chatId}`;
         const fileUrl = `/uploads/${file.filename}`;
         const fileType = file.mimetype;
         const sanitizedFileName = path.basename(file.originalname).slice(0, 200).replace(/[<>&"']/g, '');
@@ -1207,8 +1119,8 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
         const messageText = text ? String(text).trim() : (messageType === 'audio' ? 'Голосовое сообщение' : file.originalname);
 
         const result = await pool.query(
-            'INSERT INTO messages (chat_id, room_id, user_id, text, file_url, file_name, file_type, message_type, sent, time, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id',
-            [chatId, roomId, req.session.userId, messageText, fileUrl, sanitizedFileName, fileType, messageType, 1, time, 'sent']
+            'INSERT INTO messages (chat_id, user_id, text, file_url, file_name, file_type, message_type, sent, time, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id',
+            [chatId, req.session.userId, messageText, fileUrl, sanitizedFileName, fileType, messageType, 1, time, 'sent']
         );
         const messageId = result.rows[0].id;
 
@@ -1220,11 +1132,11 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
         setTimeout(() => dbRun('UPDATE messages SET status = $1 WHERE id = $2', ['delivered', messageId]), 1000);
         setTimeout(() => dbRun('UPDATE messages SET status = $1 WHERE id = $2', ['read', messageId]), 2000);
 
-        const fileMessage = { 
-            id: messageId, chat_id: Number(chatId), room_id: roomId, user_id: req.session.userId, 
-            sender_username: senderUsername, sender_avatar: senderAvatar, 
-            text: messageText, file_url: fileUrl, file_name: sanitizedFileName, 
-            file_type: fileType, message_type: messageType, sent: true, time, status: 'sent' 
+        const fileMessage = {
+            id: messageId, chat_id: Number(chatId), user_id: req.session.userId,
+            sender_username: senderUsername, sender_avatar: senderAvatar,
+            text: messageText, file_url: fileUrl, file_name: sanitizedFileName,
+            file_type: fileType, message_type: messageType, sent: true, time, status: 'sent'
         };
         io.to(socketRoomKey).emit('newMessage', fileMessage);
         res.json({ success: true, message: fileMessage });
@@ -1235,30 +1147,19 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
 });
 
 
-// Проверяет, что пользователь является участником чата/комнаты, к которой
+// Проверяет, что пользователь является владельцем чата, к которому
 // относится сообщение. Без этой проверки любой авторизованный мог бы ставить
 // реакции на чужие сообщения по id.
 async function userCanAccessMessage(userId, messageId) {
     const row = await dbGet(
-        `SELECT m.room_id, c.room_id AS chat_room_id, c.user_id AS chat_owner_id
+        `SELECT c.user_id AS chat_owner_id
          FROM messages m
          JOIN chats c ON m.chat_id = c.id
          WHERE m.id = $1`,
         [messageId]
     );
     if (!row) return false;
-
-    // Личный чат (без room_id): сообщение должно принадлежать чату этого пользователя
-    if (!row.chat_room_id && !row.room_id) {
-        return row.chat_owner_id === userId;
-    }
-    // Общий чат (room): пользователь должен быть участником комнаты
-    const roomId = row.room_id || row.chat_room_id;
-    const participant = await dbGet(
-        'SELECT id FROM room_participants WHERE room_id = $1 AND user_id = $2',
-        [roomId, userId]
-    );
-    return Boolean(participant);
+    return row.chat_owner_id === userId;
 }
 
 // Add reaction

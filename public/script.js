@@ -75,11 +75,6 @@ const avatarColorValue = document.getElementById('avatarColorValue');
 const avatarColorPreview = document.getElementById('avatarColorPreview');
 const settingsSaveBtn = document.getElementById('settingsSaveBtn');
 const notificationsToggle = document.getElementById('notificationsToggle');
-const newChatBtn = document.getElementById('newChatBtn');
-const getChatCodeBtn = document.getElementById('getChatCodeBtn');
-const joinCodeInput = document.getElementById('joinCodeInput');
-const joinChatBtn = document.getElementById('joinChatBtn');
-const inviteCodePreview = document.getElementById('inviteCodePreview');
 const chatSearchBox = document.getElementById('chatSearchBox');
 const replyPreview = document.getElementById('replyPreview');
 const replyPreviewText = document.getElementById('replyPreviewText');
@@ -128,8 +123,6 @@ function showApp() {
     displayUsername.textContent = currentUser.username;
     displayCode.textContent = currentUser.uniqueCode;
     syncAvatarColorControls();
-    getChatCodeBtn.disabled = false;
-    showInviteCode('');
     loadChats();
 }
 
@@ -207,7 +200,6 @@ function renderChatList() {
         <span class="chat-item-name">${escapeHtml(chat.name)}</span>
         <span class="chat-item-time">${escapeHtml(chat.last_time || '')}</span>
         ${escapeHtml(chat.last_message || 'Нет сообщений')}
-        <span class="chat-code">Код: ${escapeHtml(chat.invite_code)}</span>
         <span class="unread-badge">${escapeHtml(String(chat.unread))}</span>
     </div>
             <button class="delete-chat-btn" title="Удалить чат">🗑</button>
@@ -240,7 +232,7 @@ function getStatusIcon(status) {
 
 function getChatSocketRoomKey(chat) {
     if (!chat) return null;
-    return chat.room_id ? `room:${chat.room_id}` : `chat:${chat.id}`;
+    return `chat:${chat.id}`;
 }
 
 // Select chat
@@ -258,12 +250,6 @@ async function selectChat(chatId) {
         currentAvatar.innerHTML = formatAvatarHtml(chat.avatar || chat.name);
         currentChatStatus.textContent = chat.online ? 'онлайн' : 'был(а) недавно';
         currentChatStatus.className = `chat-status ${chat.online ? '' : 'offline'}`;
-        
-        // Invite code button for shared chats
-        getChatCodeBtn.disabled = false;
-        if (!chat.room_id) {
-            showInviteCode('');
-        }
         
         // Reset reply preview when switching chats
         clearReplyMode();
@@ -733,175 +719,6 @@ function updateVoiceRecordingState() {
     }
 }
 
-// Create new chat
-async function createNewChat() {
-    showNewChatModal(async (name) => {
-        if (!name) return;
-        try {
-            const response = await csrfFetch('/api/chats', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name })
-            });
-            const data = await response.json();
-            if (data.success) {
-                await loadChats();
-                if (data.chat && data.chat.id) await selectChat(data.chat.id);
-                if (data.chat && data.chat.invite_code) showInviteCode(data.chat.invite_code);
-            } else {
-                alert(data.message || 'Ошибка создания чата');
-            }
-        } catch (error) {
-            console.error('Create chat error:', error);
-        }
-    });
-}
-
-async function fetchInviteCodeForChat(chatId) {
-    if (!chatId) return null;
-
-    try {
-        const response = await csrfFetch(`/api/chats/invite/${chatId}`);
-        const data = await response.json();
-
-        if (data.success) {
-            return data.code;
-        }
-
-        console.error('Get invite code error:', data.message);
-    } catch (error) {
-        console.error('Get invite code error:', error);
-    }
-
-    return null;
-}
-
-async function handleGetCodeClick() {
-    const selectedChat = chats.find(c => c.id === currentChatId);
-
-    if (selectedChat && selectedChat.room_id) {
-        const code = await fetchInviteCodeForChat(currentChatId);
-        if (!code) return alert('Не удалось получить код приглашения для этого чата');
-        await sendCodeMessage(currentChatId, code);
-        showInviteCode(code);
-        return; //  Важно: завершаем выполнение
-    }
-
-    // вызываем только внутри колбэка
-    showNewChatModal(async (name) => {
-        if (!name) return;
-        await createChatWithCode(name);
-    });
-}
-
-
-
-async function getInviteCode() {
-    if (!currentChatId) {
-        return alert('Выберите чат, чтобы получить код');
-    }
-
-    const code = await fetchInviteCodeForChat(currentChatId);
-    if (code) {
-        showInviteCode(code);
-    } else {
-        alert('Ошибка получения кода');
-    }
-}
-
-async function sendCodeMessage(chatId, code) {
-    try {
-        const response = await csrfFetch('/api/messages', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chatId, text: `Код: ${code}` })
-        });
-
-        const data = await response.json();
-
-        if (data.success) {
-            if (chatId === currentChatId) {
-                scheduleCurrentChatReload();
-            }
-            scheduleChatsReload();
-        } else {
-            console.error('Send code message failed:', data.message);
-        }
-    } catch (error) {
-        console.error('Send code message error:', error);
-    }
-}
-
-async function createChatWithCode(name) {
-    try {
-        const response = await csrfFetch('/api/chats', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name })
-        });
-
-        const data = await response.json();
-
-        if (data.success) {
-            await loadChats();
-            if (data.chat && data.chat.id) {
-                await selectChat(data.chat.id);
-                if (data.chat.invite_code) {
-                    await sendCodeMessage(data.chat.id, data.chat.invite_code);
-                    showInviteCode(data.chat.invite_code);
-                } else {
-                    await getInviteCode();
-                }
-            }
-        } else {
-            alert(data.message || 'Ошибка создания чата с кодом');
-        }
-    } catch (error) {
-        console.error('Create chat with code error:', error);
-    }
-}
-
-async function joinChatByCode() {
-    const code = joinCodeInput.value.trim();
-    if (!code) {
-        return alert('Введите код приглашения');
-    }
-
-    try {
-        const response = await csrfFetch('/api/chats/join', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ code })
-        });
-
-        const data = await response.json();
-
-        if (data.success) {
-            if (data.chat && data.chat.id) {
-                await loadChats();
-                selectChat(data.chat.id);
-                joinCodeInput.value = '';
-                showInviteCode('');
-            } else {
-                alert('Вы уже добавлены в этот чат');
-            }
-        } else {
-            alert(data.message || 'Ошибка при подключении к чату');
-        }
-    } catch (error) {
-        console.error('Join chat error:', error);
-        alert('Ошибка соединения');
-    }
-}
-
-function showInviteCode(code) {
-    if (!code) {
-        inviteCodePreview.textContent = '';
-        return;
-    }
-    inviteCodePreview.textContent = `Код чата: ${code}`;
-}
-
 // Setup event listeners
 function setupEventListeners() {
     const logoutSidebarBtn = document.getElementById('logoutSidebarBtn');
@@ -1090,13 +907,6 @@ if (logoutSidebarBtn) {
         }
     });
     
-    // New chat button
-    newChatBtn.addEventListener('click', createNewChat);
-    
-    // Invite code button
-    getChatCodeBtn.addEventListener('click', handleGetCodeClick);
-    joinChatBtn.addEventListener('click', joinChatByCode);
-
     if (chatSearchBox) {
     const chatSearchBtn = document.getElementById('chatSearchBtn');
     const chatSearchClear = document.getElementById('chatSearchClear');
@@ -1357,48 +1167,6 @@ function highlightText(text, query) {
 }
 
 
-function showNewChatModal(callback) {
-    const modal = document.getElementById('newChatModal');
-    const input = document.getElementById('newChatNameInput');
-    const error = document.getElementById('newChatError');
-    const confirmBtn = document.getElementById('newChatConfirmBtn');
-    const cancelBtn = document.getElementById('newChatCancelBtn');
-
-    input.value = '';
-    error.textContent = '';
-    modal.classList.add('active');
-    setTimeout(() => input.focus(), 50);
-
-    function confirm() {
-        const name = input.value.trim();
-        if (!name) { error.textContent = 'Введите название чата'; return; }
-        if (name.length > 64) { error.textContent = 'Максимум 64 символа'; return; }
-        modal.classList.remove('active');
-        cleanup();
-        callback(name);
-    }
-
-    function cancel() {
-        modal.classList.remove('active');
-        cleanup();
-        callback(null);
-    }
-
-    function onKey(e) {
-        if (e.key === 'Enter') confirm();
-        if (e.key === 'Escape') cancel();
-    }
-
-    function cleanup() {
-        confirmBtn.removeEventListener('click', confirm);
-        cancelBtn.removeEventListener('click', cancel);
-        input.removeEventListener('keydown', onKey);
-    }
-
-    confirmBtn.addEventListener('click', confirm);
-    cancelBtn.addEventListener('click', cancel);
-    input.addEventListener('keydown', onKey);
-}
 // Initialize app
 init();
 
@@ -1819,52 +1587,6 @@ window.addEventListener('load', () => {
     requestNotificationPermission();
 });
 
-// ========== ANTI-COPY PROTECTION ==========
-
-// Disable right-click context menu
-document.addEventListener('contextmenu', (e) => {
-    // Разрешаем контекстное меню на сообщениях
-    if (e.target.closest('.message-row')) return;
-    e.preventDefault();
-    return false;
-});
-
-// Disable text selection
-document.addEventListener('selectstart', (e) => {
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-    e.preventDefault();
-    return false;
-});
-
-// Disable drag and drop
-document.addEventListener('dragstart', (e) => {
-    e.preventDefault();
-    return false;
-});
-
-document.addEventListener('drop', (e) => {
-    e.preventDefault();
-    return false;
-});
-
-// Disable copy, cut, paste
-document.addEventListener('copy', (e) => {
-    e.preventDefault();
-    return false;
-});
-
-document.addEventListener('cut', (e) => {
-    e.preventDefault();
-    return false;
-});
-
-document.addEventListener('paste', (e) => {
-    // Разрешаем вставку в поля ввода
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-    e.preventDefault();
-    return false;
-});
-
 // ========== МОБИЛЬНАЯ НАВИГАЦИЯ ==========
 const backBtn = document.getElementById('backBtn');
 
@@ -1887,10 +1609,7 @@ updateBackBtn();
 socket.on('newMessage', (message) => {
     const selectedChat = chats.find(c => c.id === currentChatId);
     if (!selectedChat) return;
-
-    const isSelectedPrivateChat = !selectedChat.room_id && message.chat_id === selectedChat.id;
-    const isSelectedSharedChat = Boolean(selectedChat.room_id) && message.room_id === selectedChat.room_id;
-    if (!isSelectedPrivateChat && !isSelectedSharedChat) return;
+    if (message.chat_id !== selectedChat.id) return;
 
     scheduleCurrentChatReload();
     scheduleChatsReload();

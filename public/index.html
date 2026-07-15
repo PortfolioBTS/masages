@@ -96,22 +96,12 @@
             <div class="sidebar-header">
                 <h2>Чаты</h2>
                 <input type="text" class="search-box" placeholder="Поиск..." />
-                <button class="new-chat-btn" id="newChatBtn">+</button>
             </div>
             
             <div class="chat-list" id="chatList">
                 <!-- Chat items will be added here -->
             </div>
 
-            <div class="invite-panel">
-                <button class="invite-btn" id="getChatCodeBtn" disabled>Получить код</button>
-                <div class="invite-code-preview" id="inviteCodePreview"></div>
-                <div class="join-chat-row">
-                    <input type="text" id="joinCodeInput" placeholder="Введите 6-значный код">
-                    <button class="join-chat-btn" id="joinChatBtn">Присоединиться</button>
-                </div>
-            </div>
-            
             <div class="settings">
                 <button class="logout-sidebar-btn" id="logoutSidebarBtn">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -275,25 +265,6 @@
         </div>
         <div class="modal-actions">
             <button type="button" class="settings-save-btn" id="cpSaveBtn">Сохранить</button>
-        </div>
-    </div>
-</div>
-    <!-- New Chat Modal -->
-<div class="modal" id="newChatModal">
-    <div class="modal-content">
-        <div class="modal-header">
-            <h3>Новый чат</h3>
-            <button class="close-btn" id="newChatCancelBtn">&times;</button>
-        </div>
-        <div class="modal-body">
-            <div class="setting-item">
-                <label>Название чата</label>
-                <input type="text" id="newChatNameInput" placeholder="Введите название..." maxlength="64" autocomplete="off">
-            </div>
-            <div class="error-message" id="newChatError"></div>
-        </div>
-        <div class="modal-actions">
-            <button type="button" class="settings-save-btn" id="newChatConfirmBtn">Создать</button>
         </div>
     </div>
 </div>
