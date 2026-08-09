@@ -16,6 +16,7 @@ const { Server } = require('socket.io');
 const pgSession = require('connect-pg-simple')(session);
 const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
+const { ipKeyGenerator } = rateLimit;
 
 // === RUST ANON SERVICE INTEGRATION ===
 const ANON_SERVICE_URL = process.env.ANON_SERVICE_URL || 'http://127.0.0.1:8080';
@@ -98,7 +99,7 @@ app.use((req, res, next) => {
     next();
 });
 
-const rateLimitKeyGenerator = (req) => req.realIp || req.ip;
+const rateLimitKeyGenerator = (req) => ipKeyGenerator(req.realIp || req.ip);
 
 const loginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -349,6 +350,12 @@ async function initDatabase() {
             UNIQUE(message_id, user_id, emoji)
         )
     `);
+
+    // Миграция: если таблицы chats/messages были созданы ДО появления комнат,
+    // CREATE TABLE IF NOT EXISTS их не тронет и колонки room_id не будет.
+    // Добавляем её вручную, иначе следующий CREATE INDEX ON messages(room_id) упадёт с 42703.
+    await pool.query(`ALTER TABLE chats ADD COLUMN IF NOT EXISTS room_id INTEGER REFERENCES rooms(id);`);
+    await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS room_id INTEGER REFERENCES rooms(id);`);
 
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id);`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_room_id ON messages(room_id);`);

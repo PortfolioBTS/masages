@@ -68,6 +68,10 @@ CREATE TABLE IF NOT EXISTS reactions (
     UNIQUE(message_id, user_id, emoji)
 );
 
+-- Миграция для БД, созданных до появления комнат (room_id)
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS room_id INTEGER REFERENCES rooms(id) ON DELETE SET NULL;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS room_id INTEGER REFERENCES rooms(id) ON DELETE SET NULL;
+
 CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id);
 CREATE INDEX IF NOT EXISTS idx_messages_room_id ON messages(room_id);
 CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id);
