@@ -1,25 +1,41 @@
 require('dotenv').config();
 
-// 1. ИМПОРТЫ
+// 1. IMPORTS
 const express = require('express');
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const session = require('express-session');
-
 const multer = require('multer');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const http = require('http');
-const https = require('https'); // Изменено: явный импорт https
+const https = require('https');
 const fs = require('fs');
 const { Server } = require('socket.io');
 const pgSession = require('connect-pg-simple')(session);
 const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
 
+// === RUST ANON SERVICE INTEGRATION ===
+const ANON_SERVICE_URL = process.env.ANON_SERVICE_URL || 'http://127.0.0.1:8080';
 
-// Конфигурация загрузки файлов
+async function fetchAnonymousIdentity() {
+    try {
+        const res = await fetch(`${ANON_SERVICE_URL}/generate`, {
+            method: 'POST',
+            signal: AbortSignal.timeout(2000)
+        });
+        if (res.ok) {
+            const data = await res.json();
+            if (data.unique_code && data.username) return data;
+        }
+    } catch (e) {
+        console.warn('[Anon] Rust service unavailable, using fallback:', e.message);
+    }
+    return null;
+}
+
 const ALLOWED_MIME_TYPES = [
     'image/jpeg', 'image/png', 'image/gif', 'image/webp',
     'video/mp4', 'video/webm', 'video/quicktime',
@@ -27,10 +43,8 @@ const ALLOWED_MIME_TYPES = [
     'application/pdf', 'text/plain',
 ];
 
-// Запрещённые расширения (независимо от MIME-типа)
 const BLOCKED_EXTENSIONS = new Set(['.html', '.htm', '.php', '.exe', '.js', '.sh', '.py', '.rb', '.pl', '.bat', '.cmd', '.ps1', '.vbs', '.jar', '.msi']);
 
-// Magic bytes для проверки реального типа содержимого
 function checkMagicBytes(buffer, mimetype) {
     if (!buffer || buffer.length < 4) return false;
     const b = buffer;
@@ -45,14 +59,10 @@ function checkMagicBytes(buffer, mimetype) {
         return (b[0] === 0x4F && b[1] === 0x67 && b[2] === 0x67) || (b[0] === 0x1A && b[1] === 0x45 && b[2] === 0xDF && b[3] === 0xA3);
     }
     if (mimetype === 'audio/wav') return b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46;
-    if (mimetype === 'text/plain') return true; // текст не имеет фиксированной сигнатуры
+    if (mimetype === 'text/plain') return true;
     if (mimetype === 'video/quicktime') return b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70;
-    // По умолчанию ОТКАЗЫВАЕМ: MIME-заголовок клиент подделывает, поэтому всё,
-    // что не распознали явно, считаем подозрительным. Раньше здесь было `return true`,
-    // что пропускало любой бинарник с подменённым типом.
     return false;
 }
-
 const upload = multer({
     storage: multer.diskStorage({
         destination: (req, file, cb) => {
@@ -68,12 +78,10 @@ const upload = multer({
     }),
     limits: { fileSize: 50 * 1024 * 1024 },
     fileFilter: (req, file, cb) => {
-        // 1. Проверяем расширение
         const ext = path.extname(file.originalname).toLowerCase();
         if (BLOCKED_EXTENSIONS.has(ext)) {
             return cb(new Error('Неподдерживаемый тип файла'), false);
         }
-        // 2. Проверяем MIME-тип из заголовка (первичная фильтрация)
         if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
             return cb(new Error('Неподдерживаемый тип файла'), false);
         }
@@ -81,35 +89,20 @@ const upload = multer({
     }
 });
 
-// 2. ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЙ
 const app = express();
 app.set('trust proxy', 1);
 
-// Если сайт стоит за Cloudflare (Security → Proxied/оранжевое облачко),
-// Cloudflare добавляет ещё один хоп перед хостинг-платформой, из-за чего
-// req.ip может показывать IP хостинга, а не реального клиента.
-// CF-Connecting-IP — это заголовок, который выставляет сам Cloudflare
-// (клиент не может его подделать, Cloudflare перезаписывает его на границе
-// своей сети), поэтому это самый надёжный источник настоящего IP.
 app.use((req, res, next) => {
     const cfIp = req.headers['cf-connecting-ip'];
-    if (cfIp) {
-        req.realIp = cfIp;
-    } else {
-        req.realIp = req.ip;
-    }
+    req.realIp = cfIp || req.ip;
     next();
 });
 
-// === RATE LIMITING ===
-// За Cloudflare/Railway req.ip = адрес прокси, поэтому ключуемся по реальному
-// клиентскому IP (cf-connecting-ip → x-forwarded-for → req.ip), который middleware
-// выше уже положил в req.realIp. Без этого весь сайт получит один общий лимит.
 const rateLimitKeyGenerator = (req) => req.realIp || req.ip;
 
 const loginLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,     // 15 минут
-    max: 5,                        // 5 попыток входа
+    windowMs: 15 * 60 * 1000,
+    max: 5,
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: rateLimitKeyGenerator,
@@ -117,8 +110,8 @@ const loginLimiter = rateLimit({
 });
 
 const registerLimiter = rateLimit({
-    windowMs: 60 * 60 * 1000,     // 1 час
-    max: 3,                        // 3 регистрации
+    windowMs: 60 * 60 * 1000,
+    max: 3,
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: rateLimitKeyGenerator,
@@ -126,8 +119,8 @@ const registerLimiter = rateLimit({
 });
 
 const passwordLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,     // 15 минут
-    max: 3,                        // 3 смены пароля
+    windowMs: 15 * 60 * 1000,
+    max: 3,
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: rateLimitKeyGenerator,
@@ -135,25 +128,22 @@ const passwordLimiter = rateLimit({
 });
 
 const apiLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,     // 15 минут
-    max: 300,                     // 300 запросов на произвольный /api/* (защита от спама)
+    windowMs: 15 * 60 * 1000,
+    max: 300,
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: rateLimitKeyGenerator,
     message: { success: false, message: 'Слишком много запросов. Попробуйте позже.' }
 });
 
- 
 let server;
 if (process.env.NODE_ENV === 'production') {
     server = http.createServer(app);
 } else {
-    // Проверка существования файлов SSL для dev-режима
     const sslOptions = {
         key: fs.existsSync('./localhost+1-key.pem') ? fs.readFileSync('./localhost+1-key.pem') : null,
         cert: fs.existsSync('./localhost+1.pem') ? fs.readFileSync('./localhost+1.pem') : null,
     };
-    
     if (sslOptions.key && sslOptions.cert) {
         server = https.createServer(sslOptions, app);
     } else {
@@ -161,23 +151,16 @@ if (process.env.NODE_ENV === 'production') {
         server = http.createServer(app);
     }
 }
- 
+
 const io = new Server(server);
-// Максимум 5 одновременных WebSocket-соединений с одного IP
 const ipConnectionCount = new Map();
 
-// Очищаем записи с нулевым счётчиком каждые 10 минут, чтобы не копился мусор
 setInterval(() => {
     for (const [ip, count] of ipConnectionCount.entries()) {
         if (count <= 0) ipConnectionCount.delete(ip);
     }
 }, 10 * 60 * 1000);
 
-// Извлекает настоящий клиентский IP из заголовков прокси-цепочки.
-// За Cloudflare+Railway socket.handshake.address показывает адрес прокси, а не клиента.
-// Порядок: cf-connecting-ip (Cloudflare, перезаписывается на границе сети) →
-// x-forwarded-for (стандартный заголовок прокси, берём первый = исходный клиент) →
-// handshake.address (TCP-сокет, фоллбэк для прямого подключения).
 function getClientIp(handshake) {
     const headers = handshake.headers || {};
     if (headers['cf-connecting-ip']) {
@@ -188,17 +171,13 @@ function getClientIp(handshake) {
     }
     return handshake.address;
 }
-
 io.use((socket, next) => {
     const ip = getClientIp(socket.handshake);
     const count = ipConnectionCount.get(ip) || 0;
-
     if (count >= 5) {
         return next(new Error('Слишком много подключений с вашего IP'));
     }
-
     ipConnectionCount.set(ip, count + 1);
-
     socket.on('disconnect', () => {
         const current = ipConnectionCount.get(ip) || 1;
         if (current <= 1) {
@@ -207,15 +186,12 @@ io.use((socket, next) => {
             ipConnectionCount.set(ip, current - 1);
         }
     });
-
     next();
 });
+
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
- 
-// 3. ПОДКЛЮЧЕНИЕ К POSTGRESQL
 
-// Если установлена переменная DUMP_CA=true — выводим ВСЮ цепочку сертификатов и завершаем работу
 async function maybeDumpCa() {
     if (process.env.DUMP_CA !== 'true') return;
     const tls = require('tls');
@@ -233,7 +209,6 @@ async function maybeDumpCa() {
         socket.once('data', (data) => {
             if (data[0] !== 0x53) { reject(new Error('Сервер не поддерживает SSL')); return; }
             const tlsSocket = tls.connect({ socket, host, rejectUnauthorized: false }, () => {
-                // Собираем ВСЮ цепочку сертификатов (leaf → intermediate → root)
                 const chain = [];
                 let current = tlsSocket.getPeerCertificate(true);
                 const seen = new Set();
@@ -243,14 +218,11 @@ async function maybeDumpCa() {
                     if (!current.issuerCertificate || current.issuerCertificate === current) break;
                     current = current.issuerCertificate;
                 }
-
-                // Конвертируем каждый сертификат в PEM
                 const pemChain = chain.map(c => [
                     '-----BEGIN CERTIFICATE-----',
                     c.raw.toString('base64').match(/.{1,64}/g).join('\n'),
                     '-----END CERTIFICATE-----'
                 ].join('\n')).join('\n');
-
                 console.log('\n[DUMP_CA] Найдено сертификатов в цепочке: ' + chain.length);
                 chain.forEach((c, i) => {
                     console.log('[DUMP_CA] [' + i + '] subject:', JSON.stringify(c.subject));
@@ -272,10 +244,6 @@ async function maybeDumpCa() {
 
 const sslConfig = (() => {
     if (process.env.NODE_ENV !== 'production') return false;
-
-    // Railway использует self-signed сертификат в цепочке — стандартная конфигурация для этого хостинга.
-    // TLS-шифрование активно, трафик не покидает внутреннюю сеть Railway.
-    // Источник: https://docs.railway.com/guides/postgresql
     console.log('[SSL] production: rejectUnauthorized=false (Railway internal network)');
     return { rejectUnauthorized: false };
 })();
@@ -284,29 +252,22 @@ const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: sslConfig,
 });
- 
-// Вспомогательная функция — аналог db.get (одна строка)
+
 async function dbGet(query, params = []) {
     const result = await pool.query(query, params);
     return result.rows[0] || null;
 }
- 
-// Вспомогательная функция — аналог db.all (все строки)
+
 async function dbAll(query, params = []) {
     const result = await pool.query(query, params);
     return result.rows;
 }
- 
-// Вспомогательная функция — аналог db.run (INSERT/UPDATE/DELETE)
+
 async function dbRun(query, params = []) {
     const result = await pool.query(query, params);
     return result;
 }
-
-
-// 4. СОЗДАНИЕ ТАБЛИЦ
 async function initDatabase() {
-    // Если DUMP_CA=true — выводим сертификат в лог и выходим
     await maybeDumpCa().catch(err => { console.error('[DUMP_CA] Ошибка:', err.message); process.exit(1); });
 
     await pool.query(`
@@ -314,13 +275,13 @@ async function initDatabase() {
             id SERIAL PRIMARY KEY,
             unique_code TEXT UNIQUE NOT NULL,
             username TEXT UNIQUE NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
+            email TEXT,
+            password TEXT,
             avatar TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     `);
- 
+
     await pool.query(`
         CREATE TABLE IF NOT EXISTS rooms (
             id SERIAL PRIMARY KEY,
@@ -329,7 +290,7 @@ async function initDatabase() {
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     `);
- 
+
     await pool.query(`
         CREATE TABLE IF NOT EXISTS chats (
             id SERIAL PRIMARY KEY,
@@ -341,7 +302,7 @@ async function initDatabase() {
             is_bot INTEGER DEFAULT 0
         )
     `);
- 
+
     await pool.query(`
         CREATE TABLE IF NOT EXISTS messages (
             id SERIAL PRIMARY KEY,
@@ -361,7 +322,7 @@ async function initDatabase() {
             reply_to_id INTEGER REFERENCES messages(id)
         )
     `);
- 
+
     await pool.query(`
         CREATE TABLE IF NOT EXISTS unread (
             id SERIAL PRIMARY KEY,
@@ -370,7 +331,7 @@ async function initDatabase() {
             count INTEGER DEFAULT 0
         )
     `);
- 
+
     await pool.query(`
         CREATE TABLE IF NOT EXISTS room_participants (
             id SERIAL PRIMARY KEY,
@@ -378,7 +339,7 @@ async function initDatabase() {
             user_id INTEGER NOT NULL REFERENCES users(id)
         )
     `);
- 
+
     await pool.query(`
         CREATE TABLE IF NOT EXISTS reactions (
             id SERIAL PRIMARY KEY,
@@ -388,16 +349,13 @@ async function initDatabase() {
             UNIQUE(message_id, user_id, emoji)
         )
     `);
+
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id);`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_room_id ON messages(room_id);`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id);`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_chats_user_id ON chats(user_id);`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_reactions_msg_user ON reactions(message_id, user_id);`);
 
-    // Миграция: поддержка анонимных аккаунтов (без email/пароля).
-    // Idempotent — проверяем текущую nullability через information_schema и
-    // выполняем DROP NOT NULL только один раз. UNIQUE на email при этом остаётся,
-    // но PostgreSQL разрешает несколько NULL в UNIQUE-колонке (в отличие от SQLite).
     const cols = await dbAll(`
         SELECT column_name, is_nullable
         FROM information_schema.columns
@@ -414,17 +372,15 @@ async function initDatabase() {
 
     console.log('База данных инициализирована');
 }
- 
+
 initDatabase().catch(err => {
     console.error('Ошибка инициализации БД:', err);
     process.exit(1);
 });
- 
-// 5. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 function getSocketRoomKey(chatId, roomId) {
     return roomId ? `room:${roomId}` : `chat:${chatId}`;
 }
- 
+
 function getLocalAddresses() {
     const nets = os.networkInterfaces();
     const addresses = [];
@@ -437,23 +393,17 @@ function getLocalAddresses() {
     }
     return addresses;
 }
- 
+
 function normalizeAvatarColor(value) {
     const color = String(value || '').trim();
     return /^#[0-9a-fA-F]{6}$/.test(color) ? color.toUpperCase() : '#667EEA';
 }
- 
+
 function getCurrentTime() {
     const now = new Date();
     return `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
 }
 
-
-
-
-
-
- 
 async function generateUniqueCodeAsync() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
     for (let attempts = 0; attempts < 100; attempts++) {
@@ -465,8 +415,6 @@ async function generateUniqueCodeAsync() {
     throw new Error('Could not generate unique code');
 }
 
-// Генерирует уникальное анонимное имя вида «Гость-AB3X9». Коллизии маловероятны,
-// но проверяем на всякий случай, т.к. username = UNIQUE.
 async function generateAnonymousUsernameAsync() {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     for (let attempts = 0; attempts < 100; attempts++) {
@@ -478,13 +426,13 @@ async function generateAnonymousUsernameAsync() {
     }
     throw new Error('Could not generate anonymous username');
 }
- 
+
 function generateInviteCode() {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     const bytes = crypto.randomBytes(6);
     return Array.from(bytes).map(b => chars[b % chars.length]).join('');
 }
- 
+
 async function generateInviteCodeAsync() {
     for (let attempts = 0; attempts < 100; attempts++) {
         const code = generateInviteCode();
@@ -493,10 +441,10 @@ async function generateInviteCodeAsync() {
     }
     throw new Error('Could not generate invite code');
 }
- 
+
 const sessionSecret = process.env.SESSION_SECRET;
 if (!sessionSecret) throw new Error('SESSION_SECRET не задан в переменных окружения');
- 
+
 const sessionMiddleware = session({
     store: new pgSession({
         pool: pool,
@@ -519,8 +467,6 @@ io.use((socket, next) => {
     sessionMiddleware(socket.request, socket.request.res || {}, next);
 });
 
-
-
 io.on('connection', (socket) => {
     const userId = socket.request.session?.userId;
     if (!userId) {
@@ -531,9 +477,7 @@ io.on('connection', (socket) => {
 
     socket.on('joinChat', async (roomKey) => {
         if (typeof roomKey !== 'string' || roomKey.length === 0) return;
-
         try {
-            // Проверяем принадлежность комнаты/чата текущему пользователю
             if (roomKey.startsWith('room:')) {
                 const roomId = parseInt(roomKey.slice(5), 10);
                 if (!Number.isFinite(roomId)) return;
@@ -541,7 +485,7 @@ io.on('connection', (socket) => {
                     'SELECT id FROM room_participants WHERE room_id = $1 AND user_id = $2',
                     [roomId, userId]
                 );
-                if (!participant) return; // Пользователь не участник этой комнаты
+                if (!participant) return;
             } else if (roomKey.startsWith('chat:')) {
                 const chatId = parseInt(roomKey.slice(5), 10);
                 if (!Number.isFinite(chatId)) return;
@@ -549,9 +493,9 @@ io.on('connection', (socket) => {
                     'SELECT id FROM chats WHERE id = $1 AND user_id = $2',
                     [chatId, userId]
                 );
-                if (!chat) return; // Чат не принадлежит пользователю
+                if (!chat) return;
             } else {
-                return; // Неизвестный формат ключа
+                return;
             }
             socket.join(roomKey);
         } catch (err) {
@@ -563,29 +507,23 @@ io.on('connection', (socket) => {
         console.log('Пользователь отключился, userId:', userId);
     });
 });
- 
-// 7. MIDDLEWARE
 app.use(express.json());
-app.use(cookieParser()); // Нужен для чтения req.cookies в CSRF middleware
+app.use(cookieParser());
 
- 
-// CSRF-защита через double-submit cookie pattern
-// Клиент должен отправлять заголовок X-CSRF-Token со значением cookie csrf_token
 app.use((req, res, next) => {
     const safeMethods = ['GET', 'HEAD', 'OPTIONS'];
     if (safeMethods.includes(req.method)) return next();
     if (req.path.startsWith('/socket.io')) return next();
 
-    // Генерируем и выставляем CSRF-cookie если его нет
     if (!req.cookies['csrf_token']) {
         const csrfToken = crypto.randomBytes(32).toString('hex');
         res.cookie('csrf_token', csrfToken, {
-            httpOnly: false, // должен быть доступен JS для отправки в заголовке
+            httpOnly: false,
             sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
             secure: process.env.NODE_ENV === 'production',
             maxAge: 24 * 60 * 60 * 1000
         });
-        return next(); // первый запрос пропускаем, cookie только что установлено
+        return next();
     }
 
     const cookieToken = req.cookies['csrf_token'];
@@ -596,53 +534,25 @@ app.use((req, res, next) => {
     }
     next();
 });
- 
-// Middleware безопасности (ИСПРАВЛЕНО: Обновлен CSP и добавлен Nonce)
+
 app.use((req, res, next) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, private');
     res.set('Pragma', 'no-cache');
     res.set('Expires', '0');
     res.set('Surrogate-Control', 'no-store');
     res.set('X-Robots-Tag', 'noindex, nofollow');
-    
-    // Генерация Nonce для CSP
     const nonce = crypto.randomBytes(16).toString('base64');
     res.locals.cspNonce = nonce;
-
-    // Обновленная политика безопасности: убраны unsafe-inline там где можно, добавлен nonce
-    // style-src: 'unsafe-inline' нужен, потому что script.js генерирует HTML с
-    // динамическими inline style="..." (цвет аватарки/пузырька сообщения — свой
-    // для каждого юзера/сообщения, поэтому nonce/hash сюда не подходят: они
-    // считаются от точного статичного содержимого). script-src при этом
-    // остаётся строгим (только 'self' + nonce) — это где XSS реально опасен.
     res.set('Content-Security-Policy', `default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ws: wss:; media-src 'self' blob:; frame-ancestors 'none'`);
-    
     res.set('X-Frame-Options', 'DENY');
     res.set('X-Content-Type-Options', 'nosniff');
-    // Устаревший заголовок убран, так как он не работает в современных браузерах и может мешать CSP
-    // res.set('X-XSS-Protection', '1; mode=block'); 
     res.set('Referrer-Policy', 'strict-origin-when-cross-origin');
-    
     next();
 });
 
-
 app.use(sessionMiddleware);
-// Защищённая раздача файлов — только для авторизованных
-// 1. Глобально раздача статики (ДО роутов)
 app.use(express.static(path.join(__dirname, 'public')));
 
-
-
-
- 
-
- 
-
-
- 
-
-// 2. Защищённый роут
 app.get('/uploads/:filename', async (req, res) => {
     if (!req.session.userId) return res.status(401).json({ success: false, message: 'Не авторизован' });
     const filename = path.basename(req.params.filename);
@@ -651,21 +561,25 @@ app.get('/uploads/:filename', async (req, res) => {
     res.sendFile(filePath);
 });
 
-
-
-
-
-
-
 app.get('/link.my', (req, res) => {
     serveIndexWithNonce(req, res);
 });
 
-// 8. API МАРШРУТЫ
-// Глобальный лимит на все /api/* — защита от спама/абуза (поверх точечных лимитов ниже).
-// Устанавливается ДО первого api-роута.
-app.use('/api/', apiLimiter);
+function serveIndexWithNonce(req, res) {
+    const nonce = res.locals.cspNonce || '';
+    const indexPath = path.join(__dirname, 'public', 'index.html');
+    fs.readFile(indexPath, 'utf8', (err, html) => {
+        if (err) return res.status(500).send('Server error');
+        const injected = html
+            .replace(/<script(?![^>]*\bnonce=)/g, `<script nonce="${nonce}"`)
+            .replace(/<style(?![^>]*\bnonce=)/g, `<style nonce="${nonce}"`)
+            .replace(/<link([^>]*rel=["']stylesheet["'][^>]*)(?![^>]*\bnonce=)>/g, `<link$1 nonce="${nonce}">`);
+        res.setHeader('Content-Type', 'text/html');
+        res.send(injected);
+    });
+}
 
+app.use('/api/', apiLimiter);
 app.post('/api/register', registerLimiter, async (req, res) => {
     const { username, email, password, confirmPassword } = req.body;
     if (!username || !email || !password || !confirmPassword)
@@ -682,7 +596,7 @@ app.post('/api/register', registerLimiter, async (req, res) => {
         return res.json({ success: false, message: 'Пароль должен быть не менее 6 символов' });
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
         return res.json({ success: false, message: 'Введите корректный email' });
- 
+
     try {
         const existing = await dbGet('SELECT id FROM users WHERE email = $1 OR username = $2', [email, username]);
         if (existing) return res.json({ success: false, message: 'Ошибка регистрации. Проверьте введённые данные.' });
@@ -690,8 +604,6 @@ app.post('/api/register', registerLimiter, async (req, res) => {
         const uniqueCode = await generateUniqueCodeAsync();
         const hashedPassword = await bcrypt.hash(password, 12);
 
-        // Транзакция: пользователь + чат бота + приветственное сообщение — атомарны.
-        // Если хоть один INSERT упадёт, откатятся все, не останется «пользователя без бота».
         const client = await pool.connect();
         let userId;
         try {
@@ -731,15 +643,25 @@ app.post('/api/register', registerLimiter, async (req, res) => {
     }
 });
 
-// Anonymous registration — без email и пароля, только unique_code + случайное имя.
-// Аккаунт «привязан» к текущей сессии/браузеру; восстановить доступ с другого
-// устройства нельзя (нет email для сброса). Это и есть «анонимность».
 app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
     try {
-        const username = await generateAnonymousUsernameAsync();
-        const uniqueCode = await generateUniqueCodeAsync();
+        let uniqueCode, username;
+        const rustIdentity = await fetchAnonymousIdentity();
+        if (rustIdentity) {
+            uniqueCode = rustIdentity.unique_code;
+            username = rustIdentity.username;
+            const existingCode = await dbGet('SELECT id FROM users WHERE unique_code = $1', [uniqueCode]);
+            const existingName = await dbGet('SELECT id FROM users WHERE username = $1', [username]);
+            if (existingCode || existingName) {
+                console.warn('[Anon] Rust-generated identity collision, using fallback');
+                uniqueCode = await generateUniqueCodeAsync();
+                username = await generateAnonymousUsernameAsync();
+            }
+        } else {
+            uniqueCode = await generateUniqueCodeAsync();
+            username = await generateAnonymousUsernameAsync();
+        }
 
-        // Та же транзакция, что и в обычной регистрации: пользователь + чат бота + приветствие.
         const client = await pool.connect();
         let userId;
         try {
@@ -757,7 +679,7 @@ app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
             const botChatId = botResult.rows[0].id;
             await client.query(
                 'INSERT INTO messages (chat_id, user_id, text, sent, time, status) VALUES ($1, $2, $3, $4, $5, $6)',
-                [botChatId, userId, 'Привет! Ты вошёл как анонимный гость. Чаты доступны, пока активна эта сессия.', 0, getCurrentTime(), 'read']
+                [botChatId, userId, 'Привет! Ты вошёл в приватный режим. Чаты доступны, пока активна эта сессия.', 0, getCurrentTime(), 'read']
             );
             await client.query('COMMIT');
         } catch (txErr) {
@@ -773,35 +695,31 @@ app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
         req.session.avatar = '#667EEA';
         req.session.isAnonymous = true;
 
-        res.json({ success: true, message: 'Анонимная регистрация успешна!', user: { id: userId, username, uniqueCode, avatar: '#667EEA', isAnonymous: true } });
+        res.json({ success: true, message: 'Приватный режим активирован!', user: { id: userId, username, uniqueCode, avatar: '#667EEA', isAnonymous: true } });
     } catch (error) {
         console.error('Anonymous register error:', error);
         res.json({ success: false, message: 'Ошибка сервера' });
     }
 });
 
-// Login (ИСПРАВЛЕНО: Добавлена регенерация сессии)
 app.post('/api/login', loginLimiter, async (req, res) => {
     const { email, password } = req.body;
     if (!email || !password) return res.json({ success: false, message: 'Введите email и пароль' });
     if (email.length > 254 || password.length > 128) return res.json({ success: false, message: 'Неверный email или пароль' });
- 
+
     try {
         const user = await dbGet('SELECT * FROM users WHERE email = $1', [email]);
         if (!user) return res.json({ success: false, message: 'Неверный email или пароль' });
- 
+
         const validPassword = await bcrypt.compare(password, user.password);
         if (!validPassword) return res.json({ success: false, message: 'Неверный email или пароль' });
- 
-        // Регенерация сессии для защиты от Session Fixation
+
         req.session.regenerate((err) => {
             if (err) return res.json({ success: false, message: 'Ошибка инициализации сессии' });
-            
             req.session.userId = user.id;
             req.session.username = user.username;
             req.session.uniqueCode = user.unique_code;
             req.session.avatar = user.avatar || '';
-            
             res.json({ success: true, message: 'Вход выполнен!', user: { id: user.id, username: user.username, uniqueCode: user.unique_code, avatar: user.avatar || '' } });
         });
     } catch (error) {
@@ -809,19 +727,15 @@ app.post('/api/login', loginLimiter, async (req, res) => {
         res.json({ success: false, message: 'Ошибка базы данных' });
     }
 });
- 
-// Logout
+
 app.post('/api/logout', (req, res) => {
     req.session.destroy((err) => {
         res.clearCookie('connect.sid');
-        if (err) {
-            console.error('Logout session destroy error:', err);
-        }
+        if (err) console.error('Logout session destroy error:', err);
         res.json({ success: true });
     });
 });
- 
-// Check auth
+
 app.get('/api/auth', async (req, res) => {
     if (!req.session.userId) return res.json({ authenticated: false });
     try {
@@ -833,8 +747,7 @@ app.get('/api/auth', async (req, res) => {
         res.json({ authenticated: false });
     }
 });
- 
-// Get user
+
 app.get('/api/user', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false });
     try {
@@ -845,8 +758,7 @@ app.get('/api/user', async (req, res) => {
         res.json({ success: false });
     }
 });
- 
-// Update avatar color
+
 app.post('/api/user/avatar-color', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const avatarColor = normalizeAvatarColor(req.body && req.body.avatarColor);
@@ -858,8 +770,6 @@ app.post('/api/user/avatar-color', async (req, res) => {
         res.json({ success: false, message: 'Ошибка обновления цвета аватара' });
     }
 });
- 
-// Get chats
 app.get('/api/chats', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     try {
@@ -879,15 +789,14 @@ app.get('/api/chats', async (req, res) => {
         res.json({ success: false, message: 'Ошибка загрузки чатов' });
     }
 });
- 
-// Get messages
+
 app.get('/api/messages/:chatId', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const chatId = req.params.chatId;
     try {
         const chat = await dbGet('SELECT * FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
         if (!chat) return res.json({ success: false, message: 'Чат не найден' });
- 
+
         const selectParam = chat.room_id || chatId;
         const selectQuery = chat.room_id
             ? `SELECT m.*, u.username as sender_username, u.avatar as sender_avatar,
@@ -906,9 +815,9 @@ app.get('/api/messages/:chatId', async (req, res) => {
                LEFT JOIN users ru ON rt.user_id = ru.id
                WHERE m.chat_id = $1 AND m.deleted = 0
                ORDER BY m.id ASC`;
- 
+
         let messages = await dbAll(selectQuery, [selectParam]);
- 
+
         if (messages.length === 0) {
             const updateQuery = chat.room_id
                 ? 'UPDATE messages SET status = $1 WHERE room_id = $2 AND sent = 0'
@@ -916,75 +825,69 @@ app.get('/api/messages/:chatId', async (req, res) => {
             await dbRun(updateQuery, ['read', selectParam]);
             return res.json({ success: true, messages: [], chat });
         }
- 
+
         const messageIds = messages.map(m => m.id);
         const placeholders = messageIds.map((_, i) => `$${i + 1}`).join(',');
         const reactions = await dbAll(
             `SELECT message_id, STRING_AGG(DISTINCT emoji, ',') as emojis FROM reactions WHERE message_id IN (${placeholders}) GROUP BY message_id`,
             messageIds
         );
- 
+
         const reactionsMap = {};
         reactions.forEach(r => { reactionsMap[r.message_id] = r.emojis.split(','); });
- 
+
         messages = messages.map(m => ({
             ...m,
             reactions: reactionsMap[m.id] || [],
             reply_to: m.reply_to_id ? { id: m.reply_to_id, text: m.reply_to_text, sender_username: m.reply_to_sender_username, sender_avatar: m.reply_to_sender_avatar } : null
         }));
- 
+
         const updateQuery = chat.room_id
             ? 'UPDATE messages SET status = $1 WHERE room_id = $2 AND sent = 0'
             : 'UPDATE messages SET status = $1 WHERE chat_id = $2 AND sent = 0';
         await dbRun(updateQuery, ['read', selectParam]);
- 
+
         res.json({ success: true, messages, chat });
     } catch (error) {
         console.error('Get messages error:', error);
         res.json({ success: false, message: 'Ошибка загрузки сообщений' });
     }
 });
- 
-// Send message (ИСПРАВЛЕНО: Санитизация ввода)
+
 app.post('/api/messages', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { chatId, text, replyToId } = req.body;
     const replyTo = Number(replyToId) || null;
     if (!text || text.trim() === '' || !chatId) return res.json({ success: false, message: 'Введите текст сообщения' });
     if (text.length > 4000) return res.json({ success: false, message: 'Сообщение не может быть длиннее 4000 символов' });
- 
+
     try {
         const chat = await dbGet('SELECT * FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
         if (!chat) return res.json({ success: false, message: 'Чат не найден' });
- 
+
         const time = getCurrentTime();
         const roomId = chat.room_id || null;
         const socketRoomKey = getSocketRoomKey(chatId, roomId);
-        
-        
         const safeText = text.trim();
- 
+
         const result = await pool.query(
             'INSERT INTO messages (chat_id, room_id, user_id, text, message_type, sent, time, status, reply_to_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id',
             [chatId, roomId, req.session.userId, safeText, 'text', 1, time, 'sent', replyTo]
         );
         const messageId = result.rows[0].id;
- 
+
         const fullMessage = await dbGet(
             'SELECT m.*, u.username, u.avatar as user_avatar FROM messages m JOIN users u ON m.user_id = u.id WHERE m.id = $1',
             [messageId]
         );
- 
+
         const messageForSocket = { ...fullMessage, sender_username: fullMessage.username, sender_avatar: fullMessage.user_avatar };
         io.to(socketRoomKey).emit('newMessage', messageForSocket);
         res.json({ success: true, message: messageForSocket });
- 
-        // Ответ бота
+
         if (chat.is_bot) {
             const botUserId = req.session.userId;
             setTimeout(async () => {
-                // За 1.5с чат могли удалить — проверяем, что он ещё существует и принадлежит тому же юзеру,
-                // иначе INSERT ответа упадёт в несуществующий/чужой chat_id (нарушение FK или мусор).
                 const stillExists = await dbGet(
                     'SELECT id FROM chats WHERE id = $1 AND user_id = $2 AND is_bot = 1',
                     [chatId, botUserId]
@@ -1015,22 +918,16 @@ app.post('/api/messages', async (req, res) => {
         res.json({ success: false, message: 'Ошибка отправки' });
     }
 });
- 
 
- 
-// Create chat
 app.post('/api/chats', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { name } = req.body;
     if (!name) return res.json({ success: false, message: 'Введите имя чата' });
     if (name.length > 64) return res.json({ success: false, message: 'Название чата не может быть длиннее 64 символов' });
- 
+
     const avatar = name.charAt(0).toUpperCase();
     try {
         const roomCode = await generateInviteCodeAsync();
-
-        // Транзакция: комната + участник + чат — атомарны. Иначе при сбое на 2-м шаге
-        // останется «комната без владельца» или «участник без чата».
         const client = await pool.connect();
         let roomId, chatId;
         try {
@@ -1056,8 +953,7 @@ app.post('/api/chats', async (req, res) => {
         res.json({ success: false, message: 'Ошибка создания чата' });
     }
 });
- 
-// Get invite code
+
 app.get('/api/chats/invite/:chatId', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const chatId = req.params.chatId;
@@ -1072,28 +968,27 @@ app.get('/api/chats/invite/:chatId', async (req, res) => {
         res.json({ success: false, message: 'Ошибка получения кода' });
     }
 });
- 
-// Join chat by code
+
 app.post('/api/chats/join', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { code } = req.body;
     if (!code) return res.json({ success: false, message: 'Введите код приглашения' });
- 
+
     try {
         const room = await dbGet('SELECT * FROM rooms WHERE code = $1', [code]);
         if (!room) return res.json({ success: false, message: 'Чат по этому коду не найден' });
- 
+
         const participant = await dbGet('SELECT id FROM room_participants WHERE room_id = $1 AND user_id = $2', [room.id, req.session.userId]);
         if (participant) {
             const chat = await dbGet('SELECT id FROM chats WHERE room_id = $1 AND user_id = $2', [room.id, req.session.userId]);
             if (!chat) return res.json({ success: false, message: 'Чат уже добавлен' });
             return res.json({ success: true, chat: { id: chat.id } });
         }
- 
+
         const otherUser = await dbGet('SELECT u.username FROM users u JOIN room_participants rp ON u.id = rp.user_id WHERE rp.room_id = $1 AND u.id != $2 LIMIT 1', [room.id, req.session.userId]);
         const chatName = otherUser ? `Чат с ${otherUser.username}` : room.name;
         const avatar = chatName.charAt(0).toUpperCase();
- 
+
         await pool.query('INSERT INTO room_participants (room_id, user_id) VALUES ($1, $2)', [room.id, req.session.userId]);
         const chatResult = await pool.query(
             'INSERT INTO chats (user_id, room_id, name, avatar, online, is_bot) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
@@ -1105,22 +1000,18 @@ app.post('/api/chats/join', async (req, res) => {
         res.json({ success: false, message: 'Ошибка входа в чат' });
     }
 });
- 
-// Delete chat
+
 app.delete('/api/chats/:chatId', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const chatId = req.params.chatId;
     try {
         const chat = await dbGet('SELECT * FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
         if (!chat) return res.json({ success: false, message: 'Чат не найден' });
- 
+
         if (chat.room_id) {
-            // Удаляем запись участника
             await dbRun('DELETE FROM room_participants WHERE room_id = $1 AND user_id = $2', [chat.room_id, req.session.userId]);
-            // Проверяем, остались ли ещё участники в комнате
             const remaining = await dbGet('SELECT COUNT(*) as cnt FROM room_participants WHERE room_id = $1', [chat.room_id]);
             if (!remaining || Number(remaining.cnt) === 0) {
-                // Последний участник вышел — удаляем сообщения и комнату
                 await dbRun('DELETE FROM messages WHERE room_id = $1', [chat.room_id]);
                 await dbRun('DELETE FROM rooms WHERE id = $1', [chat.room_id]);
             }
@@ -1135,14 +1026,13 @@ app.delete('/api/chats/:chatId', async (req, res) => {
         res.json({ success: false, message: 'Ошибка удаления чата' });
     }
 });
- 
-// Edit message
+
 app.put('/api/messages/:messageId', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { messageId } = req.params;
     const { text } = req.body;
     if (!text || text.trim() === '') return res.json({ success: false, message: 'Текст не может быть пустым' });
- 
+
     try {
         const message = await dbGet('SELECT * FROM messages WHERE id = $1 AND user_id = $2', [messageId, req.session.userId]);
         if (!message) return res.json({ success: false, message: 'Сообщение не найдено' });
@@ -1153,8 +1043,7 @@ app.put('/api/messages/:messageId', async (req, res) => {
         res.json({ success: false, message: 'Ошибка редактирования' });
     }
 });
- 
-// Delete message
+
 app.delete('/api/messages/:messageId', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { messageId } = req.params;
@@ -1167,17 +1056,14 @@ app.delete('/api/messages/:messageId', async (req, res) => {
         res.json({ success: false, message: 'Ошибка удаления' });
     }
 });
-// Загрузка фото/видео/аудио
 app.post('/api/messages/file', upload.single('file'), async (req, res) => {
     if (!req.session.userId) return res.status(401).json({ success: false, message: 'Не авторизован' });
-    
     const { chatId, text } = req.body;
     const file = req.file;
 
     if (!file) return res.status(400).json({ success: false, message: 'Файл не выбран' });
     if (!chatId) return res.status(400).json({ success: false, message: 'Указан чат' });
 
-    // Проверяем magic bytes сохранённого файла
     try {
         const filePath = path.join(__dirname, 'uploads', file.filename);
         const buffer = Buffer.alloc(8);
@@ -1185,7 +1071,7 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
         fs.readSync(fd, buffer, 0, 8, 0);
         fs.closeSync(fd);
         if (!checkMagicBytes(buffer, file.mimetype)) {
-            fs.unlinkSync(filePath); // удаляем подозрительный файл
+            fs.unlinkSync(filePath);
             return res.status(400).json({ success: false, message: 'Содержимое файла не соответствует его типу' });
         }
     } catch (magicErr) {
@@ -1212,7 +1098,6 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
         );
         const messageId = result.rows[0].id;
 
-        // Берём username и avatar из БД, а не из сессии
         const senderUser = await dbGet('SELECT username, avatar FROM users WHERE id = $1', [req.session.userId]);
         const senderUsername = senderUser ? senderUser.username : '';
         const senderAvatar = senderUser ? (senderUser.avatar || '') : '';
@@ -1220,11 +1105,11 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
         setTimeout(() => dbRun('UPDATE messages SET status = $1 WHERE id = $2', ['delivered', messageId]), 1000);
         setTimeout(() => dbRun('UPDATE messages SET status = $1 WHERE id = $2', ['read', messageId]), 2000);
 
-        const fileMessage = { 
-            id: messageId, chat_id: Number(chatId), room_id: roomId, user_id: req.session.userId, 
-            sender_username: senderUsername, sender_avatar: senderAvatar, 
-            text: messageText, file_url: fileUrl, file_name: sanitizedFileName, 
-            file_type: fileType, message_type: messageType, sent: true, time, status: 'sent' 
+        const fileMessage = {
+            id: messageId, chat_id: Number(chatId), room_id: roomId, user_id: req.session.userId,
+            sender_username: senderUsername, sender_avatar: senderAvatar,
+            text: messageText, file_url: fileUrl, file_name: sanitizedFileName,
+            file_type: fileType, message_type: messageType, sent: true, time, status: 'sent'
         };
         io.to(socketRoomKey).emit('newMessage', fileMessage);
         res.json({ success: true, message: fileMessage });
@@ -1234,10 +1119,6 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
     }
 });
 
-
-// Проверяет, что пользователь является участником чата/комнаты, к которой
-// относится сообщение. Без этой проверки любой авторизованный мог бы ставить
-// реакции на чужие сообщения по id.
 async function userCanAccessMessage(userId, messageId) {
     const row = await dbGet(
         `SELECT m.room_id, c.room_id AS chat_room_id, c.user_id AS chat_owner_id
@@ -1247,12 +1128,9 @@ async function userCanAccessMessage(userId, messageId) {
         [messageId]
     );
     if (!row) return false;
-
-    // Личный чат (без room_id): сообщение должно принадлежать чату этого пользователя
     if (!row.chat_room_id && !row.room_id) {
         return row.chat_owner_id === userId;
     }
-    // Общий чат (room): пользователь должен быть участником комнаты
     const roomId = row.room_id || row.chat_room_id;
     const participant = await dbGet(
         'SELECT id FROM room_participants WHERE room_id = $1 AND user_id = $2',
@@ -1261,7 +1139,6 @@ async function userCanAccessMessage(userId, messageId) {
     return Boolean(participant);
 }
 
-// Add reaction
 app.post('/api/reactions', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { messageId, emoji } = req.body;
@@ -1280,7 +1157,6 @@ app.post('/api/reactions', async (req, res) => {
     }
 });
 
-// Remove reaction
 app.delete('/api/reactions/:messageId/:emoji', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const messageId = Number(req.params.messageId);
@@ -1304,21 +1180,19 @@ app.delete('/api/reactions/:messageId/:emoji', async (req, res) => {
     }
 });
 
-// Search chats and messages
 app.get('/api/search', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const query = req.query.q || '';
     if (!query || query.length < 1) return res.json({ success: true, results: [] });
     if (query.length > 100) return res.json({ success: false, message: 'Запрос слишком длинный' });
 
-    // Экранируем спецсимволы LIKE: % и _ имеют особое значение
     const safeTerm = query.replace(/[%_\\]/g, '\\$&');
     const searchTerm = `%${safeTerm}%`;
     try {
         const chats = await dbAll('SELECT id, name, avatar FROM chats WHERE user_id = $1 AND name ILIKE $2 LIMIT 10', [req.session.userId, searchTerm]);
         const messages = await dbAll(
-            `SELECT m.id, m.text, m.chat_id, c.name as chat_name FROM messages m 
-             JOIN chats c ON m.chat_id = c.id 
+            `SELECT m.id, m.text, m.chat_id, c.name as chat_name FROM messages m
+             JOIN chats c ON m.chat_id = c.id
              WHERE c.user_id = $1 AND m.text ILIKE $2 AND m.deleted = 0 LIMIT 20`,
             [req.session.userId, searchTerm]
         );
@@ -1327,8 +1201,7 @@ app.get('/api/search', async (req, res) => {
         res.json({ success: false, message: 'Ошибка поиска' });
     }
 });
- 
-// Change password (ИСПРАВЛЕНО: Добавлен Rate Limiting + фикс бага с userId)
+
 app.post('/api/change-password', passwordLimiter, async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { currentPassword, newPassword, confirmPassword } = req.body;
@@ -1339,17 +1212,12 @@ app.post('/api/change-password', passwordLimiter, async (req, res) => {
     try {
         const user = await dbGet('SELECT password FROM users WHERE id = $1', [req.session.userId]);
         if (!user) return res.json({ success: false, message: 'Пользователь не найден' });
-        // Анонимные аккаунты не имеют пароля
-        if (!user.password) return res.json({ success: false, message: 'У этого аккаунта нет пароля (анонимный режим)' });
+        if (!user.password) return res.json({ success: false, message: 'У этого аккаунта нет пароля (приватный режим)' });
         const validPassword = await bcrypt.compare(currentPassword, user.password);
         if (!validPassword) return res.json({ success: false, message: 'Неверный текущий пароль' });
         const hashedPassword = await bcrypt.hash(newPassword, 12);
-
-        // ВАЖНО: сохраняем userId ДО destroy(), потому что после destroy()
-        // req.session.userId становится undefined и UPDATE падал в никуда (WHERE id = NULL).
         const userId = req.session.userId;
 
-        // Сначала обновляем пароль (пока сессия ещё жива и userId валиден), потом уничтожаем сессию.
         await dbRun('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, userId]);
 
         req.session.destroy((err) => {
@@ -1363,8 +1231,6 @@ app.post('/api/change-password', passwordLimiter, async (req, res) => {
     }
 });
 
-
-// Обработка ошибок загрузки файлов
 app.use((err, req, res, next) => {
     if (err instanceof multer.MulterError) {
         if (err.code === 'LIMIT_FILE_SIZE') {
@@ -1375,36 +1241,16 @@ app.use((err, req, res, next) => {
     if (err.message === 'Неподдерживаемый тип файла') {
         return res.status(400).json({ success: false, message: 'Разрешены только фото, видео, аудио и PDF' });
     }
-    // Глобальный обработчик — скрываем детали ошибки от клиента
     console.error('Unhandled error:', err);
     res.status(500).json({ success: false, message: 'Внутренняя ошибка сервера' });
 });
 
-// Вспомогательная функция: отдаёт index.html с подставленным CSP-nonce
-function serveIndexWithNonce(req, res) {
-    const nonce = res.locals.cspNonce || '';
-    const indexPath = path.join(__dirname, 'public', 'index.html');
-    fs.readFile(indexPath, 'utf8', (err, html) => {
-        if (err) return res.status(500).send('Server error');
-        // Вставляем nonce во все теги <script> и <link rel="stylesheet"> / <style>
-        const injected = html
-            .replace(/<script(?![^>]*\bnonce=)/g, `<script nonce="${nonce}"`)
-            .replace(/<style(?![^>]*\bnonce=)/g, `<style nonce="${nonce}"`)
-            .replace(/<link([^>]*rel=["']stylesheet["'][^>]*)(?![^>]*\bnonce=)>/g, `<link$1 nonce="${nonce}">`);
-        res.setHeader('Content-Type', 'text/html');
-        res.send(injected);
-    });
-}
-
-app.get('*', (req, res) => {
-    serveIndexWithNonce(req, res);
-});
- 
 server.listen(PORT, HOST, () => {
     const addresses = getLocalAddresses();
-    console.log('Сервер запущен на следующих адресах:');
-    addresses.forEach(addr => {
-        console.log(`Доступен в сети: https://${addr}:${PORT}`);
-    });
-    console.log(`  https://localhost:${PORT}`);
+    if (addresses.length > 0) {
+        console.log(`Сервер запущен на порту ${PORT}`);
+        addresses.forEach(addr => console.log(`Доступен по адресу: http://${addr}:${PORT}`));
+    } else {
+        console.log(`Сервер запущен на порту ${PORT}`);
+    }
 });

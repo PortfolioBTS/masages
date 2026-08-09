@@ -3,304 +3,225 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="robots" content="noindex, nofollow">
-    <meta name="googlebot" content="noindex, nofollow">
-    <meta http-equiv="X-UA-Compatible" content="ie=edge">
-    <meta http-equiv="pragma" content="no-cache">
-    <meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
-    <meta http-equiv="expires" content="0">
-    <title>Nyxo</title>
-    <link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700&family=Manrope:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <title>Nyxo — Мессенджер</title>
     <link rel="stylesheet" href="style.css">
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E💬%3C/text%3E%3C/svg%3E">
 </head>
 <body>
-    <!-- Auth Screen (полноценная отдельная страница, не модалка) -->
-    <div class="auth-modal" id="authModal">
-        <div class="auth-page-header">
-            <div class="auth-page-logo">
-                <span class="auth-page-logo-dot"></span> Nyxo
-            </div>
-            <span class="auth-page-header-note">Приватный мессенджер</span>
-        </div>
-
-        <div class="auth-page-main">
+    <div id="auth-screen" class="auth-screen">
         <div class="auth-container">
-            <div class="auth-brand">
-    <div class="auth-brand-icon">
-        <div class="signal-ring"></div>
-        <div class="signal-ring delay"></div>
-        <div class="signal-core"></div>
-    </div>
-    <span class="auth-brand-name">Nyxo</span>
-    <span class="auth-brand-tagline">Сигнал защищён</span>
-</div>
+            <div class="auth-logo">
+                <div class="logo-icon">💬</div>
+                <h1>Nyxo</h1>
+                <p>Безопасный мессенджер</p>
+            </div>
             <div class="auth-tabs">
                 <button class="auth-tab active" data-tab="login">Вход</button>
                 <button class="auth-tab" data-tab="register">Регистрация</button>
             </div>
-            
-            <!-- Login Form -->
-            <form class="auth-form" id="loginForm">
+            <div id="login-form" class="auth-form active">
                 <div class="form-group">
-                    <label>Email</label>
-                    <input type="email" id="loginEmail" placeholder="Введите email" required>
+                    <label for="login-email">Email</label>
+                    <input type="email" id="login-email" placeholder="Введите email" required>
                 </div>
                 <div class="form-group">
-                    <label>Пароль</label>
-                    <input type="password" id="loginPassword" placeholder="Введите пароль" required>
+                    <label for="login-password">Пароль</label>
+                    <input type="password" id="login-password" placeholder="Введите пароль" required>
                 </div>
-                <div class="error-message" id="loginError"></div>
-                <button type="submit" class="auth-submit">Войти</button>
-            </form>
-            
-            <!-- Register Form -->
-            <form class="auth-form hidden" id="registerForm">
-                <div class="form-group">
-                    <label>Имя пользователя</label>
-                    <input type="text" id="regUsername" placeholder="Придумайте имя" required minlength="3">
-                </div>
-                <div class="form-group">
-                    <label>Email</label>
-                    <input type="email" id="regEmail" placeholder="Введите email" required>
-                </div>
-                <div class="form-group">
-                    <label>Пароль</label>
-                    <input type="password" id="regPassword" placeholder="Минимум 6 символов" required minlength="6">
-                    <div class="strength-bar"><div class="strength-fill" id="regStrengthFill"></div></div>
-                    <div class="strength-label" id="regStrengthLabel"></div>
-                </div>
-                <div class="form-group">
-                    <label>Подтвердите пароль</label>
-                    <input type="password" id="regConfirmPassword" placeholder="Повторите пароль" required>
-                </div>
-                <div class="error-message" id="registerError"></div>
-                <button type="submit" class="auth-submit">Зарегистрироваться</button>
-            </form>
-            
-            <div class="user-info hidden" id="userInfo">
-                <p>Вы вошли как: <strong id="displayUsername"></strong></p>
-                <p class="unique-code">Ваш уникальный код: <strong id="displayCode"></strong></p>
-                <button class="logout-btn" id="logoutBtn">Выйти</button>
+                <button id="login-btn" class="auth-btn">Войти</button>
+                <div class="auth-divider"><span>или</span></div>
+                <button id="anonymous-login-btn" class="auth-btn anonymous-btn">🔒 Войти в приватном режиме</button>
+                <p class="anonymous-hint">Без email и пароля. Данные удалятся при выходе.</p>
             </div>
-        </div>
-        </div>
-
-        <div class="auth-page-footer">
-            Nyxo — сообщения без следа
+            <div id="register-form" class="auth-form">
+                <div class="form-group">
+                    <label for="register-username">Имя пользователя</label>
+                    <input type="text" id="register-username" placeholder="Введите имя" required maxlength="32">
+                </div>
+                <div class="form-group">
+                    <label for="register-email">Email</label>
+                    <input type="email" id="register-email" placeholder="Введите email" required>
+                </div>
+                <div class="form-group">
+                    <label for="register-password">Пароль</label>
+                    <input type="password" id="register-password" placeholder="Придумайте пароль" required minlength="6">
+                </div>
+                <div class="form-group">
+                    <label for="register-confirm-password">Подтвердите пароль</label>
+                    <input type="password" id="register-confirm-password" placeholder="Повторите пароль" required>
+                </div>
+                <button id="register-btn" class="auth-btn">Зарегистрироваться</button>
+            </div>
         </div>
     </div>
 
-    <div class="app">
-        <!-- Sidebar -->
-        <aside class="sidebar">
+    <div id="app" class="app hidden">
+        <div class="sidebar">
             <div class="sidebar-header">
-                <h2>Чаты</h2>
-                <input type="text" class="search-box" placeholder="Поиск..." />
-                <button class="new-chat-btn" id="newChatBtn">+</button>
+                <div class="logo-small">💬 Nyxo</div>
+                <button id="new-chat-btn" class="icon-btn" title="Новый чат">+</button>
             </div>
-            
-            <div class="chat-list" id="chatList">
-                <!-- Chat items will be added here -->
+            <div class="search-container">
+                <input type="text" id="search-input" placeholder="Поиск чатов и сообщений...">
             </div>
-
-            <div class="invite-panel">
-                <button class="invite-btn" id="getChatCodeBtn" disabled>Получить код</button>
-                <div class="invite-code-preview" id="inviteCodePreview"></div>
-                <div class="join-chat-row">
-                    <input type="text" id="joinCodeInput" placeholder="Введите 6-значный код">
-                    <button class="join-chat-btn" id="joinChatBtn">Присоединиться</button>
-                </div>
+            <div id="chats-list" class="chats-list"></div>
+            <div class="sidebar-footer">
+                <button id="profileBtn" class="footer-btn">👤 Профиль</button>
+                <button id="logout-btn" class="footer-btn">🚪 Выйти</button>
             </div>
-            
-            <div class="settings">
-                <button class="logout-sidebar-btn" id="logoutSidebarBtn">
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
-        <polyline points="16 17 21 12 16 7"></polyline>
-        <line x1="21" y1="12" x2="9" y2="12"></line>
-    </svg>
-    <span>Выйти</span>
-</button>
-                <button class="settings-btn" id="settingsBtn">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <circle cx="12" cy="12" r="3"></circle>
-                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-                    </svg>
-                    <span>Настройки</span>
-                </button>
-            </div>
-        </aside>
-
-        <!-- Chat Area -->
-        <main class="chat-area">
-            <div class="chat-header" id="chatHeader">
-                <div class="chat-header-info">
-                    <button class="back-btn" id="backBtn" style="display:none;">←</button>
-                    <div class="avatar" id="currentAvatar">Б</div>
-                    <div class="chat-header-text">
-                        <h3 id="currentChatName">Выберите чат</h3>
-                        <span class="chat-status" id="currentChatStatus">онлайн</span>
+        </div>
+        <div class="main-content">
+            <div id="chat-header" class="chat-header hidden">
+                <div class="chat-info">
+                    <div id="chat-avatar" class="chat-avatar"></div>
+                    <div class="chat-details">
+                        <h3 id="chat-name"></h3>
+                        <span id="chat-status" class="status"></span>
                     </div>
                 </div>
-                <div class="chat-search-row">
-                    <input type="text" id="chatSearchBox" class="chat-search-box" placeholder="Поиск сообщений в чате..." />
-                    <button id="chatSearchBtn" class="chat-search-btn">🔍</button>
-                    <span id="searchCounter" class="search-counter" style="display:none;"></span>
-                    <button id="searchPrev" class="search-nav-btn" style="display:none;" title="Предыдущее">▲</button>
-                    <button id="searchNext" class="search-nav-btn" style="display:none;" title="Следующее">▼</button>
-                    <button id="chatSearchClear" class="chat-search-clear" style="display:none;">✕</button>
+                <div class="chat-actions">
+                    <button id="get-chat-code-btn" class="icon-btn" title="Код приглашения">🔗</button>
+                    <button id="chat-menu-btn" class="icon-btn" title="Меню">⋮</button>
                 </div>
             </div>
-
-            <div class="messages" id="messages">
-                <div class="no-chat-selected">
-                    <p>Выберите чат из списка</p>
+            <div id="chat-messages" class="chat-messages"></div>
+            <div id="message-input-container" class="message-input-container hidden">
+                <div id="reply-preview" class="reply-preview hidden">
+                    <span id="reply-preview-text"></span>
+                    <button id="cancel-reply-btn" class="icon-btn">✕</button>
                 </div>
+                <div class="input-wrapper">
+                    <button id="attach-btn" class="icon-btn" title="Прикрепить файл">📎</button>
+                    <input type="text" id="message-input" placeholder="Введите сообщение..." maxlength="4000">
+                    <button id="send-btn" class="icon-btn" title="Отправить">➤</button>
+                    <button id="record-btn" class="icon-btn" title="Голосовое сообщение">🎤</button>
+                </div>
+                <input type="file" id="file-input" class="hidden" accept="image/*,video/*,audio/*,.pdf,.txt">
             </div>
-
-            <div class="input-area" id="inputArea">
-                <div class="reply-preview hidden" id="replyPreview">
-                    <span id="replyPreviewText"></span>
-                    <button type="button" class="cancel-reply-btn" id="cancelReplyBtn">✕</button>
-                </div>
-                <button type="button" class="emoji-btn" id="emojiButton">
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="12" cy="12" r="10"/><path d="M8 13s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/>
-    </svg>
-</button>
-<button type="button" class="file-btn" id="fileButton">
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
-    </svg>
-</button>
-<button type="button" class="voice-btn" id="voiceButton">
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
-    </svg>
-</button>
-                <input type="text" id="messageInput" placeholder="Введите сообщение..." disabled>
-                <button id="sendBtn" disabled>
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <line x1="22" y1="2" x2="11" y2="13"></line>
-                        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-                    </svg>
-                </button>
-                <input type="file" id="fileInput" hidden>
-                <span class="record-indicator hidden" id="recordIndicator">Запись...</span>
-                <div class="emoji-picker hidden" id="emojiPicker">
-                    <button type="button" class="emoji-item">😊</button>
-                    <button type="button" class="emoji-item">😂</button>
-                    <button type="button" class="emoji-item">😍</button>
-                    <button type="button" class="emoji-item">😎</button>
-                    <button type="button" class="emoji-item">😢</button>
-                    <button type="button" class="emoji-item">😡</button>
-                    <button type="button" class="emoji-item">👍</button>
-                    <button type="button" class="emoji-item">🎉</button>
-                    <button type="button" class="emoji-item">💬</button>
-                    <button type="button" class="emoji-item">🔥</button>
-                </div>
-                
+            <div id="empty-state" class="empty-state">
+                <div class="empty-icon">💬</div>
+                <h2>Добро пожаловать в Nyxo</h2>
+                <p>Выберите чат или создайте новый</p>
             </div>
-        </main>
+        </div>
     </div>
 
-    <!-- Settings Modal -->
-    <div class="modal" id="settingsModal">
+    <div id="new-chat-modal" class="modal hidden">
         <div class="modal-content">
             <div class="modal-header">
-                <h3>Настройки</h3>
-                <button class="close-btn" id="closeSettings">&times;</button>
+                <h3>Новый чат</h3>
+                <button class="close-modal">&times;</button>
             </div>
             <div class="modal-body">
-                <div class="setting-item">
-                    <label>Имя пользователя</label>
-                    <input type="text" id="usernameInput" value="Пользователь">
+                <div class="form-group">
+                    <label for="new-chat-name">Название чата</label>
+                    <input type="text" id="new-chat-name" placeholder="Введите название" maxlength="64">
                 </div>
-                <div class="setting-item">
-                    <label>Аватар</label>
-                    <div class="avatar-upload">
-                        <div class="avatar-color-row">
-                            <input type="color" id="avatarColorInput" value="#667eea">
-                            <span id="avatarColorValue" class="avatar-color-value">#667EEA</span>
-                        </div>
-                        <div class="avatar-color-preview" id="avatarColorPreview">П</div>
+                <button id="create-chat-btn" class="auth-btn">Создать чат</button>
+                <div class="auth-divider"><span>или</span></div>
+                <div class="form-group">
+                    <label for="join-chat-code">Код приглашения</label>
+                    <input type="text" id="join-chat-code" placeholder="Введите код">
+                </div>
+                <button id="join-chat-btn" class="auth-btn secondary">Присоединиться</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="chat-menu-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Меню чата</h3>
+                <button class="close-modal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <button id="delete-chat-btn" class="danger-btn">🗑 Удалить чат</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="profile-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Профиль</h3>
+                <button class="close-modal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="profile-info">
+                    <div id="profile-avatar" class="profile-avatar"></div>
+                    <div class="profile-details">
+                        <h4 id="profile-username"></h4>
+                        <p id="profile-email"></p>
+                        <p id="profile-code" class="profile-code"></p>
+                        <span id="profile-anon-badge" class="anon-badge hidden">🔒 Приватный режим</span>
                     </div>
                 </div>
-                <div class="setting-item">
-                    <label>Тема</label>
-                    <select id="themeSelect">
-    <option value="light">Классический</option>
-    <option value="night">Ночь</option>
-    <option value="warm">Тёплый</option>
-    <option value="forest">Лесной</option>
-    <option value="mono">Монохром</option>
-</select>
+                <div class="form-group">
+                    <label>Цвет аватара</label>
+                    <div class="color-picker">
+                        <button class="color-option" data-color="#667EEA" style="background:#667EEA"></button>
+                        <button class="color-option" data-color="#F093FB" style="background:#F093FB"></button>
+                        <button class="color-option" data-color="#4FACFE" style="background:#4FACFE"></button>
+                        <button class="color-option" data-color="#43E97B" style="background:#43E97B"></button>
+                        <button class="color-option" data-color="#FA709A" style="background:#FA709A"></button>
+                        <button class="color-option" data-color="#FFD93D" style="background:#FFD93D"></button>
+                    </div>
                 </div>
-                <div class="setting-item">
-                    <label>Уведомления</label>
-                    <label class="toggle">
-                        <input type="checkbox" id="notificationsToggle" checked>
-                        <span class="slider"></span>
-                    </label>
+                <button id="change-password-btn" class="auth-btn secondary">🔒 Сменить пароль</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="password-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Смена пароля</h3>
+                <button class="close-modal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="current-password">Текущий пароль</label>
+                    <input type="password" id="current-password" placeholder="Введите текущий пароль">
+                </div>
+                <div class="form-group">
+                    <label for="new-password">Новый пароль</label>
+                    <input type="password" id="new-password" placeholder="Введите новый пароль" minlength="6">
+                </div>
+                <div class="form-group">
+                    <label for="confirm-new-password">Подтвердите новый пароль</label>
+                    <input type="password" id="confirm-new-password" placeholder="Повторите новый пароль">
+                </div>
+                <button id="save-password-btn" class="auth-btn">Сохранить</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="invite-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Код приглашения</h3>
+                <button class="close-modal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="invite-text">Поделитесь этим кодом с друзьями:</p>
+                <div class="invite-code-container">
+                    <code id="invite-code-display"></code>
+                    <button id="copy-invite-btn" class="icon-btn">📋</button>
                 </div>
             </div>
-            <div class="modal-actions">
-                <button type="button" class="settings-btn-secondary" id="profileBtn">Профиль</button>
-<button type="button" class="settings-btn-secondary" id="changePasswordBtn">Сменить пароль</button>
-                <button type="button" class="settings-save-btn" id="settingsSaveBtn">Сохранить</button>
-            </div>
         </div>
     </div>
-    <!-- Change Password Modal -->
-<div class="modal" id="changePasswordModal">
-    <div class="modal-content">
-        <div class="modal-header">
-            <h3>Смена пароля</h3>
-            <button class="close-btn" id="closeChangePassword">&times;</button>
-        </div>
-        <div class="modal-body">
-            <div class="setting-item">
-                <label>Текущий пароль</label>
-                <input type="password" id="cpCurrent" placeholder="Введите текущий пароль">
-            </div>
-            <div class="setting-item">
-                <label>Новый пароль</label>
-                <input type="password" id="cpNew" placeholder="Минимум 6 символов">
-            </div>
-            <div class="setting-item">
-                <label>Повторите новый пароль</label>
-                <input type="password" id="cpConfirm" placeholder="Повторите пароль">
-            </div>
-            <div class="error-message" id="cpError"></div>
-        </div>
-        <div class="modal-actions">
-            <button type="button" class="settings-save-btn" id="cpSaveBtn">Сохранить</button>
-        </div>
+
+    <div id="message-menu" class="context-menu hidden">
+        <button id="reply-message-btn" class="menu-item">↩️ Ответить</button>
+        <button id="edit-message-btn" class="menu-item">✏️ Редактировать</button>
+        <button id="delete-message-btn" class="menu-item danger">🗑 Удалить</button>
     </div>
-</div>
-    <!-- New Chat Modal -->
-<div class="modal" id="newChatModal">
-    <div class="modal-content">
-        <div class="modal-header">
-            <h3>Новый чат</h3>
-            <button class="close-btn" id="newChatCancelBtn">&times;</button>
-        </div>
-        <div class="modal-body">
-            <div class="setting-item">
-                <label>Название чата</label>
-                <input type="text" id="newChatNameInput" placeholder="Введите название..." maxlength="64" autocomplete="off">
-            </div>
-            <div class="error-message" id="newChatError"></div>
-        </div>
-        <div class="modal-actions">
-            <button type="button" class="settings-save-btn" id="newChatConfirmBtn">Создать</button>
-        </div>
-    </div>
-</div>
+
+    <div id="toast" class="toast hidden"></div>
+    <div id="overlay" class="overlay hidden"></div>
+
     <script src="/socket.io/socket.io.js"></script>
     <script src="script.js"></script>
-    
-    <!-- Copyright Watermark -->
-    <div class="copyright-watermark">Copyright © 2026 Online Messenger</div>
 </body>
 </html>

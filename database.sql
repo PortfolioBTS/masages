@@ -1,92 +1,75 @@
--- =====================================================
--- МЕССЕНДЖЕР - SQL СХЕМА БАЗЫ ДАННЫХ
--- =====================================================
+-- PostgreSQL schema for Nyxo messenger
+-- Run this manually if you prefer external migration over initDatabase()
 
--- Таблица пользователей
 CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    unique_code TEXT UNIQUE NOT NULL,    -- Уникальный код (8 символов: A-Z, a-z, 0-9)
-    username TEXT UNIQUE NOT NULL,       -- Имя пользователя
-    email TEXT UNIQUE NOT NULL,          -- Email
-    password TEXT NOT NULL,              -- Хэшированный пароль
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    id SERIAL PRIMARY KEY,
+    unique_code TEXT UNIQUE NOT NULL,
+    username TEXT UNIQUE NOT NULL,
+    email TEXT,
+    password TEXT,
+    avatar TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Таблица чатов
-CREATE TABLE IF NOT EXISTS chats (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,            -- Ссылка на пользователя
-    room_id INTEGER,                     -- Ссылка на общую комнату чата
-    name TEXT NOT NULL,                  -- Название чата
-    avatar TEXT NOT NULL,                -- Аватар (первая буква имени)
-    online INTEGER DEFAULT 0,            -- Онлайн статус (0/1)
-    is_bot INTEGER DEFAULT 0,            -- Является ли ботом (0/1)
-    FOREIGN KEY (user_id) REFERENCES users(id),
-    FOREIGN KEY (room_id) REFERENCES rooms(id)
-);
-
--- Таблица комнат для общих чатов
 CREATE TABLE IF NOT EXISTS rooms (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,
     code TEXT UNIQUE NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Таблица участников комнаты
-CREATE TABLE IF NOT EXISTS room_participants (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    room_id INTEGER NOT NULL,
-    user_id INTEGER NOT NULL,
-    FOREIGN KEY (room_id) REFERENCES rooms(id),
-    FOREIGN KEY (user_id) REFERENCES users(id)
+CREATE TABLE IF NOT EXISTS chats (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    room_id INTEGER REFERENCES rooms(id) ON DELETE SET NULL,
+    name TEXT NOT NULL,
+    avatar TEXT NOT NULL,
+    online INTEGER DEFAULT 0,
+    is_bot INTEGER DEFAULT 0
 );
 
--- Таблица сообщений
 CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id INTEGER NOT NULL,            -- Ссылка на чат
-    room_id INTEGER,                     -- Ссылка на общую комнату чата
-    user_id INTEGER NOT NULL,            -- Ссылка на пользователя
-    text TEXT NOT NULL,                  -- Текст сообщения
-    sent INTEGER DEFAULT 1,              -- Отправлено пользователем (1) или получено (0)
-    time TEXT NOT NULL,                  -- Время отправки (ЧЧ:ММ)
-    status TEXT DEFAULT 'sent',          -- Статус: sent, delivered, read
-    FOREIGN KEY (chat_id) REFERENCES chats(id),
-    FOREIGN KEY (room_id) REFERENCES rooms(id),
-    FOREIGN KEY (user_id) REFERENCES users(id)
+    id SERIAL PRIMARY KEY,
+    chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    room_id INTEGER REFERENCES rooms(id) ON DELETE SET NULL,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    text TEXT NOT NULL,
+    file_url TEXT,
+    file_name TEXT,
+    file_type TEXT,
+    message_type TEXT DEFAULT 'text',
+    sent INTEGER DEFAULT 1,
+    time TEXT NOT NULL,
+    status TEXT DEFAULT 'sent',
+    edited_at TEXT,
+    deleted INTEGER DEFAULT 0,
+    reply_to_id INTEGER REFERENCES messages(id) ON DELETE SET NULL
 );
 
--- Таблица непрочитанных сообщений
 CREATE TABLE IF NOT EXISTS unread (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id INTEGER NOT NULL,
-    user_id INTEGER NOT NULL,
-    count INTEGER DEFAULT 0,
-    FOREIGN KEY (chat_id) REFERENCES chats(id),
-    FOREIGN KEY (user_id) REFERENCES users(id)
+    id SERIAL PRIMARY KEY,
+    chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    count INTEGER DEFAULT 0
 );
 
--- =====================================================
--- ПРИМЕРЫ ЗАПРОСОВ
--- =====================================================
+CREATE TABLE IF NOT EXISTS room_participants (
+    id SERIAL PRIMARY KEY,
+    room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE(room_id, user_id)
+);
 
--- Получить всех пользователей:
--- SELECT * FROM users;
+CREATE TABLE IF NOT EXISTS reactions (
+    id SERIAL PRIMARY KEY,
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    emoji TEXT NOT NULL,
+    UNIQUE(message_id, user_id, emoji)
+);
 
--- Получить все чаты пользователя:
--- SELECT * FROM chats WHERE user_id = 1;
-
--- Получить все сообщения чата:
--- SELECT * FROM messages WHERE chat_id = 1 ORDER BY id ASC;
-
--- Получить последнее сообщение каждого чата:
--- SELECT c.id, c.name, c.avatar, c.online, c.is_bot,
---        (SELECT text FROM messages WHERE chat_id = c.id ORDER BY id DESC LIMIT 1) as last_message,
---        (SELECT time FROM messages WHERE chat_id = c.id ORDER BY id DESC LIMIT 1) as last_time
--- FROM chats c WHERE c.user_id = 1;
-
--- Удалить пользователя и все его данные:
--- DELETE FROM messages WHERE chat_id IN (SELECT id FROM chats WHERE user_id = 1);
--- DELETE FROM chats WHERE user_id = 1;
--- DELETE FROM users WHERE id = 1;
+CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id);
+CREATE INDEX IF NOT EXISTS idx_messages_room_id ON messages(room_id);
+CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id);
+CREATE INDEX IF NOT EXISTS idx_chats_user_id ON chats(user_id);
+CREATE INDEX IF NOT EXISTS idx_reactions_msg_user ON reactions(message_id, user_id);
