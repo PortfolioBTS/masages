@@ -337,6 +337,31 @@ function setupEventListeners() {
         }
     });
 
+    socket.on('messageEdited', ({ id, text, chat_id, room_id }) => {
+        if (chat_id == currentChatId || room_id == currentRoomId) {
+            const bubble = document.querySelector(`[data-message-id="${id}"]`);
+            if (!bubble) return;
+            const textEl = bubble.querySelector('.message-text');
+            if (textEl) textEl.textContent = text;
+            if (!bubble.querySelector('.edited-label')) {
+                const contentEl = bubble.querySelector('.message-content');
+                if (contentEl) {
+                    const label = document.createElement('div');
+                    label.className = 'edited-label';
+                    label.textContent = 'изменено';
+                    contentEl.appendChild(label);
+                }
+            }
+        }
+    });
+
+    socket.on('messageDeleted', ({ id, chat_id, room_id }) => {
+        if (chat_id == currentChatId || room_id == currentRoomId) {
+            const bubble = document.querySelector(`[data-message-id="${id}"]`);
+            if (bubble) bubble.remove();
+        }
+    });
+
     document.addEventListener('click', () => hideMessageMenu());
     document.addEventListener('scroll', () => hideMessageMenu(), true);
 }
@@ -434,7 +459,7 @@ function createMessageElement(message) {
             content += `<div class="edited-label">изменено</div>`;
         }
         if (message.reactions && message.reactions.length > 0) {
-            content += `<div class="reactions">${message.reactions.map(r => `<span class="reaction">${r}</span>`).join('')}</div>`;
+            content += `<div class="reactions">${message.reactions.map(r => `<span class="reaction">${escapeHtml(r)}</span>`).join('')}</div>`;
         }
     }
 

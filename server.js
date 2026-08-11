@@ -8,6 +8,7 @@ const session = require('express-session');
 const multer = require('multer');
 const path = require('path');
 const os = require('os');
+const net = require('net');
 const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
@@ -90,12 +91,71 @@ const upload = multer({
     }
 });
 
+// === Верификация CF-Connecting-IP (см. https://www.cloudflare.com/ips/) ===
+// Список подтверждён на 2026-08-10. CF-Connecting-IP — это просто HTTP-заголовок,
+// который любой клиент может подставить сам. Доверять ему можно только если сам
+// запрос физически пришёл с IP-адреса Cloudflare — иначе, обращаясь напрямую на
+// публичный *.up.railway.app домен, атакующий получает "новый IP" на каждый
+// запрос и обнуляет все rate-limit'ы (login/register/change-password).
+// Список можно переопределить через переменную окружения CF_IP_RANGES
+// (через запятую), если Cloudflare обновит диапазоны.
+const DEFAULT_CLOUDFLARE_IP_RANGES = [
+    // IPv4
+    '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22',
+    '141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20',
+    '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
+    '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22',
+    // IPv6
+    '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32',
+    '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32',
+];
+
+const cloudflareBlockList = new net.BlockList();
+(function loadCloudflareRanges() {
+    const ranges = process.env.CF_IP_RANGES
+        ? process.env.CF_IP_RANGES.split(',').map(s => s.trim()).filter(Boolean)
+        : DEFAULT_CLOUDFLARE_IP_RANGES;
+    for (const cidr of ranges) {
+        const [addr, prefixStr] = cidr.split('/');
+        const type = net.isIP(addr);
+        if (!type || !prefixStr) {
+            console.warn('[CF] Пропущен некорректный диапазон:', cidr);
+            continue;
+        }
+        cloudflareBlockList.addSubnet(addr, Number(prefixStr), type === 6 ? 'ipv6' : 'ipv4');
+    }
+})();
+
+function isFromCloudflare(ip) {
+    if (!ip) return false;
+    const clean = ip.startsWith('::ffff:') ? ip.slice(7) : ip;
+    const type = net.isIP(clean);
+    if (!type) return false;
+    try {
+        return cloudflareBlockList.check(clean, type === 6 ? 'ipv6' : 'ipv4');
+    } catch (e) {
+        return false;
+    }
+}
+
+// connectingIp — адрес, с которого запрос физически пришёл на наш доверенный
+// прокси (Railway), а не значение из легко подделываемых заголовков.
+function resolveRealIp(headers, connectingIp) {
+    const cfIp = headers['cf-connecting-ip'];
+    if (cfIp && isFromCloudflare(connectingIp)) {
+        return cfIp.split(',')[0].trim();
+    }
+    return connectingIp;
+}
+
 const app = express();
 app.set('trust proxy', 1);
 
 app.use((req, res, next) => {
-    const cfIp = req.headers['cf-connecting-ip'];
-    req.realIp = cfIp || req.ip;
+    // req.ip уже учитывает 1 доверенный хоп (trust proxy = 1), то есть это IP,
+    // который реально подключился к Railway — Cloudflare edge, если трафик шёл
+    // через CF, либо настоящий IP клиента, если Railway-домен открыт напрямую.
+    req.realIp = resolveRealIp(req.headers, req.ip);
     next();
 });
 
@@ -164,13 +224,15 @@ setInterval(() => {
 
 function getClientIp(handshake) {
     const headers = handshake.headers || {};
-    if (headers['cf-connecting-ip']) {
-        return headers['cf-connecting-ip'].trim().split(',')[0];
-    }
-    if (headers['x-forwarded-for']) {
-        return headers['x-forwarded-for'].trim().split(',')[0];
-    }
-    return handshake.address;
+    // Тот же принцип, что и в HTTP-мидлваре: сначала находим адрес, который
+    // реально подключился к нашему прокси (последний хоп X-Forwarded-For —
+    // соответствует "доверяем 1 прокси" из app.set('trust proxy', 1)), и только
+    // если ЭТОТ адрес принадлежит Cloudflare — доверяем CF-Connecting-IP.
+    const xff = headers['x-forwarded-for'];
+    const connectingIp = xff
+        ? xff.split(',').map(s => s.trim()).filter(Boolean).pop()
+        : handshake.address;
+    return resolveRealIp(headers, connectingIp);
 }
 io.use((socket, next) => {
     const ip = getClientIp(socket.handshake);
@@ -245,7 +307,14 @@ async function maybeDumpCa() {
 
 const sslConfig = (() => {
     if (process.env.NODE_ENV !== 'production') return false;
-    console.log('[SSL] production: rejectUnauthorized=false (Railway internal network)');
+    if (process.env.DB_CA_CERT) {
+        console.log('[SSL] production: rejectUnauthorized=true, CA закреплён через DB_CA_CERT');
+        return { ca: process.env.DB_CA_CERT, rejectUnauthorized: true };
+    }
+    console.warn('[SSL] production: DB_CA_CERT не задан — используется rejectUnauthorized=false ' +
+        '(осознанный компромисс под Railway internal network). Чтобы включить полную проверку ' +
+        'сертификата, запустите сервер один раз с DUMP_CA=true, скопируйте цепочку сертификатов ' +
+        'в переменную DB_CA_CERT и перезапустите.');
     return { rejectUnauthorized: false };
 })();
 
@@ -357,6 +426,38 @@ async function initDatabase() {
     await pool.query(`ALTER TABLE chats ADD COLUMN IF NOT EXISTS room_id INTEGER REFERENCES rooms(id);`);
     await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS room_id INTEGER REFERENCES rooms(id);`);
 
+    // Миграция: удаление чата/выход из комнаты падало с нарушением FK —
+    // messages.chat_id (NOT NULL, без ON DELETE) не давал снести свою же
+    // запись в chats, если пользователь уже что-то написал, а chats.room_id
+    // не давал снести саму комнату, пока на неё ссылалась хоть одна запись в
+    // chats. Разрешаем chat_id уходить в NULL (история комнаты остаётся
+    // видна остальным по room_id) и каскадно чистим осиротевшие chats при
+    // удалении room.
+    await pool.query(`ALTER TABLE messages ALTER COLUMN chat_id DROP NOT NULL;`);
+    await pool.query(`ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_chat_id_fkey;`);
+    await pool.query(`ALTER TABLE messages ADD CONSTRAINT messages_chat_id_fkey FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE SET NULL;`);
+    await pool.query(`ALTER TABLE chats DROP CONSTRAINT IF EXISTS chats_room_id_fkey;`);
+    await pool.query(`ALTER TABLE chats ADD CONSTRAINT chats_room_id_fkey FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE;`);
+
+    // Реакции должны исчезать вместе со своим сообщением (иначе снос всех
+    // сообщений комнаты падает с reactions_message_id_fkey, как только у
+    // любого из них есть хоть одна реакция).
+    await pool.query(`ALTER TABLE reactions DROP CONSTRAINT IF EXISTS reactions_message_id_fkey;`);
+    await pool.query(`ALTER TABLE reactions ADD CONSTRAINT reactions_message_id_fkey FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE;`);
+    // Ответ на удалённое сообщение просто теряет связь с оригиналом, а не
+    // блокирует его удаление и не удаляется сам.
+    await pool.query(`ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_reply_to_id_fkey;`);
+    await pool.query(`ALTER TABLE messages ADD CONSTRAINT messages_reply_to_id_fkey FOREIGN KEY (reply_to_id) REFERENCES messages(id) ON DELETE SET NULL;`);
+    // Остальное уже удаляется в правильном порядке на уровне приложения
+    // (см. DELETE /api/chats/:chatId), но каскад добавлен как страховка на
+    // случай, если порядок операций там в будущем изменят по ошибке.
+    await pool.query(`ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_room_id_fkey;`);
+    await pool.query(`ALTER TABLE messages ADD CONSTRAINT messages_room_id_fkey FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE;`);
+    await pool.query(`ALTER TABLE unread DROP CONSTRAINT IF EXISTS unread_chat_id_fkey;`);
+    await pool.query(`ALTER TABLE unread ADD CONSTRAINT unread_chat_id_fkey FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE;`);
+    await pool.query(`ALTER TABLE room_participants DROP CONSTRAINT IF EXISTS room_participants_room_id_fkey;`);
+    await pool.query(`ALTER TABLE room_participants ADD CONSTRAINT room_participants_room_id_fkey FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE;`);
+
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id);`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_room_id ON messages(room_id);`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id);`);
@@ -448,6 +549,12 @@ async function generateInviteCodeAsync() {
     }
     throw new Error('Could not generate invite code');
 }
+
+// Фиктивный bcrypt-хэш без известного пароля. Используется в /api/login, чтобы
+// bcrypt.compare выполнялся ВСЕГДА — и когда юзер найден, и когда нет — с
+// одинаковой стоимостью (~100мс), иначе разница во времени ответа позволяет
+// перебором узнавать зарегистрированные email.
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync(crypto.randomBytes(32).toString('hex'), 12);
 
 const sessionSecret = process.env.SESSION_SECRET;
 if (!sessionSecret) throw new Error('SESSION_SECRET не задан в переменных окружения');
@@ -565,6 +672,13 @@ app.get('/uploads/:filename', async (req, res) => {
     const filename = path.basename(req.params.filename);
     const filePath = path.join(__dirname, 'uploads', filename);
     if (!fs.existsSync(filePath)) return res.status(404).json({ success: false, message: 'Файл не найден' });
+    try {
+        const allowed = await userCanAccessFile(req.session.userId, filename);
+        if (!allowed) return res.status(403).json({ success: false, message: 'Доступ запрещён' });
+    } catch (err) {
+        console.error('Uploads access check error:', err);
+        return res.status(500).json({ success: false, message: 'Ошибка проверки доступа' });
+    }
     res.sendFile(filePath);
 });
 
@@ -599,8 +713,8 @@ app.post('/api/register', registerLimiter, async (req, res) => {
         return res.json({ success: false, message: 'Пароль не может быть длиннее 128 символов' });
     if (password !== confirmPassword)
         return res.json({ success: false, message: 'Пароли не совпадают' });
-    if (password.length < 6)
-        return res.json({ success: false, message: 'Пароль должен быть не менее 6 символов' });
+    if (password.length < 8)
+        return res.json({ success: false, message: 'Пароль должен быть не менее 8 символов' });
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
         return res.json({ success: false, message: 'Введите корректный email' });
 
@@ -716,10 +830,14 @@ app.post('/api/login', loginLimiter, async (req, res) => {
 
     try {
         const user = await dbGet('SELECT * FROM users WHERE email = $1', [email]);
-        if (!user) return res.json({ success: false, message: 'Неверный email или пароль' });
-
-        const validPassword = await bcrypt.compare(password, user.password);
-        if (!validPassword) return res.json({ success: false, message: 'Неверный email или пароль' });
+        // bcrypt.compare выполняется независимо от того, найден ли юзер —
+        // это убирает разницу во времени ответа между "нет такого email"
+        // и "неверный пароль" (см. п.4 аудита).
+        const hashToCheck = (user && user.password) ? user.password : DUMMY_PASSWORD_HASH;
+        const validPassword = await bcrypt.compare(password, hashToCheck);
+        if (!user || !user.password || !validPassword) {
+            return res.json({ success: false, message: 'Неверный email или пароль' });
+        }
 
         req.session.regenerate((err) => {
             if (err) return res.json({ success: false, message: 'Ошибка инициализации сессии' });
@@ -1018,15 +1136,21 @@ app.delete('/api/chats/:chatId', async (req, res) => {
         if (chat.room_id) {
             await dbRun('DELETE FROM room_participants WHERE room_id = $1 AND user_id = $2', [chat.room_id, req.session.userId]);
             const remaining = await dbGet('SELECT COUNT(*) as cnt FROM room_participants WHERE room_id = $1', [chat.room_id]);
+            await dbRun('DELETE FROM unread WHERE chat_id = $1', [chatId]);
+            await dbRun('DELETE FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
             if (!remaining || Number(remaining.cnt) === 0) {
+                // Последний участник вышел — сносим комнату целиком.
                 await dbRun('DELETE FROM messages WHERE room_id = $1', [chat.room_id]);
                 await dbRun('DELETE FROM rooms WHERE id = $1', [chat.room_id]);
             }
+            // Если участники остались — историю не трогаем, она у них
+            // по-прежнему доступна по room_id (chat_id этого сообщения,
+            // если оно было отправлено уходящим, просто станет NULL).
         } else {
             await dbRun('DELETE FROM messages WHERE chat_id = $1', [chatId]);
+            await dbRun('DELETE FROM unread WHERE chat_id = $1', [chatId]);
+            await dbRun('DELETE FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
         }
-        await dbRun('DELETE FROM unread WHERE chat_id = $1', [chatId]);
-        await dbRun('DELETE FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
         res.json({ success: true });
     } catch (error) {
         console.error('Delete chat error:', error);
@@ -1039,12 +1163,23 @@ app.put('/api/messages/:messageId', async (req, res) => {
     const { messageId } = req.params;
     const { text } = req.body;
     if (!text || text.trim() === '') return res.json({ success: false, message: 'Текст не может быть пустым' });
+    if (text.length > 4000) return res.json({ success: false, message: 'Сообщение не может быть длиннее 4000 символов' });
 
     try {
         const message = await dbGet('SELECT * FROM messages WHERE id = $1 AND user_id = $2', [messageId, req.session.userId]);
         if (!message) return res.json({ success: false, message: 'Сообщение не найдено' });
         const editedAt = new Date().toISOString();
-        await dbRun('UPDATE messages SET text = $1, edited_at = $2 WHERE id = $3', [text.trim(), editedAt, messageId]);
+        const trimmedText = text.trim();
+        await dbRun('UPDATE messages SET text = $1, edited_at = $2 WHERE id = $3', [trimmedText, editedAt, messageId]);
+
+        // Раньше правки не рассылались по сокету — у остальных участников
+        // комнаты изменение не появлялось без перезагрузки (см. "Мелочи").
+        const socketRoomKey = getSocketRoomKey(message.chat_id, message.room_id);
+        io.to(socketRoomKey).emit('messageEdited', {
+            id: Number(messageId), text: trimmedText, edited_at: editedAt,
+            chat_id: message.chat_id, room_id: message.room_id
+        });
+
         res.json({ success: true, edited_at: editedAt });
     } catch (error) {
         res.json({ success: false, message: 'Ошибка редактирования' });
@@ -1058,36 +1193,67 @@ app.delete('/api/messages/:messageId', async (req, res) => {
         const message = await dbGet('SELECT * FROM messages WHERE id = $1 AND user_id = $2', [messageId, req.session.userId]);
         if (!message) return res.json({ success: false, message: 'Сообщение не найдено' });
         await dbRun('UPDATE messages SET deleted = 1 WHERE id = $1', [messageId]);
+
+        const socketRoomKey = getSocketRoomKey(message.chat_id, message.room_id);
+        io.to(socketRoomKey).emit('messageDeleted', {
+            id: Number(messageId), chat_id: message.chat_id, room_id: message.room_id
+        });
+
         res.json({ success: true });
     } catch (error) {
         res.json({ success: false, message: 'Ошибка удаления' });
     }
 });
+// multer(upload.single('file')) уже записал файл на диск ДО этого хендлера —
+// значит, ранние return (401/400/404) должны сами убирать за собой, иначе
+// каждая неудачная/подделанная попытка загрузки будет накапливать файлы-сироты.
+function cleanupUploadedFile(file) {
+    if (!file) return;
+    try {
+        const p = path.join(__dirname, 'uploads', file.filename);
+        if (fs.existsSync(p)) fs.unlinkSync(p);
+    } catch (e) { /* ignore */ }
+}
+
 app.post('/api/messages/file', upload.single('file'), async (req, res) => {
-    if (!req.session.userId) return res.status(401).json({ success: false, message: 'Не авторизован' });
+    if (!req.session.userId) {
+        cleanupUploadedFile(req.file);
+        return res.status(401).json({ success: false, message: 'Не авторизован' });
+    }
     const { chatId, text } = req.body;
     const file = req.file;
 
     if (!file) return res.status(400).json({ success: false, message: 'Файл не выбран' });
-    if (!chatId) return res.status(400).json({ success: false, message: 'Указан чат' });
+    if (!chatId) {
+        cleanupUploadedFile(file);
+        return res.status(400).json({ success: false, message: 'Указан чат' });
+    }
 
+    const uploadedFilePath = path.join(__dirname, 'uploads', file.filename);
     try {
-        const filePath = path.join(__dirname, 'uploads', file.filename);
         const buffer = Buffer.alloc(8);
-        const fd = fs.openSync(filePath, 'r');
+        const fd = fs.openSync(uploadedFilePath, 'r');
         fs.readSync(fd, buffer, 0, 8, 0);
         fs.closeSync(fd);
         if (!checkMagicBytes(buffer, file.mimetype)) {
-            fs.unlinkSync(filePath);
+            fs.unlinkSync(uploadedFilePath);
             return res.status(400).json({ success: false, message: 'Содержимое файла не соответствует его типу' });
         }
     } catch (magicErr) {
+        // Раньше при исключении здесь проверка молча пропускалась и файл
+        // проходил дальше — теоретическая лазейка мимо проверки типа файла.
+        // Теперь любая ошибка проверки = отказ (fail closed), а не fail open.
         console.error('Magic bytes check error:', magicErr);
+        try { if (fs.existsSync(uploadedFilePath)) fs.unlinkSync(uploadedFilePath); } catch (_) { /* ignore */ }
+        return res.status(400).json({ success: false, message: 'Не удалось проверить содержимое файла' });
     }
 
     try {
         const chat = await dbGet('SELECT * FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
-        if (!chat) return res.status(404).json({ success: false, message: 'Чат не найден' });
+        if (!chat) {
+            cleanupUploadedFile(file);
+            return res.status(404).json({ success: false, message: 'Чат не найден' });
+        }
 
         const time = getCurrentTime();
         const roomId = chat.room_id || null;
@@ -1146,11 +1312,30 @@ async function userCanAccessMessage(userId, messageId) {
     return Boolean(participant);
 }
 
+// Файлы отдаются только тому, кто реально является участником чата/комнаты,
+// к которому относится сообщение с этим файлом — а не просто "залогинен ли
+// кто-то вообще" (см. п.1 аудита). Имя файла уникально (Date.now() + random),
+// поэтому джойн messages.file_url -> chats/room_participants однозначно
+// определяет владельца.
+// В UI предлагается фиксированный набор из 5 эмодзи для реакций. Раньше на
+// бэке проверялась только длина строки (≤10 символов), а не содержимое — это
+// пропускало вход в message.reactions, который на фронте рендерится в
+// innerHTML без escapeHtml (см. п.3 аудита). Теперь бэк принимает только
+// эмодзи из этого списка.
+const ALLOWED_REACTION_EMOJIS = new Set(['👍', '❤️', '😂', '😢', '🔥']);
+
+async function userCanAccessFile(userId, filename) {
+    const fileUrl = `/uploads/${filename}`;
+    const message = await dbGet('SELECT id FROM messages WHERE file_url = $1 LIMIT 1', [fileUrl]);
+    if (!message) return false;
+    return userCanAccessMessage(userId, message.id);
+}
+
 app.post('/api/reactions', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { messageId, emoji } = req.body;
     if (!messageId || !emoji) return res.json({ success: false, message: 'Параметры отсутствуют' });
-    if (typeof emoji !== 'string' || emoji.length > 10) return res.json({ success: false, message: 'Недопустимый emoji' });
+    if (typeof emoji !== 'string' || !ALLOWED_REACTION_EMOJIS.has(emoji)) return res.json({ success: false, message: 'Недопустимый emoji' });
 
     try {
         if (!(await userCanAccessMessage(req.session.userId, messageId))) {
@@ -1168,7 +1353,7 @@ app.delete('/api/reactions/:messageId/:emoji', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const messageId = Number(req.params.messageId);
     const emoji = decodeURIComponent(req.params.emoji);
-    if (!Number.isFinite(messageId) || !emoji || emoji.length > 10) {
+    if (!Number.isFinite(messageId) || !ALLOWED_REACTION_EMOJIS.has(emoji)) {
         return res.json({ success: false, message: 'Недопустимые параметры' });
     }
 
@@ -1214,7 +1399,7 @@ app.post('/api/change-password', passwordLimiter, async (req, res) => {
     const { currentPassword, newPassword, confirmPassword } = req.body;
     if (!currentPassword || !newPassword || !confirmPassword) return res.json({ success: false, message: 'Заполните все поля' });
     if (newPassword !== confirmPassword) return res.json({ success: false, message: 'Новые пароли не совпадают' });
-    if (newPassword.length < 6) return res.json({ success: false, message: 'Пароль должен быть не менее 6 символов' });
+    if (newPassword.length < 8) return res.json({ success: false, message: 'Пароль должен быть не менее 8 символов' });
 
     try {
         const user = await dbGet('SELECT password FROM users WHERE id = $1', [req.session.userId]);
