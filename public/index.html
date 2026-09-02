@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nyxo — Мессенджер</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E💬%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+    <div id="auth-screen" class="auth-screen">
+        <div class="auth-container">
+            <div class="auth-logo">
+                <div class="logo-icon">💬</div>
+                <h1>Nyxo</h1>
+                <p>Безопасный мессенджер</p>
+            </div>
+            <div class="auth-tabs">
+                <button class="auth-tab active" data-tab="login">Вход</button>
+                <button class="auth-tab" data-tab="register">Регистрация</button>
+            </div>
+            <div id="login-form" class="auth-form active">
+                <div class="form-group">
+                    <label for="login-email">Email</label>
+                    <input type="email" id="login-email" placeholder="Введите email" required>
+                </div>
+                <div class="form-group">
+                    <label for="login-password">Пароль</label>
+                    <input type="password" id="login-password" placeholder="Введите пароль" required>
+                </div>
+                <button id="login-btn" class="auth-btn">Войти</button>
+                <div class="auth-divider"><span>или</span></div>
+                <button id="anonymous-login-btn" class="auth-btn anonymous-btn">🔒 Войти в приватном режиме</button>
+                <p class="anonymous-hint">Без email и пароля. Данные удалятся при выходе.</p>
+            </div>
+            <div id="register-form" class="auth-form">
+                <div class="form-group">
+                    <label for="register-username">Имя пользователя</label>
+                    <input type="text" id="register-username" placeholder="Введите имя" required maxlength="32">
+                </div>
+                <div class="form-group">
+                    <label for="register-email">Email</label>
+                    <input type="email" id="register-email" placeholder="Введите email" required>
+                </div>
+                <div class="form-group">
+                    <label for="register-password">Пароль</label>
+                    <input type="password" id="register-password" placeholder="Придумайте пароль (минимум 8 символов)" required minlength="8">
+                </div>
+                <div class="form-group">
+                    <label for="register-confirm-password">Подтвердите пароль</label>
+                    <input type="password" id="register-confirm-password" placeholder="Повторите пароль" required>
+                </div>
+                <button id="register-btn" class="auth-btn">Зарегистрироваться</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="app" class="app hidden">
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo-small">💬 Nyxo</div>
+                <button id="new-chat-btn" class="icon-btn" title="Новый чат">+</button>
+            </div>
+            <div class="search-container">
+                <input type="text" id="search-input" placeholder="Поиск чатов и сообщений...">
+            </div>
+            <div id="chats-list" class="chats-list"></div>
+            <div class="sidebar-footer">
+                <button id="profile-btn" class="footer-btn">👤 Профиль</button>
+                <button id="logout-btn" class="footer-btn">🚪 Выйти</button>
+            </div>
+        </div>
+        <div class="main-content">
+            <div id="chat-header" class="chat-header hidden">
+                <div class="chat-info">
+                    <div id="chat-avatar" class="chat-avatar"></div>
+                    <div class="chat-details">
+                        <h3 id="chat-name"></h3>
+                        <span id="chat-status" class="status"></span>
+                    </div>
+                </div>
+                <div class="chat-actions">
+                    <button id="get-chat-code-btn" class="icon-btn" title="Код приглашения">🔗</button>
+                    <button id="chat-menu-btn" class="icon-btn" title="Меню">⋮</button>
+                </div>
+            </div>
+            <div id="chat-messages" class="chat-messages"></div>
+            <div id="message-input-container" class="message-input-container hidden">
+                <div id="reply-preview" class="reply-preview hidden">
+                    <span id="reply-preview-text"></span>
+                    <button id="cancel-reply-btn" class="icon-btn">✕</button>
+                </div>
+                <div class="input-wrapper">
+                    <button id="attach-btn" class="icon-btn" title="Прикрепить файл">📎</button>
+                    <input type="text" id="message-input" placeholder="Введите сообщение..." maxlength="4000">
+                    <button id="send-btn" class="icon-btn" title="Отправить">➤</button>
+                    <button id="record-btn" class="icon-btn" title="Голосовые сообщения пока не реализованы" disabled>🎤</button>
+                </div>
+                <input type="file" id="file-input" class="hidden" accept="image/*,video/*,audio/*,.pdf,.txt">
+            </div>
+            <div id="empty-state" class="empty-state">
+                <div class="empty-icon">💬</div>
+                <h2>Добро пожаловать в Nyxo</h2>
+                <p>Выберите чат или создайте новый</p>
+            </div>
+        </div>
+    </div>
+
+    <div id="new-chat-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Новый чат</h3>
+                <button class="close-modal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="new-chat-name">Название чата</label>
+                    <input type="text" id="new-chat-name" placeholder="Введите название" maxlength="64">
+                </div>
+                <button id="create-chat-btn" class="auth-btn">Создать чат</button>
+                <div class="auth-divider"><span>или</span></div>
+                <div class="form-group">
+                    <label for="join-chat-code">Код приглашения</label>
+                    <input type="text" id="join-chat-code" placeholder="Введите код">
+                </div>
+                <button id="join-chat-btn" class="auth-btn secondary">Присоединиться</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="chat-menu-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Меню чата</h3>
+                <button class="close-modal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <button id="delete-chat-btn" class="danger-btn">🗑 Удалить чат</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="profile-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Профиль</h3>
+                <button class="close-modal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="profile-info">
+                    <div id="profile-avatar" class="profile-avatar"></div>
+                    <div class="profile-details">
+                        <h4 id="profile-username"></h4>
+                        <p id="profile-email"></p>
+                        <p id="profile-code" class="profile-code"></p>
+                        <span id="profile-anon-badge" class="anon-badge hidden">🔒 Приватный режим</span>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Цвет аватара</label>
+                    <div class="color-picker">
+                        <button class="color-option" data-color="#667EEA" style="background:#667EEA"></button>
+                        <button class="color-option" data-color="#F093FB" style="background:#F093FB"></button>
+                        <button class="color-option" data-color="#4FACFE" style="background:#4FACFE"></button>
+                        <button class="color-option" data-color="#43E97B" style="background:#43E97B"></button>
+                        <button class="color-option" data-color="#FA709A" style="background:#FA709A"></button>
+                        <button class="color-option" data-color="#FFD93D" style="background:#FFD93D"></button>
+                    </div>
+                </div>
+                <button id="change-password-btn" class="auth-btn secondary">🔒 Сменить пароль</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="password-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Смена пароля</h3>
+                <button class="close-modal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="current-password">Текущий пароль</label>
+                    <input type="password" id="current-password" placeholder="Введите текущий пароль">
+                </div>
+                <div class="form-group">
+                    <label for="new-password">Новый пароль</label>
+                    <input type="password" id="new-password" placeholder="Введите новый пароль (минимум 8 символов)" minlength="8">
+                </div>
+                <div class="form-group">
+                    <label for="confirm-new-password">Подтвердите новый пароль</label>
+                    <input type="password" id="confirm-new-password" placeholder="Повторите новый пароль">
+                </div>
+                <button id="save-password-btn" class="auth-btn">Сохранить</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="invite-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Код приглашения</h3>
+                <button class="close-modal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="invite-text">Поделитесь этим кодом с друзьями:</p>
+                <div class="invite-code-container">
+                    <code id="invite-code-display"></code>
+                    <button id="copy-invite-btn" class="icon-btn">📋</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="message-menu" class="context-menu hidden">
+        <button id="reply-message-btn" class="menu-item">↩️ Ответить</button>
+        <button id="edit-message-btn" class="menu-item">✏️ Редактировать</button>
+        <button id="delete-message-btn" class="menu-item danger">🗑 Удалить</button>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+    <div id="overlay" class="overlay hidden"></div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>

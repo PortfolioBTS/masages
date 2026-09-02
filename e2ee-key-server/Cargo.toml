@@ -1,0 +1,20 @@
+[package]
+name = "e2ee-key-server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+[dependencies]
+tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "signal"] }
+axum = "0.7.2"
+serde = { version = "1.0.195", features = ["derive"] }
+serde_json = "1.0.111"
+sqlx = { version = "0.7.3", default-features = false, features = ["runtime-tokio-rustls", "postgres", "migrate", "macros"] }
+ed25519-dalek = "2.1.0"
+base64 = "0.21.7"
+thiserror = "1.0.56"
+anyhow = "1.0.79"
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+subtle = "2.5"
+dotenvy = "0.15.7"
