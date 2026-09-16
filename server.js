@@ -19,6 +19,31 @@ const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
 const { ipKeyGenerator } = rateLimit;
 
+// Импорт новых модулей безопасности и приватности
+const { stripMetadataFromFile, cleanupOldFiles } = require('./lib/metadata-stripper');
+const DisappearingMessagesManager = require('./lib/disappearing-messages');
+const {
+    addRandomDelay,
+    padMessage,
+    unpadMessage,
+    addTimingNoise,
+    sanitizeText,
+    getPrivacyHeaders,
+    anonymizeIP,
+    generateSecureToken
+} = require('./lib/privacy');
+
+// Импорт E2EE прокси
+const e2eeProxy = require('./lib/e2ee-proxy');
+
+// Импорт Tor support
+const {
+    checkTorConnection,
+    getTorHiddenServiceConfig,
+    torConnectionLogger,
+    ENABLE_TOR_ROUTING
+} = require('./lib/tor-support');
+
 // === RUST ANON SERVICE INTEGRATION ===
 const ANON_SERVICE_URL = process.env.ANON_SERVICE_URL || 'http://127.0.0.1:8080';
 
@@ -386,8 +411,15 @@ async function dbRun(query, params = []) {
     const result = await pool.query(query, params);
     return result;
 }
+// Инициализация менеджера исчезающих сообщений
+let disappearingMessagesManager;
+
 async function initDatabase() {
     await maybeDumpCa().catch(err => { console.error('[DUMP_CA] Ошибка:', err.message); process.exit(1); });
+
+    // Инициализация disappearing messages
+    disappearingMessagesManager = new DisappearingMessagesManager(pool);
+    await disappearingMessagesManager.initialize();
 
     await pool.query(`
         CREATE TABLE IF NOT EXISTS users (
@@ -673,6 +705,9 @@ io.on('connection', (socket) => {
 app.use(express.json());
 app.use(cookieParser());
 
+// Tor connection logger
+app.use(torConnectionLogger);
+
 app.use((req, res, next) => {
     if (req.path.startsWith('/socket.io')) return next();
 
@@ -713,6 +748,12 @@ app.use((req, res, next) => {
 });
 
 app.use((req, res, next) => {
+    // Усиленные заголовки приватности
+    const privacyHeaders = getPrivacyHeaders();
+    Object.entries(privacyHeaders).forEach(([key, value]) => {
+        res.set(key, value);
+    });
+
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, private');
     res.set('Pragma', 'no-cache');
     res.set('Expires', '0');
@@ -850,6 +891,9 @@ app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
             username = await generateAnonymousUsernameAsync();
         }
 
+        // Генерация уникального session fingerprint для анонимного пользователя
+        const sessionFingerprint = generateSecureToken(32);
+
         const client = await pool.connect();
         let userId;
         try {
@@ -867,7 +911,7 @@ app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
             const botChatId = botResult.rows[0].id;
             await client.query(
                 'INSERT INTO messages (chat_id, user_id, text, sent, time, status) VALUES ($1, $2, $3, $4, $5, $6)',
-                [botChatId, userId, 'Привет! Ты вошёл в приватный режим. Чаты доступны, пока активна эта сессия.', 0, getCurrentTime(), 'read']
+                [botChatId, userId, '🔒 Приватный режим активирован!\n\nВаши данные:\n• Хранятся только в этой сессии\n• Будут удалены при выходе\n• Не связаны с email или телефоном\n\nДля максимальной анонимности:\n• Используйте Tor Browser\n• Не делитесь личной информацией\n• Включите disappearing messages', 0, getCurrentTime(), 'read']
             );
             await client.query('COMMIT');
         } catch (txErr) {
@@ -882,8 +926,26 @@ app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
         req.session.uniqueCode = uniqueCode;
         req.session.avatar = '#667EEA';
         req.session.isAnonymous = true;
+        req.session.sessionFingerprint = sessionFingerprint;
+        req.session.createdAt = Date.now();
 
-        res.json({ success: true, message: 'Приватный режим активирован!', user: { id: userId, username, uniqueCode, avatar: '#667EEA', isAnonymous: true } });
+        // Устанавливаем короткий срок жизни сессии для анонимных пользователей
+        req.session.cookie.maxAge = 4 * 60 * 60 * 1000; // 4 часа
+
+        console.log(`[Anon] New anonymous user created: ${username} (ID: ${userId})`);
+
+        res.json({
+            success: true,
+            message: 'Приватный режим активирован!',
+            user: {
+                id: userId,
+                username,
+                uniqueCode,
+                avatar: '#667EEA',
+                isAnonymous: true,
+                sessionExpiresIn: 4 * 60 * 60 // секунды
+            }
+        });
     } catch (error) {
         console.error('Anonymous register error:', error);
         res.json({ success: false, message: 'Ошибка сервера' });
@@ -896,12 +958,19 @@ app.post('/api/login', loginLimiter, async (req, res) => {
     if (email.length > 254 || password.length > 128) return res.json({ success: false, message: 'Неверный email или пароль' });
 
     try {
+        // Добавляем случайную задержку для защиты от timing attacks
+        await addRandomDelay(50, 150);
+
         const user = await dbGet('SELECT * FROM users WHERE email = $1', [email]);
         // bcrypt.compare выполняется независимо от того, найден ли юзер —
         // это убирает разницу во времени ответа между "нет такого email"
         // и "неверный пароль" (см. п.4 аудита).
         const hashToCheck = (user && user.password) ? user.password : DUMMY_PASSWORD_HASH;
         const validPassword = await bcrypt.compare(password, hashToCheck);
+
+        // Дополнительная случайная задержка
+        await addRandomDelay(20, 80);
+
         if (!user || !user.password || !validPassword) {
             return res.json({ success: false, message: 'Неверный email или пароль' });
         }
@@ -920,11 +989,35 @@ app.post('/api/login', loginLimiter, async (req, res) => {
     }
 });
 
-app.post('/api/logout', (req, res) => {
+app.post('/api/logout', async (req, res) => {
+    const isAnonymous = req.session?.isAnonymous;
+    const userId = req.session?.userId;
+
+    // Для анонимных пользователей удаляем все данные
+    if (isAnonymous && userId) {
+        try {
+            console.log(`[Anon] Cleaning up data for anonymous user ${userId}`);
+
+            // Удаляем все чаты пользователя
+            await dbRun('DELETE FROM messages WHERE user_id = $1', [userId]);
+            await dbRun('DELETE FROM chats WHERE user_id = $1', [userId]);
+            await dbRun('DELETE FROM room_participants WHERE user_id = $1', [userId]);
+            await dbRun('DELETE FROM reactions WHERE user_id = $1', [userId]);
+
+            // Удаляем самого пользователя
+            await dbRun('DELETE FROM users WHERE id = $1', [userId]);
+
+            console.log(`[Anon] Successfully cleaned up anonymous user ${userId}`);
+        } catch (error) {
+            console.error('[Anon] Cleanup error:', error);
+        }
+    }
+
     req.session.destroy((err) => {
         res.clearCookie('connect.sid');
+        res.clearCookie('csrf_token');
         if (err) console.error('Logout session destroy error:', err);
-        res.json({ success: true });
+        res.json({ success: true, message: isAnonymous ? 'Данные удалены' : 'Выход выполнен' });
     });
 });
 
@@ -932,9 +1025,39 @@ app.get('/api/auth', async (req, res) => {
     if (!req.session.userId) return res.json({ authenticated: false });
     try {
         const row = await dbGet('SELECT avatar FROM users WHERE id = $1', [req.session.userId]);
+        if (!row && req.session.isAnonymous) {
+            // Анонимный пользователь был удален, очищаем сессию
+            req.session.destroy(() => {});
+            return res.json({ authenticated: false, expired: true });
+        }
+        if (!row) return res.json({ authenticated: false });
+
         const avatar = row ? (row.avatar || '') : (req.session.avatar || '');
         req.session.avatar = avatar;
-        res.json({ authenticated: true, user: { id: req.session.userId, username: req.session.username, uniqueCode: req.session.uniqueCode, avatar } });
+
+        // Проверка времени жизни анонимной сессии
+        if (req.session.isAnonymous && req.session.createdAt) {
+            const sessionAge = Date.now() - req.session.createdAt;
+            const maxAge = 4 * 60 * 60 * 1000; // 4 часа
+            if (sessionAge > maxAge) {
+                return res.json({
+                    authenticated: false,
+                    expired: true,
+                    message: 'Анонимная сессия истекла'
+                });
+            }
+        }
+
+        res.json({
+            authenticated: true,
+            user: {
+                id: req.session.userId,
+                username: req.session.username,
+                uniqueCode: req.session.uniqueCode,
+                avatar,
+                isAnonymous: req.session.isAnonymous || false
+            }
+        });
     } catch (error) {
         res.json({ authenticated: false });
     }
@@ -1048,7 +1171,7 @@ app.get('/api/messages/:chatId', async (req, res) => {
 
 app.post('/api/messages', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
-    const { chatId, text, replyToId } = req.body;
+    const { chatId, text, replyToId, expirySeconds } = req.body;
     const replyTo = Number(replyToId) || null;
     if (!text || text.trim() === '' || !chatId) return res.json({ success: false, message: 'Введите текст сообщения' });
     if (text.length > 4000) return res.json({ success: false, message: 'Сообщение не может быть длиннее 4000 символов' });
@@ -1060,13 +1183,26 @@ app.post('/api/messages', async (req, res) => {
         const time = getCurrentTime();
         const roomId = chat.room_id || null;
         const socketRoomKey = getSocketRoomKey(chatId, roomId);
-        const safeText = text.trim();
+
+        // Очистка текста от опасных метаданных
+        const safeText = sanitizeText(text.trim());
 
         const result = await pool.query(
             'INSERT INTO messages (chat_id, room_id, user_id, text, message_type, sent, time, status, reply_to_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id',
             [chatId, roomId, req.session.userId, safeText, 'text', 1, time, 'sent', replyTo]
         );
         const messageId = result.rows[0].id;
+
+        // Установка времени жизни сообщения если указано
+        if (expirySeconds && Number(expirySeconds) > 0) {
+            await disappearingMessagesManager.setMessageExpiry(messageId, Number(expirySeconds), false);
+        } else {
+            // Проверка настроек чата на автоудаление
+            const chatSettings = await disappearingMessagesManager.getChatSettings(chatId);
+            if (chatSettings && chatSettings.default_message_expiry) {
+                await disappearingMessagesManager.setMessageExpiry(messageId, chatSettings.default_message_expiry, false);
+            }
+        }
 
         const fullMessage = await dbGet(
             'SELECT m.*, u.username, u.avatar as user_avatar FROM messages m JOIN users u ON m.user_id = u.id WHERE m.id = $1',
@@ -1306,6 +1442,12 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
             fs.unlinkSync(uploadedFilePath);
             return res.status(400).json({ success: false, message: 'Содержимое файла не соответствует его типу' });
         }
+
+        // Удаление метаданных из файла для защиты приватности
+        if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf') {
+            await stripMetadataFromFile(uploadedFilePath, file.mimetype);
+            console.log('[Privacy] Stripped metadata from uploaded file:', file.filename);
+        }
     } catch (magicErr) {
         // Раньше при исключении здесь проверка молча пропускалась и файл
         // проходил дальше — теоретическая лазейка мимо проверки типа файла.
@@ -1486,6 +1628,90 @@ app.get('/api/search', async (req, res) => {
     }
 });
 
+// API для disappearing messages
+app.post('/api/messages/:messageId/set-expiry', async (req, res) => {
+    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
+    const messageId = Number(req.params.messageId);
+    const { expirySeconds, autoDeleteOnRead } = req.body;
+
+    if (!Number.isFinite(messageId) || !Number.isFinite(expirySeconds)) {
+        return res.json({ success: false, message: 'Неверные параметры' });
+    }
+
+    try {
+        // Проверка доступа к сообщению
+        const message = await dbGet('SELECT user_id FROM messages WHERE id = $1', [messageId]);
+        if (!message || message.user_id !== req.session.userId) {
+            return res.json({ success: false, message: 'Сообщение не найдено или нет доступа' });
+        }
+
+        await disappearingMessagesManager.setMessageExpiry(
+            messageId,
+            expirySeconds,
+            autoDeleteOnRead || false
+        );
+
+        res.json({ success: true, message: 'Таймер самоуничтожения установлен' });
+    } catch (error) {
+        console.error('Set expiry error:', error);
+        res.json({ success: false, message: 'Ошибка установки таймера' });
+    }
+});
+
+app.post('/api/chats/:chatId/set-default-expiry', async (req, res) => {
+    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
+    const chatId = Number(req.params.chatId);
+    const { expirySeconds } = req.body;
+
+    if (!Number.isFinite(chatId) || !Number.isFinite(expirySeconds)) {
+        return res.json({ success: false, message: 'Неверные параметры' });
+    }
+
+    try {
+        // Проверка доступа к чату
+        const chat = await dbGet('SELECT id FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
+        if (!chat) {
+            return res.json({ success: false, message: 'Чат не найден' });
+        }
+
+        await disappearingMessagesManager.setChatDefaultExpiry(chatId, expirySeconds);
+
+        res.json({ success: true, message: 'Автоудаление сообщений настроено для чата' });
+    } catch (error) {
+        console.error('Set chat default expiry error:', error);
+        res.json({ success: false, message: 'Ошибка настройки автоудаления' });
+    }
+});
+
+app.get('/api/chats/:chatId/settings', async (req, res) => {
+    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
+    const chatId = Number(req.params.chatId);
+
+    try {
+        const chat = await dbGet('SELECT id FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
+        if (!chat) {
+            return res.json({ success: false, message: 'Чат не найден' });
+        }
+
+        const settings = await disappearingMessagesManager.getChatSettings(chatId);
+        res.json({ success: true, settings: settings || {} });
+    } catch (error) {
+        console.error('Get chat settings error:', error);
+        res.json({ success: false, message: 'Ошибка получения настроек' });
+    }
+});
+                 (uc.room_id IS NOT NULL AND m.room_id = uc.room_id)
+                 OR (uc.room_id IS NULL AND m.chat_id = uc.id)
+             )
+             WHERE uc.user_id = $1 AND m.text ILIKE $2 AND m.deleted = 0 LIMIT 20`,
+            [req.session.userId, searchTerm]
+        );
+        res.json({ success: true, results: { chats, messages } });
+    } catch (error) {
+        res.json({ success: false, message: 'Ошибка поиска' });
+    }
+});
+
 app.post('/api/change-password', passwordLimiter, async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { currentPassword, newPassword, confirmPassword } = req.body;
@@ -1529,12 +1755,49 @@ app.use((err, req, res, next) => {
     res.status(500).json({ success: false, message: 'Внутренняя ошибка сервера' });
 });
 
-server.listen(PORT, HOST, () => {
+server.listen(PORT, HOST, async () => {
     const addresses = getLocalAddresses();
+    console.log(`\n${'='.repeat(60)}`);
+    console.log(`Nyxo Messenger запущен на порту ${PORT}`);
+    console.log(`${'='.repeat(60)}\n`);
+
     if (addresses.length > 0) {
-        console.log(`Сервер запущен на порту ${PORT}`);
-        addresses.forEach(addr => console.log(`Доступен по адресу: http://${addr}:${PORT}`));
-    } else {
-        console.log(`Сервер запущен на порту ${PORT}`);
+        console.log('Доступен по адресам:');
+        addresses.forEach(addr => console.log(`  → http://${addr}:${PORT}`));
+        console.log('');
     }
+
+    // Проверка Tor подключения
+    if (ENABLE_TOR_ROUTING) {
+        console.log('Проверка Tor подключения...');
+        const torStatus = await checkTorConnection();
+        if (torStatus.available && torStatus.isTor) {
+            console.log('✓ Tor успешно подключен');
+            console.log(`  IP через Tor: ${torStatus.ip}`);
+
+            const hiddenServiceConfig = getTorHiddenServiceConfig();
+            console.log('\nДля настройки Hidden Service добавьте в torrc:');
+            console.log(hiddenServiceConfig.hiddenServiceConfig);
+        } else {
+            console.warn('⚠ Tor не доступен:', torStatus.message);
+            console.warn('  Сервер работает без Tor routing');
+        }
+        console.log('');
+    }
+
+    // Запуск фоновой очистки старых файлов
+    setInterval(() => {
+        const uploadsDir = path.join(__dirname, 'uploads');
+        cleanupOldFiles(uploadsDir, 24 * 60 * 60 * 1000); // 24 часа
+    }, 60 * 60 * 1000); // Каждый час
+
+    console.log('Функции безопасности:');
+    console.log('  ✓ CSRF Protection');
+    console.log('  ✓ Rate Limiting');
+    console.log('  ✓ Metadata Stripping');
+    console.log('  ✓ Disappearing Messages');
+    console.log('  ✓ Enhanced Privacy Headers');
+    console.log('  ✓ Timing Attack Protection');
+    if (ENABLE_TOR_ROUTING) console.log('  ✓ Tor Hidden Service Support');
+    console.log(`\n${'='.repeat(60)}\n`);
 });
