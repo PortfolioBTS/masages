@@ -1700,17 +1700,6 @@ app.get('/api/chats/:chatId/settings', async (req, res) => {
         res.json({ success: false, message: 'Ошибка получения настроек' });
     }
 });
-                 (uc.room_id IS NOT NULL AND m.room_id = uc.room_id)
-                 OR (uc.room_id IS NULL AND m.chat_id = uc.id)
-             )
-             WHERE uc.user_id = $1 AND m.text ILIKE $2 AND m.deleted = 0 LIMIT 20`,
-            [req.session.userId, searchTerm]
-        );
-        res.json({ success: true, results: { chats, messages } });
-    } catch (error) {
-        res.json({ success: false, message: 'Ошибка поиска' });
-    }
-});
 
 app.post('/api/change-password', passwordLimiter, async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
