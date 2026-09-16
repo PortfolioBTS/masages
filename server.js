@@ -34,7 +34,7 @@ const {
 } = require('./lib/privacy');
 
 // Импорт E2EE прокси
-const e2eeProxy = require('./lib/e2ee-proxy');
+const setupE2eeProxy = require('./lib/e2ee-proxy');
 
 // Импорт Tor support
 const {
@@ -774,6 +774,8 @@ app.use((req, res, next) => {
 
 app.use(sessionMiddleware);
 app.use(express.static(path.join(__dirname, 'public')));
+
+setupE2eeProxy(app);
 
 app.get('/uploads/:filename', async (req, res) => {
     if (!req.session.userId) return res.status(401).json({ success: false, message: 'Не авторизован' });
