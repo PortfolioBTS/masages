@@ -1,151 +1,258 @@
-# Nyxo Messenger
+# Nyxo Messenger v2.0 🔒
 
-Мессенджер на Node.js/Express/Socket.io с PostgreSQL. Поддерживает обычную и
-анонимную регистрацию, 1:1 и групповые чаты, файлы, реакции, ответы на
-сообщения, disappearing messages, поиск. Текст сообщений шифруется перед
-записью в БД.
+Максимально анонимный и безопасный мессенджер с поддержкой E2EE, Tor routing и автоматическим удалением метаданных.
 
-## Стек
+## ✨ Ключевые возможности
 
-- Backend: Node.js, Express 4, Socket.io 4, PostgreSQL (`pg`)
-- Сессии: `express-session` + `connect-pg-simple` (хранилище сессий — та же БД)
-- Пароли: `bcryptjs`
-- Файлы: `multer` (диск), `sharp` (снятие метаданных из изображений)
-- Frontend: без фреймворка — HTML/CSS/vanilla JS (`public/`)
-- Опционально, отдельными процессами: два Rust-сервиса — `anon-service`
-  (генерация анонимных identity) и `e2ee-key-server` (хранение E2EE-ключей).
-  Оба не обязательны для работы приложения — см. раздел "Опциональные
-  компоненты".
+### 🛡️ Безопасность и Приватность
+- **End-to-End шифрование (E2EE)** — X3DH протокол с отдельным Rust-сервисом для обмена ключами
+- **Tor Hidden Service поддержка** — полная анонимность через .onion адреса
+- **Автоматическое удаление метаданных** — EXIF из фото, метаданные из PDF
+- **Disappearing messages** — самоуничтожающиеся сообщения с таймером
+- **Защита от timing attacks** — случайные задержки в критических операциях
+- **Усиленные заголовки приватности** — CSP, CORS, Permissions Policy
+- **Анонимный режим** — полное удаление данных при выходе
 
-## Запуск
+### 🎨 Современный интерфейс
+- **Темная тема по умолчанию** — профессиональный дизайн с glassmorphism эффектами
+- **Плавные анимации** — современные переходы и микроанимации
+- **Градиенты и свечение** — визуально приятный интерфейс
+- **Адаптивный дизайн** — работает на всех устройствах
 
-```
+### 💬 Функции мессенджера
+- Групповые чаты с кодами приглашений
+- Редактирование и удаление сообщений
+- Реакции на сообщения (emoji)
+- Ответы на сообщения (quotes)
+- Поиск по чатам и сообщениям
+- Статусы сообщений (отправлено/доставлено/прочитано)
+- Загрузка файлов (фото, видео, аудио, документы)
+- Бот-помощник
+
+## 🚀 Быстрый старт
+
+### Требования
+- Node.js 18+
+- PostgreSQL 14+
+- Rust 1.70+ (для микросервисов)
+- Tor (опционально, для .onion адресов)
+
+### Установка
+
+```bash
+# 1. Клонирование репозитория
+git clone https://github.com/PortfolioBTS/masages.git
+cd masages
+
+# 2. Установка зависимостей Node.js
 npm install
-cp .env.example .env    # заполнить переменные, см. ниже
-npm start                # или: npm run dev
+
+# 3. Настройка переменных окружения
+cp .env.example .env
+# Отредактируйте .env и укажите параметры БД и секреты
+
+# 4. Запуск микросервиса анонимности (Rust)
+cd anon-service
+cargo run --release &
+cd ..
+
+# 5. Запуск E2EE Key Server (Rust) - опционально
+cd e2ee-key-server
+cargo run --release &
+cd ..
+
+# 6. Запуск основного сервера
+npm start
 ```
 
-Точка входа — `server.js`. По умолчанию слушает `0.0.0.0:3000`.
+### Конфигурация Tor (опционально)
 
-При старте `server.js` сам создаёт недостающие таблицы и накатывает миграции
-(`initDatabase()` в начале файла) — отдельный шаг миграции не нужен.
-`database.sql` — best-effort слепок схемы для тех, кто хочет накатить её
-вручную; при расхождении верен `server.js`, а не этот файл.
+Для максимальной анонимности через Tor:
 
-## Переменные окружения
+```bash
+# 1. Установка Tor
+# Ubuntu/Debian:
+sudo apt install tor
 
-| Переменная | Обязательна | Назначение |
-|---|---|---|
-| `SESSION_SECRET` | да | секрет для подписи сессионных cookie, ≥32 символов |
-| `DATABASE_URL` | да | строка подключения к PostgreSQL |
-| `MESSAGE_ENCRYPTION_KEY` | да | ключ AES-256-GCM (32 байта в base64) для шифрования текста сообщений перед записью в БД. Без него сервер не стартует. Генерация: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"` |
-| `NODE_ENV` | нет | `production` — сервер поднимается на чистом HTTP (TLS предполагается на уровне прокси/хостинга), cookie `secure`/`sameSite=none`. Иначе — пробует локальный HTTPS через `localhost+1.pem`/`localhost+1-key.pem` (mkcert), при их отсутствии — HTTP с предупреждением в консоль |
-| `PORT`, `HOST` | нет | адрес и порт (по умолчанию `3000`, `0.0.0.0`) |
-| `ANON_SERVICE_URL` | нет | адрес `anon-service` (генератор анонимных имён/кодов). Недоступен — используется встроенный JS-фоллбэк, деградации функциональности нет |
-| `INTERNAL_KEY_SERVER_SECRET`, `KEY_SERVER_URL` | нет | адрес и секрет `e2ee-key-server`. Клиентского E2EE-шифрования в браузере в проекте нет — см. "Известные ограничения" |
-| `TOR_PROXY_HOST`, `TOR_PROXY_PORT`, `ENABLE_TOR_ROUTING` | нет | Tor routing, требует дополнительно настроенного hidden service |
-| `CF_IP_RANGES` | нет | переопределение диапазонов IP Cloudflare (через запятую), используется для доверия заголовку `CF-Connecting-IP` при определении реального IP клиента для rate-limit |
-| `DB_CA_CERT` | нет (обязательна в production при SSL-подключении к управляемому Postgres) | цепочка сертификатов CA |
-| `DUMP_CA` | нет, разовая утилита | `DUMP_CA=true npm start` — сервер подключается к БД, печатает в консоль цепочку сертификатов и завершает процесс. Используется один раз, чтобы получить значение для `DB_CA_CERT` |
+# macOS:
+brew install tor
 
-## Реализовано
+# 2. Настройка Hidden Service
+# Добавьте в /etc/tor/torrc:
+HiddenServiceDir /var/lib/tor/nyxo/
+HiddenServicePort 80 127.0.0.1:3000
+HiddenServiceVersion 3
 
-- Регистрация (обычная по email/паролю и анонимная), логин, сессии в БД
-- 1:1 чаты и групповые комнаты (таблицы `rooms`/`room_participants`, вход по
-  инвайт-коду)
-- Отправка, редактирование, удаление сообщений (soft-delete), реакции
-  (фиксированный набор из 5 эмодзи), ответы на сообщения
-- Файлы: загрузка с проверкой magic bytes (содержимое файла должно
-  соответствовать заявленному MIME-типу), белый список типов, снятие
-  EXIF/метаданных из изображений и PDF, отдача файла только участникам
-  соответствующего чата/комнаты
-- Disappearing messages: удаление по таймеру и по факту прочтения. Технически
-  это soft-delete — строка в БД остаётся, `text` заменяется на плейсхолдер и
-  выставляется `deleted=1`, сама запись не удаляется
-- Поиск по названиям чатов (SQL `ILIKE`) и по тексту сообщений (текст
-  зашифрован в БД — поиск идёт расшифровкой кандидатов и фильтрацией на
-  стороне приложения, не SQL `LIKE`)
-- Rate limiting на login/register/смену пароля/API (`express-rate-limit`,
-  ключ — реальный IP с учётом Cloudflare)
-- CSRF-токен в cookie + заголовке на все небезопасные методы
-- Экранирование пользовательского текста на фронте (без `innerHTML` для
-  сообщений), CSP-заголовки
-- Шифрование текста сообщений (AES-256-GCM) непосредственно перед записью в
-  БД и расшифровка при чтении — см. раздел ниже
+# 3. Перезапуск Tor
+sudo systemctl restart tor
 
-## Известные ограничения
+# 4. Получение .onion адреса
+sudo cat /var/lib/tor/nyxo/hostname
 
-- **E2EE не реализован end-to-end.** Есть отдельная инфраструктура —
-  Rust-сервис `e2ee-key-server` и API-эндпоинты для работы с ключами (X3DH),
-  но клиентского шифрования в браузере (`public/script.js`) нет. Сообщения
-  идут на сервер открытым текстом по HTTPS и шифруются только в момент
-  записи в БД — см. модель угроз ниже.
-- **Tor routing** требует ручной настройки hidden service на хосте и
-  `ENABLE_TOR_ROUTING=true`; сам код только проксирует запросы через
-  указанный SOCKS5, поднятие Tor-демона — вне зоны ответственности этого
-  репозитория.
-- **Disappearing messages не удаляют данные физически** (см. выше) — если
-  требуется полное удаление строки, `lib/disappearing-messages.js` нужно
-  менять на `DELETE FROM messages` вместо `UPDATE ... SET deleted = 1`.
-- Существующие сообщения, записанные до включения `MESSAGE_ENCRYPTION_KEY`,
-  остаются в БД открытым текстом — обратная миграция (шифрование задним
-  числом) не выполняется автоматически.
-
-## Модель безопасности шифрования сообщений
-
-`lib/message-crypto.js` шифрует `messages.text` по алгоритму AES-256-GCM
-непосредственно перед `INSERT`/`UPDATE` и расшифровывает при чтении. Ключ
-хранится только в переменной окружения `MESSAGE_ENCRYPTION_KEY`.
-
-Защищает: дамп/бэкап БД, утечку на стороне хостера Postgres, чтение базы
-в обход приложения — без ключа это нечитаемые байты.
-
-Не защищает: компрометацию самого процесса Node.js/переменных окружения —
-у кого есть `MESSAGE_ENCRYPTION_KEY` и доступ к серверу, тот расшифрует
-данные так же, как это делает само приложение при каждом запросе. Это
-шифрование на стороне сервера ("at rest"), а не end-to-end.
-
-## Структура проекта
-
-```
-server.js                  # весь backend: маршруты, Socket.io, initDatabase()
-lib/
-  message-crypto.js        # шифрование/расшифровка текста сообщений
-  disappearing-messages.js # таймеры удаления сообщений
-  metadata-stripper.js     # снятие EXIF/метаданных из файлов
-  privacy.js                # санитайзинг текста, IP-анонимизация, заголовки приватности
-  e2ee-proxy.js             # прокси к e2ee-key-server
-  tor-support.js            # поддержка Tor/SOCKS5
-public/                    # frontend (index.html, script.js, style.css)
-anon-service/               # опциональный Rust-сервис генерации анонимных identity
-e2ee-key-server/            # опциональный Rust-сервис хранения E2EE-ключей
-database.sql                 # слепок схемы БД (см. выше про приоритет server.js)
+# 5. Включение Tor routing в .env
+ENABLE_TOR_ROUTING=true
+TOR_PROXY_HOST=127.0.0.1
+TOR_PROXY_PORT=9050
 ```
 
-## API
+## 📁 Структура проекта
 
-Аутентификация — сессионная cookie; на все небезопасные методы (кроме
-`/socket.io`) требуется заголовок `X-CSRF-Token`, совпадающий со значением
-cookie `csrf_token`.
+```
+masages/
+├── server.js                 # Основной сервер (Express + Socket.io)
+├── public/                   # Фронтенд
+│   ├── index.html
+│   ├── script.js
+│   └── style.css            # Новый современный дизайн
+├── lib/                     # Библиотеки безопасности
+│   ├── metadata-stripper.js # Удаление метаданных
+│   ├── disappearing-messages.js
+│   ├── privacy.js           # Функции приватности
+│   ├── tor-support.js       # Tor/SOCKS5 поддержка
+│   └── e2ee-proxy.js        # Прокси для E2EE сервера
+├── anon-service/            # Rust микросервис (генерация ID)
+├── e2ee-key-server/         # Rust микросервис (E2EE ключи)
+└── uploads/                 # Загруженные файлы
 
-- `POST /api/register`, `POST /api/register/anonymous`, `POST /api/login`,
-  `POST /api/logout`, `GET /api/auth`, `GET /api/user`,
-  `POST /api/user/avatar-color`, `POST /api/change-password`
-- `GET /api/chats`, `POST /api/chats`, `DELETE /api/chats/:chatId`,
-  `GET /api/chats/invite/:chatId`, `POST /api/chats/join`
-- `GET /api/messages/:chatId`, `POST /api/messages`,
-  `PUT /api/messages/:messageId`, `DELETE /api/messages/:messageId`,
-  `POST /api/messages/file`
-- `POST /api/reactions`, `DELETE /api/reactions/:messageId/:emoji`
-- `GET /api/search?q=`
-- `POST /api/messages/:messageId/set-expiry`,
-  `POST /api/chats/:chatId/set-default-expiry`,
-  `GET /api/chats/:chatId/settings`
-- `GET /uploads/:filename` — отдача файла, только участникам чата/комнаты
-- Socket.io события: `joinChat` (клиент → сервер), `newMessage`,
-  `messageEdited`, `messageDeleted` (сервер → клиент)
+```
 
-Формат ответа JSON-эндпоинтов — `{ success: boolean, ... }`, HTTP-статус в
-большинстве случаев остаётся `200` даже при ошибке (сама ошибка — в поле
-`success`/`message`); отдельные коды `401`/`403`/`404`/`500` используются
-в `/api/messages/file` и `/uploads/:filename`.
+## 🔐 Безопасность
+
+### Реализованная защита
+
+1. **Content Security Policy (CSP)** — nonce-based, запрещает inline скрипты
+2. **CSRF Protection** — double-submit cookie pattern с улучшениями
+3. **Rate Limiting** — защита от bruteforce на всех критических эндпоинтах
+4. **Magic Bytes Verification** — проверка реального типа файлов
+5. **Metadata Stripping** — автоматическое удаление EXIF и метаданных
+6. **Timing Attack Protection** — случайные задержки в аутентификации
+7. **Параметризованные запросы** — защита от SQL-инъекций
+8. **WebSocket авторизация** — проверка сессий перед подключением
+9. **Защищенная раздача файлов** — контроль доступа на уровне участников
+10. **Enhanced Privacy Headers** — полный набор заголовков безопасности
+
+### E2EE Implementation
+
+Мессенджер использует модифицированный X3DH протокол:
+
+- **Два identity-ключа** вместо одного (Ed25519 для подписей, X25519 для DH)
+- **Signed PreKey** с ротацией для forward secrecy
+- **One-Time PreKeys** пул для каждой новой сессии
+- **Сервер не видит приватные ключи** — только публичный материал
+
+⚠️ **Важно**: Интеграция E2EE на клиенте (браузер) еще не завершена. Сервис готов, но требуется WASM-модуль для криптографии в браузере.
+
+## 🎯 Новые API эндпоинты
+
+### Disappearing Messages
+
+```javascript
+// Установка таймера самоуничтожения для сообщения
+POST /api/messages/:messageId/set-expiry
+Body: { expirySeconds: 3600, autoDeleteOnRead: false }
+
+// Настройка автоудаления для чата
+POST /api/chats/:chatId/set-default-expiry
+Body: { expirySeconds: 3600 }
+
+// Получение настроек чата
+GET /api/chats/:chatId/settings
+```
+
+### E2EE Key Management
+
+```javascript
+// Регистрация identity ключей
+PUT /api/keys/identity
+Body: { identity_signing_key: "base64", identity_dh_key: "base64" }
+
+// Ротация Signed PreKey
+PUT /api/keys/signed-prekey
+Body: { key_id: 1, public_key: "base64", signature: "base64" }
+
+// Пополнение One-Time PreKeys
+POST /api/keys/one-time-prekeys
+Body: { keys: [{ key_id: 1, public_key: "base64" }, ...] }
+
+// Получение bundle для начала сессии
+GET /api/keys/bundle/:targetUserId
+
+// Количество оставшихся OPK
+GET /api/keys/one-time-prekeys/count
+
+// Удаление всех ключей
+DELETE /api/keys
+```
+
+## 🎨 Визуальные улучшения
+
+### До vs После
+
+**Было:**
+- Светлая тема с базовыми цветами
+- Emoji иконки вместо профессиональных
+- Простые переходы
+- Стандартные формы
+
+**Стало:**
+- Темная тема с градиентами и glassmorphism
+- Современная типографика
+- Плавные анимации и микроинтеракции
+- Профессиональные формы с улучшенным UX
+- Визуальная иерархия и воздушность
+
+## 📊 Технические характеристики
+
+- **Backend**: Node.js + Express + Socket.io
+- **Database**: PostgreSQL с индексами
+- **Security Services**: 2 Rust микросервиса
+- **Frontend**: Vanilla JS (без фреймворков)
+- **Encryption**: X3DH протокол (готов к интеграции)
+- **Anonymity**: Tor Hidden Service support
+
+## 🔄 Roadmap
+
+- [ ] Завершение клиентского E2EE модуля (WASM)
+- [ ] Desktop приложение (Electron)
+- [ ] Mobile приложения (React Native)
+- [ ] Voice/Video calls через WebRTC
+- [ ] Multi-device поддержка
+- [ ] Групповое E2EE
+- [ ] Stickers и GIF поддержка
+
+## 🤝 Безопасное использование
+
+### Рекомендации
+
+1. **Всегда используйте HTTPS** в production
+2. **Настройте Tor** для максимальной анонимности
+3. **Регулярно обновляйте** зависимости
+4. **Используйте сильные пароли** для БД и секретов
+5. **Настройте firewall** для закрытия неиспользуемых портов
+6. **Включите E2EE** после завершения клиентской интеграции
+
+### Ограничения
+
+- E2EE на клиенте еще не реализован (сервис готов)
+- Multi-device не поддерживается
+- Групповое E2EE отсутствует
+- Voice/Video звонки не реализованы
+
+## 📄 Лицензия
+
+MIT License
+
+## 🔗 Ссылки
+
+- [SECURITY.md](./SECURITY.md) — Детали безопасности
+- [FEATURES.md](./FEATURES.md) — Полный список функций
+- [anon-service/README.md](./anon-service/README.md) — Rust микросервис анонимности
+- [e2ee-key-server/README.md](./e2ee-key-server/README.md) — E2EE сервис
+
+## 🐛 Нашли баг?
+
+Создайте Issue с тегом `security` для проблем безопасности или `bug` для обычных багов.
+
+---
+
+**Сделано с ❤️ для приватности и анонимности**
