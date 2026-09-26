@@ -42,7 +42,11 @@ body {
     position: relative;
 }
 
-/* Animated background */
+/* Background.
+   Раньше этот полноэкранный слой бесконечно анимировался (scale + opacity).
+   Поверх него лежат элементы с backdrop-filter: blur(), и браузер был
+   вынужден пересчитывать размытие ВСЕГО интерфейса на каждом кадре —
+   постоянная нагрузка на GPU/CPU, лаги при прокрутке и наборе текста. */
 body::before {
     content: '';
     position: fixed;
@@ -51,14 +55,8 @@ body::before {
         radial-gradient(circle at 20% 50%, rgba(99, 102, 241, 0.1) 0%, transparent 50%),
         radial-gradient(circle at 80% 80%, rgba(139, 92, 246, 0.1) 0%, transparent 50%),
         radial-gradient(circle at 40% 90%, rgba(236, 72, 153, 0.05) 0%, transparent 50%);
-    animation: backgroundPulse 15s ease-in-out infinite;
     pointer-events: none;
     z-index: 0;
-}
-
-@keyframes backgroundPulse {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.8; transform: scale(1.05); }
 }
 
 .hidden { display: none !important; }
@@ -480,10 +478,14 @@ body::before {
     justify-content: space-between;
 }
 
-.chat-info {
+/* Только шапка чата: без .chat-header этот flex-ряд применялся и к
+   .chat-info в списке чатов — имя и последнее сообщение вставали в одну
+   строку, и имя обрезалось до "Room…". */
+.chat-header .chat-info {
     display: flex;
     align-items: center;
     gap: 16px;
+    min-width: 0;
 }
 
 .chat-avatar {
@@ -565,13 +567,20 @@ body::before {
     background: rgba(148, 163, 184, 0.3);
 }
 
+/* У пузыря сообщения больше нет backdrop-filter: blur() — это был
+   отдельный слой с размытием на КАЖДОЕ сообщение (сотни на экране), и
+   прокрутка длинного чата заметно тормозила. Фон пузырей и так почти
+   непрозрачный, визуально разницы нет. Анимация появления — только для
+   новых сообщений, а не для всей истории разом при открытии чата. */
 .message {
     max-width: 70%;
     padding: 14px 18px;
     border-radius: 18px;
     position: relative;
+}
+
+.message.message-new {
     animation: messageSlide 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-    backdrop-filter: blur(10px);
 }
 
 @keyframes messageSlide {
@@ -802,6 +811,21 @@ body::before {
 .icon-btn.e2ee-active:hover {
     background: rgba(34, 197, 94, 0.25);
     border-color: #22c55e;
+}
+
+/* Кнопка "назад к списку чатов" — только на мобильных (см. @media ниже). */
+.back-btn {
+    display: none;
+    flex-shrink: 0;
+}
+
+.search-section-title {
+    padding: 12px 14px 6px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-tertiary);
 }
 
 .message-lock {
@@ -1151,9 +1175,48 @@ body::before {
     .sidebar {
         position: fixed;
         inset: 0;
+        width: 100%;
         z-index: 50;
         transform: translateX(0);
         transition: transform 0.3s ease;
+    }
+
+    .back-btn {
+        display: flex;
+    }
+
+    .chat-header,
+    .message-input-container {
+        padding: 12px 14px;
+    }
+
+    .chat-header .chat-info {
+        gap: 10px;
+    }
+
+    .chat-details {
+        min-width: 0;
+    }
+
+    .chat-details h3 {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .chat-actions {
+        gap: 6px;
+    }
+
+    .chat-header .icon-btn,
+    .chat-avatar {
+        width: 38px;
+        height: 38px;
+        font-size: 17px;
+    }
+
+    .chat-messages {
+        padding: 16px 12px;
     }
 
     .sidebar.hidden-mobile {

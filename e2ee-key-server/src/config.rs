@@ -22,12 +22,17 @@ impl Config {
         let database_url =
             env::var("DATABASE_URL").map_err(|_| anyhow::anyhow!("DATABASE_URL is not set"))?;
         let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:7420".to_string());
-        let internal_shared_secret = env::var("INTERNAL_SHARED_SECRET").map_err(|_| {
-            anyhow::anyhow!(
-                "INTERNAL_SHARED_SECRET is not set — this must be a long random value \
-                 shared with the Node backend, see .env.example"
-            )
-        })?;
+        // Node-бэкенд (lib/e2ee-proxy.js) и .env.example называют этот секрет
+        // INTERNAL_KEY_SERVER_SECRET — принимаем оба имени, иначе с общим
+        // .env сервис не стартовал ("INTERNAL_SHARED_SECRET is not set").
+        let internal_shared_secret = env::var("INTERNAL_SHARED_SECRET")
+            .or_else(|_| env::var("INTERNAL_KEY_SERVER_SECRET"))
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "INTERNAL_SHARED_SECRET (or INTERNAL_KEY_SERVER_SECRET) is not set — this must be \
+                     a long random value shared with the Node backend, see .env.example"
+                )
+            })?;
         if internal_shared_secret.len() < 32 {
             anyhow::bail!("INTERNAL_SHARED_SECRET must be at least 32 characters long");
         }
