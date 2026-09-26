@@ -4,7 +4,9 @@ let currentRoomId = null;
 let currentUser = null;
 let replyToMessageId = null;
 let editingMessageId = null;
+let editingMessageEncrypted = false; // флаг ИСХОДНОГО сообщения — при правке шифруем/не шифруем так же, а не по текущему тумблеру чата
 let longPressTimer = null;
+let e2eeClient = null; // см. секцию "E2EE" ниже — создаётся лениво под currentUser.id
 
 const elements = {
     authScreen: document.getElementById('auth-screen'),
@@ -59,7 +61,141 @@ const elements = {
     profileCode: document.getElementById('profile-code'),
     profileAvatar: document.getElementById('profile-avatar'),
     profileAnonBadge: document.getElementById('profile-anon-badge'),
+    e2eeToggleBtn: document.getElementById('e2ee-toggle-btn'),
 };
+
+// ==================== E2EE (X3DH + Sender Keys) ====================
+// Ключи устройства хранятся в IndexedDB, отдельная база на каждого
+// currentUser.id — это исключает утечку ключевого материала между
+// разными аккаунтами на одном браузере (общий компьютер, тест-логины).
+// Подробности протокола и честные ограничения — см. public/e2ee.js.
+
+function getE2eeClient() {
+    if (!currentUser) return null;
+    if (!e2eeClient || e2eeClient.forUserId !== currentUser.id) {
+        e2eeClient = E2EE.createClient({
+            userId: currentUser.id,
+            storage: E2EE.makeIndexedDbStorage('nyxo-e2ee-' + currentUser.id),
+        });
+        e2eeClient.forUserId = currentUser.id;
+    }
+    return e2eeClient;
+}
+
+function initE2eeForCurrentUser() {
+    const client = getE2eeClient();
+    if (!client) return;
+    // Не блокируем показ приложения генерацией/загрузкой ключей.
+    client.init().catch(err => console.error('E2EE: инициализация ключей устройства не удалась:', err));
+}
+
+function e2eeStorageKey(chatId) {
+    return `e2ee-enabled:${currentUser ? currentUser.id : '0'}:${chatId}`;
+}
+
+function isE2eeEnabledForChat(chatId) {
+    return localStorage.getItem(e2eeStorageKey(chatId)) === '1';
+}
+
+function updateE2eeToggleUI(chatId, roomId) {
+    if (!elements.e2eeToggleBtn) return;
+    if (!roomId) {
+        // Боту/одиночному чату групповое E2EE не подходит — прячем тумблер,
+        // чтобы не обещать шифрование там, где его некому подтвердить.
+        elements.e2eeToggleBtn.classList.add('hidden');
+        return;
+    }
+    elements.e2eeToggleBtn.classList.remove('hidden');
+    const enabled = isE2eeEnabledForChat(chatId);
+    elements.e2eeToggleBtn.textContent = enabled ? '🔒' : '🔓';
+    elements.e2eeToggleBtn.classList.toggle('e2ee-active', enabled);
+    elements.e2eeToggleBtn.title = enabled ? 'Сквозное шифрование включено' : 'Включить сквозное шифрование';
+    elements.messageInput.placeholder = enabled ? 'Зашифрованное сообщение...' : 'Сообщение...';
+}
+
+// Готовит комнату к шифрованию: создаёт (если ещё нет) свой Sender Key и
+// досылает его участникам, кому текущая версия ключа ещё не отправлена.
+// Идемпотентна — безопасно звать при каждом открытии чата, в том числе
+// чтобы со временем подхватить участников, добавленных позже.
+async function ensureE2eeRoomReady(chatId, roomId) {
+    const client = getE2eeClient();
+    if (!client || !roomId) return;
+    try {
+        const partRes = await api(`/api/chats/${chatId}/participants`);
+        if (!partRes.success || !partRes.roomId) return;
+        const result = await client.ensureRoomSession(chatId, partRes.roomId, partRes.participants);
+        if (result.warnings && result.warnings.length > 0) {
+            console.warn('E2EE: не со всеми участниками установлен защищённый канал:', result.warnings);
+        }
+    } catch (err) {
+        console.error('E2EE: не удалось подготовить сессию комнаты:', err);
+        showToast('Не удалось включить шифрование для всех участников', 'error');
+    }
+}
+
+// Забирает ожидающие key-share для этого чата (от других участников,
+// включивших у себя шифрование) — нужно делать ДО расшифровки входящих
+// сообщений, иначе их Sender Key ещё не будет известен локально.
+async function syncE2eeKeyShares(chatId, roomId) {
+    const client = getE2eeClient();
+    if (!client || !roomId) return;
+    try {
+        await client.syncKeyShares(chatId, roomId);
+    } catch (err) {
+        console.error('E2EE: syncKeyShares failed:', err);
+    }
+}
+
+// Расшифровывает сообщение "на месте" перед рендерингом — после этого
+// вызова весь остальной код (createMessageElement, предпросмотр ответа,
+// редактирование) работает с message.text как с обычным открытым
+// текстом, будто шифрования и не было.
+async function decryptMessageInPlace(message, roomId) {
+    if (!message.encrypted) return message;
+    const client = getE2eeClient();
+    if (client && roomId) {
+        const res = await client.decryptIncoming(roomId, message.user_id, message.text);
+        message.text = res.ok ? res.text : '🔒 Не удалось расшифровать';
+        message._e2eeFailed = !res.ok;
+    } else {
+        message.text = '🔒 Зашифрованное сообщение';
+        message._e2eeFailed = true;
+    }
+    if (message.reply_to && message.reply_to.encrypted && client && roomId) {
+        const replyRes = await client.decryptIncoming(roomId, message.reply_to.sender_id, message.reply_to.text);
+        message.reply_to.text = replyRes.ok ? replyRes.text : '🔒 Не удалось расшифровать';
+    }
+    return message;
+}
+
+async function decryptMessagesInPlace(messages, roomId) {
+    for (const m of messages) await decryptMessageInPlace(m, roomId);
+    return messages;
+}
+
+if (elements.e2eeToggleBtn) {
+    elements.e2eeToggleBtn.addEventListener('click', async () => {
+        if (!currentChatId || !currentRoomId) return;
+        const enabling = !isE2eeEnabledForChat(currentChatId);
+        if (enabling) {
+            elements.e2eeToggleBtn.disabled = true;
+            elements.e2eeToggleBtn.textContent = '⏳';
+            await ensureE2eeRoomReady(currentChatId, currentRoomId);
+            elements.e2eeToggleBtn.disabled = false;
+        }
+        localStorage.setItem(e2eeStorageKey(currentChatId), enabling ? '1' : '0');
+        updateE2eeToggleUI(currentChatId, currentRoomId);
+        showToast(enabling ? 'Шифрование включено для этого чата' : 'Шифрование выключено для этого чата', 'success');
+    });
+}
+
+socket.on('e2eeKeyShare', ({ roomId }) => {
+    // Кто-то прислал нам Sender Key. Если это открытый сейчас чат —
+    // подхватываем сразу, иначе заберём при следующем открытии чата.
+    if (roomId && roomId === currentRoomId && currentChatId) {
+        syncE2eeKeyShares(currentChatId, currentRoomId);
+    }
+});
 
 function init() {
     checkAuth();
@@ -76,6 +212,7 @@ async function checkAuth() {
         const data = await res.json();
         if (data.authenticated) {
             currentUser = data.user;
+            initE2eeForCurrentUser();
             showApp();
             loadChats();
         } else {
@@ -143,6 +280,7 @@ function setupEventListeners() {
         });
         if (data.success) {
             currentUser = data.user;
+            initE2eeForCurrentUser();
             showToast('Вход выполнен!', 'success');
             showApp();
             loadChats();
@@ -162,6 +300,7 @@ function setupEventListeners() {
         });
         if (data.success) {
             currentUser = data.user;
+            initE2eeForCurrentUser();
             showToast('Регистрация успешна!', 'success');
             showApp();
             loadChats();
@@ -174,6 +313,7 @@ function setupEventListeners() {
         const data = await api('/api/register/anonymous', { method: 'POST' });
         if (data.success) {
             currentUser = data.user;
+            initE2eeForCurrentUser();
             showToast('Приватный режим активирован!', 'success');
             showApp();
             loadChats();
@@ -185,6 +325,7 @@ function setupEventListeners() {
     elements.logoutBtn.addEventListener('click', async () => {
         await api('/api/logout', { method: 'POST' });
         currentUser = null;
+        e2eeClient = null; // ключи устройства остаются в IndexedDB под старым userId для следующего входа
         currentChatId = null;
         currentRoomId = null;
         showToast('Вы вышли из аккаунта', 'info');
@@ -296,6 +437,7 @@ function setupEventListeners() {
 
     elements.editMessageBtn.addEventListener('click', () => {
         editingMessageId = elements.messageMenu.dataset.messageId;
+        editingMessageEncrypted = elements.messageMenu.dataset.encrypted === '1';
         const text = elements.messageMenu.dataset.messageText;
         elements.messageInput.value = text;
         elements.messageInput.focus();
@@ -332,8 +474,9 @@ function setupEventListeners() {
         hideMessageMenu();
     });
 
-    socket.on('newMessage', (message) => {
+    socket.on('newMessage', async (message) => {
         if (message.chat_id == currentChatId || message.room_id == currentRoomId) {
+            await decryptMessageInPlace(message, currentRoomId ?? message.room_id);
             appendMessage(message);
             scrollToBottom();
         } else {
@@ -341,12 +484,19 @@ function setupEventListeners() {
         }
     });
 
-    socket.on('messageEdited', ({ id, text, chat_id, room_id }) => {
+    socket.on('messageEdited', async ({ id, text, chat_id, room_id, encrypted, user_id }) => {
         if (chat_id == currentChatId || room_id == currentRoomId) {
+            let displayText = text;
+            if (encrypted) {
+                const client = getE2eeClient();
+                const roomId = currentRoomId ?? room_id;
+                const res = client && roomId ? await client.decryptIncoming(roomId, user_id, text) : null;
+                displayText = (res && res.ok) ? res.text : '🔒 Не удалось расшифровать';
+            }
             const bubble = document.querySelector(`[data-message-id="${id}"]`);
             if (!bubble) return;
             const textEl = bubble.querySelector('.message-text');
-            if (textEl) textEl.textContent = text;
+            if (textEl) textEl.textContent = displayText;
             if (!bubble.querySelector('.edited-label')) {
                 const contentEl = bubble.querySelector('.message-content');
                 if (contentEl) {
@@ -395,7 +545,7 @@ async function loadChats() {
             <div class="chat-avatar-small" style="background:${chat.avatar && chat.avatar.startsWith('#') ? chat.avatar : '#667EEA'}">${chat.name.charAt(0).toUpperCase()}</div>
             <div class="chat-info">
                 <div class="chat-name">${escapeHtml(chat.name)}</div>
-                <div class="chat-last">${chat.last_message ? escapeHtml(chat.last_message.substring(0, 30)) : 'Нет сообщений'}</div>
+                <div class="chat-last">${chat.last_message_encrypted ? '🔒 Зашифрованное сообщение' : (chat.last_message ? escapeHtml(chat.last_message.substring(0, 30)) : 'Нет сообщений')}</div>
             </div>
             ${chat.unread > 0 ? `<div class="chat-badge">${chat.unread}</div>` : ''}
         `;
@@ -416,11 +566,21 @@ async function openChat(chatId, roomId, name, avatar, online, isBot) {
     elements.messageInputContainer.classList.remove('hidden');
     elements.emptyState.classList.add('hidden');
     elements.chatMessages.innerHTML = '';
+    updateE2eeToggleUI(chatId, roomId);
+
+    // Сначала забираем ожидающие key-share (иначе только что полученные
+    // Sender Key от других участников ещё не будут известны локально —
+    // их сообщения ниже не расшифруются), и, если сами включили шифрование
+    // для этого чата, убеждаемся, что все текущие участники комнаты знают
+    // наш Sender Key (идемпотентно, подхватит и тех, кто добавился позже).
+    await syncE2eeKeyShares(chatId, roomId);
+    if (roomId && isE2eeEnabledForChat(chatId)) await ensureE2eeRoomReady(chatId, roomId);
 
     const data = await api(`/api/messages/${chatId}`);
     if (!data.success) return;
 
     if (data.messages) {
+        await decryptMessagesInPlace(data.messages, roomId);
         data.messages.forEach(msg => appendMessage(msg));
         scrollToBottom();
     }
@@ -502,7 +662,7 @@ function createMessageElement(message) {
             contentDiv.appendChild(createFileAttachmentElement(message));
         }
         const textDiv = document.createElement('div');
-        textDiv.className = 'message-text';
+        textDiv.className = 'message-text' + (message._e2eeFailed ? ' e2ee-failed' : '');
         textDiv.textContent = message.text || '';
         contentDiv.appendChild(textDiv);
 
@@ -527,6 +687,13 @@ function createMessageElement(message) {
 
     const metaDiv = document.createElement('div');
     metaDiv.className = 'message-meta';
+    if (message.encrypted) {
+        const lockSpan = document.createElement('span');
+        lockSpan.className = 'message-lock';
+        lockSpan.textContent = '🔒';
+        lockSpan.title = 'Сквозное шифрование';
+        metaDiv.appendChild(lockSpan);
+    }
     const timeSpan = document.createElement('span');
     timeSpan.className = 'message-time';
     timeSpan.textContent = message.time || '';
@@ -566,6 +733,7 @@ function showMessageMenu(x, y, message) {
     elements.messageMenu.classList.remove('hidden');
     elements.messageMenu.dataset.messageId = message.id;
     elements.messageMenu.dataset.messageText = message.text || '';
+    elements.messageMenu.dataset.encrypted = message.encrypted ? '1' : '0';
     const isMine = message.user_id === (currentUser ? currentUser.id : 0);
     elements.editMessageBtn.style.display = isMine ? 'block' : 'none';
     elements.deleteMessageBtn.style.display = isMine ? 'block' : 'none';
@@ -588,14 +756,24 @@ async function sendMessage() {
         showToast('Выберите чат', 'error');
         return;
     }
-    const payload = { chatId: currentChatId, text };
-    if (replyToMessageId) payload.replyToId = replyToMessageId;
 
     try {
         if (editingMessageId) {
+            // Шифруем правку так же, как было зашифровано исходное
+            // сообщение — независимо от текущего состояния тумблера чата
+            // (см. editingMessageEncrypted): сервер не принимает флаг
+            // encrypted при редактировании, он фиксирован с момента
+            // создания сообщения.
+            let outgoingText = text;
+            if (editingMessageEncrypted) {
+                const client = getE2eeClient();
+                if (!client || !currentRoomId) { showToast('Не удалось зашифровать правку', 'error'); return; }
+                try { outgoingText = await client.encryptOutgoing(currentRoomId, text); }
+                catch { showToast('Не удалось зашифровать правку', 'error'); return; }
+            }
             const data = await api(`/api/messages/${editingMessageId}`, {
                 method: 'PUT',
-                body: JSON.stringify({ text }),
+                body: JSON.stringify({ text: outgoingText }),
             });
             if (!data.success) {
                 showToast(data.message || 'Не удалось изменить сообщение', 'error');
@@ -603,9 +781,25 @@ async function sendMessage() {
             }
             showToast('Сообщение изменено', 'success');
             const el = document.querySelector(`[data-message-id="${editingMessageId}"] .message-text`);
-            if (el) el.textContent = text;
+            if (el) el.textContent = text; // в бабле — то, что реально набрано, открытым текстом
             editingMessageId = null;
+            editingMessageEncrypted = false;
         } else {
+            const e2eeOn = currentRoomId && isE2eeEnabledForChat(currentChatId);
+            let outgoingText = text;
+            let encrypted = false;
+            if (e2eeOn) {
+                const client = getE2eeClient();
+                try {
+                    outgoingText = await client.encryptOutgoing(currentRoomId, text);
+                    encrypted = true;
+                } catch (err) {
+                    showToast('Не удалось зашифровать сообщение — попробуйте переключить шифрование', 'error');
+                    return;
+                }
+            }
+            const payload = { chatId: currentChatId, text: outgoingText, encrypted };
+            if (replyToMessageId) payload.replyToId = replyToMessageId;
             const data = await api('/api/messages', {
                 method: 'POST',
                 body: JSON.stringify(payload),

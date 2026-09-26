@@ -34,8 +34,12 @@ const {
     generateSecureToken
 } = require('./lib/privacy');
 
-// Импорт E2EE прокси
-const e2eeProxy = require('./lib/e2ee-proxy');
+// Импорт E2EE прокси (маршруты регистрируются после sessionMiddleware —
+// см. вызов registerE2eeProxyRoutes ниже)
+const { registerE2eeProxyRoutes } = require('./lib/e2ee-proxy');
+// Групповой E2EE: участники чата + попарная доставка Sender Key
+// (key-shares). Тоже регистрируется после sessionMiddleware.
+const { initE2eeGroupsSchema, registerE2eeGroupRoutes } = require('./lib/e2ee-groups');
 
 // Импорт Tor support
 const {
@@ -507,6 +511,12 @@ async function initDatabase() {
     // Добавляем её вручную, иначе следующий CREATE INDEX ON messages(room_id) упадёт с 42703.
     await pool.query(`ALTER TABLE chats ADD COLUMN IF NOT EXISTS room_id INTEGER REFERENCES rooms(id);`);
     await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS room_id INTEGER REFERENCES rooms(id);`);
+    // E2EE: сообщение хранит клиентский шифроконверт вместо обычного
+    // текста (см. public/e2ee.js). Серверное шифрование "at rest" из
+    // lib/message-crypto.js применяется поверх в обоих случаях —
+    // этот флаг только про то, что лежит ВНУТРИ, после его снятия.
+    await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS encrypted BOOLEAN NOT NULL DEFAULT FALSE;`);
+    await initE2eeGroupsSchema(pool);
 
     // Миграция: удаление чата/выход из комнаты падало с нарушением FK —
     // messages.chat_id (NOT NULL, без ON DELETE) не давал снести свою же
@@ -670,6 +680,11 @@ io.on('connection', (socket) => {
         return;
     }
     console.log('Пользователь подключился через WebSocket, userId:', userId);
+    // Личная комната пользователя (на всех его вкладках/устройствах) —
+    // нужна для адресной доставки событий конкретному человеку, а не
+    // всем в конкретном чате. Пока единственный потребитель — пуш
+    // "у тебя новый E2EE key-share" из lib/e2ee-groups.js.
+    socket.join('user:' + userId);
 
     socket.on('joinChat', async (roomKey) => {
         if (typeof roomKey !== 'string' || roomKey.length === 0) return;
@@ -775,6 +790,12 @@ app.use((req, res, next) => {
 
 app.use(sessionMiddleware);
 app.use(express.static(path.join(__dirname, 'public')));
+
+// E2EE key-server proxy: /api/keys/* → Rust key-server по loopback.
+// Регистрируется строго ПОСЛЕ sessionMiddleware — маршрутам нужна сессия.
+registerE2eeProxyRoutes(app);
+// Групповой E2EE: список участников чата + key-shares (тоже нужна сессия).
+registerE2eeGroupRoutes(app, { dbGet, dbAll, dbRun, io });
 
 app.get('/uploads/:filename', async (req, res) => {
     if (!req.session.userId) return res.status(401).json({ success: false, message: 'Не авторизован' });
@@ -1092,6 +1113,7 @@ app.get('/api/chats', async (req, res) => {
         const chats = await dbAll(`
             SELECT c.id, c.name, c.avatar, c.online, c.is_bot, c.room_id, r.code as invite_code,
                    (SELECT text FROM messages WHERE ((c.room_id IS NOT NULL AND room_id = c.room_id) OR (c.room_id IS NULL AND chat_id = c.id)) ORDER BY id DESC LIMIT 1) as last_message,
+                   (SELECT encrypted FROM messages WHERE ((c.room_id IS NOT NULL AND room_id = c.room_id) OR (c.room_id IS NULL AND chat_id = c.id)) ORDER BY id DESC LIMIT 1) as last_message_encrypted,
                    (SELECT time FROM messages WHERE ((c.room_id IS NOT NULL AND room_id = c.room_id) OR (c.room_id IS NULL AND chat_id = c.id)) ORDER BY id DESC LIMIT 1) as last_time,
                    (SELECT COUNT(*) FROM messages m WHERE ((c.room_id IS NOT NULL AND m.room_id = c.room_id) OR (c.room_id IS NULL AND m.chat_id = c.id)) AND m.sent = 0 AND m.status != 'read') as unread
             FROM chats c
@@ -1099,7 +1121,11 @@ app.get('/api/chats', async (req, res) => {
             WHERE c.user_id = $1
             ORDER BY (SELECT MAX(id) FROM messages WHERE ((c.room_id IS NOT NULL AND room_id = c.room_id) OR (c.room_id IS NULL AND chat_id = c.id))) DESC NULLS LAST
         `, [req.session.userId]);
-        res.json({ success: true, chats: chats.map(c => ({ ...c, unread: Number(c.unread), last_message: decryptText(c.last_message) })) });
+        // Предпросмотр E2EE-сообщения в списке чатов не расшифровываем —
+        // это потребовало бы Sender Key каждого отправителя каждого чата
+        // ещё до открытия чата. Показываем нейтральную подпись, конверт
+        // клиенту не отдаём вовсе (script.js подставляет плейсхолдер).
+        res.json({ success: true, chats: chats.map(c => ({ ...c, unread: Number(c.unread), last_message: c.last_message_encrypted ? null : decryptText(c.last_message) })) });
     } catch (error) {
         console.error('Get chats error:', error);
         res.json({ success: false, message: 'Ошибка загрузки чатов' });
@@ -1116,7 +1142,8 @@ app.get('/api/messages/:chatId', async (req, res) => {
         const selectParam = chat.room_id || chatId;
         const selectQuery = chat.room_id
             ? `SELECT m.*, u.username as sender_username, u.avatar as sender_avatar,
-                      rt.id as reply_to_id, rt.text as reply_to_text, ru.username as reply_to_sender_username, ru.avatar as reply_to_sender_avatar
+                      rt.id as reply_to_id, rt.text as reply_to_text, rt.user_id as reply_to_sender_id, rt.encrypted as reply_to_encrypted,
+                      ru.username as reply_to_sender_username, ru.avatar as reply_to_sender_avatar
                FROM messages m
                JOIN users u ON m.user_id = u.id
                LEFT JOIN messages rt ON m.reply_to_id = rt.id
@@ -1124,7 +1151,8 @@ app.get('/api/messages/:chatId', async (req, res) => {
                WHERE m.room_id = $1 AND m.deleted = 0
                ORDER BY m.id ASC`
             : `SELECT m.*, u.username as sender_username, u.avatar as sender_avatar,
-                      rt.id as reply_to_id, rt.text as reply_to_text, ru.username as reply_to_sender_username, ru.avatar as reply_to_sender_avatar
+                      rt.id as reply_to_id, rt.text as reply_to_text, rt.user_id as reply_to_sender_id, rt.encrypted as reply_to_encrypted,
+                      ru.username as reply_to_sender_username, ru.avatar as reply_to_sender_avatar
                FROM messages m
                JOIN users u ON m.user_id = u.id
                LEFT JOIN messages rt ON m.reply_to_id = rt.id
@@ -1156,7 +1184,11 @@ app.get('/api/messages/:chatId', async (req, res) => {
             ...m,
             text: decryptText(m.text),
             reactions: reactionsMap[m.id] || [],
-            reply_to: m.reply_to_id ? { id: m.reply_to_id, text: decryptText(m.reply_to_text), sender_username: m.reply_to_sender_username, sender_avatar: m.reply_to_sender_avatar } : null
+            reply_to: m.reply_to_id ? {
+                id: m.reply_to_id, text: decryptText(m.reply_to_text),
+                sender_id: m.reply_to_sender_id, encrypted: m.reply_to_encrypted,
+                sender_username: m.reply_to_sender_username, sender_avatar: m.reply_to_sender_avatar
+            } : null
         }));
 
         const updateQuery = chat.room_id
@@ -1174,9 +1206,14 @@ app.get('/api/messages/:chatId', async (req, res) => {
 app.post('/api/messages', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     const { chatId, text, replyToId, expirySeconds } = req.body;
+    const encrypted = req.body.encrypted === true;
     const replyTo = Number(replyToId) || null;
     if (!text || text.trim() === '' || !chatId) return res.json({ success: false, message: 'Введите текст сообщения' });
-    if (text.length > 4000) return res.json({ success: false, message: 'Сообщение не может быть длиннее 4000 символов' });
+    // У E2EE-сообщений text — это JSON-конверт (senderKeyId/iv/ct/подпись,
+    // см. public/e2ee.js), а не читаемый текст: он больше обычного
+    // сообщения той же "длины" за счёт base64 и служебных полей.
+    const maxLen = encrypted ? 12000 : 4000;
+    if (text.length > maxLen) return res.json({ success: false, message: `Сообщение не может быть длиннее ${maxLen} символов` });
 
     try {
         const chat = await dbGet('SELECT * FROM chats WHERE id = $1 AND user_id = $2', [chatId, req.session.userId]);
@@ -1186,12 +1223,14 @@ app.post('/api/messages', async (req, res) => {
         const roomId = chat.room_id || null;
         const socketRoomKey = getSocketRoomKey(chatId, roomId);
 
-        // Очистка текста от опасных метаданных
-        const safeText = sanitizeText(text.trim());
+        // Для E2EE-конверта sanitizeText не нужен и вреден по смыслу: это
+        // не человеческий текст, а base64/JSON, который клиент должен
+        // получить обратно байт-в-байт для расшифровки.
+        const safeText = encrypted ? text.trim() : sanitizeText(text.trim());
 
         const result = await pool.query(
-            'INSERT INTO messages (chat_id, room_id, user_id, text, message_type, sent, time, status, reply_to_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id',
-            [chatId, roomId, req.session.userId, encryptText(safeText), 'text', 1, time, 'sent', replyTo]
+            'INSERT INTO messages (chat_id, room_id, user_id, text, message_type, sent, time, status, reply_to_id, encrypted) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id',
+            [chatId, roomId, req.session.userId, encryptText(safeText), 'text', 1, time, 'sent', replyTo, encrypted]
         );
         const messageId = result.rows[0].id;
 
@@ -1372,11 +1411,16 @@ app.put('/api/messages/:messageId', async (req, res) => {
     const { messageId } = req.params;
     const { text } = req.body;
     if (!text || text.trim() === '') return res.json({ success: false, message: 'Текст не может быть пустым' });
-    if (text.length > 4000) return res.json({ success: false, message: 'Сообщение не может быть длиннее 4000 символов' });
 
     try {
         const message = await dbGet('SELECT * FROM messages WHERE id = $1 AND user_id = $2', [messageId, req.session.userId]);
         if (!message) return res.json({ success: false, message: 'Сообщение не найдено' });
+        // Правка E2EE-сообщения — это новый конверт того же (по флагу)
+        // типа: клиент сам шифрует новый текст перед PUT, флаг при
+        // редактировании не меняется (encrypted не пришло — просто он же).
+        const maxLen = message.encrypted ? 12000 : 4000;
+        if (text.length > maxLen) return res.json({ success: false, message: `Сообщение не может быть длиннее ${maxLen} символов` });
+
         const editedAt = new Date().toISOString();
         const trimmedText = text.trim();
         await dbRun('UPDATE messages SET text = $1, edited_at = $2 WHERE id = $3', [encryptText(trimmedText), editedAt, messageId]);
@@ -1386,7 +1430,7 @@ app.put('/api/messages/:messageId', async (req, res) => {
         const socketRoomKey = getSocketRoomKey(message.chat_id, message.room_id);
         io.to(socketRoomKey).emit('messageEdited', {
             id: Number(messageId), text: trimmedText, edited_at: editedAt,
-            chat_id: message.chat_id, room_id: message.room_id
+            chat_id: message.chat_id, room_id: message.room_id, encrypted: message.encrypted, user_id: message.user_id
         });
 
         res.json({ success: true, edited_at: editedAt });
@@ -1620,13 +1664,16 @@ app.get('/api/search', async (req, res) => {
         //
         // Джойн на СОБСТВЕННУЮ запись chats искателя (uc) по тому же
         // паттерну room_id/chat_id, что и в /api/chats — см. п.4 аудита.
+        // m.encrypted = FALSE — E2EE-сообщения (см. public/e2ee.js) сервер
+        // расшифровать в принципе не может, это не баг поиска, а прямое
+        // следствие сквозного шифрования; отдавать их в кандидаты бессмысленно.
         const candidates = await dbAll(
             `SELECT m.id, m.text, uc.id AS chat_id, uc.name AS chat_name FROM messages m
              JOIN chats uc ON (
                  (uc.room_id IS NOT NULL AND m.room_id = uc.room_id)
                  OR (uc.room_id IS NULL AND m.chat_id = uc.id)
              )
-             WHERE uc.user_id = $1 AND m.deleted = 0
+             WHERE uc.user_id = $1 AND m.deleted = 0 AND m.encrypted = FALSE
              ORDER BY m.id DESC LIMIT 500`,
             [req.session.userId]
         );

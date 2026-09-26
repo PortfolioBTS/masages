@@ -80,6 +80,7 @@
                     </div>
                 </div>
                 <div class="chat-actions">
+                    <button id="e2ee-toggle-btn" class="icon-btn hidden" title="Включить сквозное шифрование">🔓</button>
                     <button id="get-chat-code-btn" class="icon-btn" title="Код приглашения">🔗</button>
                     <button id="chat-menu-btn" class="icon-btn" title="Меню">⋮</button>
                 </div>
@@ -222,6 +223,7 @@
     <div id="overlay" class="overlay hidden"></div>
 
     <script src="/socket.io/socket.io.js"></script>
+    <script src="e2ee.js"></script>
     <script src="script.js"></script>
 </body>
 </html>

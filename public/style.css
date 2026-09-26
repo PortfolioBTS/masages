@@ -792,6 +792,27 @@ body::before {
     border-color: var(--border);
 }
 
+/* E2EE */
+.icon-btn.e2ee-active {
+    background: rgba(34, 197, 94, 0.15);
+    border-color: rgba(34, 197, 94, 0.5);
+    color: #22c55e;
+}
+
+.icon-btn.e2ee-active:hover {
+    background: rgba(34, 197, 94, 0.25);
+    border-color: #22c55e;
+}
+
+.message-lock {
+    opacity: 0.8;
+}
+
+.message-text.e2ee-failed {
+    font-style: italic;
+    opacity: 0.6;
+}
+
 /* Empty State */
 .empty-state {
     flex: 1;

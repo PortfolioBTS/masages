@@ -42,7 +42,7 @@ npm start                # или: npm run dev
 | `NODE_ENV` | нет | `production` — сервер поднимается на чистом HTTP (TLS предполагается на уровне прокси/хостинга), cookie `secure`/`sameSite=none`. Иначе — пробует локальный HTTPS через `localhost+1.pem`/`localhost+1-key.pem` (mkcert), при их отсутствии — HTTP с предупреждением в консоль |
 | `PORT`, `HOST` | нет | адрес и порт (по умолчанию `3000`, `0.0.0.0`) |
 | `ANON_SERVICE_URL` | нет | адрес `anon-service` (генератор анонимных имён/кодов). Недоступен — используется встроенный JS-фоллбэк, деградации функциональности нет |
-| `INTERNAL_KEY_SERVER_SECRET`, `KEY_SERVER_URL` | нет | адрес и секрет `e2ee-key-server`. Клиентского E2EE-шифрования в браузере в проекте нет — см. "Известные ограничения" |
+| `INTERNAL_KEY_SERVER_SECRET`, `KEY_SERVER_URL` | нет | адрес и секрет `e2ee-key-server`, обслуживающего identity/prekey-эндпоинты для клиентского E2EE (`public/e2ee.js`) — см. "Сквозное шифрование (E2EE)" ниже |
 | `TOR_PROXY_HOST`, `TOR_PROXY_PORT`, `ENABLE_TOR_ROUTING` | нет | Tor routing, требует дополнительно настроенного hidden service |
 | `CF_IP_RANGES` | нет | переопределение диапазонов IP Cloudflare (через запятую), используется для доверия заголовку `CF-Connecting-IP` при определении реального IP клиента для rate-limit |
 | `DB_CA_CERT` | нет (обязательна в production при SSL-подключении к управляемому Postgres) | цепочка сертификатов CA |
@@ -72,14 +72,23 @@ npm start                # или: npm run dev
   сообщений), CSP-заголовки
 - Шифрование текста сообщений (AES-256-GCM) непосредственно перед записью в
   БД и расшифровка при чтении — см. раздел ниже
+- Опциональное сквозное (E2EE) шифрование текстовых сообщений в группах и
+  1:1-чатах: X3DH для попарного согласования ключей + Sender Keys для самих
+  сообщений (`public/e2ee.js`, включается тумблером в шапке чата) — см.
+  "Сквозное шифрование (E2EE)" ниже
 
 ## Известные ограничения
 
-- **E2EE не реализован end-to-end.** Есть отдельная инфраструктура —
-  Rust-сервис `e2ee-key-server` и API-эндпоинты для работы с ключами (X3DH),
-  но клиентского шифрования в браузере (`public/script.js`) нет. Сообщения
-  идут на сервер открытым текстом по HTTPS и шифруются только в момент
-  записи в БД — см. модель угроз ниже.
+- **E2EE закрывает только текст сообщений, и с честными оговорками**
+  (подробности и обоснование — прямо в комментариях `public/e2ee.js`):
+  identity-ключ отправителя в X3DH принимается по модели TOFU (сверки через
+  отдельный "код безопасности", как в Signal, — нет); попарный X3DH-секрет
+  между двумя пользователями переиспользуется статически для последующих
+  key-share без Double Ratchet поверх; ключи уже показанных сообщений не
+  удаляются после использования (иначе история переставала бы открываться
+  при каждой перезагрузке страницы — сервер отдаёт её целиком, а не только
+  новое), поэтому от компрометации самого устройства это не защищает.
+  Вложения (файлы, `/api/messages/file`) E2EE не покрыты вовсе.
 - **Tor routing** требует ручной настройки hidden service на хосте и
   `ENABLE_TOR_ROUTING=true`; сам код только проксирует запросы через
   указанный SOCKS5, поднятие Tor-демона — вне зоны ответственности этого
@@ -105,20 +114,48 @@ npm start                # или: npm run dev
 данные так же, как это делает само приложение при каждом запросе. Это
 шифрование на стороне сервера ("at rest"), а не end-to-end.
 
+## Сквозное шифрование (E2EE)
+
+`public/e2ee.js` — клиентская реализация X3DH (попарное согласование
+ключей) + Sender Keys (Signal-style групповое шифрование), поверх
+стандартного Web Crypto API (`crypto.subtle`) без внешних крипто-библиотек
+и без бандлера — тот же файл прогоняется в протокольных тестах
+(`test/e2ee.protocol.test.js`) под чистым Node, поскольку и там, и в
+браузере это один и тот же `globalThis.crypto`.
+
+Включается тумблером 🔓/🔒 в шапке чата (не групповая настройка — у каждого
+участника свой локальный выбор; получатель расшифровывает по флагу
+конкретного сообщения, а не по своему тумблеру). При включении клиент:
+создаёт свой Sender Key для комнаты, попарно согласует X3DH-секрет с
+каждым участником (identity/signed-prekey/one-time-prekey — через
+`e2ee-key-server`, см. ниже), и рассылает Sender Key каждому, обернув его
+в этот попарный секрет (`POST /api/keys/key-shares`). Сервер здесь —
+только непрозрачная маршрутизация: он видит, кто кому шлёт key-share и в
+рамках какой комнаты, но не сам ключ и не текст сообщений.
+
+Ключи устройства (identity, signed prekey, one-time prekeys, Sender Key
+чужих участников) хранятся в IndexedDB браузера, отдельная база на
+каждого `userId` — не отправляются на сервер и не покидают устройство.
+
+Честные ограничения этой реализации — см. предыдущий раздел и
+комментарии в начале `public/e2ee.js`.
+
 ## Структура проекта
 
 ```
 server.js                  # весь backend: маршруты, Socket.io, initDatabase()
 lib/
-  message-crypto.js        # шифрование/расшифровка текста сообщений
+  message-crypto.js        # шифрование/расшифровка текста сообщений (at rest)
   disappearing-messages.js # таймеры удаления сообщений
   metadata-stripper.js     # снятие EXIF/метаданных из файлов
   privacy.js                # санитайзинг текста, IP-анонимизация, заголовки приватности
-  e2ee-proxy.js             # прокси к e2ee-key-server
+  e2ee-proxy.js             # прокси к e2ee-key-server (identity/prekey/bundle)
+  e2ee-groups.js            # участники чата + key-shares для группового E2EE
   tor-support.js            # поддержка Tor/SOCKS5
-public/                    # frontend (index.html, script.js, style.css)
+public/                    # frontend (index.html, script.js, style.css, e2ee.js)
 anon-service/               # опциональный Rust-сервис генерации анонимных identity
 e2ee-key-server/            # опциональный Rust-сервис хранения E2EE-ключей
+test/                        # протокольные и серверные тесты (node test/*.test.js)
 database.sql                 # слепок схемы БД (см. выше про приоритет server.js)
 ```
 
@@ -132,7 +169,8 @@ cookie `csrf_token`.
   `POST /api/logout`, `GET /api/auth`, `GET /api/user`,
   `POST /api/user/avatar-color`, `POST /api/change-password`
 - `GET /api/chats`, `POST /api/chats`, `DELETE /api/chats/:chatId`,
-  `GET /api/chats/invite/:chatId`, `POST /api/chats/join`
+  `GET /api/chats/invite/:chatId`, `POST /api/chats/join`,
+  `GET /api/chats/:chatId/participants`
 - `GET /api/messages/:chatId`, `POST /api/messages`,
   `PUT /api/messages/:messageId`, `DELETE /api/messages/:messageId`,
   `POST /api/messages/file`
@@ -141,11 +179,30 @@ cookie `csrf_token`.
 - `POST /api/messages/:messageId/set-expiry`,
   `POST /api/chats/:chatId/set-default-expiry`,
   `GET /api/chats/:chatId/settings`
+- E2EE: `PUT /api/keys/identity`, `PUT /api/keys/signed-prekey`,
+  `POST /api/keys/one-time-prekeys`, `GET /api/keys/one-time-prekeys/count`,
+  `GET /api/keys/bundle/:targetUserId`, `DELETE /api/keys` (проксируются в
+  `e2ee-key-server`, недоступны без `INTERNAL_KEY_SERVER_SECRET`),
+  `POST /api/keys/key-shares`, `GET /api/keys/key-shares/:chatId`
 - `GET /uploads/:filename` — отдача файла, только участникам чата/комнаты
 - Socket.io события: `joinChat` (клиент → сервер), `newMessage`,
-  `messageEdited`, `messageDeleted` (сервер → клиент)
+  `messageEdited`, `messageDeleted`, `e2eeKeyShare` (сервер → клиент)
 
 Формат ответа JSON-эндпоинтов — `{ success: boolean, ... }`, HTTP-статус в
 большинстве случаев остаётся `200` даже при ошибке (сама ошибка — в поле
 `success`/`message`); отдельные коды `401`/`403`/`404`/`500` используются
 в `/api/messages/file` и `/uploads/:filename`.
+
+## Тесты
+
+Без реального Postgres/Rust-сервисов — фейковые БД/сервер в памяти,
+чистый Node:
+
+```
+node test/e2ee.protocol.test.js   # X3DH + Sender Keys: round trip, из
+                                   # порядка доставки, ротация ключа,
+                                   # подмена подписи/шифротекста, группа из N
+node test/server-routes.test.js   # регистрация маршрутов e2ee-proxy.js и
+                                   # e2ee-groups.js, участники/key-shares
+```
+
