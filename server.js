@@ -46,9 +46,12 @@ const {
 } = require('./lib/tor-support');
 
 // === RUST ANON SERVICE INTEGRATION ===
-const ANON_SERVICE_URL = process.env.ANON_SERVICE_URL || 'http://127.0.0.1:8080';
+// Только если адрес задан явно. Раньше по умолчанию был 127.0.0.1:8080 — а
+// на Railway PORT=8080, и анонимная регистрация стучалась в сам же сервер.
+const ANON_SERVICE_URL = process.env.ANON_SERVICE_URL || null;
 
 async function fetchAnonymousIdentity() {
+    if (!ANON_SERVICE_URL) return null;
     try {
         const res = await fetch(`${ANON_SERVICE_URL}/generate`, {
             method: 'POST',
@@ -135,8 +138,20 @@ function checkMagicBytes(buffer, mimetype) {
     return false;
 }
 
-const UPLOADS_DIR = path.join(__dirname, 'uploads');
+// Вложения должны лежать на постоянном диске: файловая система контейнера
+// (Railway и т.п.) очищается при каждом деплое. UPLOADS_DIR — явный путь;
+// RAILWAY_VOLUME_MOUNT_PATH Railway выставляет сам, когда к сервису
+// подключён volume.
+const UPLOADS_DIR = process.env.UPLOADS_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'uploads');
 fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+try {
+    const probe = path.join(UPLOADS_DIR, `.write-test-${process.pid}`);
+    fs.writeFileSync(probe, '');
+    fs.unlinkSync(probe);
+    console.log(`[Uploads] Папка вложений: ${UPLOADS_DIR}`);
+} catch (err) {
+    console.error(`[Uploads] Нет доступа на запись в ${UPLOADS_DIR}: ${err.message} — загрузка файлов работать не будет`);
+}
 
 // Удаляет файлы вложений с диска по их file_url ("/uploads/<name>").
 // Вызывается после того, как ссылающиеся на них сообщения удалены из БД.

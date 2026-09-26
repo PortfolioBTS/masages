@@ -9,7 +9,7 @@
     "test": "node test/e2ee.protocol.test.js && node test/server-routes.test.js && node test/lib.test.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": "24.x"
   },
   "keywords": [
     "messenger",
