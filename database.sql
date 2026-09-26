@@ -55,7 +55,9 @@ CREATE TABLE IF NOT EXISTS chats (
     name TEXT NOT NULL,
     avatar TEXT NOT NULL,
     online INTEGER DEFAULT 0,
-    is_bot INTEGER DEFAULT 0
+    is_bot INTEGER DEFAULT 0,
+    -- id последнего прочитанного сообщения (счётчик непрочитанного)
+    last_read_message_id INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -73,7 +75,11 @@ CREATE TABLE IF NOT EXISTS messages (
     status TEXT DEFAULT 'sent',
     edited_at TEXT,
     deleted INTEGER DEFAULT 0,
-    reply_to_id INTEGER REFERENCES messages(id) ON DELETE SET NULL
+    reply_to_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    -- text содержит клиентский E2EE-конверт (см. public/e2ee.js)
+    encrypted BOOLEAN NOT NULL DEFAULT FALSE,
+    -- точное время отправки; у сообщений до миграции — NULL (клиент показывает time)
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS unread (
@@ -107,8 +113,39 @@ ALTER TABLE messages ALTER COLUMN chat_id DROP NOT NULL;
 ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_chat_id_fkey;
 ALTER TABLE messages ADD CONSTRAINT messages_chat_id_fkey FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE SET NULL;
 
-CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id);
-CREATE INDEX IF NOT EXISTS idx_messages_room_id ON messages(room_id);
+-- Таблицы lib/disappearing-messages.js и lib/e2ee-groups.js
+CREATE TABLE IF NOT EXISTS message_expiry (
+    message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    expires_at TIMESTAMP NOT NULL,
+    auto_delete_on_read BOOLEAN DEFAULT FALSE
+);
+CREATE INDEX IF NOT EXISTS idx_message_expiry_expires_at ON message_expiry(expires_at);
+
+CREATE TABLE IF NOT EXISTS chat_settings (
+    chat_id INTEGER PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+    default_message_expiry INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS e2ee_key_shares (
+    id SERIAL PRIMARY KEY,
+    room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    sender_id INTEGER NOT NULL REFERENCES users(id),
+    recipient_id INTEGER NOT NULL REFERENCES users(id),
+    ciphertext TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_e2ee_key_shares_recipient ON e2ee_key_shares(recipient_id, room_id);
+
+-- Индексы (см. комментарии в initDatabase() в server.js). Выборки
+-- "сообщения чата по id" (последнее сообщение, непрочитанные, страница
+-- истории, поиск) идут index-only scan'ом по idx_messages_*_live.
+CREATE INDEX IF NOT EXISTS idx_messages_room_live ON messages(room_id, deleted, id) INCLUDE (user_id, sent, encrypted);
+CREATE INDEX IF NOT EXISTS idx_messages_chat_live ON messages(chat_id, deleted, id) INCLUDE (user_id, sent, encrypted);
 CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id);
+CREATE INDEX IF NOT EXISTS idx_messages_file_url ON messages(file_url) WHERE file_url IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_messages_reply_to_id ON messages(reply_to_id) WHERE reply_to_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_chats_user_id ON chats(user_id);
+CREATE INDEX IF NOT EXISTS idx_chats_room_id ON chats(room_id);
+CREATE INDEX IF NOT EXISTS idx_room_participants_room_user ON room_participants(room_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_room_participants_user ON room_participants(user_id);
 CREATE INDEX IF NOT EXISTS idx_reactions_msg_user ON reactions(message_id, user_id);

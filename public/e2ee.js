@@ -71,10 +71,13 @@
         return out;
     }
 
+    // Таблица строится один раз, а не на каждый вызов b64decode.
+    const B64_LOOKUP = new Int16Array(256).fill(-1);
+    for (let i = 0; i < B64_CHARS.length; i++) B64_LOOKUP[B64_CHARS.charCodeAt(i)] = i;
+
     function b64decode(str) {
         const clean = String(str || '').replace(/[^A-Za-z0-9+/]/g, '');
-        const lookup = new Int16Array(256).fill(-1);
-        for (let i = 0; i < B64_CHARS.length; i++) lookup[B64_CHARS.charCodeAt(i)] = i;
+        const lookup = B64_LOOKUP;
         const len = clean.length;
         const outLen = Math.floor((len * 6) / 8);
         const out = new Uint8Array(outLen);
@@ -217,6 +220,11 @@
     }
 
     const MAX_CACHED_KEYS = 2000;
+    // Насколько далеко вперёд по цепочке можно "перескочить" за одно
+    // сообщение. Без предела конверт с iteration = 10^9 (его может
+    // подписать любой участник комнаты) заставлял клиента получателя
+    // посчитать миллиард HMAC подряд — вкладка намертво зависала.
+    const MAX_SKIP = 5000;
 
     // Возвращает messageKey для нужной iteration, продвигая цепочку и
     // кэшируя "пропущенные" (и уже использованные — см. комментарий в
@@ -726,6 +734,9 @@
             let envelope;
             try { envelope = JSON.parse(text); } catch { return { ok: false, reason: 'bad-envelope' }; }
             if (!envelope || envelope.alg !== 'senderkey-v1') return { ok: false, reason: 'bad-envelope' };
+            if (!Number.isInteger(envelope.iteration) || envelope.iteration < 0 || envelope.iteration > 0xFFFFFFFF) {
+                return { ok: false, reason: 'bad-envelope' };
+            }
 
             const key = 'senderKey:' + roomId + ':' + senderId;
             const state = await storage.get(key);
@@ -740,8 +751,15 @@
             if (state.senderKeyId === envelope.senderKeyId) {
                 const sigOk = await verify(b64decode(state.signingPublicKey), sig, sigInput);
                 if (!sigOk) return { ok: false, reason: 'bad-signature' };
+                if (envelope.iteration - state.nextIteration > MAX_SKIP) return { ok: false, reason: 'too-far-ahead' };
+                // Цепочка продвигается (и состояние надо сохранить) только
+                // для новых итераций. Раньше состояние — вместе с кэшем до
+                // 2000 ключей — перезаписывалось в IndexedDB после КАЖДОГО
+                // расшифрованного сообщения, в том числе при простом повторном
+                // показе истории, и открытие зашифрованного чата тормозило.
+                const advances = envelope.iteration >= state.nextIteration;
                 messageKey = await getOrDeriveMessageKey(state, envelope.iteration);
-                await storage.set(key, state);
+                if (advances) await storage.set(key, state);
             } else {
                 // Не текущий ключ отправителя — возможно, это сообщение,
                 // отправленное ДО его ротации (см. archiveIfRotated): ищем
