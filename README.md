@@ -45,7 +45,8 @@ npm test                 # тесты без БД
 | `MESSAGE_ENCRYPTION_KEY` | да | ключ AES-256-GCM (32 байта в base64) для шифрования текста сообщений перед записью в БД. Без него сервер не стартует. Генерация: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"` |
 | `NODE_ENV` | нет | `production` — сервер поднимается на чистом HTTP (TLS предполагается на уровне прокси/хостинга), cookie `secure`/`sameSite=none`. Иначе — пробует локальный HTTPS через `localhost+1.pem`/`localhost+1-key.pem` (mkcert), при их отсутствии — HTTP с предупреждением в консоль |
 | `PORT`, `HOST` | нет | адрес и порт (по умолчанию `3000`, `0.0.0.0`) |
-| `ANON_SERVICE_URL` | нет | адрес `anon-service` (генератор анонимных имён/кодов). Недоступен — используется встроенный JS-фоллбэк, деградации функциональности нет |
+| `ANON_SERVICE_URL` | нет | адрес `anon-service` (генератор анонимных имён/кодов). Не задан или недоступен — используется встроенный JS-фоллбэк, деградации функциональности нет |
+| `UPLOADS_DIR` | нет | папка для вложений. По умолчанию — `RAILWAY_VOLUME_MOUNT_PATH` (если к сервису на Railway подключён volume), иначе `./uploads`. Вложения должны лежать на постоянном диске: файловая система контейнера очищается при каждом деплое |
 | `INTERNAL_KEY_SERVER_SECRET`, `KEY_SERVER_URL` | нет | адрес и секрет `e2ee-key-server`, обслуживающего identity/prekey-эндпоинты для клиентского E2EE (`public/e2ee.js`) — см. "Сквозное шифрование (E2EE)" ниже |
 | `TOR_PROXY_HOST`, `TOR_PROXY_PORT`, `ENABLE_TOR_ROUTING` | нет | Tor routing, требует дополнительно настроенного hidden service |
 | `CF_IP_RANGES` | нет | переопределение диапазонов IP Cloudflare (через запятую), используется для доверия заголовку `CF-Connecting-IP` при определении реального IP клиента для rate-limit |
