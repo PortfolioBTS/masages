@@ -168,7 +168,8 @@ body::before {
     margin-bottom: 20px;
 }
 
-.form-group label {
+.form-group label,
+.form-label {
     display: block;
     margin-bottom: 8px;
     font-size: 14px;
@@ -219,6 +220,21 @@ body::before {
 
 .auth-btn:active {
     transform: translateY(0);
+}
+
+/* Кнопка на время PoW-проверки ("Проверка…") и других долгих операций. */
+.auth-btn:disabled,
+.danger-btn:disabled {
+    opacity: 0.7;
+    cursor: progress;
+    transform: none;
+}
+
+/* Видимый фокус для клавиатуры — у кнопок и пунктов списка чатов. */
+button:focus-visible,
+.chat-item:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
 }
 
 .auth-btn.secondary {
@@ -813,6 +829,92 @@ body::before {
     border-color: #22c55e;
 }
 
+/* Ключи устройства не удалось подготовить — шифрование недоступно. */
+.icon-btn.e2ee-unavailable {
+    background: rgba(245, 158, 11, 0.15);
+    border-color: rgba(245, 158, 11, 0.5);
+    color: var(--warning);
+}
+
+.icon-btn.e2ee-unavailable:hover {
+    background: rgba(245, 158, 11, 0.25);
+    border-color: var(--warning);
+}
+
+/* Баннер над лентой: у участника сменился ключ шифрования. */
+.e2ee-banner {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 28px;
+    background: rgba(245, 158, 11, 0.12);
+    border-bottom: 1px solid rgba(245, 158, 11, 0.4);
+    color: #fcd34d;
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+.e2ee-banner-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.banner-btn {
+    flex-shrink: 0;
+    padding: 8px 14px;
+    background: rgba(245, 158, 11, 0.2);
+    border: 1px solid rgba(245, 158, 11, 0.6);
+    border-radius: 10px;
+    color: #fde68a;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.banner-btn:hover {
+    background: rgba(245, 158, 11, 0.3);
+}
+
+/* Локальные служебные строки в ленте (не сообщения сервера). */
+.system-notice {
+    align-self: center;
+    max-width: 85%;
+    padding: 8px 14px;
+    background: rgba(37, 37, 63, 0.7);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    text-align: center;
+    line-height: 1.5;
+}
+
+/* Чужое открытое сообщение в комнате, где у меня включено E2EE. */
+.plaintext-label {
+    color: var(--warning);
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+/* Зашифрованное вложение: заглушка, пока файл скачивается и расшифровывается. */
+.encrypted-attachment {
+    margin-bottom: 8px;
+}
+
+.attachment-status {
+    display: inline-block;
+    padding: 10px 14px;
+    background: rgba(0, 0, 0, 0.15);
+    border-radius: 10px;
+    font-size: 14px;
+}
+
+.attachment-status.e2ee-failed {
+    font-style: italic;
+    opacity: 0.7;
+}
+
 /* Кнопка "назад к списку чатов" — только на мобильных (см. @media ниже). */
 .back-btn {
     display: none;
@@ -971,6 +1073,37 @@ body::before {
     box-shadow: 0 6px 20px rgba(239, 68, 68, 0.4);
 }
 
+.danger-btn:disabled:hover {
+    transform: none;
+}
+
+/* Менее заметный вариант — для "Удалить аккаунт" в профиле. */
+.danger-btn.outline {
+    background: transparent;
+    color: var(--error);
+    border: 1px solid rgba(239, 68, 68, 0.5);
+    box-shadow: none;
+}
+
+.danger-btn.outline:hover {
+    background: rgba(239, 68, 68, 0.1);
+}
+
+.modal-warning {
+    margin-bottom: 20px;
+    padding: 12px 14px;
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    border-radius: 12px;
+    color: var(--text-secondary);
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+.modal-content.modal-wide {
+    max-width: 560px;
+}
+
 /* Profile */
 .profile-info {
     display: flex;
@@ -1054,6 +1187,105 @@ body::before {
     box-shadow: 0 0 0 2px var(--bg-primary), 0 0 0 4px var(--text-primary);
 }
 
+/* Цвета образцов — здесь, а не в style="..." разметки: CSP style-src
+   без 'unsafe-inline' инлайновые стили блокирует. */
+.color-option[data-color="#667EEA"] { background: #667EEA; }
+.color-option[data-color="#F093FB"] { background: #F093FB; }
+.color-option[data-color="#4FACFE"] { background: #4FACFE; }
+.color-option[data-color="#43E97B"] { background: #43E97B; }
+.color-option[data-color="#FA709A"] { background: #FA709A; }
+.color-option[data-color="#FFD93D"] { background: #FFD93D; }
+
+/* Настройки-переключатели в профиле */
+.settings-row {
+    margin-bottom: 20px;
+}
+
+.switch-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 14px 16px;
+    background: rgba(37, 37, 63, 0.5);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    cursor: pointer;
+    position: relative;
+}
+
+.switch-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.switch-title {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.switch-hint {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    line-height: 1.4;
+}
+
+/* Сам чекбокс невидим, но остаётся в порядке фокуса и читается скринридером. */
+.switch-input {
+    position: absolute;
+    opacity: 0;
+    width: 1px;
+    height: 1px;
+}
+
+.switch {
+    flex-shrink: 0;
+    width: 44px;
+    height: 24px;
+    border-radius: 12px;
+    background: rgba(148, 163, 184, 0.3);
+    position: relative;
+    transition: background 0.3s ease;
+}
+
+.switch::after {
+    content: '';
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: white;
+    transition: transform 0.3s ease;
+}
+
+.switch-input:checked + .switch {
+    background: var(--primary);
+}
+
+.switch-input:checked + .switch::after {
+    transform: translateX(20px);
+}
+
+.switch-input:focus-visible + .switch {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+}
+
+.switch-input:disabled + .switch {
+    opacity: 0.5;
+}
+
+.profile-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
 .invite-text {
     margin-bottom: 14px;
     color: var(--text-secondary);
@@ -1069,13 +1301,201 @@ body::before {
     border: 1px solid rgba(99, 102, 241, 0.2);
 }
 
+/* 26 символов группами по 5 — переносится по пробелам между группами. */
 .invite-code-container code {
     flex: 1;
+    min-width: 0;
     font-family: 'JetBrains Mono', 'Courier New', monospace;
-    font-size: 20px;
-    letter-spacing: 3px;
+    font-size: 18px;
+    letter-spacing: 1px;
+    word-spacing: 4px;
+    line-height: 1.6;
     font-weight: 600;
     color: var(--primary);
+    overflow-wrap: anywhere;
+    user-select: all;
+}
+
+.invite-code-container.expired code {
+    text-decoration: line-through;
+    opacity: 0.5;
+}
+
+.invite-meta {
+    margin-top: 10px;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.invite-meta.expired {
+    color: var(--warning);
+    font-weight: 600;
+}
+
+.invite-hint {
+    margin: 12px 0;
+    font-size: 13px;
+    color: var(--text-tertiary);
+    line-height: 1.5;
+}
+
+/* Участники и ключи */
+.members-intro {
+    margin-bottom: 16px;
+    font-size: 14px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.members-note {
+    margin-bottom: 16px;
+    padding: 10px 14px;
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.4);
+    border-radius: 12px;
+    color: #fcd34d;
+    font-size: 13px;
+}
+
+.members-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.members-placeholder {
+    padding: 14px;
+    color: var(--text-tertiary);
+    font-size: 14px;
+    text-align: center;
+}
+
+.member-item {
+    background: rgba(37, 37, 63, 0.5);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 12px 14px;
+}
+
+.member-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.member-avatar {
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    color: white;
+    font-weight: 700;
+    background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+}
+
+.member-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.member-name {
+    font-weight: 600;
+    font-size: 15px;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.member-status {
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.member-status.verified { color: var(--success); }
+.member-status.unverified { color: var(--text-tertiary); }
+.member-status.changed { color: var(--warning); }
+.member-status.unknown { color: var(--text-tertiary); font-style: italic; }
+
+.member-code-btn {
+    flex-shrink: 0;
+    padding: 8px 14px;
+    background: rgba(37, 37, 63, 0.8);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.member-code-btn:hover,
+.member-code-btn[aria-expanded="true"] {
+    background: rgba(99, 102, 241, 0.2);
+    border-color: var(--primary);
+    color: var(--text-primary);
+}
+
+.member-details {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+}
+
+.member-warning {
+    margin-bottom: 12px;
+    padding: 10px 12px;
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.4);
+    border-radius: 10px;
+    color: #fcd34d;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+/* 60 цифр — 12 групп по 5, сеткой, чтобы было удобно сверять вслух. */
+.safety-number {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 6px 12px;
+    padding: 12px;
+    background: rgba(15, 15, 26, 0.6);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    font-family: 'JetBrains Mono', 'Courier New', monospace;
+    font-size: 16px;
+    letter-spacing: 1px;
+    text-align: center;
+    color: var(--text-primary);
+}
+
+.safety-number.unavailable {
+    display: block;
+    font-family: inherit;
+    font-size: 13px;
+    letter-spacing: normal;
+    color: var(--text-tertiary);
+}
+
+.safety-hint {
+    margin: 10px 0;
+    font-size: 12px;
+    color: var(--text-tertiary);
+    line-height: 1.5;
+}
+
+.member-actions .auth-btn,
+.member-actions .danger-btn {
+    padding: 12px;
+    font-size: 14px;
 }
 
 /* Context Menu */
@@ -1233,6 +1653,57 @@ body::before {
 
     .auth-container {
         padding: 32px 24px;
+    }
+
+    .e2ee-banner {
+        padding: 10px 14px;
+        font-size: 13px;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    .banner-btn {
+        width: 100%;
+    }
+
+    .modal-content {
+        width: calc(100% - 24px);
+        max-height: calc(100vh - 24px);
+    }
+
+    .modal-header,
+    .modal-body {
+        padding: 18px 16px;
+    }
+
+    .safety-number {
+        grid-template-columns: repeat(3, 1fr);
+        font-size: 15px;
+    }
+
+    .member-head {
+        flex-wrap: wrap;
+    }
+}
+
+/* Узкие телефоны: в шапке комнаты четыре кнопки + "назад" + аватар. */
+@media (max-width: 420px) {
+    .chat-header .icon-btn {
+        width: 34px;
+        height: 34px;
+        font-size: 15px;
+    }
+
+    .chat-header .chat-avatar {
+        display: none;
+    }
+
+    .chat-actions {
+        gap: 4px;
+    }
+
+    .invite-code-container code {
+        font-size: 16px;
     }
 }
 

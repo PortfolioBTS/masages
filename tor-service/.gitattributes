@@ -1,0 +1,3 @@
+# entrypoint.sh исполняется в Linux-контейнере: CRLF сломал бы shebang.
+*.sh text eol=lf
+Dockerfile text eol=lf

@@ -27,9 +27,36 @@
 --   * reactions.message_id, unread.chat_id, room_participants.room_id —
 --     ON DELETE CASCADE.
 --   * Все FK на users(id) (chats.user_id, messages.user_id, unread.user_id,
---     room_participants.user_id, reactions.user_id) НЕ каскадные (обычный
---     ON DELETE NO ACTION) — в приложении сейчас нет функции удаления
---     пользователя, так что это не проверялось.
+--     room_participants.user_id, reactions.user_id, e2ee_key_shares.*) НЕ
+--     каскадные (обычный ON DELETE NO ACTION): удаление пользователя
+--     (deleteUserAccount в server.js) само удаляет его строки в нужном
+--     порядке одной транзакцией.
+--   * Удаление сообщений физическое (DELETE), колонка messages.deleted
+--     осталась от старой soft-delete схемы: новые строки всегда 0, старые
+--     deleted = 1 сервер удаляет после старта.
+--   * users.id, rooms.id, chats.id у новых строк — случайные (функция
+--     nyxo_random_id ниже, PG 13+ из-за gen_random_uuid()); messages.id
+--     остаётся последовательным: на его порядке держатся история,
+--     непрочитанное и room_participants.visible_from_id.
+
+-- Случайный id из [1 000 000, 2^31 - 1]: 48 бит gen_random_uuid() (внутри —
+-- pg_strong_random) по модулю размера диапазона, с перепроверкой занятости.
+-- Тело должно совпадать с RANDOM_ID_FUNCTION_BODY в server.js.
+CREATE OR REPLACE FUNCTION nyxo_random_id(target regclass) RETURNS integer
+LANGUAGE plpgsql VOLATILE AS $fn$
+DECLARE
+    candidate integer;
+    taken boolean;
+BEGIN
+    LOOP
+        candidate := (1000000 + ('x' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 12))::bit(48)::bigint % 2146483648)::integer;
+        EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s WHERE id = $1)', target) INTO taken USING candidate;
+        IF NOT taken THEN
+            RETURN candidate;
+        END IF;
+    END LOOP;
+END
+$fn$;
 
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
@@ -38,14 +65,18 @@ CREATE TABLE IF NOT EXISTS users (
     email TEXT,
     password TEXT,
     avatar TEXT DEFAULT '',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    -- отметки прочтения (POST /api/user/privacy)
+    read_receipts BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 CREATE TABLE IF NOT EXISTS rooms (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,
     code TEXT UNIQUE NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    -- срок жизни инвайт-кода (INVITE_TTL_HOURS); NULL считается истёкшим
+    code_expires_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS chats (
@@ -57,8 +88,14 @@ CREATE TABLE IF NOT EXISTS chats (
     online INTEGER DEFAULT 0,
     is_bot INTEGER DEFAULT 0,
     -- id последнего прочитанного сообщения (счётчик непрочитанного)
-    last_read_message_id INTEGER NOT NULL DEFAULT 0
+    last_read_message_id INTEGER NOT NULL DEFAULT 0,
+    -- порядок чатов без сообщений (id случайные); у старых строк NULL
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+ALTER TABLE users ALTER COLUMN id SET DEFAULT nyxo_random_id('users'::regclass);
+ALTER TABLE rooms ALTER COLUMN id SET DEFAULT nyxo_random_id('rooms'::regclass);
+ALTER TABLE chats ALTER COLUMN id SET DEFAULT nyxo_random_id('chats'::regclass);
 
 CREATE TABLE IF NOT EXISTS messages (
     id SERIAL PRIMARY KEY,
@@ -79,7 +116,9 @@ CREATE TABLE IF NOT EXISTS messages (
     -- text содержит клиентский E2EE-конверт (см. public/e2ee.js)
     encrypted BOOLEAN NOT NULL DEFAULT FALSE,
     -- точное время отправки; у сообщений до миграции — NULL (клиент показывает time)
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    -- размер вложения в байтах (квота UPLOAD_QUOTA_MB); у старых вложений NULL
+    file_size BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS unread (
@@ -92,7 +131,10 @@ CREATE TABLE IF NOT EXISTS unread (
 CREATE TABLE IF NOT EXISTS room_participants (
     id SERIAL PRIMARY KEY,
     room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-    user_id INTEGER NOT NULL REFERENCES users(id)
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    -- участник видит только сообщения с id > visible_from_id (MAX(id)
+    -- сообщений комнаты на момент вступления; у старых участников 0)
+    visible_from_id INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS reactions (
@@ -112,6 +154,17 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS room_id INTEGER REFERENCES rooms(i
 ALTER TABLE messages ALTER COLUMN chat_id DROP NOT NULL;
 ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_chat_id_fkey;
 ALTER TABLE messages ADD CONSTRAINT messages_chat_id_fkey FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE SET NULL;
+
+-- Колонки hardening-версии для БД, созданных раньше. Перевыпуск старых
+-- инвайт-кодов и обезличивание имён старых вложений делает только
+-- server.js (regenerateLegacyInviteCodes, anonymizeLegacyFileNames) — им
+-- нужен код генерации/шифрования.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS read_receipts BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE rooms ADD COLUMN IF NOT EXISTS code_expires_at TIMESTAMPTZ;
+ALTER TABLE room_participants ADD COLUMN IF NOT EXISTS visible_from_id INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS file_size BIGINT;
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ;
+ALTER TABLE chats ALTER COLUMN created_at SET DEFAULT NOW();
 
 -- Таблицы lib/disappearing-messages.js и lib/e2ee-groups.js
 CREATE TABLE IF NOT EXISTS message_expiry (
@@ -144,8 +197,12 @@ CREATE INDEX IF NOT EXISTS idx_messages_chat_live ON messages(chat_id, deleted, 
 CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id);
 CREATE INDEX IF NOT EXISTS idx_messages_file_url ON messages(file_url) WHERE file_url IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_messages_reply_to_id ON messages(reply_to_id) WHERE reply_to_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_messages_user_files ON messages(user_id) INCLUDE (file_size) WHERE file_size IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_chats_user_id ON chats(user_id);
 CREATE INDEX IF NOT EXISTS idx_chats_room_id ON chats(room_id);
-CREATE INDEX IF NOT EXISTS idx_room_participants_room_user ON room_participants(room_id, user_id);
+-- Один участник — одна строка на комнату (на существующей БД server.js
+-- перед созданием индекса удаляет дубли, см. ensureUniqueRoomParticipants).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_room_participants_unique ON room_participants(room_id, user_id);
+DROP INDEX IF EXISTS idx_room_participants_room_user;
 CREATE INDEX IF NOT EXISTS idx_room_participants_user ON room_participants(user_id);
 CREATE INDEX IF NOT EXISTS idx_reactions_msg_user ON reactions(message_id, user_id);

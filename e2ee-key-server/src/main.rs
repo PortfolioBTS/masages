@@ -37,7 +37,8 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     // Сервис владеет своей схемой самостоятельно — идемпотентно, без
-    // внешнего migration-раннера. См. migrations/0001_init.sql.
+    // внешнего migration-раннера. См. migrations/*.sql: макрос встраивает
+    // их в бинарник при компиляции (build.rs следит за изменениями папки).
     sqlx::migrate!("./migrations").run(&pool).await?;
 
     let state = AppState {
@@ -56,6 +57,14 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/internal/v1/keys/signed-prekey",
             put(handlers::put_signed_prekey),
+        )
+        .route(
+            "/internal/v1/keys/pq-prekey",
+            put(handlers::put_pq_prekey),
+        )
+        .route(
+            "/internal/v1/keys/identities",
+            get(handlers::get_identities),
         )
         .route(
             "/internal/v1/keys/one-time-prekeys",
