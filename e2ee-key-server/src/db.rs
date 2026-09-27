@@ -1,10 +1,16 @@
 use sqlx::PgPool;
 
-use crate::crypto::{PUBKEY_LEN, SIGNATURE_LEN};
+use crate::crypto::{PQ_PUBKEY_LEN, PUBKEY_LEN, SIGNATURE_LEN};
 
 pub struct SignedPrekeyRow {
     pub key_id: i64,
     pub public_key: [u8; PUBKEY_LEN],
+    pub signature: [u8; SIGNATURE_LEN],
+}
+
+pub struct PqPrekeyRow {
+    pub key_id: i64,
+    pub public_key: [u8; PQ_PUBKEY_LEN],
     pub signature: [u8; SIGNATURE_LEN],
 }
 
@@ -22,6 +28,7 @@ pub struct Bundle {
     pub identity: IdentityRow,
     pub signed_prekey: SignedPrekeyRow,
     pub one_time_prekey: Option<OneTimePrekeyRow>,
+    pub pq_prekey: Option<PqPrekeyRow>,
 }
 
 fn to_arr32(v: Vec<u8>) -> [u8; PUBKEY_LEN] {
@@ -35,6 +42,13 @@ fn to_arr32(v: Vec<u8>) -> [u8; PUBKEY_LEN] {
 fn to_arr64(v: Vec<u8>) -> [u8; SIGNATURE_LEN] {
     v.try_into()
         .expect("corrupt row: expected 64-byte signature")
+}
+
+fn to_pq_arr(v: Vec<u8>) -> [u8; PQ_PUBKEY_LEN] {
+    // Тот же инвариант, что у to_arr32: длина проверена при записи
+    // (crypto::decode_pq_pubkey).
+    v.try_into()
+        .expect("corrupt row: expected 1184-byte ML-KEM-768 key")
 }
 
 pub async fn upsert_identity_keys(
@@ -74,6 +88,40 @@ pub async fn get_identity_signing_key(
     Ok(row.map(|(k,)| to_arr32(k)))
 }
 
+/// Identity-ключи сразу нескольких пользователей (для проверки safety
+/// number и смены ключа у участников комнаты). Пользователи без identity
+/// в результат просто не попадают. OPK не трогает — в отличие от
+/// fetch_bundle, запрос ничего не расходует.
+pub async fn fetch_identities(
+    pool: &PgPool,
+    user_ids: &[i64],
+) -> Result<Vec<(i64, IdentityRow)>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, (i64, Vec<u8>, Vec<u8>)>(
+        r#"
+        SELECT user_id, identity_signing_key, identity_dh_key
+        FROM identity_keys
+        WHERE user_id = ANY($1)
+        ORDER BY user_id
+        "#,
+    )
+    .bind(user_ids)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(user_id, signing_key, dh_key)| {
+            (
+                user_id,
+                IdentityRow {
+                    identity_signing_key: to_arr32(signing_key),
+                    identity_dh_key: to_arr32(dh_key),
+                },
+            )
+        })
+        .collect())
+}
+
 pub async fn upsert_signed_prekey(
     pool: &PgPool,
     user_id: i64,
@@ -84,6 +132,34 @@ pub async fn upsert_signed_prekey(
     sqlx::query(
         r#"
         INSERT INTO signed_prekeys (user_id, key_id, public_key, signature, created_at)
+        VALUES ($1, $2, $3, $4, now())
+        ON CONFLICT (user_id) DO UPDATE
+            SET key_id = EXCLUDED.key_id,
+                public_key = EXCLUDED.public_key,
+                signature = EXCLUDED.signature,
+                created_at = now()
+        "#,
+    )
+    .bind(user_id)
+    .bind(key_id)
+    .bind(&public_key[..])
+    .bind(&signature[..])
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Один текущий PQ-prekey на пользователя, ротация = перезапись (как у SPK).
+pub async fn upsert_pq_prekey(
+    pool: &PgPool,
+    user_id: i64,
+    key_id: i64,
+    public_key: &[u8; PQ_PUBKEY_LEN],
+    signature: &[u8; SIGNATURE_LEN],
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO signed_pq_prekeys (user_id, key_id, public_key, signature, created_at)
         VALUES ($1, $2, $3, $4, now())
         ON CONFLICT (user_id) DO UPDATE
             SET key_id = EXCLUDED.key_id,
@@ -137,12 +213,13 @@ pub async fn count_one_time_prekeys(pool: &PgPool, user_id: i64) -> Result<i64, 
 }
 
 /// Атомарно собирает bundle для установления сессии с target_user_id:
-/// identity keys + текущий signed prekey + (если есть) один one-time
-/// prekey, который тут же удаляется (claim-and-consume под
-/// `FOR UPDATE SKIP LOCKED`, чтобы конкурентные запросы не выдавали
+/// identity keys + текущий signed prekey + (если есть) PQ-prekey + (если
+/// есть) один one-time prekey, который тут же удаляется (claim-and-consume
+/// под `FOR UPDATE SKIP LOCKED`, чтобы конкурентные запросы не выдавали
 /// один и тот же OPK дважды). Если у target нет identity-ключей или
 /// signed prekey — считаем, что пользователь не завершил E2EE-онбординг,
-/// и возвращаем None.
+/// и возвращаем None. Отсутствие PQ-prekey bundle не ломает: клиент без
+/// ML-KEM остаётся с классическим X3DH.
 pub async fn fetch_bundle(
     pool: &PgPool,
     target_user_id: i64,
@@ -170,6 +247,13 @@ pub async fn fetch_bundle(
     let Some((spk_key_id, spk_pub, spk_sig)) = spk else {
         return Ok(None);
     };
+
+    let pq = sqlx::query_as::<_, (i64, Vec<u8>, Vec<u8>)>(
+        "SELECT key_id, public_key, signature FROM signed_pq_prekeys WHERE user_id = $1",
+    )
+    .bind(target_user_id)
+    .fetch_optional(&mut *tx)
+    .await?;
 
     let otpk = sqlx::query_as::<_, (i64, i64, Vec<u8>)>(
         r#"
@@ -204,6 +288,11 @@ pub async fn fetch_bundle(
             key_id,
             public_key: to_arr32(public_key),
         }),
+        pq_prekey: pq.map(|(key_id, public_key, signature)| PqPrekeyRow {
+            key_id,
+            public_key: to_pq_arr(public_key),
+            signature: to_arr64(signature),
+        }),
     }))
 }
 
@@ -216,6 +305,10 @@ pub async fn delete_all_keys(pool: &PgPool, user_id: i64) -> Result<(), sqlx::Er
         .execute(&mut *tx)
         .await?;
     sqlx::query("DELETE FROM signed_prekeys WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM signed_pq_prekeys WHERE user_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;

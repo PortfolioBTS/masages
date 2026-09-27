@@ -3,7 +3,6 @@ require('dotenv').config();
 // 1. IMPORTS
 const express = require('express');
 const { Pool } = require('pg');
-const bcrypt = require('bcryptjs');
 const session = require('express-session');
 const multer = require('multer');
 const path = require('path');
@@ -22,13 +21,36 @@ const { ipKeyGenerator } = rateLimit;
 // Импорт новых модулей безопасности и приватности
 const { stripMetadataFromFile, cleanupStaleTempFiles } = require('./lib/metadata-stripper');
 const DisappearingMessagesManager = require('./lib/disappearing-messages');
-const { encryptText, decryptText } = require('./lib/message-crypto');
+const { encryptText, decryptText, messageAad } = require('./lib/message-crypto');
+const { addRandomDelay, sanitizeText, getPrivacyHeaders } = require('./lib/privacy');
 const {
-    addRandomDelay,
-    sanitizeText,
-    getPrivacyHeaders,
-    generateSecureToken
-} = require('./lib/privacy');
+    hashPassword,
+    verifyPassword,
+    needsRehash,
+    checkPasswordPolicy,
+    DUMMY_PASSWORD_HASH
+} = require('./lib/passwords');
+const {
+    ALLOWED_MIME_TYPES,
+    MIME_EXTENSIONS,
+    ENCRYPTED_FILE_MIME,
+    ENCRYPTED_FILE_EXTENSION,
+    ALL_ANONYMIZED_FILE_NAMES,
+    anonymizedFileName,
+    randomString,
+    generateUniqueCode,
+    generateInviteCode,
+    normalizeInviteCode,
+    isValidInviteCode,
+    isInviteExpired,
+    parseAllowedOrigins,
+    isRequestOriginAllowed,
+    buildContentSecurityPolicy,
+    resolveDbTlsConfig,
+    createCounter,
+    normalizeEmail,
+    positiveNumberOr
+} = require('./lib/security-utils');
 
 // Импорт E2EE прокси (маршруты регистрируются после sessionMiddleware —
 // см. вызов registerE2eeProxyRoutes ниже)
@@ -37,24 +59,26 @@ const { registerE2eeProxyRoutes, deleteKeysForUser } = require('./lib/e2ee-proxy
 // (key-shares). Тоже регистрируется после sessionMiddleware.
 const { initE2eeGroupsSchema, registerE2eeGroupRoutes } = require('./lib/e2ee-groups');
 
-// Импорт Tor support
-const {
-    checkTorConnection,
-    getTorHiddenServiceConfig,
-    torConnectionLogger,
-    ENABLE_TOR_ROUTING
-} = require('./lib/tor-support');
+// Onion-сервис (контейнер tor-service/) и proof-of-work для регистрации
+const { ONION_ADDRESS, ONION_PORT, onionMiddleware, isOnionHost, isOnionSocket, listenOnionPort } = require('./lib/tor-support');
+const { createChallenge, verifySolution } = require('./lib/pow');
+
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
 // === RUST ANON SERVICE INTEGRATION ===
 // Только если адрес задан явно. Раньше по умолчанию был 127.0.0.1:8080 — а
 // на Railway PORT=8080, и анонимная регистрация стучалась в сам же сервер.
 const ANON_SERVICE_URL = process.env.ANON_SERVICE_URL || null;
+// Общий секрет с anon-service: без него любой, кто достучится до сервиса
+// по внутренней сети, мог бы сам выпрашивать у него "анонимные" личности.
+const ANON_SERVICE_SECRET = process.env.ANON_SERVICE_SECRET || null;
 
 async function fetchAnonymousIdentity() {
     if (!ANON_SERVICE_URL) return null;
     try {
         const res = await fetch(`${ANON_SERVICE_URL}/generate`, {
             method: 'POST',
+            headers: ANON_SERVICE_SECRET ? { 'X-Internal-Secret': ANON_SERVICE_SECRET } : {},
             signal: AbortSignal.timeout(2000)
         });
         if (res.ok) {
@@ -67,35 +91,15 @@ async function fetchAnonymousIdentity() {
     return null;
 }
 
-const ALLOWED_MIME_TYPES = [
-    'image/jpeg', 'image/png', 'image/gif', 'image/webp',
-    'video/mp4', 'video/webm', 'video/quicktime',
-    'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/webm',
-    'application/pdf', 'text/plain',
-];
+// ALLOWED_MIME_TYPES и MIME_EXTENSIONS (жёсткий маппинг mimetype ->
+// расширение на диске, расширение никогда не берётся из имени файла) —
+// в lib/security-utils.js, рядом с обезличенными именами вложений.
 
-// Жёсткий маппинг mimetype -> расширение на диске. Расширение НИКОГДА не
-// берётся из file.originalname (см. п.2 аудита): имя, присланное клиентом —
-// это просто строка, и path.extname() от неё может вернуть что угодно вплоть
-// до '.png"><svg onload=alert(1)>', что затем всплывает в file_url и рискует
-// быть вставлено как HTML. Здесь расширение выбирается только из этого
-// фиксированного списка по уже провалидированному через ALLOWED_MIME_TYPES
-// mimetype, так что итоговое имя файла всегда полностью предсказуемо.
-const MIME_EXTENSIONS = {
-    'image/jpeg': '.jpg',
-    'image/png': '.png',
-    'image/gif': '.gif',
-    'image/webp': '.webp',
-    'video/mp4': '.mp4',
-    'video/webm': '.webm',
-    'video/quicktime': '.mov',
-    'audio/mpeg': '.mp3',
-    'audio/ogg': '.ogg',
-    'audio/wav': '.wav',
-    'audio/webm': '.weba',
-    'application/pdf': '.pdf',
-    'text/plain': '.txt',
-};
+// Лимит на суммарный объём вложений одного пользователя: без него один
+// аккаунт мог забить весь volume (по 50 МБ за запрос, без ограничений).
+const UPLOAD_QUOTA_BYTES = Math.floor(positiveNumberOr(process.env.UPLOAD_QUOTA_MB, 500) * 1024 * 1024);
+// Длина E2EE-конверта (текст сообщения или описание зашифрованного файла).
+const MAX_ENVELOPE_LENGTH = 12000;
 
 // '.svg' явно в блок-листе как доп. защита (defense-in-depth, п.7 аудита):
 // image/svg+xml и так не входит в ALLOWED_MIME_TYPES, но SVG может нести
@@ -172,8 +176,9 @@ const upload = multer({
         filename: (req, file, cb) => {
             // Расширение — только из MIME_EXTENSIONS (жёсткий маппинг по
             // уже проверенному в fileFilter mimetype), никогда из
-            // file.originalname — см. комментарий у MIME_EXTENSIONS выше.
-            const ext = MIME_EXTENSIONS[file.mimetype] || '';
+            // file.originalname — см. комментарий у MIME_EXTENSIONS.
+            // Шифротекст E2EE-вложения — всегда .bin.
+            const ext = file.mimetype === ENCRYPTED_FILE_MIME ? ENCRYPTED_FILE_EXTENSION : (MIME_EXTENSIONS[file.mimetype] || '');
             const safeName = `${Date.now()}-${crypto.randomBytes(12).toString('hex')}${ext}`;
             if (!SAFE_FILENAME_RE.test(safeName)) {
                 return cb(new Error('Не удалось сформировать безопасное имя файла'));
@@ -183,14 +188,25 @@ const upload = multer({
     }),
     limits: { fileSize: 50 * 1024 * 1024, files: 1, fields: 10 },
     // Имя файла в multipart — UTF-8 (по умолчанию busboy декодировал его как
-    // latin1, и русские имена файлов превращались в "Ð¤Ð°Ð¹Ð»").
+    // latin1). Само имя больше нигде не хранится, но BLOCKED_EXTENSIONS
+    // ниже смотрит на его расширение.
     defParamCharset: 'utf8',
     fileFilter: (req, file, cb) => {
         const ext = path.extname(file.originalname).toLowerCase();
         if (BLOCKED_EXTENSIONS.has(ext)) {
             return cb(new Error('Неподдерживаемый тип файла'), false);
         }
-        if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+        // Поля формы (chatId, encrypted, envelope) клиент шлёт ДО файла,
+        // поэтому к этому моменту они уже в req.body. application/octet-stream
+        // — это шифротекст E2EE-вложения, и принимается он только с явным
+        // encrypted=true: иначе под видом "шифротекста" можно было бы залить
+        // любой файл без проверки сигнатуры и очистки метаданных. И наоборот,
+        // encrypted=true с обычным типом — тоже отказ.
+        const wantsEncrypted = Boolean(req.body) && req.body.encrypted === 'true';
+        if (file.mimetype === ENCRYPTED_FILE_MIME) {
+            return wantsEncrypted ? cb(null, true) : cb(new Error('Неподдерживаемый тип файла'), false);
+        }
+        if (wantsEncrypted || !ALLOWED_MIME_TYPES.includes(file.mimetype)) {
             return cb(new Error('Неподдерживаемый тип файла'), false);
         }
         cb(null, true);
@@ -283,55 +299,124 @@ const toPositiveInt = (value) => {
     return Number.isInteger(n) && n > 0 ? n : null;
 };
 
+// Самым первым: признак onion-запроса (req.isOnion) нужен лимитерам и
+// заголовкам ниже, а у onion-запроса onionMiddleware ещё и вычищает
+// присланные клиентом X-Forwarded-* — прокси перед приложением там нет.
+app.use(onionMiddleware);
+
 app.use((req, res, next) => {
     // req.ip уже учитывает 1 доверенный хоп (trust proxy = 1), то есть это IP,
     // который реально подключился к Railway — Cloudflare edge, если трафик шёл
     // через CF, либо настоящий IP клиента, если Railway-домен открыт напрямую.
+    // У onion-запроса это адрес контейнера tor — один на всех onion-клиентов,
+    // поэтому лимиты ниже для onion по IP не считаются.
     req.realIp = resolveRealIp(req.headers, req.ip);
     next();
 });
 
 const rateLimitKeyGenerator = (req) => ipKeyGenerator(req.realIp || req.ip);
+const sessionUserId = (req) => (req.session && req.session.userId) || null;
+const RATE_LIMIT_DEFAULTS = { standardHeaders: true, legacyHeaders: false };
 
+// Вход: для clearnet — по IP; для onion IP общий у всех, поэтому ключ —
+// email (перебор паролей одного аккаунта через Tor всё равно упирается
+// в loginAccountLimiter ниже).
 const loginLimiter = rateLimit({
+    ...RATE_LIMIT_DEFAULTS,
     windowMs: 15 * 60 * 1000,
     max: 5,
-    standardHeaders: true,
-    legacyHeaders: false,
-    keyGenerator: rateLimitKeyGenerator,
+    keyGenerator: (req) => (req.isOnion ? `onion:${normalizeEmail(req.body && req.body.email)}` : rateLimitKeyGenerator(req)),
     message: { success: false, message: 'Слишком много попыток входа. Попробуйте позже.' }
 });
 
-const registerLimiter = rateLimit({
+// Лимит на аккаунт для всех: смена IP (ботнет, новые цепочки Tor) не даёт
+// перебирать пароль одного пользователя быстрее 10 попыток в час.
+const loginAccountLimiter = rateLimit({
+    ...RATE_LIMIT_DEFAULTS,
     windowMs: 60 * 60 * 1000,
-    max: 3,
-    standardHeaders: true,
-    legacyHeaders: false,
+    max: 10,
+    keyGenerator: (req) => `account:${normalizeEmail(req.body && req.body.email)}`,
+    message: { success: false, message: 'Слишком много попыток входа в этот аккаунт. Попробуйте позже.' }
+});
+
+// Массовую регистрацию теперь сдерживает proof-of-work (lib/pow.js). IP-лимит
+// остался мягким и только для clearnet: для onion он запер бы регистрацию
+// всем сразу (общий IP контейнера tor).
+const registerLimiter = rateLimit({
+    ...RATE_LIMIT_DEFAULTS,
+    windowMs: 60 * 60 * 1000,
+    max: 10,
+    skip: (req) => req.isOnion,
     keyGenerator: rateLimitKeyGenerator,
     message: { success: false, message: 'Слишком много регистраций. Попробуйте позже.' }
 });
 
+// Смена пароля и удаление аккаунта (оба — только для залогиненных). Ключ —
+// пользователь: угадывать пароль по украденной сессии можно только в
+// рамках её аккаунта, а onion-пользователи не делят один счётчик на всех.
 const passwordLimiter = rateLimit({
+    ...RATE_LIMIT_DEFAULTS,
     windowMs: 15 * 60 * 1000,
     max: 3,
-    standardHeaders: true,
-    legacyHeaders: false,
+    keyGenerator: (req) => (sessionUserId(req) ? `user:${sessionUserId(req)}` : rateLimitKeyGenerator(req)),
+    message: { success: false, message: 'Слишком много попыток ввода пароля. Попробуйте позже.' }
+});
+
+// Вход в комнату по коду: даже 130-битный код не должен перебираться
+// с бесконечной скоростью, и утёкший список кодов — массово проверяться.
+const joinUserLimiter = rateLimit({
+    ...RATE_LIMIT_DEFAULTS,
+    windowMs: 15 * 60 * 1000,
+    max: 20,
+    skip: (req) => !sessionUserId(req),
+    keyGenerator: (req) => `user:${sessionUserId(req)}`,
+    message: { success: false, message: 'Слишком много попыток входа в чат. Попробуйте позже.' }
+});
+const joinIpLimiter = rateLimit({
+    ...RATE_LIMIT_DEFAULTS,
+    windowMs: 15 * 60 * 1000,
+    max: 60,
+    skip: (req) => req.isOnion,
     keyGenerator: rateLimitKeyGenerator,
-    message: { success: false, message: 'Слишком много попыток смены пароля. Попробуйте позже.' }
+    message: { success: false, message: 'Слишком много попыток входа в чат. Попробуйте позже.' }
 });
 
 // 300 запросов за 15 минут (~1 в 3 секунды) активный пользователь чата
 // выбирал за несколько минут — особенно когда клиент перезапрашивал
 // список чатов на каждое входящее сообщение — после чего всё приложение
-// "висло" с ошибкой на 15 минут.
+// "висло" с ошибкой на 15 минут. Залогиненных считаем по аккаунту (за
+// одним NAT или onion-адресом их много), остальных — по IP. Неавторизованные
+// onion-запросы не считаются: у них один IP на всех, и любой исчерпал бы
+// общую квоту за всех onion-посетителей. Их открытые маршруты (вход,
+// регистрация) защищены лимитом на аккаунт и proof-of-work, а от флуда —
+// защита самого onion-сервиса (см. tor-service/README.md).
 const apiLimiter = rateLimit({
+    ...RATE_LIMIT_DEFAULTS,
     windowMs: 15 * 60 * 1000,
     max: 1000,
-    standardHeaders: true,
-    legacyHeaders: false,
-    keyGenerator: rateLimitKeyGenerator,
+    skip: (req) => req.isOnion && !sessionUserId(req),
+    keyGenerator: (req) => (sessionUserId(req) ? `user:${sessionUserId(req)}` : rateLimitKeyGenerator(req)),
     message: { success: false, message: 'Слишком много запросов. Попробуйте позже.' }
 });
+
+// Разрешённые "чужие" источники (свои домены-зеркала). Свой хост и
+// onion-адрес разрешены и без этого списка.
+const ALLOWED_ORIGINS = parseAllowedOrigins(process.env.ALLOWED_ORIGINS);
+if (ALLOWED_ORIGINS.invalid.length > 0) {
+    console.warn('[Origin] ALLOWED_ORIGINS: пропущены некорректные записи:', ALLOWED_ORIGINS.invalid.join(', '));
+}
+
+// Запрос пришёл со страницы самого мессенджера (см. isRequestOriginAllowed).
+function isTrustedOrigin(headers) {
+    return isRequestOriginAllowed({
+        origin: headers.origin,
+        host: headers.host,
+        forwardedHost: headers['x-forwarded-host'],
+        secFetchSite: headers['sec-fetch-site'],
+        allowed: ALLOWED_ORIGINS,
+        isOnionHost,
+    });
+}
 
 let server;
 if (process.env.NODE_ENV === 'production') {
@@ -349,9 +434,23 @@ if (process.env.NODE_ENV === 'production') {
     }
 }
 
-const io = new Server(server);
-const ipConnectionCount = new Map();
+// Cross-Site WebSocket Hijacking: сессионная кука уходит и в рукопожатии,
+// которое открыла ЧУЖАЯ страница (CORS на WebSocket не действует), — и
+// любой сайт, открытый у залогиненного пользователя, мог подключиться к
+// сокету от его имени и читать входящие сообщения в реальном времени.
+// Рукопожатие (и polling, и websocket) пускаем только со своего источника.
+const io = new Server(server, {
+    allowRequest: (req, callback) => {
+        if (isTrustedOrigin(req.headers)) return callback(null, true);
+        callback('Origin not allowed', false);
+    },
+});
+// Лимиты одновременных сокетов: на аккаунт — всегда, на IP — только для
+// clearnet (у всех onion-клиентов один IP — контейнер tor).
+const MAX_SOCKETS_PER_USER = 10;
 const MAX_SOCKETS_PER_IP = 20;
+const userSocketCount = createCounter();
+const ipSocketCount = createCounter();
 
 function getClientIp(handshake) {
     const headers = handshake.headers || {};
@@ -419,18 +518,23 @@ async function maybeDumpCa() {
     process.exit(0);
 }
 
-const sslConfig = (() => {
-    if (process.env.NODE_ENV !== 'production') return false;
-    if (process.env.DB_CA_CERT) {
-        console.log('[SSL] production: rejectUnauthorized=true, CA закреплён через DB_CA_CERT');
-        return { ca: process.env.DB_CA_CERT, rejectUnauthorized: true };
-    }
-    console.warn('[SSL] production: DB_CA_CERT не задан — используется rejectUnauthorized=false ' +
-        '(осознанный компромисс под Railway internal network). Чтобы включить полную проверку ' +
-        'сертификата, запустите сервер один раз с DUMP_CA=true, скопируйте цепочку сертификатов ' +
-        'в переменную DB_CA_CERT и перезапустите.');
-    return { rejectUnauthorized: false };
-})();
+// TLS до Postgres (см. resolveDbTlsConfig): в production без DB_CA_CERT
+// сервер стартует только в приватной сети Railway или с явным
+// DB_TLS_INSECURE=true. Исключение — DUMP_CA=true: этот режим как раз и
+// нужен, чтобы получить цепочку для DB_CA_CERT, и пулом он не пользуется.
+const dbTls = resolveDbTlsConfig({
+    nodeEnv: process.env.NODE_ENV,
+    databaseUrl: process.env.DATABASE_URL,
+    caCert: process.env.DB_CA_CERT,
+    insecure: process.env.DB_TLS_INSECURE === 'true',
+});
+if (dbTls.error && process.env.DUMP_CA !== 'true') {
+    console.error(dbTls.error);
+    process.exit(1);
+}
+if (dbTls.info) console.log(dbTls.info);
+if (dbTls.warning) console.warn(dbTls.warning);
+const sslConfig = dbTls.ssl;
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -579,9 +683,10 @@ async function initDatabase() {
     // EXISTS всё равно берёт ACCESS EXCLUSIVE блокировку таблицы, поэтому
     // миграции ниже выполняются только если они действительно нужны.
     const columns = await dbAll(`
-        SELECT table_name, column_name, is_nullable
+        SELECT table_name, column_name, is_nullable, column_default
         FROM information_schema.columns
-        WHERE table_schema = current_schema() AND table_name IN ('users', 'chats', 'messages')
+        WHERE table_schema = current_schema()
+          AND table_name IN ('users', 'chats', 'messages', 'rooms', 'room_participants')
     `);
     const column = (table, name) => columns.find(c => c.table_name === table && c.column_name === name);
 
@@ -608,6 +713,40 @@ async function initDatabase() {
     // sent = 0 (их пишет лишь бот, и сразу со статусом 'read'), т.е. всегда 0.
     const lastReadColumn = column('chats', 'last_read_message_id');
     if (!lastReadColumn) await pool.query('ALTER TABLE chats ADD COLUMN last_read_message_id INTEGER');
+
+    // Все ADD COLUMN ниже — с NULL или константой по умолчанию: в PG 11+
+    // это правка только метаданных, без перезаписи таблицы.
+    //
+    // Отметки прочтения можно выключить (POST /api/user/privacy).
+    if (!column('users', 'read_receipts')) {
+        await pool.query('ALTER TABLE users ADD COLUMN read_receipts BOOLEAN NOT NULL DEFAULT TRUE');
+    }
+    // Срок жизни инвайт-кода; коды старых комнат перевыпускаются ниже
+    // (regenerateLegacyInviteCodes).
+    if (!column('rooms', 'code_expires_at')) {
+        await pool.query('ALTER TABLE rooms ADD COLUMN code_expires_at TIMESTAMPTZ');
+    }
+    // С какого сообщения участник видит историю комнаты: новичок видит
+    // только то, что отправлено ПОСЛЕ его вступления (раньше код приглашения
+    // открывал всю переписку с самого начала). Уже состоящие участники — 0,
+    // то есть всё, как и раньше.
+    if (!column('room_participants', 'visible_from_id')) {
+        await pool.query('ALTER TABLE room_participants ADD COLUMN visible_from_id INTEGER NOT NULL DEFAULT 0');
+    }
+    // Размер вложения — для квоты UPLOAD_QUOTA_MB. У старых вложений NULL
+    // (в квоту не засчитываются).
+    if (!column('messages', 'file_size')) {
+        await pool.query('ALTER TABLE messages ADD COLUMN file_size BIGINT');
+    }
+    // Порядок чатов без сообщений раньше давал chats.id DESC — с случайными
+    // id (ensureRandomIdDefaults) он больше ничего не значит. У старых
+    // строк NULL: между собой они по-прежнему упорядочены по id.
+    if (!column('chats', 'created_at')) {
+        await pool.query('ALTER TABLE chats ADD COLUMN created_at TIMESTAMPTZ');
+        await pool.query('ALTER TABLE chats ALTER COLUMN created_at SET DEFAULT NOW()');
+    }
+
+    await ensureRandomIdDefaults(column);
 
     // Миграция: удаление чата/выход из комнаты падало с нарушением FK —
     // messages.chat_id (NOT NULL, без ON DELETE) не давал снести свою же
@@ -664,9 +803,13 @@ async function initDatabase() {
     await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_reply_to_id ON messages(reply_to_id) WHERE reply_to_id IS NOT NULL');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_chats_user_id ON chats(user_id)');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_chats_room_id ON chats(room_id)');
+    // Сумма размеров вложений пользователя (квота) — index-only scan по
+    // его файлам, а не проход по всем его сообщениям.
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_user_files ON messages(user_id) INCLUDE (file_size) WHERE file_size IS NOT NULL');
     // Проверка "участник ли комнаты" выполняется на каждый файл, реакцию и
-    // joinChat — раньше по room_participants вообще не было индексов.
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_room_participants_room_user ON room_participants(room_id, user_id)');
+    // joinChat. Уникальный (room_id, user_id) заодно не даёт одному
+    // пользователю оказаться в комнате дважды (с двумя visible_from_id).
+    await ensureUniqueRoomParticipants();
     await pool.query('CREATE INDEX IF NOT EXISTS idx_room_participants_user ON room_participants(user_id)');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_reactions_msg_user ON reactions(message_id, user_id)');
 
@@ -692,7 +835,177 @@ async function initDatabase() {
         await pool.query('ALTER TABLE users ALTER COLUMN password DROP NOT NULL');
     }
 
+    await regenerateLegacyInviteCodes();
+    await anonymizeLegacyFileNames();
+
     console.log('База данных инициализирована');
+}
+
+// ---- Случайные id для users, rooms, chats ----
+//
+// Последовательные id выдавали размер и темп роста сервиса (id свежей
+// регистрации = число пользователей) и порядок событий: по id комнаты или
+// чата было видно, кто и когда создал её раньше. Новые строки получают
+// случайный id из [1 000 000, 2^31 - 1]: 48 бит из gen_random_uuid() (PG 13+,
+// внутри pg_strong_random — криптостойкий ГСЧ; первые 12 hex-цифр UUIDv4
+// случайны целиком) по модулю размера диапазона (смещение ~2^-17 — не
+// различимо), с перепроверкой занятости в цикле. Существующие id не
+// меняются. messages.id остаётся последовательным намеренно: на порядке
+// сообщений держатся история, непрочитанное и visible_from_id.
+//
+// Тело функции — константа: по ней же при старте видно, что в БД уже
+// нужная версия, и CREATE OR REPLACE не выполняется лишний раз (два
+// одновременно стартующих экземпляра иначе ловили бы "tuple concurrently
+// updated").
+const RANDOM_ID_FUNCTION_BODY = `
+DECLARE
+    candidate integer;
+    taken boolean;
+BEGIN
+    LOOP
+        candidate := (1000000 + ('x' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 12))::bit(48)::bigint % 2146483648)::integer;
+        EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s WHERE id = $1)', target) INTO taken USING candidate;
+        IF NOT taken THEN
+            RETURN candidate;
+        END IF;
+    END LOOP;
+END
+`;
+
+async function ensureRandomIdDefaults(column) {
+    const existing = await dbGet(
+        `SELECT p.prosrc FROM pg_proc p
+         JOIN pg_namespace n ON n.oid = p.pronamespace
+         WHERE p.proname = 'nyxo_random_id' AND n.nspname = current_schema()`
+    );
+    if (!existing || existing.prosrc !== RANDOM_ID_FUNCTION_BODY) {
+        await pool.query(`
+            CREATE OR REPLACE FUNCTION nyxo_random_id(target regclass) RETURNS integer
+            LANGUAGE plpgsql VOLATILE AS $fn$${RANDOM_ID_FUNCTION_BODY}$fn$
+        `);
+    }
+    for (const table of ['users', 'rooms', 'chats']) {
+        const current = String(column(table, 'id')?.column_default || '');
+        if (!current.includes('nyxo_random_id(')) {
+            await pool.query(`ALTER TABLE ${table} ALTER COLUMN id SET DEFAULT nyxo_random_id('${table}'::regclass)`);
+        }
+    }
+}
+
+// Уникальный индекс (room_id, user_id) вместо прежнего неуникального.
+// Дубли (гонка двух одновременных "войти по коду" до этой версии) чистятся
+// в той же транзакции, под блокировкой записи в таблицу: иначе между
+// чисткой и CREATE UNIQUE INDEX старый экземпляр сервера (деплой без
+// простоя) мог вставить новый дубль, и старт упал бы.
+async function ensureUniqueRoomParticipants() {
+    const existing = await dbGet("SELECT to_regclass('idx_room_participants_unique') AS idx");
+    if (!existing || !existing.idx) {
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+            await client.query('LOCK TABLE room_participants IN SHARE ROW EXCLUSIVE MODE');
+            const removed = await client.query(`
+                DELETE FROM room_participants a USING room_participants b
+                WHERE a.room_id = b.room_id AND a.user_id = b.user_id AND a.id > b.id
+            `);
+            await client.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_room_participants_unique ON room_participants(room_id, user_id)');
+            await client.query('COMMIT');
+            if (removed.rowCount > 0) console.log(`[DB] Удалено дублей участников комнат: ${removed.rowCount}`);
+        } catch (err) {
+            await client.query('ROLLBACK');
+            throw err;
+        } finally {
+            client.release();
+        }
+    }
+    await pool.query('DROP INDEX IF EXISTS idx_room_participants_room_user');
+}
+
+const MIGRATION_BATCH = 500;
+
+// Коды приглашения старого формата (6 символов, ~30 бит, бессрочные)
+// перевыпускаются в новом формате со сроком жизни: старые ссылки перестают
+// работать — это и есть цель. Повторный старт ничего не трогает: коротких
+// кодов и NULL-сроков после первого прохода не остаётся.
+async function regenerateLegacyInviteCodes() {
+    const legacy = await dbAll('SELECT id FROM rooms WHERE length(code) < 20 ORDER BY id');
+    for (let i = 0; i < legacy.length; i += MIGRATION_BATCH) {
+        const ids = legacy.slice(i, i + MIGRATION_BATCH).map(r => r.id);
+        await pool.query(
+            `UPDATE rooms r SET code = v.code, code_expires_at = NOW() + $3::integer * INTERVAL '1 second'
+             FROM unnest($1::int[], $2::text[]) AS v(id, code)
+             WHERE r.id = v.id`,
+            [ids, ids.map(() => generateInviteCode()), INVITE_TTL_SECONDS]
+        );
+    }
+    const withoutExpiry = await pool.query(
+        `UPDATE rooms SET code_expires_at = NOW() + $1::integer * INTERVAL '1 second' WHERE code_expires_at IS NULL`,
+        [INVITE_TTL_SECONDS]
+    );
+    if (legacy.length > 0 || withoutExpiry.rowCount > 0) {
+        console.log(`[Invites] Перевыпущено старых кодов приглашения: ${legacy.length}, выставлен срок: ${withoutExpiry.rowCount}`);
+    }
+}
+
+// Старые вложения хранили исходное имя файла ("IMG_20260914_Ivanov.png"),
+// а у вложений без подписи оно же было и текстом сообщения. Имя заменяется
+// обезличенным по типу (anonymizedFileName), текст — тоже, если он
+// совпадал с именем. Выбираются только строки с ещё не обезличенным
+// именем, так что повторный старт ничего не меняет.
+async function anonymizeLegacyFileNames() {
+    let total = 0;
+    for (;;) {
+        const rows = await dbAll(
+            `SELECT id, room_id, chat_id, user_id, text, file_name, file_type FROM messages
+             WHERE file_url IS NOT NULL AND encrypted = FALSE AND file_name IS NOT NULL
+               AND file_name <> ALL($1::text[])
+             ORDER BY id
+             LIMIT $2`,
+            [ALL_ANONYMIZED_FILE_NAMES, MIGRATION_BATCH]
+        );
+        if (rows.length === 0) break;
+        const names = [];
+        const texts = [];
+        for (const row of rows) {
+            const name = anonymizedFileName(row.file_type);
+            names.push(name);
+            texts.push(readMessageText(row.text, row) === row.file_name ? writeMessageText(name, row) : null);
+        }
+        await pool.query(
+            `UPDATE messages m SET file_name = v.name, text = COALESCE(v.text, m.text)
+             FROM unnest($1::int[], $2::text[], $3::text[]) AS v(id, name, text)
+             WHERE m.id = v.id`,
+            [rows.map(r => r.id), names, texts]
+        );
+        total += rows.length;
+        if (rows.length < MIGRATION_BATCH) break;
+    }
+    if (total > 0) console.log(`[Uploads] Обезличены имена старых вложений: ${total}`);
+}
+
+// Раньше удаление сообщения было soft-delete: строка (автор, время,
+// комната, шифротекст) оставалась в БД навсегда. Теперь удаление
+// физическое, а оставшиеся от старой схемы строки удаляются один раз после
+// старта — в фоне и пачками, чтобы не держать блокировки и не задерживать
+// открытие порта (поиск по deleted <> 0 — проход по всей таблице).
+async function purgeLegacySoftDeletedMessages() {
+    let total = 0;
+    try {
+        for (;;) {
+            const rows = await dbAll(
+                `DELETE FROM messages WHERE id IN (
+                     SELECT id FROM messages WHERE deleted <> 0 LIMIT $1
+                 ) RETURNING file_url`,
+                [MIGRATION_BATCH]
+            );
+            removeUploadedFiles(rows.map(r => r.file_url));
+            total += rows.length;
+            if (rows.length < MIGRATION_BATCH) break;
+        }
+        if (total > 0) console.log(`[DB] Удалено сообщений, помеченных удалёнными в старой схеме: ${total}`);
+    } catch (err) {
+        console.error('[DB] Не удалось удалить старые soft-deleted сообщения:', err.message);
+    }
 }
 
 function getSocketRoomKey(chatId, roomId) {
@@ -722,11 +1035,10 @@ function getCurrentTime() {
     return `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
 }
 
+// Коды без смещения распределения — см. randomString в lib/security-utils.js.
 async function generateUniqueCodeAsync() {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
     for (let attempts = 0; attempts < 100; attempts++) {
-        const bytes = crypto.randomBytes(8);
-        const code = Array.from(bytes).map(b => chars[b % chars.length]).join('');
+        const code = generateUniqueCode();
         const row = await dbGet('SELECT id FROM users WHERE unique_code = $1', [code]);
         if (!row) return code;
     }
@@ -734,37 +1046,29 @@ async function generateUniqueCodeAsync() {
 }
 
 async function generateAnonymousUsernameAsync() {
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     for (let attempts = 0; attempts < 100; attempts++) {
-        const bytes = crypto.randomBytes(4);
-        const suffix = Array.from(bytes).map(b => chars[b % chars.length]).join('');
-        const username = `Гость-${suffix}`;
+        const username = `Гость-${randomString('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 4)}`;
         const row = await dbGet('SELECT id FROM users WHERE username = $1', [username]);
         if (!row) return username;
     }
     throw new Error('Could not generate anonymous username');
 }
 
-function generateInviteCode() {
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    const bytes = crypto.randomBytes(6);
-    return Array.from(bytes).map(b => chars[b % chars.length]).join('');
-}
+// Инвайт-коды (generateInviteCode) — 130 бит: проверять их на совпадение с
+// уже выданными незачем, а на невероятный случай есть UNIQUE на rooms.code.
+// Срок жизни кода — INVITE_TTL_HOURS (по умолчанию неделя), не больше 10 лет
+// (значение целиком должно помещаться в integer секунд).
+const INVITE_TTL_SECONDS = Math.min(
+    Math.round(positiveNumberOr(process.env.INVITE_TTL_HOURS, 168) * 3600),
+    10 * 365 * 24 * 3600
+);
 
-async function generateInviteCodeAsync() {
-    for (let attempts = 0; attempts < 100; attempts++) {
-        const code = generateInviteCode();
-        const row = await dbGet('SELECT id FROM rooms WHERE code = $1', [code]);
-        if (!row) return code;
-    }
-    throw new Error('Could not generate invite code');
-}
-
-// Фиктивный bcrypt-хэш без известного пароля. Используется в /api/login, чтобы
-// bcrypt.compare выполнялся ВСЕГДА — и когда юзер найден, и когда нет — с
-// одинаковой стоимостью (~100мс), иначе разница во времени ответа позволяет
-// перебором узнавать зарегистрированные email.
-const DUMMY_PASSWORD_HASH = bcrypt.hashSync(crypto.randomBytes(32).toString('hex'), 12);
+// Длина пароля: при регистрации и смене — не больше 256 символов (политика
+// в lib/passwords.js); при входе — лишь анти-DoS порог, чтобы мегабайтная
+// строка не уходила в HMAC/bcrypt, но и пароль, заданный по старым
+// правилам, не отвергался заранее.
+const MAX_PASSWORD_LENGTH = 256;
+const MAX_LOGIN_PASSWORD_LENGTH = 1024;
 
 const sessionSecret = process.env.SESSION_SECRET;
 if (!sessionSecret) throw new Error('SESSION_SECRET не задан в переменных окружения');
@@ -789,8 +1093,15 @@ const sessionMiddleware = session({
     cookie: {
         maxAge: 24 * 60 * 60 * 1000,
         httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax'
+        // 'auto' — Secure по фактическому протоколу запроса (req.secure с
+        // учётом X-Forwarded-Proto от доверенного прокси; для .onion его
+        // выставляет onionMiddleware). Жёсткий secure: true ломал вход везде,
+        // где до приложения доходит plain http.
+        secure: IS_PRODUCTION ? 'auto' : false,
+        // Раньше в production было 'none' — кука уходила с любого сайта, в том
+        // числе в межсайтовое WebSocket-рукопожатие и POST-формы. 'lax'
+        // оставляет её только своим запросам и переходам по ссылке.
+        sameSite: 'lax'
     }
 });
 
@@ -798,7 +1109,8 @@ function isExpiredAnonymousSession(sess) {
     return Boolean(sess && sess.isAnonymous && sess.createdAt && Date.now() - sess.createdAt > ANON_SESSION_MAX_AGE_MS);
 }
 
-// Socket.io: сессия -> авторизация -> лимит подключений с одного IP.
+// Socket.io: источник (allowRequest выше) -> сессия -> авторизация ->
+// лимит подключений на аккаунт и (для clearnet) на IP.
 io.use((socket, next) => {
     sessionMiddleware(socket.request, socket.request.res || {}, next);
 });
@@ -810,8 +1122,14 @@ io.use((socket, next) => {
     if (!sess || !sess.userId || isExpiredAnonymousSession(sess)) {
         return next(new Error('Не авторизован'));
     }
-    const ip = getClientIp(socket.handshake);
-    if ((ipConnectionCount.get(ip) || 0) >= MAX_SOCKETS_PER_IP) {
+    if (userSocketCount.get(sess.userId) >= MAX_SOCKETS_PER_USER) {
+        return next(new Error('Слишком много подключений'));
+    }
+    // Onion-рукопожатие (сокет принят на ONION_PORT) приходит с адреса
+    // контейнера tor — одного на всех, а его X-Forwarded-For присылает сам
+    // клиент: IP тут ничего не значит.
+    const ip = isOnionSocket(socket.request.socket) ? null : getClientIp(socket.handshake);
+    if (ip && ipSocketCount.get(ip) >= MAX_SOCKETS_PER_IP) {
         return next(new Error('Слишком много подключений с вашего IP'));
     }
     socket.data.clientIp = ip;
@@ -821,16 +1139,16 @@ io.use((socket, next) => {
 io.on('connection', async (socket) => {
     const userId = socket.request.session.userId;
 
-    // Счётчик растёт только для реально установленных соединений. Раньше он
-    // увеличивался ещё в middleware, а единственное место уменьшения —
-    // 'disconnect' — для отклонённого рукопожатия не наступает: IP мог
-    // навсегда упереться в лимит.
+    // Счётчики растут только для реально установленных соединений. Раньше
+    // счётчик IP увеличивался ещё в middleware, а единственное место
+    // уменьшения — 'disconnect' — для отклонённого рукопожатия не наступает:
+    // IP мог навсегда упереться в лимит.
     const ip = socket.data.clientIp;
-    ipConnectionCount.set(ip, (ipConnectionCount.get(ip) || 0) + 1);
+    userSocketCount.increment(userId);
+    if (ip) ipSocketCount.increment(ip);
     socket.on('disconnect', () => {
-        const current = (ipConnectionCount.get(ip) || 1) - 1;
-        if (current <= 0) ipConnectionCount.delete(ip);
-        else ipConnectionCount.set(ip, current);
+        userSocketCount.decrement(userId);
+        if (ip) ipSocketCount.decrement(ip);
     });
 
     // Личная комната пользователя (на всех его вкладках/устройствах) —
@@ -885,18 +1203,61 @@ function unsubscribeUserFromChat(userId, chatId, roomId) {
     io.in('user:' + userId).socketsLeave(getSocketRoomKey(chatId, roomId));
 }
 
-app.use(express.json());
+// Заголовки — первыми, чтобы их получил любой ответ, включая отказы
+// проверок источника и CSRF ниже.
+app.use((req, res, next) => {
+    // Усиленные заголовки приватности (nosniff, DENY, no-referrer, COOP/COEP...
+    // — см. lib/privacy.js). Здесь они больше не дублируются и не
+    // перезаписываются: раньше Referrer-Policy тут же подменялся на
+    // strict-origin-when-cross-origin, и на сторонние сайты уходил origin.
+    res.set(getPrivacyHeaders());
+
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, private');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    res.set('Surrogate-Control', 'no-store');
+    res.set('X-Robots-Tag', 'noindex, nofollow');
+    const nonce = crypto.randomBytes(16).toString('base64');
+    res.locals.cspNonce = nonce;
+    // Политика — buildContentSecurityPolicy (lib/security-utils.js). Без
+    // 'unsafe-inline' в style-src и без "ws: wss:" (любой хост) в
+    // connect-src: только WebSocket своего хоста. Схема ws/wss — по тому,
+    // как страница открыта: onion-сервис отдаётся по http (TLS там даёт сам
+    // Tor), хотя onionMiddleware и помечает такой запрос защищённым.
+    res.set('Content-Security-Policy', buildContentSecurityPolicy({
+        nonce,
+        host: req.headers.host,
+        secure: req.secure && !req.isOnion,
+    }));
+    // HSTS — только для настоящего https в production: по http браузер его
+    // всё равно игнорирует, а в разработке он "залипал" бы на localhost.
+    if (IS_PRODUCTION && req.secure && !req.isOnion) {
+        res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+    next();
+});
+
+// Небезопасные методы — только со своих страниц (см. isTrustedOrigin).
+// Второй рубеж к CSRF-токену ниже: SameSite=Lax и токен защищают от
+// межсайтовых форм, а проверка Origin — ещё и от поддоменов/соседних
+// сайтов, которые могут подсадить свою csrf_token-куку.
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+app.use((req, res, next) => {
+    if (SAFE_METHODS.has(req.method) || isTrustedOrigin(req.headers)) return next();
+    res.status(403).json({ success: false, message: 'Запрещено: запрос с чужого сайта' });
+});
+
 app.use(cookieParser());
 
-// Tor connection logger
-app.use(torConnectionLogger);
-
-function issueCsrfCookie(res) {
+function issueCsrfCookie(req, res) {
     const token = crypto.randomBytes(32).toString('hex');
     res.cookie('csrf_token', token, {
         httpOnly: false,
-        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-        secure: process.env.NODE_ENV === 'production',
+        // Раньше в production — 'none' (кука уходила и на межсайтовые
+        // запросы). Secure — по фактическому протоколу: .onion и локальная
+        // разработка по http иначе не получили бы куку вовсе.
+        sameSite: 'lax',
+        secure: Boolean(req.secure),
         maxAge: 24 * 60 * 60 * 1000
     });
     return token;
@@ -914,12 +1275,11 @@ app.use((req, res, next) => {
     // любом запросе, включая GET — к моменту первого POST от SPA (после
     // того как браузер уже загрузил index.html/script.js через GET) она уже
     // гарантированно на месте.
-    const safeMethods = ['GET', 'HEAD', 'OPTIONS'];
     const cookieToken = req.cookies['csrf_token'];
     const cookieWasMissing = !cookieToken;
-    const issuedToken = cookieWasMissing ? issueCsrfCookie(res) : cookieToken;
+    const issuedToken = cookieWasMissing ? issueCsrfCookie(req, res) : cookieToken;
 
-    if (safeMethods.includes(req.method)) return next();
+    if (SAFE_METHODS.has(req.method)) return next();
 
     // Небезопасный метод: токен обязателен и должен совпадать с уже
     // существовавшей (не только что выставленной в этом же запросе) кукой —
@@ -932,30 +1292,13 @@ app.use((req, res, next) => {
     next();
 });
 
-app.use((req, res, next) => {
-    // Усиленные заголовки приватности
-    const privacyHeaders = getPrivacyHeaders();
-    Object.entries(privacyHeaders).forEach(([key, value]) => {
-        res.set(key, value);
-    });
-
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, private');
-    res.set('Pragma', 'no-cache');
-    res.set('Expires', '0');
-    res.set('Surrogate-Control', 'no-store');
-    res.set('X-Robots-Tag', 'noindex, nofollow');
-    const nonce = crypto.randomBytes(16).toString('base64');
-    res.locals.cspNonce = nonce;
-    // base-uri и object-src не наследуются из default-src, поэтому заданы
-    // явно (п.8 аудита): без base-uri инъекция тега <base> (если когда-либо
-    // станет достижима) не блокируется текущей политикой; object-src явно
-    // запрещён, хотя и так по умолчанию блокируется отсутствием в списке.
-    res.set('Content-Security-Policy', `default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ws: wss:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; object-src 'none'`);
-    res.set('X-Frame-Options', 'DENY');
-    res.set('X-Content-Type-Options', 'nosniff');
-    res.set('Referrer-Policy', 'strict-origin-when-cross-origin');
-    next();
-});
+// Тело парсится только после проверок источника и CSRF. Глобальный лимит
+// остаётся маленьким (100 КБ по умолчанию); key-shares — исключение: до 200
+// получателей по 8 КБ (x3dh-init с постквантовой частью весит 2.4–4 КБ).
+// Специальный парсер стоит раньше: общий видит уже разобранное тело и
+// пропускает запрос.
+app.use('/api/keys/key-shares', express.json({ limit: '2mb' }));
+app.use(express.json());
 
 // Разрешает браузеру хранить ответ, но перед каждым использованием
 // сверяться с сервером (If-None-Match/If-Modified-Since -> 304 без тела).
@@ -991,7 +1334,8 @@ app.use('/api/', apiLimiter);
 
 // E2EE key-server proxy: /api/keys/* → Rust key-server по loopback.
 // Регистрируется строго ПОСЛЕ sessionMiddleware — маршрутам нужна сессия.
-registerE2eeProxyRoutes(app);
+// Чужие ключи отдаются только при общей комнате — прокси нужна БД.
+registerE2eeProxyRoutes(app, { dbGet, dbAll });
 // Групповой E2EE: список участников чата + key-shares (тоже нужна сессия).
 registerE2eeGroupRoutes(app, { dbGet, dbAll, dbRun, io });
 
@@ -1001,8 +1345,15 @@ app.get('/uploads/:filename', async (req, res) => {
     if (!SAFE_FILENAME_RE.test(filename)) return res.status(404).json({ success: false, message: 'Файл не найден' });
     const allowed = await userCanAccessFile(req.session.userId, filename);
     if (!allowed) return res.status(403).json({ success: false, message: 'Доступ запрещён' });
-    setRevalidateCacheHeaders(res, true);
-    res.sendFile(path.join(UPLOADS_DIR, filename), (err) => {
+    // Вложения переписки не должны оседать в дисковом кэше браузера: после
+    // выхода (и после удаления сообщения) их нельзя было бы достать из кэша
+    // устройства. no-store сам по себе запрещает хранение — Pragma/Expires
+    // от глобального middleware тут лишние. Last-Modified/ETag не отдаём:
+    // без кэша они не нужны, а время изменения файла — лишняя метка.
+    res.set('Cache-Control', 'no-store, private');
+    res.removeHeader('Pragma');
+    res.removeHeader('Expires');
+    res.sendFile(path.join(UPLOADS_DIR, filename), { lastModified: false, etag: false, cacheControl: false }, (err) => {
         if (err && !res.headersSent) {
             res.status(err.status === 404 ? 404 : 500).json({ success: false, message: 'Файл не найден' });
         }
@@ -1027,6 +1378,31 @@ function serveIndexWithNonce(req, res) {
     });
 }
 
+// ---- Текст сообщения в БД: шифрование at rest с AAD ----
+//
+// AAD (messageAad из lib/message-crypto.js) привязывает шифротекст к месту
+// хранения — комнате (для личного чата с ботом — чату) и отправителю:
+// строка, перенесённая в чужую комнату или под чужое имя, не
+// расшифруется. Поэтому везде, где читается или пишется messages.text,
+// выбираются и room_id, chat_id, user_id этой же строки.
+const UNREADABLE_TEXT = '[Не удалось расшифровать]';
+
+function writeMessageText(text, row) {
+    return encryptText(text, messageAad(row));
+}
+
+function readMessageText(stored, row) {
+    if (stored === null || stored === undefined) return stored;
+    try {
+        return decryptText(stored, messageAad(row));
+    } catch (err) {
+        // messageAad бросает только на строке без комнаты и без чата
+        // (осиротевшее сообщение) — показать её всё равно некому и нечем.
+        console.error('[MessageCrypto] Нет AAD для сообщения:', err.message);
+        return UNREADABLE_TEXT;
+    }
+}
+
 // Новая сессия с защитой от фиксации (regenerate) — и при входе, и при
 // регистрации (раньше при регистрации id сессии не менялся).
 function startUserSession(req, fields) {
@@ -1039,6 +1415,65 @@ function startUserSession(req, fields) {
     });
 }
 
+// Proof-of-work (lib/pow.js): решение одноразовое и привязано к цели
+// (register / register-anon).
+const POW_PURPOSES = new Set(['register', 'register-anon']);
+const POW_FAILED_RESPONSE = { success: false, message: 'Не пройдена проверка proof-of-work', powRequired: true };
+
+function checkPow(req, purpose) {
+    const solution = req.body && req.body.pow;
+    if (!solution || typeof solution !== 'object') return false;
+    try {
+        return verifySolution(solution, purpose) === true;
+    } catch (err) {
+        console.error('[PoW] Ошибка проверки решения:', err.message);
+        return false;
+    }
+}
+
+app.get('/api/pow/challenge', (req, res) => {
+    const purpose = typeof req.query.purpose === 'string' ? req.query.purpose : '';
+    if (!POW_PURPOSES.has(purpose)) {
+        return res.status(400).json({ success: false, message: 'Некорректная цель проверки' });
+    }
+    const { token, difficulty } = createChallenge(purpose);
+    res.json({ success: true, token, difficulty });
+});
+
+// Новый аккаунт и его чат с ботом с приветствием — внутри транзакции client.
+async function insertUserWithBotChat(client, { uniqueCode, username, email, passwordHash, welcomeText }) {
+    const userResult = await client.query(
+        'INSERT INTO users (unique_code, username, email, password, avatar) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+        [uniqueCode, username, email, passwordHash, '#667EEA']
+    );
+    const userId = userResult.rows[0].id;
+    const botResult = await client.query(
+        'INSERT INTO chats (user_id, name, avatar, online, is_bot) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+        [userId, 'Бот Помощник', 'Б', 1, 1]
+    );
+    const botChatId = botResult.rows[0].id;
+    await client.query(
+        'INSERT INTO messages (chat_id, user_id, text, sent, time, status) VALUES ($1, $2, $3, $4, $5, $6)',
+        [botChatId, userId, writeMessageText(welcomeText, { room_id: null, chat_id: botChatId, user_id: userId }), 0, getCurrentTime(), 'read']
+    );
+    return userId;
+}
+
+async function withTransaction(work) {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        const result = await work(client);
+        await client.query('COMMIT');
+        return result;
+    } catch (txErr) {
+        await client.query('ROLLBACK');
+        throw txErr;
+    } finally {
+        client.release();
+    }
+}
+
 app.post('/api/register', registerLimiter, async (req, res) => {
     const { email, password, confirmPassword } = req.body || {};
     const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
@@ -1048,58 +1483,44 @@ app.post('/api/register', registerLimiter, async (req, res) => {
         return res.json({ success: false, message: 'Имя не может быть длиннее 32 символов' });
     if (email.length > 254)
         return res.json({ success: false, message: 'Email слишком длинный' });
-    if (password.length > 128)
-        return res.json({ success: false, message: 'Пароль не может быть длиннее 128 символов' });
+    if (password.length > MAX_PASSWORD_LENGTH)
+        return res.json({ success: false, message: `Пароль не может быть длиннее ${MAX_PASSWORD_LENGTH} символов` });
     if (password !== confirmPassword)
         return res.json({ success: false, message: 'Пароли не совпадают' });
-    if (password.length < 8)
-        return res.json({ success: false, message: 'Пароль должен быть не менее 8 символов' });
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
         return res.json({ success: false, message: 'Введите корректный email' });
 
     try {
+        // Политика — до PoW: решение одноразовое, и отказ из-за слабого
+        // пароля не должен заставлять решать задачу заново.
+        const policyError = await checkPasswordPolicy(password, { username, email });
+        if (policyError) return res.json({ success: false, message: policyError });
+        // PoW — до любых обращений к users: иначе ответ "такие данные уже
+        // заняты" можно было бы получать бесплатно, перебирая email.
+        if (!checkPow(req, 'register')) return res.json(POW_FAILED_RESPONSE);
+
         const existing = await dbGet('SELECT id FROM users WHERE email = $1 OR username = $2', [email, username]);
         if (existing) return res.json({ success: false, message: 'Ошибка регистрации. Проверьте введённые данные.' });
 
         const uniqueCode = await generateUniqueCodeAsync();
-        const hashedPassword = await bcrypt.hash(password, 12);
-
-        const client = await pool.connect();
-        let userId;
-        try {
-            await client.query('BEGIN');
-            const userResult = await client.query(
-                'INSERT INTO users (unique_code, username, email, password, avatar) VALUES ($1, $2, $3, $4, $5) RETURNING id',
-                [uniqueCode, username, email, hashedPassword, '#667EEA']
-            );
-            userId = userResult.rows[0].id;
-
-            const botResult = await client.query(
-                'INSERT INTO chats (user_id, name, avatar, online, is_bot) VALUES ($1, $2, $3, $4, $5) RETURNING id',
-                [userId, 'Бот Помощник', 'Б', 1, 1]
-            );
-            const botChatId = botResult.rows[0].id;
-            await client.query(
-                'INSERT INTO messages (chat_id, user_id, text, sent, time, status) VALUES ($1, $2, $3, $4, $5, $6)',
-                [botChatId, userId, encryptText('Привет! Я бот-помощник. Чем могу помочь?'), 0, getCurrentTime(), 'read']
-            );
-            await client.query('COMMIT');
-        } catch (txErr) {
-            await client.query('ROLLBACK');
-            throw txErr;
-        } finally {
-            client.release();
-        }
+        const passwordHash = await hashPassword(password);
+        const userId = await withTransaction(client => insertUserWithBotChat(client, {
+            uniqueCode, username, email, passwordHash,
+            welcomeText: 'Привет! Я бот-помощник. Чем могу помочь?',
+        }));
 
         await startUserSession(req, { userId, username, uniqueCode, avatar: '#667EEA' });
-        res.json({ success: true, message: 'Регистрация успешна!', user: { id: userId, username, uniqueCode, avatar: '#667EEA' } });
+        res.json({ success: true, message: 'Регистрация успешна!', user: { id: userId, username, uniqueCode, avatar: '#667EEA', readReceipts: true } });
     } catch (error) {
         console.error('Register error:', error);
         res.json({ success: false, message: 'Ошибка сервера' });
     }
 });
 
+const ANON_WELCOME_TEXT = '🔒 Приватный режим активирован!\n\nВаши данные:\n• Хранятся только в этой сессии\n• Будут удалены при выходе (или автоматически через 4 часа)\n• Не связаны с email или телефоном\n\nДля максимальной анонимности:\n• Используйте Tor Browser\n• Не делитесь личной информацией\n• Включите disappearing messages';
+
 app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
+    if (!checkPow(req, 'register-anon')) return res.json(POW_FAILED_RESPONSE);
     try {
         let uniqueCode, username;
         const rustIdentity = await fetchAnonymousIdentity();
@@ -1117,44 +1538,19 @@ app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
             username = await generateAnonymousUsernameAsync();
         }
 
-        // Генерация уникального session fingerprint для анонимного пользователя
-        const sessionFingerprint = generateSecureToken(32);
-
-        const client = await pool.connect();
-        let userId;
-        try {
-            await client.query('BEGIN');
-            const userResult = await client.query(
-                'INSERT INTO users (unique_code, username, email, password, avatar) VALUES ($1, $2, $3, $4, $5) RETURNING id',
-                [uniqueCode, username, null, null, '#667EEA']
-            );
-            userId = userResult.rows[0].id;
-
-            const botResult = await client.query(
-                'INSERT INTO chats (user_id, name, avatar, online, is_bot) VALUES ($1, $2, $3, $4, $5) RETURNING id',
-                [userId, 'Бот Помощник', 'Б', 1, 1]
-            );
-            const botChatId = botResult.rows[0].id;
-            await client.query(
-                'INSERT INTO messages (chat_id, user_id, text, sent, time, status) VALUES ($1, $2, $3, $4, $5, $6)',
-                [botChatId, userId, encryptText('🔒 Приватный режим активирован!\n\nВаши данные:\n• Хранятся только в этой сессии\n• Будут удалены при выходе (или автоматически через 4 часа)\n• Не связаны с email или телефоном\n\nДля максимальной анонимности:\n• Используйте Tor Browser\n• Не делитесь личной информацией\n• Включите disappearing messages'), 0, getCurrentTime(), 'read']
-            );
-            await client.query('COMMIT');
-        } catch (txErr) {
-            await client.query('ROLLBACK');
-            throw txErr;
-        } finally {
-            client.release();
-        }
+        const userId = await withTransaction(client => insertUserWithBotChat(client, {
+            uniqueCode, username, email: null, passwordHash: null, welcomeText: ANON_WELCOME_TEXT,
+        }));
 
         await startUserSession(req, {
             userId, username, uniqueCode, avatar: '#667EEA',
-            isAnonymous: true, sessionFingerprint, createdAt: Date.now(),
+            isAnonymous: true, createdAt: Date.now(),
         });
         // Короткий срок жизни сессии для анонимных пользователей
         req.session.cookie.maxAge = ANON_SESSION_MAX_AGE_MS;
 
-        console.log(`[Anon] New anonymous user created: ${username} (ID: ${userId})`);
+        // Имя и id анонимного пользователя в лог не пишутся: связка "время
+        // создания — id — имя" в логах хостинга как раз и деанонимизирует.
 
         res.json({
             success: true,
@@ -1165,6 +1561,7 @@ app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
                 uniqueCode,
                 avatar: '#667EEA',
                 isAnonymous: true,
+                readReceipts: true,
                 sessionExpiresIn: ANON_SESSION_MAX_AGE_MS / 1000 // секунды
             }
         });
@@ -1174,21 +1571,21 @@ app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
     }
 });
 
-app.post('/api/login', loginLimiter, async (req, res) => {
+app.post('/api/login', loginLimiter, loginAccountLimiter, async (req, res) => {
     const { email, password } = req.body || {};
     if (!isNonEmptyString(email) || !isNonEmptyString(password)) return res.json({ success: false, message: 'Введите email и пароль' });
-    if (email.length > 254 || password.length > 128) return res.json({ success: false, message: 'Неверный email или пароль' });
+    if (email.length > 254 || password.length > MAX_LOGIN_PASSWORD_LENGTH) return res.json({ success: false, message: 'Неверный email или пароль' });
 
     try {
         // Добавляем случайную задержку для защиты от timing attacks
         await addRandomDelay(50, 150);
 
-        const user = await dbGet('SELECT id, username, unique_code, avatar, password FROM users WHERE email = $1', [email]);
-        // bcrypt.compare выполняется независимо от того, найден ли юзер —
+        const user = await dbGet('SELECT id, username, unique_code, avatar, password, read_receipts FROM users WHERE email = $1', [email]);
+        // Проверка пароля выполняется независимо от того, найден ли юзер —
         // это убирает разницу во времени ответа между "нет такого email"
         // и "неверный пароль" (см. п.4 аудита).
         const hashToCheck = (user && user.password) ? user.password : DUMMY_PASSWORD_HASH;
-        const validPassword = await bcrypt.compare(password, hashToCheck);
+        const validPassword = await verifyPassword(password, hashToCheck);
 
         // Дополнительная случайная задержка
         await addRandomDelay(20, 80);
@@ -1197,44 +1594,92 @@ app.post('/api/login', loginLimiter, async (req, res) => {
             return res.json({ success: false, message: 'Неверный email или пароль' });
         }
 
+        // Хэш старого формата (bcrypt без предхэша обрезал пароль на 72
+        // байтах) или с устаревшей стоимостью — перехэшируем, пока пароль
+        // известен. Условие на старый хэш: параллельная смена пароля важнее.
+        if (needsRehash(user.password)) {
+            try {
+                await dbRun('UPDATE users SET password = $1 WHERE id = $2 AND password = $3', [await hashPassword(password), user.id, user.password]);
+            } catch (rehashError) {
+                console.error('[Auth] Не удалось обновить хэш пароля:', rehashError.message);
+            }
+        }
+
         await startUserSession(req, {
             userId: user.id, username: user.username, uniqueCode: user.unique_code, avatar: user.avatar || '',
         });
-        res.json({ success: true, message: 'Вход выполнен!', user: { id: user.id, username: user.username, uniqueCode: user.unique_code, avatar: user.avatar || '' } });
+        res.json({
+            success: true, message: 'Вход выполнен!',
+            user: { id: user.id, username: user.username, uniqueCode: user.unique_code, avatar: user.avatar || '', readReceipts: user.read_receipts },
+        });
     } catch (error) {
         console.error('Login error:', error);
         res.json({ success: false, message: 'Ошибка базы данных' });
     }
 });
 
-app.post('/api/logout', async (req, res) => {
-    const isAnonymous = req.session?.isAnonymous;
-    const userId = req.session?.userId;
-
-    // Для анонимных пользователей удаляем все данные
-    if (isAnonymous && userId) {
-        try {
-            await deleteAnonymousUser(userId);
-        } catch (error) {
-            console.error('[Anon] Cleanup error:', error);
-        }
-    }
-
+// Завершает сессию после выхода/удаления аккаунта. clearSiteCache —
+// Clear-Site-Data: "cache": браузер выбрасывает кэш сайта (страницы,
+// вложения), чтобы на общем устройстве не оставалось следов переписки.
+function endSession(req, res, { clearSiteCache, message }) {
     req.session.destroy((err) => {
         res.clearCookie('connect.sid');
         // CSRF-куку НЕ удаляем, а выдаём новую: после выхода страница не
         // перезагружается, и следующий POST /api/login без куки получал
         // 403 "неверный CSRF-токен" — войти снова можно было только после F5.
-        issueCsrfCookie(res);
-        if (err) console.error('Logout session destroy error:', err);
-        res.json({ success: true, message: isAnonymous ? 'Данные удалены' : 'Выход выполнен' });
+        issueCsrfCookie(req, res);
+        if (clearSiteCache) res.set('Clear-Site-Data', '"cache"');
+        if (err) console.error('Session destroy error:', err);
+        res.json({ success: true, message });
     });
+}
+
+app.post('/api/logout', async (req, res) => {
+    const isAnonymous = Boolean(req.session?.isAnonymous);
+    const userId = req.session?.userId;
+
+    // Для анонимных пользователей удаляем все данные
+    if (isAnonymous && userId) {
+        try {
+            await deleteUserAccount(userId);
+        } catch (error) {
+            console.error('[Anon] Ошибка удаления данных при выходе:', error.message);
+        }
+    }
+
+    endSession(req, res, { clearSiteCache: isAnonymous, message: isAnonymous ? 'Данные удалены' : 'Выход выполнен' });
+});
+
+// Удаление аккаунта со всеми данными (см. deleteUserAccount). Обычному
+// аккаунту нужен пароль — украденной сессии (или забытой открытой вкладки)
+// недостаточно; анонимный аккаунт пароля не имеет и удаляется сразу.
+app.post('/api/account/delete', passwordLimiter, async (req, res) => {
+    const userId = req.session.userId;
+    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    try {
+        const user = await dbGet('SELECT password FROM users WHERE id = $1', [userId]);
+        if (!user) return res.json({ success: false, message: 'Пользователь не найден' });
+        if (user.password) {
+            const password = req.body?.password;
+            if (!isNonEmptyString(password) || password.length > MAX_LOGIN_PASSWORD_LENGTH) {
+                return res.json({ success: false, message: 'Введите пароль' });
+            }
+            if (!(await verifyPassword(password, user.password))) {
+                return res.json({ success: false, message: 'Неверный пароль' });
+            }
+        }
+        await deleteUserAccount(userId);
+        endSession(req, res, { clearSiteCache: true, message: 'Аккаунт и все данные удалены' });
+    } catch (error) {
+        console.error('Delete account error:', error);
+        res.json({ success: false, message: 'Ошибка удаления аккаунта' });
+    }
 });
 
 app.get('/api/auth', async (req, res) => {
     if (!req.session.userId) return res.json({ authenticated: false });
     try {
-        const row = await dbGet('SELECT avatar FROM users WHERE id = $1', [req.session.userId]);
+        const row = await dbGet('SELECT avatar, read_receipts FROM users WHERE id = $1', [req.session.userId]);
         if (!row) {
             // Пользователь удалён (например, анонимный после выхода) — сессия больше не нужна
             req.session.destroy(() => {});
@@ -1251,11 +1696,29 @@ app.get('/api/auth', async (req, res) => {
                 username: req.session.username,
                 uniqueCode: req.session.uniqueCode,
                 avatar,
-                isAnonymous: req.session.isAnonymous || false
+                isAnonymous: req.session.isAnonymous || false,
+                readReceipts: row.read_receipts
             }
         });
     } catch (error) {
         res.json({ authenticated: false });
+    }
+});
+
+// Отметки прочтения: выключенные — собеседники не видят ✓✓ и не получают
+// messagesRead от этого пользователя (см. markChatRead).
+app.post('/api/user/privacy', async (req, res) => {
+    const userId = req.session.userId;
+    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    const readReceipts = req.body?.readReceipts;
+    if (typeof readReceipts !== 'boolean') return res.json({ success: false, message: 'Некорректные параметры' });
+    try {
+        const row = await dbGet('UPDATE users SET read_receipts = $1 WHERE id = $2 RETURNING read_receipts', [readReceipts, userId]);
+        if (!row) return res.json({ success: false, message: 'Пользователь не найден' });
+        res.json({ success: true, readReceipts: row.read_receipts });
+    } catch (error) {
+        console.error('Update privacy error:', error);
+        res.json({ success: false, message: 'Ошибка сохранения настроек' });
     }
 });
 
@@ -1282,11 +1745,20 @@ app.post('/api/user/avatar-color', async (req, res) => {
     }
 });
 
-// Личная строка chats вызывающего (chats.id — у каждого участника своя).
+// Личная строка chats вызывающего (chats.id — у каждого участника своя) и
+// граница видимости истории: visible_from_id — id последнего сообщения
+// комнаты на момент вступления, видно только то, что новее (для чата с
+// ботом и старых участников — 0, то есть всё).
 async function getOwnChat(chatId, userId) {
     const id = toPositiveInt(chatId);
     if (!id) return null;
-    return dbGet('SELECT * FROM chats WHERE id = $1 AND user_id = $2', [id, userId]);
+    return dbGet(
+        `SELECT c.*, COALESCE(rp.visible_from_id, 0) AS visible_from_id
+         FROM chats c
+         LEFT JOIN room_participants rp ON rp.room_id = c.room_id AND rp.user_id = c.user_id
+         WHERE c.id = $1 AND c.user_id = $2`,
+        [id, userId]
+    );
 }
 
 // Сообщения чата лежат либо по room_id (групповая комната), либо по
@@ -1309,16 +1781,26 @@ function chatScope(chat) {
 // idx_messages_room_live/idx_messages_chat_live: последнее сообщение —
 // одна запись индекса, непрочитанные — только записи после
 // last_read_message_id (не больше 100).
+//
+// Последнее сообщение комнаты — только из видимых участнику (новее его
+// visible_from_id); непрочитанные и так начинаются после
+// last_read_message_id, который при вступлении ставится на ту же границу.
+// lm_room_id/lm_chat_id/lm_user_id нужны только для AAD расшифровки и
+// клиенту не отдаются. Чаты без сообщений — по времени создания (id
+// теперь случайные), старые строки без created_at — по id, как раньше.
 const CHAT_LIST_SQL = `
     SELECT c.id, c.name, c.avatar, c.online, c.is_bot, c.room_id, r.code AS invite_code,
            lm.id AS last_message_id, lm.text AS last_message, lm.encrypted AS last_message_encrypted,
            lm.message_type AS last_message_type, lm.time AS last_time, lm.created_at AS last_created_at,
+           lm.room_id AS lm_room_id, lm.chat_id AS lm_chat_id, lm.user_id AS lm_user_id,
            COALESCE(uc.cnt, 0) AS unread
     FROM chats c
     LEFT JOIN rooms r ON r.id = c.room_id
+    LEFT JOIN room_participants rp ON rp.room_id = c.room_id AND rp.user_id = c.user_id
     LEFT JOIN LATERAL (
         SELECT CASE WHEN c.room_id IS NOT NULL
-            THEN (SELECT MAX(x.id) FROM messages x WHERE x.room_id = c.room_id AND x.deleted = 0)
+            THEN (SELECT MAX(x.id) FROM messages x
+                  WHERE x.room_id = c.room_id AND x.deleted = 0 AND x.id > COALESCE(rp.visible_from_id, 0))
             ELSE (SELECT MAX(x.id) FROM messages x WHERE x.chat_id = c.id AND x.deleted = 0)
         END AS id
     ) last ON TRUE
@@ -1337,7 +1819,7 @@ const CHAT_LIST_SQL = `
         ) unread_rows
     ) uc ON TRUE
     WHERE c.user_id = $1
-    ORDER BY lm.id DESC NULLS LAST, c.id DESC
+    ORDER BY lm.id DESC NULLS LAST, c.created_at DESC NULLS LAST, c.id DESC
 `;
 
 app.get('/api/chats', async (req, res) => {
@@ -1350,10 +1832,12 @@ app.get('/api/chats', async (req, res) => {
         // клиенту не отдаём вовсе (script.js подставляет плейсхолдер).
         res.json({
             success: true,
-            chats: chats.map(c => ({
+            chats: chats.map(({ lm_room_id, lm_chat_id, lm_user_id, ...c }) => ({
                 ...c,
                 unread: Number(c.unread),
-                last_message: c.last_message_encrypted ? null : decryptText(c.last_message),
+                last_message: c.last_message_encrypted
+                    ? null
+                    : readMessageText(c.last_message, { room_id: lm_room_id, chat_id: lm_chat_id, user_id: lm_user_id }),
             })),
         });
     } catch (error) {
@@ -1365,11 +1849,19 @@ app.get('/api/chats', async (req, res) => {
 // Отмечает сообщения чата прочитанными вплоть до upToId: двигает личный
 // маркер непрочитанного, ставит статус 'read' чужим сообщениям (у
 // отправителя появляются ✓✓) и запускает auto-delete-on-read.
+//
+// Если читатель выключил отметки прочтения (users.read_receipts), двигается
+// только его личный маркер: статус сообщений не меняется и messagesRead не
+// рассылается. Auto-delete-on-read срабатывает всё равно — это обещание
+// отправителя, а не отметка для него.
 async function markChatRead(chat, userId, upToId) {
     const previous = Number(chat.last_read_message_id) || 0;
     if (!upToId || upToId <= previous) return;
     const moved = await dbGet(
-        'UPDATE chats SET last_read_message_id = $1 WHERE id = $2 AND last_read_message_id < $1 RETURNING id',
+        `UPDATE chats c SET last_read_message_id = $1
+         FROM users u
+         WHERE c.id = $2 AND c.last_read_message_id < $1 AND u.id = c.user_id
+         RETURNING u.read_receipts`,
         [upToId, chat.id]
     );
     if (!moved) return; // уже отмечено (например, из другой вкладки)
@@ -1378,6 +1870,17 @@ async function markChatRead(chat, userId, upToId) {
     // Только сообщения после предыдущего маркера — раньше при КАЖДОМ
     // открытии чата UPDATE переписывал статус всех сообщений чата заново.
     const scope = chatScope(chat);
+    if (!moved.read_receipts) {
+        const autoDelete = await dbAll(
+            `SELECT m.id FROM messages m
+             JOIN message_expiry e ON e.message_id = m.id AND e.auto_delete_on_read = TRUE
+             WHERE m.${scope.column} = $1 AND m.id > $2 AND m.id <= $3
+               AND m.user_id <> $4 AND m.deleted = 0`,
+            [scope.value, previous, upToId, userId]
+        );
+        disappearingMessagesManager.handleMessagesRead(autoDelete.map(r => r.id));
+        return;
+    }
     const readRows = await dbAll(
         `UPDATE messages SET status = 'read'
          WHERE ${scope.column} = $1 AND id > $2 AND id <= $3
@@ -1386,8 +1889,11 @@ async function markChatRead(chat, userId, upToId) {
         [scope.value, previous, upToId, userId]
     );
     if (readRows.length > 0) {
-        io.to(getSocketRoomKey(chat.id, chat.room_id)).emit('messagesRead', {
-            chat_id: chat.id, room_id: chat.room_id, up_to_id: upToId, reader_id: userId,
+        // Без reader_id: кто именно прочитал, остальным участникам знать не
+        // нужно. Сокетам самого читателя событие не шлётся — иначе его
+        // клиент принял бы его за прочтение своих же сообщений.
+        io.to(getSocketRoomKey(chat.id, chat.room_id)).except('user:' + userId).emit('messagesRead', {
+            chat_id: chat.id, room_id: chat.room_id, up_to_id: upToId,
         });
         disappearingMessagesManager.handleMessagesRead(readRows.map(r => r.id));
     }
@@ -1410,20 +1916,21 @@ app.get('/api/messages/:chatId', async (req, res) => {
         const limit = Math.min(toPositiveInt(req.query.limit) || MESSAGES_PAGE_SIZE, MAX_MESSAGES_PAGE_SIZE);
         const before = toPositiveInt(req.query.before);
         const scope = chatScope(chat);
-        const params = [scope.value, limit + 1];
+        const params = [scope.value, limit + 1, Number(chat.visible_from_id) || 0];
         if (before) params.push(before);
 
-        // Цитата ответа берётся только из ТОГО ЖЕ чата и только если она не
-        // удалена. Раньше reply_to_id не проверялся при отправке, и
-        // подставив чужой id, можно было получить расшифрованный текст
-        // сообщения из любого чужого чата; удалённые сообщения тоже
-        // продолжали "светиться" в цитатах.
+        // Цитата ответа берётся только из ТОГО ЖЕ чата, только если она не
+        // удалена и видна участнику (новее его visible_from_id). Раньше
+        // reply_to_id не проверялся при отправке, и подставив чужой id,
+        // можно было получить расшифрованный текст сообщения из любого
+        // чужого чата; удалённые сообщения тоже продолжали "светиться" в
+        // цитатах, а новичок комнаты видел в цитатах историю до вступления.
         // Сначала id страницы (index-only scan по idx_messages_*_live), потом
         // сами строки по первичному ключу.
         const rows = await dbAll(`
             WITH page AS MATERIALIZED (
                 SELECT id FROM messages
-                WHERE ${scope.column} = $1 AND deleted = 0 ${before ? 'AND id < $3' : ''}
+                WHERE ${scope.column} = $1 AND deleted = 0 AND id > $3 ${before ? 'AND id < $4' : ''}
                 ORDER BY id DESC
                 LIMIT $2
             )
@@ -1432,12 +1939,14 @@ app.get('/api/messages/:chatId', async (req, res) => {
                    m.reply_to_id AS reply_target_id,
                    u.username AS sender_username, u.avatar AS sender_avatar,
                    rt.id AS reply_to_id, rt.text AS reply_to_text, rt.user_id AS reply_to_sender_id,
+                   rt.room_id AS reply_to_room_id, rt.chat_id AS reply_to_chat_id,
                    rt.encrypted AS reply_to_encrypted,
                    ru.username AS reply_to_sender_username, ru.avatar AS reply_to_sender_avatar
             FROM page
             JOIN messages m ON m.id = page.id
             JOIN users u ON u.id = m.user_id
-            LEFT JOIN messages rt ON rt.id = m.reply_to_id AND rt.${scope.column} = m.${scope.column} AND rt.deleted = 0
+            LEFT JOIN messages rt ON rt.id = m.reply_to_id AND rt.${scope.column} = m.${scope.column}
+                                 AND rt.deleted = 0 AND rt.id > $3
             LEFT JOIN users ru ON ru.id = rt.user_id
             ORDER BY m.id DESC
         `, params);
@@ -1455,13 +1964,14 @@ app.get('/api/messages/:chatId', async (req, res) => {
             reactions.forEach(r => { reactionsMap[r.message_id] = r.emojis; });
         }
 
-        const messages = rows.map(({ reply_target_id, reply_to_text, reply_to_sender_id, reply_to_encrypted,
-            reply_to_sender_username, reply_to_sender_avatar, ...m }) => ({
+        const messages = rows.map(({ reply_target_id, reply_to_text, reply_to_sender_id, reply_to_room_id, reply_to_chat_id,
+            reply_to_encrypted, reply_to_sender_username, reply_to_sender_avatar, ...m }) => ({
             ...m,
-            text: decryptText(m.text),
+            text: readMessageText(m.text, m),
             reactions: reactionsMap[m.id] || [],
             reply_to: m.reply_to_id ? {
-                id: m.reply_to_id, text: decryptText(reply_to_text),
+                id: m.reply_to_id,
+                text: readMessageText(reply_to_text, { room_id: reply_to_room_id, chat_id: reply_to_chat_id, user_id: reply_to_sender_id }),
                 sender_id: reply_to_sender_id, encrypted: reply_to_encrypted,
                 sender_username: reply_to_sender_username, sender_avatar: reply_to_sender_avatar
             } : (reply_target_id ? { id: reply_target_id, deleted: true } : null)
@@ -1493,11 +2003,12 @@ app.post('/api/chats/:chatId/read', async (req, res) => {
     if (!upToId) return res.json({ success: false, message: 'Некорректный upToId' });
     const chat = await getOwnChat(req.params.chatId, userId);
     if (!chat) return res.json({ success: false, message: 'Чат не найден' });
-    // Не даём отметить прочитанным больше, чем реально есть в этом чате.
+    // Не даём отметить прочитанным больше, чем реально есть (и видно
+    // участнику) в этом чате.
     const scope = chatScope(chat);
     const latest = await dbGet(
-        `SELECT MAX(id) AS id FROM messages WHERE ${scope.column} = $1 AND deleted = 0 AND id <= $2`,
-        [scope.value, upToId]
+        `SELECT MAX(id) AS id FROM messages WHERE ${scope.column} = $1 AND deleted = 0 AND id <= $2 AND id > $3`,
+        [scope.value, upToId, Number(chat.visible_from_id) || 0]
     );
     await markChatRead(chat, userId, latest && latest.id);
     res.json({ success: true });
@@ -1527,11 +2038,12 @@ function scheduleBotReply(chat) {
             if (!stillExists) return;
 
             const replyText = BOT_RESPONSES[Math.floor(Math.random() * BOT_RESPONSES.length)];
+            // Сообщения бота хранятся от имени владельца чата (sent = 0).
             const botMessage = await dbGet(
                 `INSERT INTO messages (chat_id, room_id, user_id, text, sent, time, status)
                  VALUES ($1, NULL, $2, $3, 0, $4, 'read')
                  RETURNING id, chat_id, room_id, user_id, sent, time, status, created_at, message_type, encrypted`,
-                [chat.id, chat.user_id, encryptText(replyText), getCurrentTime()]
+                [chat.id, chat.user_id, writeMessageText(replyText, { room_id: null, chat_id: chat.id, user_id: chat.user_id }), getCurrentTime()]
             );
             // Бот "прочитал" сообщения пользователя.
             const read = await dbAll(
@@ -1560,7 +2072,7 @@ app.post('/api/messages', async (req, res) => {
     // У E2EE-сообщений text — это JSON-конверт (senderKeyId/iv/ct/подпись,
     // см. public/e2ee.js), а не читаемый текст: он больше обычного
     // сообщения той же "длины" за счёт base64 и служебных полей.
-    const maxLen = encrypted ? 12000 : 4000;
+    const maxLen = encrypted ? MAX_ENVELOPE_LENGTH : 4000;
     if (text.length > maxLen) return res.json({ success: false, message: `Сообщение не может быть длиннее ${maxLen} символов` });
     let requestedExpiry;
     try {
@@ -1579,20 +2091,22 @@ app.post('/api/messages', async (req, res) => {
         const safeText = encrypted ? text.trim() : sanitizeText(text.trim());
         if (!safeText) return res.json({ success: false, message: 'Введите текст сообщения' });
 
-        // Отвечать можно только на неудалённое сообщение из ЭТОГО же чата.
+        // Отвечать можно только на неудалённое и видимое отправителю
+        // сообщение из ЭТОГО же чата (иначе ответ на старый id вытащил бы
+        // в цитату текст из истории до вступления).
         const scope = chatScope(chat);
         let replyTo = null;
         const replyTargetId = toPositiveInt(replyToId);
         if (replyTargetId) {
             const target = await dbGet(
-                `SELECT m.id, m.text, m.user_id, m.encrypted, u.username, u.avatar
+                `SELECT m.id, m.text, m.room_id, m.chat_id, m.user_id, m.encrypted, u.username, u.avatar
                  FROM messages m JOIN users u ON u.id = m.user_id
-                 WHERE m.id = $1 AND m.${scope.column} = $2 AND m.deleted = 0`,
-                [replyTargetId, scope.value]
+                 WHERE m.id = $1 AND m.${scope.column} = $2 AND m.deleted = 0 AND m.id > $3`,
+                [replyTargetId, scope.value, Number(chat.visible_from_id) || 0]
             );
             if (target) {
                 replyTo = {
-                    id: target.id, text: decryptText(target.text), sender_id: target.user_id,
+                    id: target.id, text: readMessageText(target.text, target), sender_id: target.user_id,
                     encrypted: target.encrypted, sender_username: target.username, sender_avatar: target.avatar,
                 };
             }
@@ -1604,7 +2118,8 @@ app.post('/api/messages', async (req, res) => {
             `INSERT INTO messages (chat_id, room_id, user_id, text, message_type, sent, time, status, reply_to_id, encrypted)
              VALUES ($1, $2, $3, $4, 'text', 1, $5, 'sent', $6, $7)
              RETURNING id, created_at`,
-            [chat.id, roomId, userId, encryptText(safeText), time, replyTo ? replyTo.id : null, encrypted]
+            [chat.id, roomId, userId, writeMessageText(safeText, { room_id: roomId, chat_id: chat.id, user_id: userId }),
+                time, replyTo ? replyTo.id : null, encrypted]
         );
 
         const expiry = requestedExpiry || await getDefaultExpirySeconds(chat.id);
@@ -1639,26 +2154,20 @@ app.post('/api/chats', async (req, res) => {
 
     const avatar = name.charAt(0).toUpperCase();
     try {
-        const roomCode = await generateInviteCodeAsync();
-        const client = await pool.connect();
-        let roomId, chatId;
-        try {
-            await client.query('BEGIN');
-            const roomResult = await client.query('INSERT INTO rooms (name, code) VALUES ($1, $2) RETURNING id', [name, roomCode]);
-            roomId = roomResult.rows[0].id;
-            await client.query('INSERT INTO room_participants (room_id, user_id) VALUES ($1, $2)', [roomId, userId]);
+        const roomCode = generateInviteCode();
+        const { roomId, chatId } = await withTransaction(async (client) => {
+            const roomResult = await client.query(
+                `INSERT INTO rooms (name, code, code_expires_at) VALUES ($1, $2, NOW() + $3::integer * INTERVAL '1 second') RETURNING id`,
+                [name, roomCode, INVITE_TTL_SECONDS]
+            );
+            const newRoomId = roomResult.rows[0].id;
+            await client.query('INSERT INTO room_participants (room_id, user_id, visible_from_id) VALUES ($1, $2, 0)', [newRoomId, userId]);
             const chatResult = await client.query(
                 'INSERT INTO chats (user_id, room_id, name, avatar, online, is_bot) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
-                [userId, roomId, name, avatar, 0, 0]
+                [userId, newRoomId, name, avatar, 0, 0]
             );
-            chatId = chatResult.rows[0].id;
-            await client.query('COMMIT');
-        } catch (txErr) {
-            await client.query('ROLLBACK');
-            throw txErr;
-        } finally {
-            client.release();
-        }
+            return { roomId: newRoomId, chatId: chatResult.rows[0].id };
+        });
         subscribeUserToChat(userId, chatId, roomId);
         res.json({ success: true, chat: { id: chatId, name, avatar, online: 0, is_bot: 0, room_id: roomId, invite_code: roomCode } });
     } catch (error) {
@@ -1667,29 +2176,75 @@ app.post('/api/chats', async (req, res) => {
     }
 });
 
+function inviteExpiresAtIso(expiresAt) {
+    return expiresAt ? new Date(expiresAt).toISOString() : null;
+}
+
 app.get('/api/chats/invite/:chatId', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     try {
         const chat = await getOwnChat(req.params.chatId, req.session.userId);
         if (!chat) return res.json({ success: false, message: 'Чат не найден' });
         if (!chat.room_id) return res.json({ success: false, message: 'У этого чата нет кода приглашения' });
-        const room = await dbGet('SELECT code FROM rooms WHERE id = $1', [chat.room_id]);
+        const room = await dbGet(
+            `SELECT r.code, r.code_expires_at FROM rooms r
+             JOIN room_participants rp ON rp.room_id = r.id AND rp.user_id = $2
+             WHERE r.id = $1`,
+            [chat.room_id, req.session.userId]
+        );
         if (!room) return res.json({ success: false, message: 'Код не найден' });
-        res.json({ success: true, code: room.code });
+        res.json({
+            success: true,
+            code: room.code,
+            expiresAt: inviteExpiresAtIso(room.code_expires_at),
+            expired: isInviteExpired(room.code_expires_at),
+        });
     } catch (error) {
         res.json({ success: false, message: 'Ошибка получения кода' });
     }
 });
 
-app.post('/api/chats/join', async (req, res) => {
+// Новый код приглашения (и новый срок) — любой участник комнаты. Старый
+// код перестаёт действовать сразу: так закрывается утёкшая ссылка.
+app.post('/api/chats/:chatId/invite/rotate', async (req, res) => {
     const userId = req.session.userId;
     if (!userId) return res.json({ success: false, message: 'Не авторизован' });
-    const code = typeof req.body?.code === 'string' ? req.body.code.trim() : '';
-    if (!code || code.length > 32) return res.json({ success: false, message: 'Введите код приглашения' });
+    try {
+        const chat = await getOwnChat(req.params.chatId, userId);
+        if (!chat) return res.json({ success: false, message: 'Чат не найден' });
+        if (!chat.room_id) return res.json({ success: false, message: 'У этого чата нет кода приглашения' });
+        const room = await dbGet(
+            `UPDATE rooms SET code = $1, code_expires_at = NOW() + $2::integer * INTERVAL '1 second'
+             WHERE id = $3 AND EXISTS (SELECT 1 FROM room_participants WHERE room_id = $3 AND user_id = $4)
+             RETURNING code, code_expires_at`,
+            [generateInviteCode(), INVITE_TTL_SECONDS, chat.room_id, userId]
+        );
+        if (!room) return res.json({ success: false, message: 'Чат не найден' });
+        res.json({ success: true, code: room.code, expiresAt: inviteExpiresAtIso(room.code_expires_at) });
+    } catch (error) {
+        console.error('Rotate invite error:', error);
+        res.json({ success: false, message: 'Ошибка обновления кода' });
+    }
+});
+
+// Состав комнаты изменился: клиенты участников перечитывают список
+// участников (E2EE: новичку — Sender Key, после ухода — ротация ключа).
+function notifyRoomMembersChanged(roomId) {
+    io.to(`room:${roomId}`).emit('roomMembersChanged', { roomId });
+}
+
+app.post('/api/chats/join', joinUserLimiter, joinIpLimiter, async (req, res) => {
+    const userId = req.session.userId;
+    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    const code = normalizeInviteCode(req.body?.code);
+    if (!code) return res.json({ success: false, message: 'Введите код приглашения' });
+    // Всё, что не похоже на код нынешнего формата, в БД даже не ищем.
+    if (!isValidInviteCode(code)) return res.json({ success: false, message: 'Чат по этому коду не найден' });
 
     try {
-        const room = await dbGet('SELECT * FROM rooms WHERE code = $1', [code]);
+        const room = await dbGet('SELECT id, name, code, code_expires_at FROM rooms WHERE code = $1', [code]);
         if (!room) return res.json({ success: false, message: 'Чат по этому коду не найден' });
+        if (isInviteExpired(room.code_expires_at)) return res.json({ success: false, message: 'Код приглашения истёк' });
 
         const existingChat = await dbGet('SELECT id, name, avatar FROM chats WHERE room_id = $1 AND user_id = $2', [room.id, userId]);
         if (existingChat) {
@@ -1700,31 +2255,37 @@ app.post('/api/chats/join', async (req, res) => {
         const chatName = otherUser ? `Чат с ${otherUser.username}` : room.name;
         const avatar = chatName.charAt(0).toUpperCase();
 
-        // Участник + личная строка chats — атомарно. История комнаты до
-        // момента вступления не считается непрочитанной.
-        const client = await pool.connect();
-        let chatId;
-        try {
-            await client.query('BEGIN');
-            const already = await client.query('SELECT id FROM room_participants WHERE room_id = $1 AND user_id = $2 FOR UPDATE', [room.id, userId]);
-            if (already.rows.length === 0) {
-                await client.query('INSERT INTO room_participants (room_id, user_id) VALUES ($1, $2)', [room.id, userId]);
-            }
+        // Участник + личная строка chats — атомарно. FOR SHARE на комнате:
+        // код перепроверяется под блокировкой (его могли сменить или комнату
+        // удалить, пока шли запросы выше), и последний участник не может
+        // одновременно выйти и снести комнату вместе с новичком.
+        // Новичок видит только сообщения после вступления (visible_from_id),
+        // они же — граница непрочитанного.
+        const chatId = await withTransaction(async (client) => {
+            const locked = await client.query(
+                'SELECT id FROM rooms WHERE id = $1 AND code = $2 AND code_expires_at > NOW() FOR SHARE',
+                [room.id, code]
+            );
+            if (locked.rows.length === 0) return null;
+            await client.query(
+                `INSERT INTO room_participants (room_id, user_id, visible_from_id)
+                 VALUES ($1, $2, COALESCE((SELECT MAX(id) FROM messages WHERE room_id = $1), 0))
+                 ON CONFLICT (room_id, user_id) DO NOTHING`,
+                [room.id, userId]
+            );
             const chatResult = await client.query(
                 `INSERT INTO chats (user_id, room_id, name, avatar, online, is_bot, last_read_message_id)
-                 VALUES ($1, $2, $3, $4, 0, 0, COALESCE((SELECT MAX(id) FROM messages WHERE room_id = $2), 0))
+                 VALUES ($1, $2, $3, $4, 0, 0,
+                         (SELECT visible_from_id FROM room_participants WHERE room_id = $2 AND user_id = $1))
                  RETURNING id`,
                 [userId, room.id, chatName, avatar]
             );
-            chatId = chatResult.rows[0].id;
-            await client.query('COMMIT');
-        } catch (txErr) {
-            await client.query('ROLLBACK');
-            throw txErr;
-        } finally {
-            client.release();
-        }
+            return chatResult.rows[0].id;
+        });
+        if (!chatId) return res.json({ success: false, message: 'Чат по этому коду не найден' });
+
         subscribeUserToChat(userId, chatId, room.id);
+        notifyRoomMembersChanged(room.id);
         res.json({ success: true, chat: { id: chatId, name: chatName, avatar, online: 0, is_bot: 0, room_id: room.id, invite_code: room.code } });
     } catch (error) {
         console.error('Join chat error:', error);
@@ -1744,6 +2305,7 @@ app.delete('/api/chats/:chatId', async (req, res) => {
         // удаляемых сообщений убираются с диска после COMMIT.
         const client = await pool.connect();
         let fileUrls = [];
+        let roomSurvived = false;
         try {
             await client.query('BEGIN');
             if (chat.room_id) {
@@ -1761,6 +2323,8 @@ app.delete('/api/chats/:chatId', async (req, res) => {
                     const deleted = await client.query('DELETE FROM messages WHERE room_id = $1 RETURNING file_url', [chat.room_id]);
                     fileUrls = deleted.rows.map(r => r.file_url);
                     await client.query('DELETE FROM rooms WHERE id = $1', [chat.room_id]);
+                } else {
+                    roomSurvived = true;
                 }
                 // Если участники остались — историю не трогаем, она у них
                 // по-прежнему доступна по room_id (chat_id этого сообщения,
@@ -1780,6 +2344,7 @@ app.delete('/api/chats/:chatId', async (req, res) => {
         }
         removeUploadedFiles(fileUrls);
         unsubscribeUserFromChat(userId, chat.id, chat.room_id);
+        if (roomSurvived) notifyRoomMembersChanged(chat.room_id);
         res.json({ success: true });
     } catch (error) {
         console.error('Delete chat error:', error);
@@ -1803,18 +2368,29 @@ app.put('/api/messages/:messageId', async (req, res) => {
         // Правка E2EE-сообщения — это новый конверт того же (по флагу)
         // типа: клиент сам шифрует новый текст перед PUT, флаг при
         // редактировании не меняется (encrypted не пришло — просто он же).
-        const maxLen = message.encrypted ? 12000 : 4000;
+        const maxLen = message.encrypted ? MAX_ENVELOPE_LENGTH : 4000;
         if (text.length > maxLen) return res.json({ success: false, message: `Сообщение не может быть длиннее ${maxLen} символов` });
 
         // Та же очистка, что и при отправке (раньше правкой её можно было обойти).
         const newText = message.encrypted ? text.trim() : sanitizeText(text.trim());
         if (!newText) return res.json({ success: false, message: 'Текст не может быть пустым' });
         const editedAt = new Date().toISOString();
-        await dbRun('UPDATE messages SET text = $1, edited_at = $2 WHERE id = $3', [encryptText(newText), editedAt, messageId]);
+        // AAD — от исходной строки: комната/чат и автор при правке не меняются.
+        await dbRun('UPDATE messages SET text = $1, edited_at = $2 WHERE id = $3', [writeMessageText(newText, message), editedAt, messageId]);
 
         // Раньше правки не рассылались по сокету — у остальных участников
         // комнаты изменение не появлялось без перезагрузки (см. "Мелочи").
-        io.to(getSocketRoomKey(message.chat_id, message.room_id)).emit('messageEdited', {
+        // Тем, кто вступил в комнату после этого сообщения, новый текст не
+        // уходит: для них этого сообщения нет (visible_from_id).
+        let target = io.to(getSocketRoomKey(message.chat_id, message.room_id));
+        if (message.room_id) {
+            const hidden = await dbAll(
+                'SELECT user_id FROM room_participants WHERE room_id = $1 AND visible_from_id >= $2',
+                [message.room_id, messageId]
+            );
+            for (const row of hidden) target = target.except('user:' + row.user_id);
+        }
+        target.emit('messageEdited', {
             id: messageId, text: newText, edited_at: editedAt,
             chat_id: message.chat_id, room_id: message.room_id, encrypted: message.encrypted, user_id: message.user_id
         });
@@ -1834,11 +2410,12 @@ app.delete('/api/messages/:messageId', async (req, res) => {
     try {
         const message = await dbGet('SELECT id FROM messages WHERE id = $1 AND user_id = $2 AND deleted = 0', [messageId, userId]);
         if (!message) return res.json({ success: false, message: 'Сообщение не найдено' });
-        // Тот же путь, что и у disappearing messages: текст затирается,
-        // вложение удаляется с диска (раньше файл удалённого сообщения
+        // Тот же путь, что и у disappearing messages: строка удаляется из БД
+        // физически, вложение — с диска (раньше файл удалённого сообщения
         // оставался доступен по прямой ссылке), участникам уходит
-        // 'messageDeleted'.
-        await disappearingMessagesManager.deleteMessages([messageId]);
+        // 'messageDeleted'. Пустой результат — ошибка БД (она уже в логе).
+        const deleted = await disappearingMessagesManager.deleteMessages([messageId]);
+        if (deleted.length === 0) return res.json({ success: false, message: 'Ошибка удаления' });
         res.json({ success: true });
     } catch (error) {
         console.error('Delete message error:', error);
@@ -1865,51 +2442,90 @@ async function readFileHead(filePath, length) {
     }
 }
 
+function rejectUpload(res, file, status, message) {
+    cleanupUploadedFile(file);
+    return res.status(status).json({ success: false, message });
+}
+
+// Квота вложений: сумма file_size всех сообщений пользователя плюс новый
+// файл (index-only scan по idx_messages_user_files).
+async function exceedsUploadQuota(userId, incomingBytes) {
+    const row = await dbGet(
+        'SELECT COALESCE(SUM(file_size), 0) AS used FROM messages WHERE user_id = $1 AND file_size IS NOT NULL',
+        [userId]
+    );
+    return Number(row && row.used) + incomingBytes > UPLOAD_QUOTA_BYTES;
+}
+
+// Два вида вложений:
+//   * обычное — проверка сигнатуры, снятие метаданных (все типы, fail
+//     closed), имя по типу вместо исходного (anonymizedFileName);
+//   * E2EE (encrypted=true, только в комнатах) — сервер получает лишь
+//     шифротекст (.bin) и E2EE-конверт с типом, именем и ключом файла;
+//     сигнатуры и метаданные тут проверять не у чего — это случайные байты.
 app.post('/api/messages/file', upload.single('file'), async (req, res) => {
-    const userId = req.session.userId;
-    if (!userId) {
-        cleanupUploadedFile(req.file);
-        return res.status(401).json({ success: false, message: 'Не авторизован' });
-    }
-    const { chatId, text } = req.body || {};
     const file = req.file;
-
+    const userId = req.session.userId;
+    if (!userId) return rejectUpload(res, file, 401, 'Не авторизован');
     if (!file) return res.status(400).json({ success: false, message: 'Файл не выбран' });
-    const caption = typeof text === 'string' ? sanitizeText(text.trim()) : '';
-    if (!toPositiveInt(chatId) || caption.length > 4000) {
-        cleanupUploadedFile(file);
-        return res.status(400).json({ success: false, message: !toPositiveInt(chatId) ? 'Не указан чат' : 'Подпись слишком длинная' });
+
+    const body = req.body || {};
+    // Перепроверка fileFilter в обе стороны: шифротекст — только с флагом
+    // encrypted, флаг — только с шифротекстом (поле encrypted могло прийти
+    // после файла, когда fileFilter его ещё не видел).
+    const encrypted = body.encrypted === 'true';
+    if (encrypted !== (file.mimetype === ENCRYPTED_FILE_MIME)) {
+        return rejectUpload(res, file, 400, 'Неподдерживаемый тип файла');
+    }
+    if (!toPositiveInt(body.chatId)) return rejectUpload(res, file, 400, 'Не указан чат');
+
+    let caption = '';
+    let envelope = null;
+    if (encrypted) {
+        envelope = typeof body.envelope === 'string' ? body.envelope.trim() : '';
+        if (!envelope || envelope.length > MAX_ENVELOPE_LENGTH) {
+            return rejectUpload(res, file, 400, 'Некорректный E2EE-конверт вложения');
+        }
+    } else {
+        caption = typeof body.text === 'string' ? sanitizeText(body.text.trim()) : '';
+        if (caption.length > 4000) return rejectUpload(res, file, 400, 'Подпись слишком длинная');
     }
 
-    // Сначала проверка чата (дёшево), потом обработка файла (дорого).
-    const chat = await getOwnChat(chatId, userId).catch((err) => {
+    // Сначала проверка чата и квоты (дёшево), потом обработка файла (дорого).
+    let chat;
+    try {
+        chat = await getOwnChat(body.chatId, userId);
+        if (!chat) return rejectUpload(res, file, 404, 'Чат не найден');
+        if (encrypted && !chat.room_id) {
+            return rejectUpload(res, file, 400, 'Зашифрованные вложения доступны только в групповых чатах');
+        }
+        if (await exceedsUploadQuota(userId, file.size)) {
+            return rejectUpload(res, file, 413, 'Превышена квота хранилища вложений');
+        }
+    } catch (err) {
         cleanupUploadedFile(file);
         throw err;
-    });
-    if (!chat) {
-        cleanupUploadedFile(file);
-        return res.status(404).json({ success: false, message: 'Чат не найден' });
     }
 
     const uploadedFilePath = path.join(UPLOADS_DIR, file.filename);
-    try {
-        const head = await readFileHead(uploadedFilePath, 12);
-        if (!checkMagicBytes(head, file.mimetype)) {
-            cleanupUploadedFile(file);
-            return res.status(400).json({ success: false, message: 'Содержимое файла не соответствует его типу' });
-        }
-
-        // Удаление метаданных из файла для защиты приватности
-        if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf') {
+    let fileSize = file.size;
+    if (!encrypted) {
+        try {
+            const head = await readFileHead(uploadedFilePath, 12);
+            if (!checkMagicBytes(head, file.mimetype)) {
+                return rejectUpload(res, file, 400, 'Содержимое файла не соответствует его типу');
+            }
+            // Метаданные (EXIF/GPS, автор PDF, теги аудио/видео...) снимаются
+            // у ВСЕХ типов — раньше только у картинок и PDF.
             await stripMetadataFromFile(uploadedFilePath, file.mimetype);
+            fileSize = (await fs.promises.stat(uploadedFilePath)).size;
+        } catch (magicErr) {
+            // Раньше при исключении здесь проверка молча пропускалась и файл
+            // проходил дальше — теоретическая лазейка мимо проверки типа файла.
+            // Теперь любая ошибка проверки = отказ (fail closed), а не fail open.
+            console.error('Upload processing error:', magicErr.message);
+            return rejectUpload(res, file, 400, 'Не удалось проверить содержимое файла');
         }
-    } catch (magicErr) {
-        // Раньше при исключении здесь проверка молча пропускалась и файл
-        // проходил дальше — теоретическая лазейка мимо проверки типа файла.
-        // Теперь любая ошибка проверки = отказ (fail closed), а не fail open.
-        console.error('Magic bytes check error:', magicErr);
-        cleanupUploadedFile(file);
-        return res.status(400).json({ success: false, message: 'Не удалось проверить содержимое файла' });
     }
 
     try {
@@ -1917,16 +2533,19 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
         const roomId = chat.room_id || null;
         const fileUrl = `/uploads/${file.filename}`;
         const fileType = file.mimetype;
-        const sanitizedFileName = path.basename(file.originalname || '').slice(0, 200).replace(/[<>&"']/g, '') || 'file';
+        // Исходное имя файла (file.originalname) не хранится и не логируется.
+        const fileName = encrypted ? null : anonymizedFileName(fileType);
 
-        const messageType = fileType.startsWith('image/') ? 'image' : fileType.startsWith('video/') ? 'video' : fileType.startsWith('audio/') ? 'audio' : 'file';
-        const messageText = caption || (messageType === 'audio' ? 'Голосовое сообщение' : sanitizedFileName);
+        const messageType = encrypted ? 'file'
+            : fileType.startsWith('image/') ? 'image' : fileType.startsWith('video/') ? 'video' : fileType.startsWith('audio/') ? 'audio' : 'file';
+        const messageText = encrypted ? envelope : (caption || (messageType === 'audio' ? 'Голосовое сообщение' : fileName));
 
         const inserted = await dbGet(
-            `INSERT INTO messages (chat_id, room_id, user_id, text, file_url, file_name, file_type, message_type, sent, time, status)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, $9, 'sent')
+            `INSERT INTO messages (chat_id, room_id, user_id, text, file_url, file_name, file_type, message_type, sent, time, status, encrypted, file_size)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, $9, 'sent', $10, $11)
              RETURNING id, created_at`,
-            [chat.id, roomId, userId, encryptText(messageText), fileUrl, sanitizedFileName, fileType, messageType, time]
+            [chat.id, roomId, userId, writeMessageText(messageText, { room_id: roomId, chat_id: chat.id, user_id: userId }),
+                fileUrl, fileName, fileType, messageType, time, encrypted, fileSize]
         );
 
         const expiry = await getDefaultExpirySeconds(chat.id);
@@ -1939,9 +2558,9 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
         const fileMessage = {
             id: inserted.id, chat_id: chat.id, room_id: roomId, user_id: userId,
             sender_username: req.session.username, sender_avatar: req.session.avatar || '',
-            text: messageText, file_url: fileUrl, file_name: sanitizedFileName,
+            text: messageText, file_url: fileUrl, file_name: fileName,
             file_type: fileType, message_type: messageType, sent: 1, time, status: 'sent',
-            edited_at: null, deleted: 0, encrypted: false, created_at: inserted.created_at,
+            edited_at: null, deleted: 0, encrypted, created_at: inserted.created_at,
             reply_to: null, reactions: [],
         };
         io.to(getSocketRoomKey(chat.id, roomId)).emit('newMessage', fileMessage);
@@ -1967,7 +2586,7 @@ async function userCanAccessMessage(userId, messageId) {
         `SELECT m.room_id, c.room_id AS chat_room_id, c.user_id AS chat_owner_id
          FROM messages m
          LEFT JOIN chats c ON m.chat_id = c.id
-         WHERE m.id = $1`,
+         WHERE m.id = $1 AND m.deleted = 0`,
         [messageId]
     );
     if (!row) return false;
@@ -1980,9 +2599,11 @@ async function userCanAccessMessage(userId, messageId) {
         // у кого больше нет.
         return row.chat_owner_id != null && row.chat_owner_id === userId;
     }
+    // Участник, вступивший после этого сообщения, его не видит — ни файл,
+    // ни реакции (граница visible_from_id, см. /api/chats/join).
     const participant = await dbGet(
-        'SELECT id FROM room_participants WHERE room_id = $1 AND user_id = $2',
-        [roomId, userId]
+        'SELECT id FROM room_participants WHERE room_id = $1 AND user_id = $2 AND visible_from_id < $3',
+        [roomId, userId, messageId]
     );
     return Boolean(participant);
 }
@@ -2061,8 +2682,12 @@ app.get('/api/search', async (req, res) => {
     const safeTerm = query.replace(/[%_\\]/g, '\\$&');
     const searchTerm = `%${safeTerm}%`;
     try {
+        // Порядок — по времени создания: id чатов теперь случайные.
         const chats = await dbAll(
-            'SELECT id, name, avatar, room_id, online, is_bot FROM chats WHERE user_id = $1 AND name ILIKE $2 ORDER BY id DESC LIMIT 10',
+            `SELECT id, name, avatar, room_id, online, is_bot FROM chats
+             WHERE user_id = $1 AND name ILIKE $2
+             ORDER BY created_at DESC NULLS LAST, id DESC
+             LIMIT 10`,
             [req.session.userId, searchTerm]
         );
         // Текст сообщений хранится зашифрованным, поэтому ILIKE по m.text на
@@ -2078,15 +2703,21 @@ app.get('/api/search', async (req, res) => {
         // encrypted = FALSE — E2EE-сообщения (см. public/e2ee.js) сервер
         // расшифровать в принципе не может, это не баг поиска, а прямое
         // следствие сквозного шифрования.
+        // В комнатах — только сообщения, видимые искателю (после его
+        // вступления). msg_* — собственные room/chat/user строки сообщения,
+        // нужны для AAD и клиенту не отдаются.
         const candidates = await dbAll(`
             SELECT m.id, m.text, m.created_at, m.time, uc.id AS chat_id, uc.name AS chat_name,
-                   uc.room_id, uc.avatar, uc.online, uc.is_bot
+                   uc.room_id, uc.avatar, uc.online, uc.is_bot,
+                   m.room_id AS msg_room_id, m.chat_id AS msg_chat_id, m.user_id AS msg_user_id
             FROM (
                 SELECT ids.id, uc.id AS chat_id
                 FROM chats uc
+                LEFT JOIN room_participants rp ON rp.room_id = uc.room_id AND rp.user_id = uc.user_id
                 CROSS JOIN LATERAL (
                     (SELECT id FROM messages
                       WHERE uc.room_id IS NOT NULL AND room_id = uc.room_id AND deleted = 0 AND encrypted = FALSE
+                        AND id > COALESCE(rp.visible_from_id, 0)
                       ORDER BY id DESC LIMIT 500)
                     UNION ALL
                     (SELECT id FROM messages
@@ -2103,8 +2734,8 @@ app.get('/api/search', async (req, res) => {
         `, [req.session.userId]);
         const needle = query.toLowerCase();
         const messages = [];
-        for (const m of candidates) {
-            const text = decryptText(m.text);
+        for (const { msg_room_id, msg_chat_id, msg_user_id, ...m } of candidates) {
+            const text = readMessageText(m.text, { room_id: msg_room_id, chat_id: msg_chat_id, user_id: msg_user_id });
             if (typeof text === 'string' && text.toLowerCase().includes(needle)) {
                 messages.push({ ...m, text });
                 if (messages.length >= 20) break;
@@ -2193,16 +2824,20 @@ app.post('/api/change-password', passwordLimiter, async (req, res) => {
     const { currentPassword, newPassword, confirmPassword } = req.body || {};
     if (!isNonEmptyString(currentPassword) || !isNonEmptyString(newPassword) || typeof confirmPassword !== 'string') return res.json({ success: false, message: 'Заполните все поля' });
     if (newPassword !== confirmPassword) return res.json({ success: false, message: 'Новые пароли не совпадают' });
-    if (newPassword.length < 8) return res.json({ success: false, message: 'Пароль должен быть не менее 8 символов' });
-    if (newPassword.length > 128 || currentPassword.length > 128) return res.json({ success: false, message: 'Пароль не может быть длиннее 128 символов' });
+    if (newPassword.length > MAX_PASSWORD_LENGTH) return res.json({ success: false, message: `Пароль не может быть длиннее ${MAX_PASSWORD_LENGTH} символов` });
+    if (currentPassword.length > MAX_LOGIN_PASSWORD_LENGTH) return res.json({ success: false, message: 'Неверный текущий пароль' });
 
     try {
-        const user = await dbGet('SELECT password FROM users WHERE id = $1', [userId]);
+        const user = await dbGet('SELECT username, email, password FROM users WHERE id = $1', [userId]);
         if (!user) return res.json({ success: false, message: 'Пользователь не найден' });
         if (!user.password) return res.json({ success: false, message: 'У этого аккаунта нет пароля (приватный режим)' });
-        const validPassword = await bcrypt.compare(currentPassword, user.password);
+        const validPassword = await verifyPassword(currentPassword, user.password);
         if (!validPassword) return res.json({ success: false, message: 'Неверный текущий пароль' });
-        const hashedPassword = await bcrypt.hash(newPassword, 12);
+        // Та же политика, что и при регистрации (длина, блок-лист, не
+        // содержит имя/почту — поэтому они и выбираются выше).
+        const policyError = await checkPasswordPolicy(newPassword, { username: user.username, email: user.email });
+        if (policyError) return res.json({ success: false, message: policyError });
+        const hashedPassword = await hashPassword(newPassword);
 
         await dbRun('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, userId]);
         // Смена пароля завершает ВСЕ сессии пользователя (другие устройства,
@@ -2242,17 +2877,34 @@ app.use((err, req, res, next) => {
     res.status(500).json({ success: false, message: 'Внутренняя ошибка сервера' });
 });
 
-// Полное удаление анонимного пользователя: сообщения (и их файлы),
-// реакции, E2EE key-shares и ключи, участие в комнатах, опустевшие комнаты,
-// сама строка users. Одной транзакцией — раньше это была серия отдельных
-// DELETE, и первая же ошибка FK (например, из e2ee_key_shares, который
-// ссылается на users без каскада) оставляла пользователя в БД навсегда.
-async function deleteAnonymousUser(userId) {
-    const client = await pool.connect();
+// Полное удаление пользователя (анонимного при выходе/по сроку или любого
+// по POST /api/account/delete): его сообщения (и их файлы), реакции, E2EE
+// key-shares, участие в комнатах, опустевшие комнаты со всей историей,
+// chats (chat_settings — каскадом), unread, сама строка users;
+// message_expiry и реакции на его сообщения уходят каскадом. Одной
+// транзакцией — раньше это была серия отдельных DELETE, и первая же ошибка
+// FK (например, из e2ee_key_shares, который ссылается на users без каскада)
+// оставляла пользователя в БД навсегда. После COMMIT — файлы с диска,
+// сессии на всех устройствах, сокеты, ключи в key-server и уведомление
+// оставшимся участникам комнат.
+async function deleteUserAccount(userId) {
     let fileUrls = [];
-    try {
-        await client.query('BEGIN');
-        const rooms = await client.query('SELECT DISTINCT room_id FROM room_participants WHERE user_id = $1', [userId]);
+    let survivingRoomIds = [];
+    const deleted = await withTransaction(async (client) => {
+        // Блокировка строки пользователя: параллельная отправка сообщения
+        // (FK на users) дождётся конца удаления и получит ошибку, а не
+        // оставит сообщение, которое уже никто не удалит.
+        const user = await client.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [userId]);
+        if (user.rows.length === 0) return false;
+        const rooms = await client.query('SELECT DISTINCT room_id FROM room_participants WHERE user_id = $1 ORDER BY room_id', [userId]);
+        const roomIds = rooms.rows.map(r => r.room_id);
+        // Комнаты блокируются так же, как при выходе из чата (DELETE
+        // /api/chats/:chatId): иначе одновременный выход последнего другого
+        // участника оставил бы пустую комнату навсегда. Порядок по id — без
+        // взаимных блокировок между двумя такими удалениями.
+        if (roomIds.length > 0) {
+            await client.query('SELECT id FROM rooms WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE', [roomIds]);
+        }
         const ownMessages = await client.query('DELETE FROM messages WHERE user_id = $1 RETURNING file_url', [userId]);
         fileUrls = ownMessages.rows.map(r => r.file_url);
         await client.query('DELETE FROM reactions WHERE user_id = $1', [userId]);
@@ -2261,7 +2913,6 @@ async function deleteAnonymousUser(userId) {
         await client.query('DELETE FROM unread WHERE user_id = $1', [userId]);
         await client.query('DELETE FROM chats WHERE user_id = $1', [userId]);
 
-        const roomIds = rooms.rows.map(r => r.room_id);
         if (roomIds.length > 0) {
             const orphaned = await client.query(
                 `DELETE FROM messages m WHERE m.room_id = ANY($1::int[])
@@ -2270,24 +2921,32 @@ async function deleteAnonymousUser(userId) {
                 [roomIds]
             );
             fileUrls.push(...orphaned.rows.map(r => r.file_url));
-            await client.query(
+            const removedRooms = await client.query(
                 `DELETE FROM rooms r WHERE r.id = ANY($1::int[])
-                   AND NOT EXISTS (SELECT 1 FROM room_participants rp WHERE rp.room_id = r.id)`,
+                   AND NOT EXISTS (SELECT 1 FROM room_participants rp WHERE rp.room_id = r.id)
+                 RETURNING id`,
                 [roomIds]
             );
+            const removed = new Set(removedRooms.rows.map(r => r.id));
+            survivingRoomIds = roomIds.filter(id => !removed.has(id));
         }
         await client.query('DELETE FROM users WHERE id = $1', [userId]);
-        await client.query('COMMIT');
-    } catch (error) {
-        await client.query('ROLLBACK');
-        throw error;
-    } finally {
-        client.release();
-    }
+        return true;
+    });
+    if (!deleted) return false;
+
     removeUploadedFiles(fileUrls);
     io.in('user:' + userId).disconnectSockets(true);
+    for (const roomId of survivingRoomIds) notifyRoomMembersChanged(roomId);
     deleteKeysForUser(userId);
-    console.log(`[Anon] Successfully cleaned up anonymous user ${userId}`);
+    // Сессии на других устройствах. После COMMIT и отдельно: таблицы session
+    // может ещё не быть (42P01), а ошибка внутри транзакции откатила бы всё.
+    try {
+        await dbRun(`DELETE FROM session WHERE sess->>'userId' = $1`, [String(userId)]);
+    } catch (error) {
+        if (error.code !== '42P01') console.error('[Account] Не удалось удалить сессии:', error.message);
+    }
+    return true;
 }
 
 // Анонимные аккаунты, чья сессия уже истекла (вкладку просто закрыли, не
@@ -2305,17 +2964,20 @@ async function purgeExpiredAnonymousUsers() {
                   SELECT 1 FROM session s
                   WHERE s.expire > NOW() AND s.sess->>'userId' = u.id::text
               )
-            ORDER BY u.id
+            ORDER BY u.created_at
             LIMIT 200
         `);
+        // В лог — только счётчики, без id анонимных аккаунтов.
+        let failed = 0;
         for (const row of rows) {
             try {
-                await deleteAnonymousUser(row.id);
+                await deleteUserAccount(row.id);
             } catch (err) {
-                console.error('[Anon] Не удалось удалить пользователя', row.id, '-', err.message);
+                failed++;
+                console.error('[Anon] Не удалось удалить просроченный аккаунт:', err.message);
             }
         }
-        if (rows.length > 0) console.log(`[Anon] Удалено просроченных анонимных аккаунтов: ${rows.length}`);
+        if (rows.length > 0) console.log(`[Anon] Удалено просроченных анонимных аккаунтов: ${rows.length - failed}`);
     } catch (error) {
         // 42P01 — таблица session ещё не создана (ни одного входа с запуска БД)
         if (error.code !== '42P01') console.error('[Anon] Purge error:', error.message);
@@ -2340,35 +3002,25 @@ function onServerListening() {
         console.log('');
     }
 
-    // Проверка Tor подключения (не блокирует запуск)
-    if (ENABLE_TOR_ROUTING) {
-        checkTorConnection().then((torStatus) => {
-            if (torStatus.available && torStatus.isTor) {
-                console.log('✓ Tor успешно подключен');
-                console.log(`  IP через Tor: ${torStatus.ip}`);
-                console.log('\nДля настройки Hidden Service добавьте в torrc:');
-                console.log(getTorHiddenServiceConfig().hiddenServiceConfig);
-            } else {
-                console.warn('⚠ Tor не доступен:', torStatus.message || 'трафик идёт не через Tor');
-                console.warn('  Сервер работает без Tor routing');
-            }
-        });
-    }
-
-    // Фоновые задачи: брошенные временные файлы обработки вложений и
-    // просроченные анонимные аккаунты.
+    // Фоновые задачи: брошенные временные файлы обработки вложений,
+    // просроченные анонимные аккаунты и (однократно) строки, оставшиеся от
+    // soft-delete старой схемы.
     setInterval(() => cleanupStaleTempFiles(UPLOADS_DIR, 60 * 60 * 1000), 60 * 60 * 1000);
     setTimeout(purgeExpiredAnonymousUsers, 60 * 1000);
     setInterval(purgeExpiredAnonymousUsers, 30 * 60 * 1000);
+    setImmediate(purgeLegacySoftDeletedMessages);
 
+    // Только то, что действительно включено в этом запуске.
     console.log('Функции безопасности:');
-    console.log('  ✓ CSRF Protection');
-    console.log('  ✓ Rate Limiting');
-    console.log('  ✓ Metadata Stripping');
-    console.log('  ✓ Disappearing Messages');
-    console.log('  ✓ Enhanced Privacy Headers');
-    console.log('  ✓ Timing Attack Protection');
-    if (ENABLE_TOR_ROUTING) console.log('  ✓ Tor Hidden Service Support');
+    console.log('  ✓ CSRF-токен и проверка Origin (HTTP и WebSocket)');
+    console.log('  ✓ Rate limiting (IP, аккаунт) и proof-of-work при регистрации');
+    console.log('  ✓ Очистка метаданных и обезличенные имена вложений');
+    console.log('  ✓ Исчезающие сообщения, физическое удаление');
+    console.log('  ✓ Шифрование текста сообщений в БД (AES-256-GCM с привязкой к комнате)');
+    console.log('  ✓ CSP с nonce, заголовки приватности' + (IS_PRODUCTION ? ', HSTS по https' : ''));
+    console.log('  ✓ Выравнивание времени ответа при входе');
+    if (process.env.INTERNAL_KEY_SERVER_SECRET) console.log('  ✓ E2EE key server (прокси /api/keys)');
+    if (ONION_ADDRESS && ONION_PORT) console.log(`  ✓ Onion-сервис: http://${ONION_ADDRESS} (внутренний порт ${ONION_PORT})`);
     console.log(`\n${'='.repeat(60)}\n`);
 }
 
@@ -2376,7 +3028,12 @@ function onServerListening() {
 // параллельно с initDatabase(): первые запросы попадали на недомигрированную
 // БД и висели на блокировках ALTER TABLE.
 initDatabase()
-    .then(() => server.listen(PORT, HOST, onServerListening))
+    .then(() => {
+        server.listen(PORT, HOST, onServerListening);
+        // Отдельный внутренний порт для tor-service: соединения с него
+        // помечаются как onion (lib/tor-support.js). Наружу его не публиковать.
+        listenOnionPort(server, HOST, () => console.log(`[Tor] Onion-порт ${ONION_PORT} слушается`));
+    })
     .catch((err) => {
         console.error('Ошибка инициализации БД:', err);
         process.exit(1);

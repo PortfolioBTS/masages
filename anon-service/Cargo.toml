@@ -2,6 +2,11 @@
 name = "anon-service"
 version = "0.1.0"
 edition = "2021"
+# Cargo.lock не хранится, поэтому версии зависимостей выбираются при сборке.
+# Свежий hyper-util (через axum 0.7) требует 1.85. Dockerfile включает
+# MSRV-aware резолвер: он держит зависимости в пределах этой версии, и новый
+# подъём MSRV у них не ломает сборку.
+rust-version = "1.85"
 
 [dependencies]
 axum = "0.7"
@@ -9,4 +14,3 @@ tokio = { version = "1", features = ["full"] }
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tower-http = { version = "0.5", features = ["cors"] }

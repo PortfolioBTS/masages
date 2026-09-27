@@ -14,6 +14,20 @@ pub struct SignedPrekeyRequest {
 }
 
 #[derive(Deserialize)]
+pub struct PqPrekeyRequest {
+    pub key_id: i64,
+    pub public_key: String, // base64, ML-KEM-768 encapsulation key, 1184 bytes
+    pub signature: String,  // base64, Ed25519 signature над сырыми байтами public_key, 64 bytes
+}
+
+/// Query `?ids=1,2,3`. Option, чтобы отсутствие параметра давало наш
+/// JSON-ответ 400, а не текстовый отказ экстрактора axum.
+#[derive(Deserialize)]
+pub struct IdentitiesQuery {
+    pub ids: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub struct OneTimePrekeyItem {
     pub key_id: i64,
     pub public_key: String, // base64, X25519 pub, 32 bytes
@@ -46,11 +60,26 @@ pub struct OneTimePrekeyCountResponse {
     pub count: i64,
 }
 
+/// Подписанный prekey: и классический X25519 SPK, и ML-KEM-768 PQ-prekey
+/// отдаются в одном формате.
 #[derive(Serialize)]
 pub struct SignedPrekeyDto {
     pub key_id: i64,
     pub public_key: String,
     pub signature: String,
+}
+
+#[derive(Serialize)]
+pub struct IdentityDto {
+    pub user_id: i64,
+    pub identity_signing_key: String,
+    pub identity_dh_key: String,
+}
+
+#[derive(Serialize)]
+pub struct IdentitiesResponse {
+    /// Только пользователи с зарегистрированным identity, по возрастанию user_id.
+    pub identities: Vec<IdentityDto>,
 }
 
 #[derive(Serialize)]
@@ -70,4 +99,8 @@ pub struct BundleResponse {
     /// для самого первого сообщения. Клиент должен показать это как
     /// повод срочно пополнить пул своих OPK на стороне получателя.
     pub one_time_prekey: Option<OneTimePrekeyDto>,
+    /// ML-KEM-768 prekey для PQXDH (сериализуется как null, если его нет —
+    /// например, клиент ещё не обновился). Это «last resort» ключ: он не
+    /// расходуется при выдаче, одноразовых PQ-prekey сервис не хранит.
+    pub pq_prekey: Option<SignedPrekeyDto>,
 }
