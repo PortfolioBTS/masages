@@ -6,6 +6,37 @@
 умолчанию: постквантовый гибрид PQXDH (X25519 + ML-KEM-768) и Sender Keys, с
 кодами безопасности как в Signal. Файлы в комнатах шифруются в браузере.
 
+## Интерфейс
+
+- Строгий чёрно-белый монохром без цветовых оттенков, тёмная и светлая
+  тема (по умолчанию — как в системе, переключатель в сайдбаре и профиле).
+- Иконки вместо эмодзи: SVG-спрайт на основе Lucide (ISC) и собственный знак
+  Nyxo (`public/icons.js`), реакции тоже иконками.
+- PWA: `manifest.webmanifest`, значки 192/512/maskable, apple-touch-icon.
+- Адаптивная вёрстка (≤ 768 px — одна колонка), фокус с клавиатуры,
+  `prefers-reduced-motion`.
+
+## Возможности
+
+- **Исчезающие сообщения на всю комнату** (5 мин / 1 ч / 1 д / 7 д): таймер
+  общий для всех участников, виден в шапке, изменения — служебной строкой.
+- **Приглашения:** код 26 символов и QR-код ссылки `…/#join=КОД` (фрагмент не
+  уходит на сервер), срок действия, лимит участников, вступление после
+  одобрения (включено по умолчанию), отключение кода.
+- **Заявки на вступление:** заявитель видит «ожидает одобрения», участники —
+  полосу заявок и кнопки «Впустить/Отклонить». Принятый участник видит только
+  сообщения после одобрения, ключ E2EE ему передаётся автоматически.
+- **Чаты:** закрепление, режим «без звука», архив.
+- **Приватный режим:** срок жизни аккаунта — пока открыта вкладка / 1 день /
+  7 дней без активности (не дольше 7 дней), обратный отсчёт в сайдбаре.
+- **Журнал безопасности** в профиле: входы, неудачные попытки, смена пароля —
+  без IP, только семейство браузера и ОС.
+- **Выход со стиранием данных устройства:** ключи E2EE и локальные настройки
+  удаляются, ключи отзываются на сервере.
+- **Файлы:** перетаскивание, несколько файлов за раз, прогресс и отмена.
+- Кнопка «вниз» со счётчиком новых сообщений, индикатор соединения,
+  уведомления без текста сообщения и имени отправителя.
+
 ## Стек
 
 - Backend: Node.js 24, Express 4, Socket.io 4, PostgreSQL (`pg`)
@@ -143,9 +174,10 @@ npm test                 # тесты без БД
 
 ### Анонимность и метаданные
 
-- Анонимный вход без почты и телефона; данные удаляются при выходе, а если
-  вкладку закрыли — через ~5 часов. На устройстве при этом стираются ключи
-  E2EE и локальные настройки, сервер присылает `Clear-Site-Data: "cache"`.
+- Анонимный вход без почты и телефона; данные удаляются при выходе или после
+  выбранного срока неактивности (30 минут после закрытия вкладки, 1 день или
+  7 дней, не дольше 7 дней от создания). На устройстве при этом стираются
+  ключи E2EE и локальные настройки, сервер присылает `Clear-Site-Data: "cache"`.
 - Метаданные снимаются со всех разрешённых типов файлов: EXIF/GPS/XMP,
   GPS-дорожки видео (GoPro, DJI, Apple), теги MP3/OGG/WAV, PDF. Имена файлов
   обезличиваются.
@@ -154,8 +186,9 @@ npm test                 # тесты без БД
   порядок и время регистрации.
 - Отметки о прочтении можно отключить (тогда не видны и чужие — как в Signal).
 - Удалённые и исчезающие сообщения удаляются физически.
-- Инвайт-код — 26 символов (≈130 бит), со сроком жизни и перевыпуском. Новый
-  участник не видит историю до своего вступления.
+- Инвайт-код — 26 символов (≈130 бит), со сроком жизни, лимитом участников,
+  перевыпуском и одобрением вступления (включено по умолчанию, в том числе для
+  существующих комнат). Новый участник не видит историю до одобрения.
 - Onion-сервис (`tor-service/`) с определением onion-соединений по отдельному
   внутреннему порту.
 - Удаление аккаунта — полное: сообщения, файлы, ключи, сессии.
@@ -177,7 +210,10 @@ lib/
   message-crypto.js        # шифрование текста сообщений в БД (enc:v2, AAD, ротация)
   passwords.js             # хэширование и политика паролей
   pow.js                   # proof-of-work для регистрации
-  security-utils.js        # проверка Origin, инвайт-коды, обезличенные имена
+  security-utils.js        # проверка Origin, инвайт-коды, обезличенные имена, семейство User-Agent
+  invites.js               # параметры приглашений и заявок
+  chat-settings.js         # общий таймер исчезающих сообщений комнаты
+  anon-lifetime.js         # срок жизни анонимного аккаунта по неактивности
   disappearing-messages.js # таймеры и физическое удаление сообщений
   metadata-stripper.js     # очистка метаданных вложений на сервере
   privacy.js               # заголовки приватности, санитайзинг текста
@@ -186,6 +222,10 @@ lib/
   tor-support.js           # onion-порт, Onion-Location
 public/
   index.html, style.css, script.js
+  theme.js                 # тёмная/светлая тема без мигания при загрузке
+  icons.js                 # SVG-спрайт иконок (Lucide, ISC) и window.Icons
+  icons/, manifest.webmanifest  # значки и манифест PWA
+  vendor/qrcode.js         # qrcode-generator (MIT) для QR-кода приглашения
   e2ee.js                  # клиентский E2EE (PQXDH + Sender Keys)
   mlkem.js                 # ML-KEM-768 (FIPS 203) на чистом JS
   media-sanitizer.js       # очистка метаданных (браузер + сервер)
@@ -207,9 +247,19 @@ database.sql               # слепок схемы БД
   `POST /api/login`, `POST /api/logout`, `GET /api/auth`, `GET /api/user`,
   `POST /api/user/avatar-color`, `POST /api/user/privacy` (`{readReceipts}`),
   `POST /api/change-password`, `POST /api/account/delete` (`{password?}`)
-- `GET /api/chats`, `POST /api/chats`, `DELETE /api/chats/:chatId`,
-  `GET /api/chats/invite/:chatId`, `POST /api/chats/:chatId/invite/rotate`,
-  `POST /api/chats/join`, `GET /api/chats/:chatId/participants`
+- `GET /api/chats` (с `pinned`, `muted`, `archived`, `member_count`,
+  `expiry_seconds`), `POST /api/chats`, `DELETE /api/chats/:chatId`,
+  `POST /api/chats/:chatId/prefs` (`{pinned?, muted?, archived?}`),
+  `POST /api/chats/:chatId/expiry` (`{seconds}`: 0/300/3600/86400/604800),
+  `GET /api/chats/:chatId/participants`
+- Приглашения: `GET /api/chats/invite/:chatId`,
+  `POST /api/chats/:chatId/invite/rotate` (`{ttlSeconds, maxMembers, requireApproval}`),
+  `POST /api/chats/:chatId/invite/disable`, `POST /api/chats/join/preview`,
+  `POST /api/chats/join` (с одобрением → `{pending, requestId}`)
+- Заявки: `GET /api/chats/:chatId/join-requests`,
+  `POST /api/join-requests/:id/approve`, `POST /api/join-requests/:id/deny`,
+  `GET /api/join-requests/mine`, `DELETE /api/join-requests/:id`
+- `GET /api/security-events`
 - `GET /api/messages/:chatId?before=<id>&limit=<1..200>`,
   `POST /api/chats/:chatId/read`, `POST /api/messages`,
   `PUT /api/messages/:messageId`, `DELETE /api/messages/:messageId`,
@@ -225,8 +275,9 @@ database.sql               # слепок схемы БД
   `POST /api/keys/key-shares`, `GET /api/keys/key-shares/:chatId`
 - `GET /uploads/:filename` — только участникам чата, вступившим до сообщения
 - Socket.io: `joinChat` (клиент → сервер); `newMessage`, `messageEdited`,
-  `messageDeleted`, `messagesRead`, `e2eeKeyShare`, `roomMembersChanged`
-  (сервер → клиент)
+  `messageDeleted`, `messagesRead`, `e2eeKeyShare`, `roomMembersChanged`,
+  `chatExpiryChanged`, `joinRequestsChanged`, `joinRequestDecided`,
+  `chatListChanged` (сервер → клиент)
 
 ## Тесты
 
