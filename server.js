@@ -42,15 +42,44 @@ const {
     generateInviteCode,
     normalizeInviteCode,
     isValidInviteCode,
-    isInviteExpired,
     parseAllowedOrigins,
     isRequestOriginAllowed,
     buildContentSecurityPolicy,
     resolveDbTlsConfig,
     createCounter,
     normalizeEmail,
-    positiveNumberOr
+    positiveNumberOr,
+    classifyUserAgent
 } = require('./lib/security-utils');
+const {
+    JOIN_REQUEST_TTL_SECONDS,
+    MAX_PENDING_JOIN_REQUESTS_PER_ROOM,
+    INVALID_INVITE_MESSAGE,
+    ROOM_FULL_MESSAGE,
+    parseInviteSettings,
+    isInviteUsable,
+    isRoomFull,
+    describeInvite
+} = require('./lib/invites');
+const {
+    parseChatExpirySeconds,
+    pickRoomExpiryFromLegacy,
+    effectiveMessageExpiry,
+    parseChatPrefs
+} = require('./lib/chat-settings');
+const {
+    ANON_LIFETIMES,
+    ANON_MAX_AGE_SECONDS,
+    ANON_SOCKET_ACTIVITY_INTERVAL_MS,
+    parseAnonLifetime,
+    storedAnonLifetime,
+    anonLifetimeSeconds,
+    anonExpiresAtMs,
+    isAnonExpired,
+    anonCookieMaxAgeMs,
+    shouldPersistActivity,
+    anonWelcomeText
+} = require('./lib/anon-lifetime');
 
 // Импорт E2EE прокси (маршруты регистрируются после sessionMiddleware —
 // см. вызов registerE2eeProxyRoutes ниже)
@@ -745,8 +774,42 @@ async function initDatabase() {
         await pool.query('ALTER TABLE chats ADD COLUMN created_at TIMESTAMPTZ');
         await pool.query('ALTER TABLE chats ALTER COLUMN created_at SET DEFAULT NOW()');
     }
+    // Параметры кода приглашения (POST /api/chats/:chatId/invite/rotate):
+    // лимит участников (NULL — без лимита), вступление только с одобрения
+    // участника и выключенный код. Одобрение включено и у УЖЕ существующих
+    // комнат (DEFAULT TRUE применяется к старым строкам): их коды
+    // разосланы в старом режиме, где код сразу открывал переписку, и
+    // проверить, кому они успели уйти, уже нельзя.
+    if (!column('rooms', 'invite_max_members')) {
+        await pool.query('ALTER TABLE rooms ADD COLUMN invite_max_members INTEGER');
+    }
+    if (!column('rooms', 'invite_require_approval')) {
+        await pool.query('ALTER TABLE rooms ADD COLUMN invite_require_approval BOOLEAN NOT NULL DEFAULT TRUE');
+    }
+    if (!column('rooms', 'invite_disabled')) {
+        await pool.query('ALTER TABLE rooms ADD COLUMN invite_disabled BOOLEAN NOT NULL DEFAULT FALSE');
+    }
+    // Личные флаги чата (POST /api/chats/:chatId/prefs) — в строке chats
+    // самого пользователя, собеседники их не видят.
+    for (const flag of ['pinned', 'muted', 'archived']) {
+        if (!column('chats', flag)) await pool.query(`ALTER TABLE chats ADD COLUMN ${flag} BOOLEAN NOT NULL DEFAULT FALSE`);
+    }
+    // Срок жизни анонимного аккаунта (lib/anon-lifetime.js): выбранный
+    // вариант и последняя активность. У обычных аккаунтов обе колонки
+    // NULL — их активность не записывается вовсе (лишние метаданные).
+    // Анонимам, созданным до этой версии (срок NULL = 'tab'), отсчёт
+    // неактивности начинается с момента обновления, а не с создания —
+    // иначе обновление сервера выкинуло бы всех, кто сейчас в сети.
+    if (!column('users', 'anon_lifetime')) {
+        await pool.query('ALTER TABLE users ADD COLUMN anon_lifetime TEXT');
+    }
+    if (!column('users', 'last_active_at')) {
+        await pool.query('ALTER TABLE users ADD COLUMN last_active_at TIMESTAMPTZ');
+        await pool.query('UPDATE users SET last_active_at = NOW() WHERE email IS NULL AND password IS NULL');
+    }
 
     await ensureRandomIdDefaults(column);
+    await initJoinRequestsAndSecurityEvents();
 
     // Миграция: удаление чата/выход из комнаты падало с нарушением FK —
     // messages.chat_id (NOT NULL, без ON DELETE) не давал снести свою же
@@ -780,6 +843,7 @@ async function initDatabase() {
     // самом начале — на пустой БД сервер падал с "relation messages does
     // not exist" и не запускался вообще.
     await disappearingMessagesManager.initialize();
+    await migrateLegacyRoomExpiry();
 
     // Индексы для выборок "сообщения чата по id". Включённые колонки
     // позволяют последнему сообщению, счётчику непрочитанного, странице
@@ -812,6 +876,13 @@ async function initDatabase() {
     await ensureUniqueRoomParticipants();
     await pool.query('CREATE INDEX IF NOT EXISTS idx_room_participants_user ON room_participants(user_id)');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_reactions_msg_user ON reactions(message_id, user_id)');
+    // Авто-разархивация получателей идёт на КАЖДОЕ новое сообщение комнаты;
+    // по частичному индексу она читает только архивные строки комнаты
+    // (обычно ни одной), а не строки всех её участников.
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_chats_archived ON chats(room_id) WHERE archived');
+    // Удаление просроченных анонимов (каждые несколько минут) — только по
+    // анонимным строкам, без прохода по всей таблице users.
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_users_anon ON users(created_at) WHERE email IS NULL AND password IS NULL');
 
     // Разовое заполнение last_read_message_id для существующих чатов (все
     // старые сообщения считаются прочитанными, чтобы после обновления у
@@ -919,6 +990,93 @@ async function ensureUniqueRoomParticipants() {
         }
     }
     await pool.query('DROP INDEX IF EXISTS idx_room_participants_room_user');
+}
+
+// Заявки на вступление (комнаты с одобрением) и журнал безопасности.
+//
+// join_requests.id виден заявителю и участникам комнаты — он случайный
+// (nyxo_random_id), как id пользователей и комнат, чтобы по нему нельзя было
+// судить, сколько заявок подают по всему сервису. DEFAULT выставляется
+// отдельным ALTER: 'join_requests'::regclass внутри CREATE TABLE ещё не на
+// что ссылаться. Внешний ключ на users без каскада — как у остальных таблиц:
+// deleteUserAccount удаляет строки сам.
+//
+// security_events: только тип события, грубое семейство клиента
+// (classifyUserAgent) и время. Ни IP, ни строки User-Agent.
+async function initJoinRequestsAndSecurityEvents() {
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS join_requests (
+            id INTEGER PRIMARY KEY,
+            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE (room_id, user_id)
+        )
+    `);
+    const idDefault = await dbGet(
+        `SELECT column_default FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = 'join_requests' AND column_name = 'id'`
+    );
+    if (!String((idDefault && idDefault.column_default) || '').includes('nyxo_random_id(')) {
+        await pool.query(`ALTER TABLE join_requests ALTER COLUMN id SET DEFAULT nyxo_random_id('join_requests'::regclass)`);
+    }
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_join_requests_user ON join_requests(user_id)');
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_join_requests_created ON join_requests(created_at)');
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS security_events (
+            id BIGSERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            type TEXT NOT NULL,
+            client TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    `);
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_security_events_user ON security_events(user_id, id)');
+}
+
+// Личные таймеры исчезающих сообщений в комнатах (chat_settings, по строке
+// chats участника) переносятся в общий таймер комнаты (room_settings) и
+// удаляются. Берётся самый короткий из них, приведённый к допустимому
+// варианту не длиннее исходного, — почему именно так, см.
+// pickRoomExpiryFromLegacy в lib/chat-settings.js. Уже заданный общий
+// таймер не перезаписывается. Перенос и удаление — одной транзакцией
+// (DELETE ... RETURNING): строка, дописанная старым экземпляром сервера
+// во время деплоя, не потеряется, а перенесётся при следующем старте.
+// Повторный старт ничего не делает: личных таймеров комнат не остаётся.
+async function migrateLegacyRoomExpiry() {
+    const migrated = await withTransaction(async (client) => {
+        const removed = await client.query(
+            `DELETE FROM chat_settings cs USING chats c
+             WHERE c.id = cs.chat_id AND c.room_id IS NOT NULL
+             RETURNING c.room_id, cs.default_message_expiry`
+        );
+        if (removed.rows.length === 0) return 0;
+        const byRoom = new Map();
+        for (const row of removed.rows) {
+            if (!byRoom.has(row.room_id)) byRoom.set(row.room_id, []);
+            byRoom.get(row.room_id).push(row.default_message_expiry);
+        }
+        const roomIds = [];
+        const seconds = [];
+        for (const [roomId, values] of byRoom) {
+            const value = pickRoomExpiryFromLegacy(values);
+            if (value > 0) {
+                roomIds.push(roomId);
+                seconds.push(value);
+            }
+        }
+        if (roomIds.length > 0) {
+            await client.query(
+                `INSERT INTO room_settings (room_id, default_message_expiry)
+                 SELECT * FROM unnest($1::int[], $2::int[])
+                 ON CONFLICT (room_id) DO NOTHING`,
+                [roomIds, seconds]
+            );
+        }
+        return roomIds.length;
+    });
+    if (migrated > 0) console.log(`[DisappearingMessages] Личные таймеры перенесены в общий таймер комнат: ${migrated}`);
 }
 
 const MIGRATION_BATCH = 500;
@@ -1073,8 +1231,6 @@ const MAX_LOGIN_PASSWORD_LENGTH = 1024;
 const sessionSecret = process.env.SESSION_SECRET;
 if (!sessionSecret) throw new Error('SESSION_SECRET не задан в переменных окружения');
 
-const ANON_SESSION_MAX_AGE_MS = 4 * 60 * 60 * 1000;
-
 const sessionMiddleware = session({
     store: new pgSession({
         pool: pool,
@@ -1105,8 +1261,103 @@ const sessionMiddleware = session({
     }
 });
 
-function isExpiredAnonymousSession(sess) {
-    return Boolean(sess && sess.isAnonymous && sess.createdAt && Date.now() - sess.createdAt > ANON_SESSION_MAX_AGE_MS);
+// ---- Срок жизни анонимного аккаунта (lib/anon-lifetime.js) ----
+//
+// Аноним удаляется после выбранного срока БЕЗ АКТИВНОСТИ (30 минут / сутки /
+// неделя), но не позже 7 дней с создания; сессия живёт по тем же правилам.
+// Активность — открытый сокет (продлевается при подключении, при отключении
+// последнего сокета и раз в 5 минут, пока сокет открыт) и запросы к API.
+//
+// Источник истины — users.last_active_at: по нему удаляет
+// purgeExpiredAnonymousUsers и его же видят другие экземпляры сервера.
+// anonStates — кэш процесса, чтобы каждый запрос не делал SELECT, а
+// активность по API писалась в БД не чаще раза в минуту на пользователя.
+// Активность обычных аккаунтов не отслеживается и не хранится вовсе.
+const anonStates = new Map(); // userId -> { lifetime, createdAtMs, lastActiveMs, persistedMs }
+const anonSocketCount = createCounter();
+
+async function loadAnonState(userId, sess) {
+    const row = await dbGet(
+        `SELECT anon_lifetime,
+                EXTRACT(EPOCH FROM last_active_at) * 1000 AS last_active_ms,
+                EXTRACT(EPOCH FROM created_at::timestamptz) * 1000 AS created_ms
+         FROM users WHERE id = $1 AND email IS NULL AND password IS NULL`,
+        [userId]
+    );
+    if (!row) {
+        anonStates.delete(userId);
+        return null;
+    }
+    // Время создания — из сессии (его ставит сам сервер, Date.now()), из
+    // БД — только если в сессии его нет.
+    const createdAtMs = Number(sess && sess.createdAt) || Number(row.created_ms);
+    const lastActiveMs = row.last_active_ms === null ? createdAtMs : Number(row.last_active_ms);
+    const state = {
+        lifetime: storedAnonLifetime(row.anon_lifetime),
+        createdAtMs,
+        lastActiveMs,
+        persistedMs: lastActiveMs,
+    };
+    anonStates.set(userId, state);
+    return state;
+}
+
+// Истекла ли анонимная сессия. Жёсткий потолок проверяется без БД; "истекла
+// по неактивности" из кэша перепроверяется по БД — активность могла прийти
+// на другой экземпляр сервера. Аккаунт уже удалён — тоже истекла.
+async function isExpiredAnonymousSession(sess) {
+    if (!sess || !sess.isAnonymous) return false;
+    const createdAtMs = Number(sess.createdAt);
+    if (!sess.userId || !Number.isFinite(createdAtMs)) return true;
+    const now = Date.now();
+    if (now - createdAtMs >= ANON_MAX_AGE_SECONDS * 1000) return true;
+    const cached = anonStates.get(sess.userId);
+    if (cached && !isAnonExpired({ ...cached, now })) return false;
+    const state = await loadAnonState(sess.userId, sess);
+    return !state || isAnonExpired({ ...state, now });
+}
+
+function persistAnonActivity(userIds) {
+    if (userIds.length === 0) return;
+    dbRun(
+        'UPDATE users SET last_active_at = NOW() WHERE id = ANY($1::int[]) AND email IS NULL AND password IS NULL',
+        [userIds]
+    ).catch(err => console.error('[Anon] Не удалось записать активность:', err.message));
+}
+
+// Отметить активность анонима: в памяти — всегда, в БД — не чаще раза в
+// минуту (force — сразу, например при отключении последнего сокета).
+function noteAnonActivity(userId, { force = false } = {}) {
+    const state = anonStates.get(userId);
+    if (!state) return;
+    const now = Date.now();
+    state.lastActiveMs = now;
+    if (!force && !shouldPersistActivity(state.persistedMs, now)) return;
+    state.persistedMs = now;
+    persistAnonActivity([userId]);
+}
+
+// Раз в 5 минут — продление всем анонимам с открытым сокетом, одним UPDATE.
+function touchAnonymousSockets() {
+    const ids = anonSocketCount.keys();
+    const now = Date.now();
+    for (const id of ids) {
+        const state = anonStates.get(id);
+        if (state) {
+            state.lastActiveMs = now;
+            state.persistedMs = now;
+        }
+    }
+    persistAnonActivity(ids);
+}
+
+// Для /api/auth: когда аккаунт удалится, если больше не будет активности.
+function describeAnonLifetime(state) {
+    if (!state) return { anonLifetime: null, anonExpiresAt: null };
+    return {
+        anonLifetime: state.lifetime,
+        anonExpiresAt: new Date(anonExpiresAtMs(state)).toISOString(),
+    };
 }
 
 // Socket.io: источник (allowRequest выше) -> сессия -> авторизация ->
@@ -1119,25 +1370,30 @@ io.use((socket, next) => {
     // Раньше неавторизованный сокет принимался и тут же отключался уже в
     // 'connection' — клиент после этого сам не переподключался, и после
     // входа в аккаунт realtime не работал до перезагрузки страницы.
-    if (!sess || !sess.userId || isExpiredAnonymousSession(sess)) {
-        return next(new Error('Не авторизован'));
-    }
-    if (userSocketCount.get(sess.userId) >= MAX_SOCKETS_PER_USER) {
-        return next(new Error('Слишком много подключений'));
-    }
-    // Onion-рукопожатие (сокет принят на ONION_PORT) приходит с адреса
-    // контейнера tor — одного на всех, а его X-Forwarded-For присылает сам
-    // клиент: IP тут ничего не значит.
-    const ip = isOnionSocket(socket.request.socket) ? null : getClientIp(socket.handshake);
-    if (ip && ipSocketCount.get(ip) >= MAX_SOCKETS_PER_IP) {
-        return next(new Error('Слишком много подключений с вашего IP'));
-    }
-    socket.data.clientIp = ip;
-    next();
+    if (!sess || !sess.userId) return next(new Error('Не авторизован'));
+    isExpiredAnonymousSession(sess).then((expired) => {
+        if (expired) return next(new Error('Не авторизован'));
+        if (userSocketCount.get(sess.userId) >= MAX_SOCKETS_PER_USER) {
+            return next(new Error('Слишком много подключений'));
+        }
+        // Onion-рукопожатие (сокет принят на ONION_PORT) приходит с адреса
+        // контейнера tor — одного на всех, а его X-Forwarded-For присылает сам
+        // клиент: IP тут ничего не значит.
+        const ip = isOnionSocket(socket.request.socket) ? null : getClientIp(socket.handshake);
+        if (ip && ipSocketCount.get(ip) >= MAX_SOCKETS_PER_IP) {
+            return next(new Error('Слишком много подключений с вашего IP'));
+        }
+        socket.data.clientIp = ip;
+        next();
+    }, (err) => {
+        console.error('[Socket] Ошибка проверки сессии:', err.message);
+        next(new Error('Ошибка сервера'));
+    });
 });
 
 io.on('connection', async (socket) => {
     const userId = socket.request.session.userId;
+    const isAnonymous = Boolean(socket.request.session.isAnonymous);
 
     // Счётчики растут только для реально установленных соединений. Раньше
     // счётчик IP увеличивался ещё в middleware, а единственное место
@@ -1146,9 +1402,20 @@ io.on('connection', async (socket) => {
     const ip = socket.data.clientIp;
     userSocketCount.increment(userId);
     if (ip) ipSocketCount.increment(ip);
+    if (isAnonymous) {
+        anonSocketCount.increment(userId);
+        // Первый сокет — сразу в БД; остальные вкладки — не чаще раза в минуту.
+        noteAnonActivity(userId, { force: anonSocketCount.get(userId) === 1 });
+    }
     socket.on('disconnect', () => {
         userSocketCount.decrement(userId);
         if (ip) ipSocketCount.decrement(ip);
+        if (isAnonymous) {
+            anonSocketCount.decrement(userId);
+            // Закрылся последний сокет — отсчёт неактивности начинается
+            // отсюда, поэтому момент пишется в БД сразу.
+            if (anonSocketCount.get(userId) === 0) noteAnonActivity(userId, { force: true });
+        }
     });
 
     // Личная комната пользователя (на всех его вкладках/устройствах) —
@@ -1319,12 +1586,24 @@ app.use(express.static(path.join(__dirname, 'public'), {
 
 app.use(sessionMiddleware);
 
-// Анонимная сессия живёт не дольше 4 часов с момента создания. Раньше это
-// проверял только /api/auth, а все остальные маршруты продолжали её
-// принимать (и сессия могла продлеваться при любом её изменении).
+// Анонимная сессия проверяется на КАЖДОМ запросе (раньше — только в
+// /api/auth, остальные маршруты принимали её дальше): истёкшая
+// заменяется пустой, живая — продлевает активность аккаунта (в БД — не
+// чаще раза в минуту, см. noteAnonActivity). app.use не оборачивается
+// wrapAsync, поэтому ошибки — вручную в next.
 app.use((req, res, next) => {
-    if (!isExpiredAnonymousSession(req.session)) return next();
-    req.session.regenerate((err) => next(err));
+    const sess = req.session;
+    if (!sess || !sess.userId || !sess.isAnonymous) return next();
+    isExpiredAnonymousSession(sess).then((expired) => {
+        if (!expired) {
+            noteAnonActivity(sess.userId);
+            return next();
+        }
+        req.session.regenerate((err) => {
+            req.anonSessionExpired = true;
+            next(err);
+        });
+    }, next);
 });
 
 // Лимит на /api/ — ДО регистрации маршрутов из lib/: Express применяет
@@ -1441,10 +1720,13 @@ app.get('/api/pow/challenge', (req, res) => {
 });
 
 // Новый аккаунт и его чат с ботом с приветствием — внутри транзакции client.
-async function insertUserWithBotChat(client, { uniqueCode, username, email, passwordHash, welcomeText }) {
+// anonLifetime — только у анонимного аккаунта (у него же отсчёт активности).
+async function insertUserWithBotChat(client, { uniqueCode, username, email, passwordHash, welcomeText, anonLifetime = null }) {
     const userResult = await client.query(
-        'INSERT INTO users (unique_code, username, email, password, avatar) VALUES ($1, $2, $3, $4, $5) RETURNING id',
-        [uniqueCode, username, email, passwordHash, '#667EEA']
+        `INSERT INTO users (unique_code, username, email, password, avatar, anon_lifetime, last_active_at)
+         VALUES ($1, $2, $3, $4, $5, $6::text, CASE WHEN $6::text IS NULL THEN NULL ELSE NOW() END)
+         RETURNING id`,
+        [uniqueCode, username, email, passwordHash, '#667EEA', anonLifetime]
     );
     const userId = userResult.rows[0].id;
     const botResult = await client.query(
@@ -1510,6 +1792,7 @@ app.post('/api/register', registerLimiter, async (req, res) => {
         }));
 
         await startUserSession(req, { userId, username, uniqueCode, avatar: '#667EEA' });
+        recordSecurityEvent(userId, 'register', req);
         res.json({ success: true, message: 'Регистрация успешна!', user: { id: userId, username, uniqueCode, avatar: '#667EEA', readReceipts: true } });
     } catch (error) {
         console.error('Register error:', error);
@@ -1517,9 +1800,16 @@ app.post('/api/register', registerLimiter, async (req, res) => {
     }
 });
 
-const ANON_WELCOME_TEXT = '🔒 Приватный режим активирован!\n\nВаши данные:\n• Хранятся только в этой сессии\n• Будут удалены при выходе (или автоматически через 4 часа)\n• Не связаны с email или телефоном\n\nДля максимальной анонимности:\n• Используйте Tor Browser\n• Не делитесь личной информацией\n• Включите disappearing messages';
-
+// lifetime: 'tab' | 'day' | 'week' (по умолчанию 'tab') — см.
+// lib/anon-lifetime.js. Проверяется до PoW: решение одноразовое, и отказ
+// из-за опечатки в параметре не должен заставлять решать задачу заново.
 app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
+    let lifetime;
+    try {
+        lifetime = parseAnonLifetime(req.body?.lifetime);
+    } catch (err) {
+        return res.json({ success: false, message: err.message });
+    }
     if (!checkPow(req, 'register-anon')) return res.json(POW_FAILED_RESPONSE);
     try {
         let uniqueCode, username;
@@ -1539,15 +1829,21 @@ app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
         }
 
         const userId = await withTransaction(client => insertUserWithBotChat(client, {
-            uniqueCode, username, email: null, passwordHash: null, welcomeText: ANON_WELCOME_TEXT,
+            uniqueCode, username, email: null, passwordHash: null,
+            welcomeText: anonWelcomeText(lifetime), anonLifetime: lifetime,
         }));
 
+        const createdAtMs = Date.now();
         await startUserSession(req, {
             userId, username, uniqueCode, avatar: '#667EEA',
-            isAnonymous: true, createdAt: Date.now(),
+            isAnonymous: true, createdAt: createdAtMs, anonLifetime: lifetime,
         });
-        // Короткий срок жизни сессии для анонимных пользователей
-        req.session.cookie.maxAge = ANON_SESSION_MAX_AGE_MS;
+        // 'tab' — кука без срока (до закрытия браузера), 'day'/'week' — до
+        // жёсткого потолка; неактивность сервер проверяет сам на каждом
+        // запросе (isExpiredAnonymousSession).
+        req.session.cookie.maxAge = anonCookieMaxAgeMs({ lifetime, createdAtMs, now: createdAtMs });
+        const state = { lifetime, createdAtMs, lastActiveMs: createdAtMs, persistedMs: createdAtMs };
+        anonStates.set(userId, state);
 
         // Имя и id анонимного пользователя в лог не пишутся: связка "время
         // создания — id — имя" в логах хостинга как раз и деанонимизирует.
@@ -1562,7 +1858,9 @@ app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
                 avatar: '#667EEA',
                 isAnonymous: true,
                 readReceipts: true,
-                sessionExpiresIn: ANON_SESSION_MAX_AGE_MS / 1000 // секунды
+                ...describeAnonLifetime(state),
+                // Срок без активности, секунды (поле старых клиентов).
+                sessionExpiresIn: anonLifetimeSeconds(lifetime)
             }
         });
     } catch (error) {
@@ -1591,6 +1889,10 @@ app.post('/api/login', loginLimiter, loginAccountLimiter, async (req, res) => {
         await addRandomDelay(20, 80);
 
         if (!user || !user.password || !validPassword) {
+            // Неудачный вход в СУЩЕСТВУЮЩИЙ аккаунт — в его журнал. Запись не
+            // ожидается: иначе ответ для существующего email приходил бы
+            // заметно позже, чем для несуществующего (оракул по времени).
+            if (user && user.password) recordSecurityEvent(user.id, 'login_failed', req);
             return res.json({ success: false, message: 'Неверный email или пароль' });
         }
 
@@ -1608,6 +1910,7 @@ app.post('/api/login', loginLimiter, loginAccountLimiter, async (req, res) => {
         await startUserSession(req, {
             userId: user.id, username: user.username, uniqueCode: user.unique_code, avatar: user.avatar || '',
         });
+        recordSecurityEvent(user.id, 'login', req);
         res.json({
             success: true, message: 'Вход выполнен!',
             user: { id: user.id, username: user.username, uniqueCode: user.unique_code, avatar: user.avatar || '', readReceipts: user.read_receipts },
@@ -1677,7 +1980,9 @@ app.post('/api/account/delete', passwordLimiter, async (req, res) => {
 });
 
 app.get('/api/auth', async (req, res) => {
-    if (!req.session.userId) return res.json({ authenticated: false });
+    // Анонимная сессия только что истекла (см. middleware выше) — клиент
+    // покажет "данные удалены по сроку", а не просто форму входа.
+    if (!req.session.userId) return res.json(req.anonSessionExpired ? { authenticated: false, expired: true } : { authenticated: false });
     try {
         const row = await dbGet('SELECT avatar, read_receipts FROM users WHERE id = $1', [req.session.userId]);
         if (!row) {
@@ -1688,6 +1993,10 @@ app.get('/api/auth', async (req, res) => {
 
         const avatar = row.avatar || '';
         req.session.avatar = avatar;
+        const isAnonymous = Boolean(req.session.isAnonymous);
+        // Срок анонима — оценка "если с этого момента больше не будет
+        // активности" (этот запрос сам — активность, см. noteAnonActivity).
+        const lifetime = describeAnonLifetime(isAnonymous ? anonStates.get(req.session.userId) : null);
 
         res.json({
             authenticated: true,
@@ -1696,12 +2005,57 @@ app.get('/api/auth', async (req, res) => {
                 username: req.session.username,
                 uniqueCode: req.session.uniqueCode,
                 avatar,
-                isAnonymous: req.session.isAnonymous || false,
-                readReceipts: row.read_receipts
+                isAnonymous,
+                readReceipts: row.read_receipts,
+                ...lifetime
             }
         });
     } catch (error) {
         res.json({ authenticated: false });
+    }
+});
+
+// ---- Журнал безопасности ----
+//
+// Последние SECURITY_EVENTS_PER_USER событий входа и смены пароля — чтобы
+// пользователь заметил чужой вход. Хранится только тип, грубое семейство
+// клиента (classifyUserAgent: «Firefox · Android») и время; ни IP, ни
+// полной строки User-Agent. Для анонимов не ведётся. Запись — в фоне: её
+// сбой не должен ломать вход, а ожидание — выдавать по времени ответа,
+// существует ли аккаунт (см. login_failed в /api/login).
+const SECURITY_EVENT_TYPES = new Set(['login', 'login_failed', 'password_changed', 'register']);
+const SECURITY_EVENTS_PER_USER = 50;
+
+function recordSecurityEvent(userId, type, req) {
+    if (!SECURITY_EVENT_TYPES.has(type)) return;
+    const client = classifyUserAgent(req && req.headers && req.headers['user-agent']);
+    (async () => {
+        await dbRun('INSERT INTO security_events (user_id, type, client) VALUES ($1, $2, $3)', [userId, type, client]);
+        await dbRun(
+            `DELETE FROM security_events WHERE user_id = $1 AND id <= (
+                 SELECT id FROM security_events WHERE user_id = $1 ORDER BY id DESC OFFSET $2 LIMIT 1
+             )`,
+            [userId, SECURITY_EVENTS_PER_USER]
+        );
+    })().catch((err) => {
+        // 23503 — аккаунт удалён в этот же момент: писать уже некуда.
+        if (err.code !== '23503') console.error('[Security] Не удалось записать событие:', err.message);
+    });
+}
+
+app.get('/api/security-events', async (req, res) => {
+    const userId = req.session.userId;
+    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    if (req.session.isAnonymous) return res.json({ success: true, events: [] });
+    try {
+        const rows = await dbAll(
+            'SELECT type, client, created_at FROM security_events WHERE user_id = $1 ORDER BY id DESC LIMIT $2',
+            [userId, SECURITY_EVENTS_PER_USER]
+        );
+        res.json({ success: true, events: rows.map(r => ({ type: r.type, client: r.client, createdAt: r.created_at })) });
+    } catch (error) {
+        console.error('Security events error:', error);
+        res.json({ success: false, message: 'Ошибка загрузки журнала' });
     }
 });
 
@@ -1786,10 +2140,23 @@ function chatScope(chat) {
 // visible_from_id); непрочитанные и так начинаются после
 // last_read_message_id, который при вступлении ставится на ту же границу.
 // lm_room_id/lm_chat_id/lm_user_id нужны только для AAD расшифровки и
-// клиенту не отдаются. Чаты без сообщений — по времени создания (id
-// теперь случайные), старые строки без created_at — по id, как раньше.
+// клиенту не отдаются. Закреплённые — сверху; дальше по последнему
+// сообщению; чаты без сообщений — по времени создания (id теперь
+// случайные), старые строки без created_at — по id, как раньше. Архивные
+// остаются в списке — клиент показывает их отдельным разделом.
+//
+// member_count и expiry_seconds — в этом же запросе, без запроса на
+// каждый чат: число участников — index-only scan по
+// idx_room_participants_unique (room_id, user_id), таймер — по первичным
+// ключам room_settings/chat_settings. expiry_seconds — действующий срок:
+// общий таймер комнаты (для бота — личный), иначе DEFAULT_MESSAGE_EXPIRY_SECONDS
+// ($2), иначе 0. Код выключенного приглашения не отдаётся.
 const CHAT_LIST_SQL = `
-    SELECT c.id, c.name, c.avatar, c.online, c.is_bot, c.room_id, r.code AS invite_code,
+    SELECT c.id, c.name, c.avatar, c.online, c.is_bot, c.room_id,
+           CASE WHEN r.invite_disabled THEN NULL ELSE r.code END AS invite_code,
+           c.pinned, c.muted, c.archived,
+           mc.cnt AS member_count,
+           COALESCE(CASE WHEN c.room_id IS NOT NULL THEN rs.default_message_expiry ELSE cs.default_message_expiry END, $2::numeric) AS expiry_seconds,
            lm.id AS last_message_id, lm.text AS last_message, lm.encrypted AS last_message_encrypted,
            lm.message_type AS last_message_type, lm.time AS last_time, lm.created_at AS last_created_at,
            lm.room_id AS lm_room_id, lm.chat_id AS lm_chat_id, lm.user_id AS lm_user_id,
@@ -1797,6 +2164,11 @@ const CHAT_LIST_SQL = `
     FROM chats c
     LEFT JOIN rooms r ON r.id = c.room_id
     LEFT JOIN room_participants rp ON rp.room_id = c.room_id AND rp.user_id = c.user_id
+    LEFT JOIN room_settings rs ON rs.room_id = c.room_id
+    LEFT JOIN chat_settings cs ON cs.chat_id = c.id AND c.room_id IS NULL
+    LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS cnt FROM room_participants p WHERE p.room_id = c.room_id
+    ) mc ON c.room_id IS NOT NULL
     LEFT JOIN LATERAL (
         SELECT CASE WHEN c.room_id IS NOT NULL
             THEN (SELECT MAX(x.id) FROM messages x
@@ -1819,13 +2191,13 @@ const CHAT_LIST_SQL = `
         ) unread_rows
     ) uc ON TRUE
     WHERE c.user_id = $1
-    ORDER BY lm.id DESC NULLS LAST, c.created_at DESC NULLS LAST, c.id DESC
+    ORDER BY c.pinned DESC, lm.id DESC NULLS LAST, c.created_at DESC NULLS LAST, c.id DESC
 `;
 
 app.get('/api/chats', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
     try {
-        const chats = await dbAll(CHAT_LIST_SQL, [req.session.userId]);
+        const chats = await dbAll(CHAT_LIST_SQL, [req.session.userId, GLOBAL_DEFAULT_EXPIRY_SECONDS]);
         // Предпросмотр E2EE-сообщения в списке чатов не расшифровываем —
         // это потребовало бы Sender Key каждого отправителя каждого чата
         // ещё до открытия чата. Показываем нейтральную подпись, конверт
@@ -1835,6 +2207,7 @@ app.get('/api/chats', async (req, res) => {
             chats: chats.map(({ lm_room_id, lm_chat_id, lm_user_id, ...c }) => ({
                 ...c,
                 unread: Number(c.unread),
+                expiry_seconds: Number(c.expiry_seconds) || 0,
                 last_message: c.last_message_encrypted
                     ? null
                     : readMessageText(c.last_message, { room_id: lm_room_id, chat_id: lm_chat_id, user_id: lm_user_id }),
@@ -2014,9 +2387,44 @@ app.post('/api/chats/:chatId/read', async (req, res) => {
     res.json({ success: true });
 });
 
-async function getDefaultExpirySeconds(chatId) {
-    const settings = await disappearingMessagesManager.getChatSettings(chatId);
+// Действующий срок новых сообщений чата: общий таймер комнаты (для чата с
+// ботом — личный), иначе DEFAULT_MESSAGE_EXPIRY_SECONDS; null — не исчезают.
+async function getDefaultExpirySeconds(chat) {
+    const settings = chat.room_id
+        ? await disappearingMessagesManager.getRoomSettings(chat.room_id)
+        : await disappearingMessagesManager.getChatSettings(chat.id);
     return (settings && settings.default_message_expiry) || GLOBAL_DEFAULT_EXPIRY_SECONDS || null;
+}
+
+// Срок жизни только что созданного сообщения (текст или файл, E2EE или
+// нет, от любого участника): общий таймер чата; личный срок из запроса
+// отправителя — только если он не длиннее общего (effectiveMessageExpiry).
+async function applyNewMessageExpiry(chat, messageId, requestedSeconds = null) {
+    const expiry = effectiveMessageExpiry(requestedSeconds, await getDefaultExpirySeconds(chat));
+    if (expiry) await disappearingMessagesManager.setMessageExpiry(messageId, expiry, false);
+}
+
+// Синхронизация списка чатов между вкладками/устройствами пользователя.
+function notifyChatListChanged(userId) {
+    io.to('user:' + userId).emit('chatListChanged', {});
+}
+
+// Новое сообщение возвращает архивный чат из архива — у получателей и
+// только если чат не "без звука" (заглушённый архивный чат так и лежит в
+// архиве). senderId = null — ответ бота владельцу чата. Не на пути ответа
+// отправителю: сбой здесь только логируется. По частичному индексу
+// idx_chats_archived запрос обычно не находит ни одной строки.
+function unarchiveForRecipients(chat, senderId) {
+    const query = chat.room_id
+        ? dbAll(
+            'UPDATE chats SET archived = FALSE WHERE room_id = $1 AND archived AND NOT muted AND user_id <> $2 RETURNING user_id',
+            [chat.room_id, senderId]
+        )
+        : dbAll('UPDATE chats SET archived = FALSE WHERE id = $1 AND archived AND NOT muted RETURNING user_id', [chat.id]);
+    query.then(
+        (rows) => { for (const row of rows) notifyChatListChanged(row.user_id); },
+        (err) => console.error('[Chats] Не удалось вернуть чат из архива:', err.message)
+    );
 }
 
 // expirySeconds из тела запроса: null — не задан, число — валидный срок;
@@ -2045,6 +2453,8 @@ function scheduleBotReply(chat) {
                  RETURNING id, chat_id, room_id, user_id, sent, time, status, created_at, message_type, encrypted`,
                 [chat.id, chat.user_id, writeMessageText(replyText, { room_id: null, chat_id: chat.id, user_id: chat.user_id }), getCurrentTime()]
             );
+            // Личный таймер чата с ботом действует и на ответы бота.
+            await applyNewMessageExpiry(chat, botMessage.id);
             // Бот "прочитал" сообщения пользователя.
             const read = await dbAll(
                 `UPDATE messages SET status = 'read' WHERE chat_id = $1 AND sent = 1 AND status <> 'read' RETURNING id`,
@@ -2057,6 +2467,7 @@ function scheduleBotReply(chat) {
             if (read.length > 0) {
                 io.to(socketRoomKey).emit('messagesRead', { chat_id: chat.id, room_id: null, up_to_id: botMessage.id });
             }
+            unarchiveForRecipients(chat, null);
         } catch (e) {
             console.error('Bot error:', e);
         }
@@ -2122,8 +2533,7 @@ app.post('/api/messages', async (req, res) => {
                 time, replyTo ? replyTo.id : null, encrypted]
         );
 
-        const expiry = requestedExpiry || await getDefaultExpirySeconds(chat.id);
-        if (expiry) await disappearingMessagesManager.setMessageExpiry(inserted.id, expiry, false);
+        await applyNewMessageExpiry(chat, inserted.id, requestedExpiry);
 
         // text уже известен в открытом виде (safeText) — не расшифровываем то,
         // что сами только что зашифровали, и не перечитываем строку из БД.
@@ -2138,6 +2548,7 @@ app.post('/api/messages', async (req, res) => {
         io.to(getSocketRoomKey(chat.id, roomId)).emit('newMessage', message);
         res.json({ success: true, message });
 
+        if (roomId) unarchiveForRecipients(chat, userId);
         if (chat.is_bot) scheduleBotReply(chat);
     } catch (error) {
         console.error('Send message error:', error);
@@ -2169,6 +2580,7 @@ app.post('/api/chats', async (req, res) => {
             return { roomId: newRoomId, chatId: chatResult.rows[0].id };
         });
         subscribeUserToChat(userId, chatId, roomId);
+        notifyChatListChanged(userId);
         res.json({ success: true, chat: { id: chatId, name, avatar, online: 0, is_bot: 0, room_id: roomId, invite_code: roomCode } });
     } catch (error) {
         console.error('Create chat error:', error);
@@ -2176,56 +2588,18 @@ app.post('/api/chats', async (req, res) => {
     }
 });
 
+// ---- Приглашения и заявки на вступление ----
+//
+// Код приглашения (rooms.code, 26 символов) видят и меняют все участники
+// комнаты. Параметры кода (lib/invites.js): срок, лимит участников
+// (invite_max_members, NULL — без лимита), вступление только с одобрения
+// любого участника (invite_require_approval, по умолчанию включено) и
+// выключенный код (invite_disabled). Несуществующий, истёкший и
+// выключенный код снаружи неразличимы: везде INVALID_INVITE_MESSAGE.
+
 function inviteExpiresAtIso(expiresAt) {
     return expiresAt ? new Date(expiresAt).toISOString() : null;
 }
-
-app.get('/api/chats/invite/:chatId', async (req, res) => {
-    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
-    try {
-        const chat = await getOwnChat(req.params.chatId, req.session.userId);
-        if (!chat) return res.json({ success: false, message: 'Чат не найден' });
-        if (!chat.room_id) return res.json({ success: false, message: 'У этого чата нет кода приглашения' });
-        const room = await dbGet(
-            `SELECT r.code, r.code_expires_at FROM rooms r
-             JOIN room_participants rp ON rp.room_id = r.id AND rp.user_id = $2
-             WHERE r.id = $1`,
-            [chat.room_id, req.session.userId]
-        );
-        if (!room) return res.json({ success: false, message: 'Код не найден' });
-        res.json({
-            success: true,
-            code: room.code,
-            expiresAt: inviteExpiresAtIso(room.code_expires_at),
-            expired: isInviteExpired(room.code_expires_at),
-        });
-    } catch (error) {
-        res.json({ success: false, message: 'Ошибка получения кода' });
-    }
-});
-
-// Новый код приглашения (и новый срок) — любой участник комнаты. Старый
-// код перестаёт действовать сразу: так закрывается утёкшая ссылка.
-app.post('/api/chats/:chatId/invite/rotate', async (req, res) => {
-    const userId = req.session.userId;
-    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
-    try {
-        const chat = await getOwnChat(req.params.chatId, userId);
-        if (!chat) return res.json({ success: false, message: 'Чат не найден' });
-        if (!chat.room_id) return res.json({ success: false, message: 'У этого чата нет кода приглашения' });
-        const room = await dbGet(
-            `UPDATE rooms SET code = $1, code_expires_at = NOW() + $2::integer * INTERVAL '1 second'
-             WHERE id = $3 AND EXISTS (SELECT 1 FROM room_participants WHERE room_id = $3 AND user_id = $4)
-             RETURNING code, code_expires_at`,
-            [generateInviteCode(), INVITE_TTL_SECONDS, chat.room_id, userId]
-        );
-        if (!room) return res.json({ success: false, message: 'Чат не найден' });
-        res.json({ success: true, code: room.code, expiresAt: inviteExpiresAtIso(room.code_expires_at) });
-    } catch (error) {
-        console.error('Rotate invite error:', error);
-        res.json({ success: false, message: 'Ошибка обновления кода' });
-    }
-});
 
 // Состав комнаты изменился: клиенты участников перечитывают список
 // участников (E2EE: новичку — Sender Key, после ухода — ротация ключа).
@@ -2233,63 +2607,415 @@ function notifyRoomMembersChanged(roomId) {
     io.to(`room:${roomId}`).emit('roomMembersChanged', { roomId });
 }
 
+// Список заявок комнаты изменился — только участникам (заявитель в
+// room:<id> не подписан и чужих заявок не видит).
+function notifyJoinRequestsChanged(roomId) {
+    io.to(`room:${roomId}`).emit('joinRequestsChanged', { roomId });
+}
+
+function notifyJoinRequestDecided(userId, payload) {
+    io.to('user:' + userId).emit('joinRequestDecided', payload);
+}
+
+const JOIN_REQUEST_LIVE_SQL = `created_at > NOW() - ${JOIN_REQUEST_TTL_SECONDS} * INTERVAL '1 second'`;
+const JOIN_REQUEST_NOT_FOUND = { success: false, message: 'Заявка не найдена' };
+
+// Строка списка чатов для только что вошедшего (как в POST /api/chats).
+function roomChatPayload(chat, room) {
+    return {
+        id: chat.id, name: chat.name, avatar: chat.avatar, online: 0, is_bot: 0,
+        room_id: room.id, invite_code: room.invite_disabled ? null : room.code,
+    };
+}
+
+// Комната вызывающего по его личному чату — с проверкой участия.
+async function getOwnRoom(chatIdParam, userId) {
+    const chat = await getOwnChat(chatIdParam, userId);
+    if (!chat) return { error: 'Чат не найден' };
+    if (!chat.room_id) return { error: 'У этого чата нет кода приглашения' };
+    const room = await dbGet(
+        `SELECT r.id, r.name, r.code, r.code_expires_at, r.invite_max_members, r.invite_require_approval, r.invite_disabled,
+                (SELECT COUNT(*)::int FROM room_participants p WHERE p.room_id = r.id) AS member_count
+         FROM rooms r
+         JOIN room_participants rp ON rp.room_id = r.id AND rp.user_id = $2
+         WHERE r.id = $1`,
+        [chat.room_id, userId]
+    );
+    if (!room) return { error: 'Чат не найден' };
+    return { chat, room };
+}
+
+// Комната по коду приглашения, если код можно использовать; иначе null —
+// одинаково для несуществующего, истёкшего и выключенного кода. Всё, что не
+// похоже на код нынешнего формата, в БД даже не ищется.
+async function findRoomByInviteCode(code) {
+    if (!isValidInviteCode(code)) return null;
+    const room = await dbGet(
+        `SELECT r.id, r.name, r.code, r.code_expires_at, r.invite_max_members, r.invite_require_approval, r.invite_disabled,
+                (SELECT COUNT(*)::int FROM room_participants p WHERE p.room_id = r.id) AS member_count
+         FROM rooms r WHERE r.code = $1`,
+        [code]
+    );
+    return room && isInviteUsable(room) ? room : null;
+}
+
+// Вступление в комнату — общий путь для входа по коду без одобрения и для
+// одобрения заявки. Участник + личная строка chats — одной транзакцией под
+// блокировкой строки комнаты (FOR NO KEY UPDATE):
+//   * вступления в одну комнату идут по очереди — два одновременных
+//     запроса не превысят лимит участников;
+//   * последний участник не может одновременно выйти и снести комнату
+//     вместе с новичком (DELETE /api/chats берёт FOR UPDATE);
+//   * отправку сообщений блокировка не задерживает: внешний ключ
+//     messages.room_id берёт FOR KEY SHARE, совместимый с NO KEY UPDATE.
+// check(room, client) под блокировкой перепроверяет основание для
+// вступления (код — для входа по коду, живую заявку — для одобрения) и
+// возвращает код ошибки или null.
+// Новичок видит только сообщения после вступления: visible_from_id —
+// MAX(id) сообщений комнаты на этот момент (у заявки — на момент ОДОБРЕНИЯ,
+// а не подачи); та же граница — у непрочитанного.
+async function addRoomMember(roomId, userId, check) {
+    const result = await withTransaction(async (client) => {
+        const locked = await client.query(
+            `SELECT id, name, code, invite_max_members, invite_require_approval, invite_disabled,
+                    (code_expires_at IS NOT NULL AND code_expires_at > NOW()) AS code_live
+             FROM rooms WHERE id = $1 FOR NO KEY UPDATE`,
+            [roomId]
+        );
+        const room = locked.rows[0];
+        if (!room) return { error: 'gone' };
+        const checkError = check ? await check(room, client) : null;
+        if (checkError) return { error: checkError };
+
+        const existing = await client.query('SELECT id, name, avatar FROM chats WHERE room_id = $1 AND user_id = $2', [roomId, userId]);
+        if (existing.rows[0]) {
+            const dropped = await client.query('DELETE FROM join_requests WHERE room_id = $1 AND user_id = $2', [roomId, userId]);
+            return { chat: existing.rows[0], room, joined: false, requestRemoved: dropped.rowCount > 0 };
+        }
+        const members = await client.query('SELECT COUNT(*)::int AS n FROM room_participants WHERE room_id = $1', [roomId]);
+        if (isRoomFull(members.rows[0].n, room.invite_max_members)) return { error: 'full' };
+
+        const other = await client.query(
+            `SELECT u.username FROM room_participants rp JOIN users u ON u.id = rp.user_id
+             WHERE rp.room_id = $1 AND rp.user_id <> $2 ORDER BY rp.id LIMIT 1`,
+            [roomId, userId]
+        );
+        const name = other.rows[0] ? `Чат с ${other.rows[0].username}` : room.name;
+        const avatar = name.charAt(0).toUpperCase();
+        await client.query(
+            `INSERT INTO room_participants (room_id, user_id, visible_from_id)
+             VALUES ($1, $2, COALESCE((SELECT MAX(id) FROM messages WHERE room_id = $1), 0))
+             ON CONFLICT (room_id, user_id) DO NOTHING`,
+            [roomId, userId]
+        );
+        const chatResult = await client.query(
+            `INSERT INTO chats (user_id, room_id, name, avatar, online, is_bot, last_read_message_id)
+             VALUES ($1, $2, $3, $4, 0, 0,
+                     (SELECT visible_from_id FROM room_participants WHERE room_id = $2 AND user_id = $1))
+             RETURNING id`,
+            [userId, roomId, name, avatar]
+        );
+        const dropped = await client.query('DELETE FROM join_requests WHERE room_id = $1 AND user_id = $2', [roomId, userId]);
+        return { chat: { id: chatResult.rows[0].id, name, avatar }, room, joined: true, requestRemoved: dropped.rowCount > 0 };
+    });
+    if (result.error) return result;
+
+    const chat = roomChatPayload(result.chat, result.room);
+    if (result.joined) {
+        subscribeUserToChat(userId, chat.id, roomId);
+        notifyRoomMembersChanged(roomId);
+        notifyChatListChanged(userId);
+    }
+    if (result.requestRemoved) notifyJoinRequestsChanged(roomId);
+    return { chat, joined: result.joined };
+}
+
+// Заявка на вступление в комнату с одобрением. Повторный запрос возвращает
+// ту же заявку; просроченная (старше недели — фоновая чистка до неё ещё не
+// дошла) заменяется новой. Живых заявок в комнате — не больше
+// MAX_PENDING_JOIN_REQUESTS_PER_ROOM.
+async function createJoinRequest(roomId, userId) {
+    await dbRun(`DELETE FROM join_requests WHERE room_id = $1 AND user_id = $2 AND NOT (${JOIN_REQUEST_LIVE_SQL})`, [roomId, userId]);
+    const existing = await dbGet('SELECT id FROM join_requests WHERE room_id = $1 AND user_id = $2', [roomId, userId]);
+    if (existing) return { id: existing.id };
+    const pending = await dbGet(`SELECT COUNT(*)::int AS n FROM join_requests WHERE room_id = $1 AND ${JOIN_REQUEST_LIVE_SQL}`, [roomId]);
+    if (pending.n >= MAX_PENDING_JOIN_REQUESTS_PER_ROOM) {
+        return { error: 'В эту группу слишком много заявок. Попробуйте позже.' };
+    }
+    const inserted = await dbGet(
+        'INSERT INTO join_requests (room_id, user_id) VALUES ($1, $2) ON CONFLICT (room_id, user_id) DO NOTHING RETURNING id',
+        [roomId, userId]
+    );
+    if (!inserted) {
+        // Параллельный такой же запрос успел раньше — это та же заявка.
+        const concurrent = await dbGet('SELECT id FROM join_requests WHERE room_id = $1 AND user_id = $2', [roomId, userId]);
+        return concurrent ? { id: concurrent.id } : { error: 'Не удалось отправить заявку. Попробуйте ещё раз.' };
+    }
+    notifyJoinRequestsChanged(roomId);
+    return { id: inserted.id };
+}
+
+app.get('/api/chats/invite/:chatId', async (req, res) => {
+    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
+    try {
+        const own = await getOwnRoom(req.params.chatId, req.session.userId);
+        if (own.error) return res.json({ success: false, message: own.error });
+        res.json({ success: true, ...describeInvite(own.room, own.room.member_count) });
+    } catch (error) {
+        console.error('Get invite error:', error);
+        res.json({ success: false, message: 'Ошибка получения кода' });
+    }
+});
+
+// Новый код приглашения с параметрами { ttlSeconds, maxMembers,
+// requireApproval } — любой участник комнаты. Старый код перестаёт
+// действовать сразу (так закрывается утёкшая ссылка); выключенный код
+// перевыпуск снова включает.
+app.post('/api/chats/:chatId/invite/rotate', async (req, res) => {
+    const userId = req.session.userId;
+    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    let settings;
+    try {
+        settings = parseInviteSettings(req.body, { defaultTtlSeconds: INVITE_TTL_SECONDS });
+    } catch (err) {
+        return res.json({ success: false, message: err.message });
+    }
+    try {
+        const chat = await getOwnChat(req.params.chatId, userId);
+        if (!chat) return res.json({ success: false, message: 'Чат не найден' });
+        if (!chat.room_id) return res.json({ success: false, message: 'У этого чата нет кода приглашения' });
+        const room = await dbGet(
+            `UPDATE rooms SET code = $1, code_expires_at = NOW() + $2::integer * INTERVAL '1 second',
+                    invite_max_members = $5, invite_require_approval = $6, invite_disabled = FALSE
+             WHERE id = $3 AND EXISTS (SELECT 1 FROM room_participants WHERE room_id = $3 AND user_id = $4)
+             RETURNING code, code_expires_at, invite_max_members, invite_require_approval`,
+            [generateInviteCode(), settings.ttlSeconds, chat.room_id, userId, settings.maxMembers, settings.requireApproval]
+        );
+        if (!room) return res.json({ success: false, message: 'Чат не найден' });
+        res.json({
+            success: true,
+            code: room.code,
+            expiresAt: inviteExpiresAtIso(room.code_expires_at),
+            maxMembers: room.invite_max_members,
+            requireApproval: room.invite_require_approval,
+        });
+    } catch (error) {
+        console.error('Rotate invite error:', error);
+        res.json({ success: false, message: 'Ошибка обновления кода' });
+    }
+});
+
+// Выключить приглашение. Сам код тоже заменяется случайным, нигде не
+// показанным: выключенный код не оживёт, даже если флаг где-то забудут
+// проверить. Уже поданные заявки остаются — их можно рассмотреть.
+app.post('/api/chats/:chatId/invite/disable', async (req, res) => {
+    const userId = req.session.userId;
+    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    try {
+        const chat = await getOwnChat(req.params.chatId, userId);
+        if (!chat) return res.json({ success: false, message: 'Чат не найден' });
+        if (!chat.room_id) return res.json({ success: false, message: 'У этого чата нет кода приглашения' });
+        const room = await dbGet(
+            `UPDATE rooms SET code = $1, invite_disabled = TRUE
+             WHERE id = $2 AND EXISTS (SELECT 1 FROM room_participants WHERE room_id = $2 AND user_id = $3)
+             RETURNING id`,
+            [generateInviteCode(), chat.room_id, userId]
+        );
+        if (!room) return res.json({ success: false, message: 'Чат не найден' });
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Disable invite error:', error);
+        res.json({ success: false, message: 'Ошибка отключения кода' });
+    }
+});
+
+// Что за группа по коду — до вступления. Тот же лимитер, что у входа по
+// коду (общий счётчик): иначе предпросмотр стал бы бесплатным способом
+// перебирать коды.
+app.post('/api/chats/join/preview', joinUserLimiter, joinIpLimiter, async (req, res) => {
+    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
+    const code = normalizeInviteCode(req.body?.code);
+    if (!code) return res.json({ success: false, message: 'Введите код приглашения' });
+    try {
+        const room = await findRoomByInviteCode(code);
+        if (!room) return res.json({ success: false, message: INVALID_INVITE_MESSAGE });
+        res.json({
+            success: true,
+            roomName: room.name,
+            memberCount: room.member_count,
+            requireApproval: room.invite_require_approval !== false,
+        });
+    } catch (error) {
+        console.error('Join preview error:', error);
+        res.json({ success: false, message: 'Ошибка проверки кода' });
+    }
+});
+
 app.post('/api/chats/join', joinUserLimiter, joinIpLimiter, async (req, res) => {
     const userId = req.session.userId;
     if (!userId) return res.json({ success: false, message: 'Не авторизован' });
     const code = normalizeInviteCode(req.body?.code);
     if (!code) return res.json({ success: false, message: 'Введите код приглашения' });
-    // Всё, что не похоже на код нынешнего формата, в БД даже не ищем.
-    if (!isValidInviteCode(code)) return res.json({ success: false, message: 'Чат по этому коду не найден' });
 
     try {
-        const room = await dbGet('SELECT id, name, code, code_expires_at FROM rooms WHERE code = $1', [code]);
-        if (!room) return res.json({ success: false, message: 'Чат по этому коду не найден' });
-        if (isInviteExpired(room.code_expires_at)) return res.json({ success: false, message: 'Код приглашения истёк' });
+        const room = await findRoomByInviteCode(code);
+        if (!room) return res.json({ success: false, message: INVALID_INVITE_MESSAGE });
 
         const existingChat = await dbGet('SELECT id, name, avatar FROM chats WHERE room_id = $1 AND user_id = $2', [room.id, userId]);
-        if (existingChat) {
-            return res.json({ success: true, chat: { ...existingChat, online: 0, is_bot: 0, room_id: room.id, invite_code: room.code } });
+        if (existingChat) return res.json({ success: true, chat: roomChatPayload(existingChat, room) });
+        if (isRoomFull(room.member_count, room.invite_max_members)) {
+            return res.json({ success: false, message: ROOM_FULL_MESSAGE });
         }
 
-        const otherUser = await dbGet('SELECT u.username FROM users u JOIN room_participants rp ON u.id = rp.user_id WHERE rp.room_id = $1 AND u.id != $2 LIMIT 1', [room.id, userId]);
-        const chatName = otherUser ? `Чат с ${otherUser.username}` : room.name;
-        const avatar = chatName.charAt(0).toUpperCase();
+        const pendingResponse = async () => {
+            const request = await createJoinRequest(room.id, userId);
+            if (request.error) return res.json({ success: false, message: request.error });
+            res.json({ success: true, pending: true, requestId: request.id, roomName: room.name });
+        };
+        if (room.invite_require_approval !== false) return pendingResponse();
 
-        // Участник + личная строка chats — атомарно. FOR SHARE на комнате:
-        // код перепроверяется под блокировкой (его могли сменить или комнату
-        // удалить, пока шли запросы выше), и последний участник не может
-        // одновременно выйти и снести комнату вместе с новичком.
-        // Новичок видит только сообщения после вступления (visible_from_id),
-        // они же — граница непрочитанного.
-        const chatId = await withTransaction(async (client) => {
-            const locked = await client.query(
-                'SELECT id FROM rooms WHERE id = $1 AND code = $2 AND code_expires_at > NOW() FOR SHARE',
-                [room.id, code]
-            );
-            if (locked.rows.length === 0) return null;
-            await client.query(
-                `INSERT INTO room_participants (room_id, user_id, visible_from_id)
-                 VALUES ($1, $2, COALESCE((SELECT MAX(id) FROM messages WHERE room_id = $1), 0))
-                 ON CONFLICT (room_id, user_id) DO NOTHING`,
-                [room.id, userId]
-            );
-            const chatResult = await client.query(
-                `INSERT INTO chats (user_id, room_id, name, avatar, online, is_bot, last_read_message_id)
-                 VALUES ($1, $2, $3, $4, 0, 0,
-                         (SELECT visible_from_id FROM room_participants WHERE room_id = $2 AND user_id = $1))
-                 RETURNING id`,
-                [userId, room.id, chatName, avatar]
-            );
-            return chatResult.rows[0].id;
+        // Код перепроверяется под блокировкой комнаты: пока шли запросы выше,
+        // его могли сменить или выключить, а могли и включить одобрение.
+        const result = await addRoomMember(room.id, userId, (locked) => {
+            if (locked.code !== code || !locked.code_live || locked.invite_disabled) return 'invalid';
+            return locked.invite_require_approval === false ? null : 'approval';
         });
-        if (!chatId) return res.json({ success: false, message: 'Чат по этому коду не найден' });
-
-        subscribeUserToChat(userId, chatId, room.id);
-        notifyRoomMembersChanged(room.id);
-        res.json({ success: true, chat: { id: chatId, name: chatName, avatar, online: 0, is_bot: 0, room_id: room.id, invite_code: room.code } });
+        if (result.error === 'approval') return pendingResponse();
+        if (result.error === 'full') return res.json({ success: false, message: ROOM_FULL_MESSAGE });
+        if (result.error) return res.json({ success: false, message: INVALID_INVITE_MESSAGE });
+        res.json({ success: true, chat: result.chat });
     } catch (error) {
         console.error('Join chat error:', error);
         res.json({ success: false, message: 'Ошибка входа в чат' });
+    }
+});
+
+// Живые заявки комнаты — любому её участнику.
+app.get('/api/chats/:chatId/join-requests', async (req, res) => {
+    const userId = req.session.userId;
+    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    try {
+        const chat = await getOwnChat(req.params.chatId, userId);
+        if (!chat) return res.json({ success: false, message: 'Чат не найден' });
+        if (!chat.room_id) return res.json({ success: true, requests: [] });
+        const rows = await dbAll(
+            `SELECT jr.id, jr.user_id, u.username, jr.created_at
+             FROM join_requests jr JOIN users u ON u.id = jr.user_id
+             WHERE jr.room_id = $1 AND jr.${JOIN_REQUEST_LIVE_SQL}
+               AND EXISTS (SELECT 1 FROM room_participants WHERE room_id = $1 AND user_id = $2)
+             ORDER BY jr.created_at, jr.id`,
+            [chat.room_id, userId]
+        );
+        res.json({
+            success: true,
+            requests: rows.map(r => ({ id: r.id, userId: r.user_id, username: r.username, createdAt: r.created_at })),
+        });
+    } catch (error) {
+        console.error('Get join requests error:', error);
+        res.json({ success: false, message: 'Ошибка загрузки заявок' });
+    }
+});
+
+// Свои живые заявки (у заявителя: "ожидает одобрения").
+app.get('/api/join-requests/mine', async (req, res) => {
+    const userId = req.session.userId;
+    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    try {
+        const rows = await dbAll(
+            `SELECT jr.id, r.name AS room_name, jr.created_at
+             FROM join_requests jr JOIN rooms r ON r.id = jr.room_id
+             WHERE jr.user_id = $1 AND jr.${JOIN_REQUEST_LIVE_SQL}
+             ORDER BY jr.created_at DESC, jr.id`,
+            [userId]
+        );
+        res.json({ success: true, requests: rows.map(r => ({ id: r.id, roomName: r.room_name, createdAt: r.created_at })) });
+    } catch (error) {
+        console.error('Get own join requests error:', error);
+        res.json({ success: false, message: 'Ошибка загрузки заявок' });
+    }
+});
+
+// Одобрить заявку — любой участник той же комнаты. Заявки чужих комнат
+// неотличимы от несуществующих. Вступление — тем же addRoomMember, что и
+// вход по коду без одобрения (лимит участников, visible_from_id на момент
+// одобрения, подписка сокетов заявителя, roomMembersChanged).
+app.post('/api/join-requests/:id/approve', async (req, res) => {
+    const userId = req.session.userId;
+    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    const requestId = toPositiveInt(req.params.id);
+    if (!requestId) return res.json(JOIN_REQUEST_NOT_FOUND);
+    try {
+        const request = await dbGet(
+            `SELECT jr.id, jr.room_id, jr.user_id FROM join_requests jr
+             JOIN room_participants rp ON rp.room_id = jr.room_id AND rp.user_id = $2
+             WHERE jr.id = $1 AND jr.${JOIN_REQUEST_LIVE_SQL}`,
+            [requestId, userId]
+        );
+        if (!request) return res.json(JOIN_REQUEST_NOT_FOUND);
+        // Под блокировкой комнаты — заявка всё ещё жива (её не отклонили и не
+        // отозвали параллельно; FOR UPDATE — чтобы и не успели), а
+        // одобряющий всё ещё участник. Строка заявителя блокируется раньше
+        // заявки — в том же порядке, что и в deleteUserAccount (сначала
+        // users, потом join_requests): одновременное удаление его аккаунта
+        // не даст взаимной блокировки, заявка просто окажется удалённой.
+        const result = await addRoomMember(request.room_id, request.user_id, async (room, client) => {
+            const applicant = await client.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE', [request.user_id]);
+            if (applicant.rows.length === 0) return 'not-found';
+            const live = await client.query(
+                `SELECT jr.id FROM join_requests jr
+                 JOIN room_participants rp ON rp.room_id = jr.room_id AND rp.user_id = $3
+                 WHERE jr.id = $1 AND jr.user_id = $2 AND jr.room_id = $4 AND jr.${JOIN_REQUEST_LIVE_SQL}
+                 FOR UPDATE OF jr`,
+                [requestId, request.user_id, userId, room.id]
+            );
+            return live.rows.length > 0 ? null : 'not-found';
+        });
+        if (result.error === 'full') return res.json({ success: false, message: ROOM_FULL_MESSAGE });
+        if (result.error) return res.json(JOIN_REQUEST_NOT_FOUND);
+        notifyJoinRequestDecided(request.user_id, { requestId, approved: true, chat: result.chat });
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Approve join request error:', error);
+        res.json({ success: false, message: 'Ошибка одобрения заявки' });
+    }
+});
+
+app.post('/api/join-requests/:id/deny', async (req, res) => {
+    const userId = req.session.userId;
+    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    const requestId = toPositiveInt(req.params.id);
+    if (!requestId) return res.json(JOIN_REQUEST_NOT_FOUND);
+    try {
+        const removed = await dbGet(
+            `DELETE FROM join_requests jr USING room_participants rp
+             WHERE jr.id = $1 AND rp.room_id = jr.room_id AND rp.user_id = $2 AND jr.${JOIN_REQUEST_LIVE_SQL}
+             RETURNING jr.id, jr.room_id, jr.user_id`,
+            [requestId, userId]
+        );
+        if (!removed) return res.json(JOIN_REQUEST_NOT_FOUND);
+        notifyJoinRequestsChanged(removed.room_id);
+        notifyJoinRequestDecided(removed.user_id, { requestId: removed.id, approved: false });
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Deny join request error:', error);
+        res.json({ success: false, message: 'Ошибка отклонения заявки' });
+    }
+});
+
+// Заявитель отзывает свою заявку.
+app.delete('/api/join-requests/:id', async (req, res) => {
+    const userId = req.session.userId;
+    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    const requestId = toPositiveInt(req.params.id);
+    if (!requestId) return res.json(JOIN_REQUEST_NOT_FOUND);
+    try {
+        const removed = await dbGet('DELETE FROM join_requests WHERE id = $1 AND user_id = $2 RETURNING room_id', [requestId, userId]);
+        if (!removed) return res.json(JOIN_REQUEST_NOT_FOUND);
+        notifyJoinRequestsChanged(removed.room_id);
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Cancel join request error:', error);
+        res.json({ success: false, message: 'Ошибка отмены заявки' });
     }
 });
 
@@ -2306,6 +3032,7 @@ app.delete('/api/chats/:chatId', async (req, res) => {
         const client = await pool.connect();
         let fileUrls = [];
         let roomSurvived = false;
+        let droppedRequests = [];
         try {
             await client.query('BEGIN');
             if (chat.room_id) {
@@ -2320,8 +3047,12 @@ app.delete('/api/chats/:chatId', async (req, res) => {
                 const remaining = await client.query('SELECT 1 FROM room_participants WHERE room_id = $1 LIMIT 1', [chat.room_id]);
                 if (remaining.rows.length === 0) {
                     // Последний участник вышел — сносим комнату целиком.
+                    // Заявки ушли бы и каскадом, но заявителям надо сказать,
+                    // что рассматривать их больше некому.
                     const deleted = await client.query('DELETE FROM messages WHERE room_id = $1 RETURNING file_url', [chat.room_id]);
                     fileUrls = deleted.rows.map(r => r.file_url);
+                    const requests = await client.query('DELETE FROM join_requests WHERE room_id = $1 RETURNING id, user_id', [chat.room_id]);
+                    droppedRequests = requests.rows;
                     await client.query('DELETE FROM rooms WHERE id = $1', [chat.room_id]);
                 } else {
                     roomSurvived = true;
@@ -2345,6 +3076,8 @@ app.delete('/api/chats/:chatId', async (req, res) => {
         removeUploadedFiles(fileUrls);
         unsubscribeUserFromChat(userId, chat.id, chat.room_id);
         if (roomSurvived) notifyRoomMembersChanged(chat.room_id);
+        for (const request of droppedRequests) notifyJoinRequestDecided(request.user_id, { requestId: request.id, approved: false });
+        notifyChatListChanged(userId);
         res.json({ success: true });
     } catch (error) {
         console.error('Delete chat error:', error);
@@ -2548,8 +3281,7 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
                 fileUrl, fileName, fileType, messageType, time, encrypted, fileSize]
         );
 
-        const expiry = await getDefaultExpirySeconds(chat.id);
-        if (expiry) await disappearingMessagesManager.setMessageExpiry(inserted.id, expiry, false);
+        await applyNewMessageExpiry(chat, inserted.id);
 
         // Раньше здесь по setTimeout статус "доставлено"/"прочитано"
         // выставлялся через 1 и 2 секунды независимо от реальности (и без
@@ -2565,6 +3297,7 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
         };
         io.to(getSocketRoomKey(chat.id, roomId)).emit('newMessage', fileMessage);
         res.json({ success: true, message: fileMessage });
+        if (roomId) unarchiveForRecipients(chat, userId);
     } catch (error) {
         console.error('Upload file error:', error);
         cleanupUploadedFile(file);
@@ -2763,12 +3496,19 @@ app.post('/api/messages/:messageId/set-expiry', async (req, res) => {
 
     try {
         // Проверка доступа к сообщению
-        const message = await dbGet('SELECT user_id FROM messages WHERE id = $1 AND deleted = 0', [messageId]);
+        const message = await dbGet('SELECT user_id, room_id, chat_id FROM messages WHERE id = $1 AND deleted = 0', [messageId]);
         if (!message || message.user_id !== req.session.userId) {
             return res.json({ success: false, message: 'Сообщение не найдено или нет доступа' });
         }
 
-        await disappearingMessagesManager.setMessageExpiry(messageId, expirySeconds, autoDeleteOnRead === true);
+        // Общий таймер чата — верхняя граница: автор может ускорить
+        // исчезновение своего сообщения, но не продлить его сверх того, о чём
+        // договорилась комната (уже назначенный срок только приближается).
+        const chatDefault = await getDefaultExpirySeconds({ id: message.chat_id, room_id: message.room_id });
+        await disappearingMessagesManager.setMessageExpiry(
+            messageId, effectiveMessageExpiry(expirySeconds, chatDefault), autoDeleteOnRead === true,
+            { shortenOnly: Boolean(chatDefault) }
+        );
 
         res.json({ success: true, message: 'Таймер самоуничтожения установлен' });
     } catch (error) {
@@ -2777,11 +3517,52 @@ app.post('/api/messages/:messageId/set-expiry', async (req, res) => {
     }
 });
 
+// Таймер исчезающих сообщений чата. В комнате — общий для всех участников
+// (room_settings), и менять его может любой участник, как и код
+// приглашения; в чате с ботом — личный (chat_settings). Действует на
+// сообщения, отправленные после изменения. Возвращается действующий срок
+// (выключенный таймер — DEFAULT_MESSAGE_EXPIRY_SECONDS, если он задан).
+async function setChatExpiry(chat, seconds) {
+    if (chat.room_id) await disappearingMessagesManager.setRoomDefaultExpiry(chat.room_id, seconds);
+    else await disappearingMessagesManager.setChatDefaultExpiry(chat.id, seconds);
+    const effective = seconds || GLOBAL_DEFAULT_EXPIRY_SECONDS || 0;
+    // В комнате chatId не отправляется: у каждого участника он свой.
+    io.to(getSocketRoomKey(chat.id, chat.room_id)).emit('chatExpiryChanged', {
+        roomId: chat.room_id || null,
+        chatId: chat.room_id ? null : chat.id,
+        seconds: effective,
+    });
+    return effective;
+}
+
+app.post('/api/chats/:chatId/expiry', async (req, res) => {
+    const userId = req.session.userId;
+    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    let seconds;
+    try {
+        seconds = parseChatExpirySeconds(req.body?.seconds);
+    } catch (err) {
+        return res.json({ success: false, message: err.message });
+    }
+    try {
+        const chat = await getOwnChat(req.params.chatId, userId);
+        if (!chat) return res.json({ success: false, message: 'Чат не найден' });
+        res.json({ success: true, seconds: await setChatExpiry(chat, seconds) });
+    } catch (error) {
+        console.error('Set chat expiry error:', error);
+        res.json({ success: false, message: 'Ошибка настройки автоудаления' });
+    }
+});
+
+// Старый маршрут ({ expirySeconds }) — тот же общий таймер и тот же набор
+// допустимых сроков, что и POST /api/chats/:chatId/expiry.
 app.post('/api/chats/:chatId/set-default-expiry', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
-    const expirySeconds = Number(req.body?.expirySeconds);
-    if (!Number.isFinite(expirySeconds)) {
-        return res.json({ success: false, message: 'Неверные параметры' });
+    let seconds;
+    try {
+        seconds = parseChatExpirySeconds(req.body?.expirySeconds);
+    } catch (err) {
+        return res.json({ success: false, message: err.message });
     }
 
     try {
@@ -2791,11 +3572,13 @@ app.post('/api/chats/:chatId/set-default-expiry', async (req, res) => {
             return res.json({ success: false, message: 'Чат не найден' });
         }
 
-        await disappearingMessagesManager.setChatDefaultExpiry(chat.id, expirySeconds);
-
-        res.json({ success: true, message: expirySeconds > 0 ? 'Автоудаление сообщений настроено для чата' : 'Автоудаление сообщений выключено' });
+        const effective = await setChatExpiry(chat, seconds);
+        res.json({
+            success: true,
+            seconds: effective,
+            message: seconds > 0 ? 'Автоудаление сообщений настроено для чата' : 'Автоудаление сообщений выключено',
+        });
     } catch (error) {
-        if (error instanceof RangeError) return res.json({ success: false, message: error.message });
         console.error('Set chat default expiry error:', error);
         res.json({ success: false, message: 'Ошибка настройки автоудаления' });
     }
@@ -2810,11 +3593,41 @@ app.get('/api/chats/:chatId/settings', async (req, res) => {
             return res.json({ success: false, message: 'Чат не найден' });
         }
 
-        const settings = await disappearingMessagesManager.getChatSettings(chat.id);
-        res.json({ success: true, settings: settings || {} });
+        const expiry = await getDefaultExpirySeconds(chat);
+        res.json({ success: true, settings: expiry ? { default_message_expiry: expiry } : {} });
     } catch (error) {
         console.error('Get chat settings error:', error);
         res.json({ success: false, message: 'Ошибка получения настроек' });
+    }
+});
+
+// Личные флаги чата: закреплён, без звука, в архиве. Хранятся в строке
+// chats самого пользователя — собеседники их не видят. Остальным вкладкам
+// и устройствам пользователя — chatListChanged.
+app.post('/api/chats/:chatId/prefs', async (req, res) => {
+    const userId = req.session.userId;
+    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    let prefs;
+    try {
+        prefs = parseChatPrefs(req.body);
+    } catch (err) {
+        return res.json({ success: false, message: err.message });
+    }
+    const chatId = toPositiveInt(req.params.chatId);
+    if (!chatId) return res.json({ success: false, message: 'Чат не найден' });
+    try {
+        const row = await dbGet(
+            `UPDATE chats SET pinned = COALESCE($3, pinned), muted = COALESCE($4, muted), archived = COALESCE($5, archived)
+             WHERE id = $1 AND user_id = $2
+             RETURNING pinned, muted, archived`,
+            [chatId, userId, prefs.pinned, prefs.muted, prefs.archived]
+        );
+        if (!row) return res.json({ success: false, message: 'Чат не найден' });
+        notifyChatListChanged(userId);
+        res.json({ success: true, pinned: row.pinned, muted: row.muted, archived: row.archived });
+    } catch (error) {
+        console.error('Set chat prefs error:', error);
+        res.json({ success: false, message: 'Ошибка сохранения настроек чата' });
     }
 });
 
@@ -2840,6 +3653,7 @@ app.post('/api/change-password', passwordLimiter, async (req, res) => {
         const hashedPassword = await hashPassword(newPassword);
 
         await dbRun('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, userId]);
+        recordSecurityEvent(userId, 'password_changed', req);
         // Смена пароля завершает ВСЕ сессии пользователя (другие устройства,
         // в т.ч. того, кто мог узнать старый пароль), а не только текущую.
         await dbRun(`DELETE FROM session WHERE sess->>'userId' = $1`, [String(userId)]);
@@ -2879,7 +3693,8 @@ app.use((err, req, res, next) => {
 
 // Полное удаление пользователя (анонимного при выходе/по сроку или любого
 // по POST /api/account/delete): его сообщения (и их файлы), реакции, E2EE
-// key-shares, участие в комнатах, опустевшие комнаты со всей историей,
+// key-shares, участие в комнатах, его заявки на вступление, журнал
+// безопасности, опустевшие комнаты со всей историей и заявками в них,
 // chats (chat_settings — каскадом), unread, сама строка users;
 // message_expiry и реакции на его сообщения уходят каскадом. Одной
 // транзакцией — раньше это была серия отдельных DELETE, и первая же ошибка
@@ -2890,6 +3705,8 @@ app.use((err, req, res, next) => {
 async function deleteUserAccount(userId) {
     let fileUrls = [];
     let survivingRoomIds = [];
+    let requestRoomIds = [];
+    let droppedRequests = [];
     const deleted = await withTransaction(async (client) => {
         // Блокировка строки пользователя: параллельная отправка сообщения
         // (FK на users) дождётся конца удаления и получит ошибку, а не
@@ -2912,6 +3729,9 @@ async function deleteUserAccount(userId) {
         await client.query('DELETE FROM room_participants WHERE user_id = $1', [userId]);
         await client.query('DELETE FROM unread WHERE user_id = $1', [userId]);
         await client.query('DELETE FROM chats WHERE user_id = $1', [userId]);
+        const ownRequests = await client.query('DELETE FROM join_requests WHERE user_id = $1 RETURNING room_id', [userId]);
+        requestRoomIds = [...new Set(ownRequests.rows.map(r => r.room_id))];
+        await client.query('DELETE FROM security_events WHERE user_id = $1', [userId]);
 
         if (roomIds.length > 0) {
             const orphaned = await client.query(
@@ -2921,6 +3741,15 @@ async function deleteUserAccount(userId) {
                 [roomIds]
             );
             fileUrls.push(...orphaned.rows.map(r => r.file_url));
+            // Заявки в опустевшие комнаты ушли бы и каскадом, но заявителям
+            // надо сказать, что рассматривать их больше некому.
+            const orphanedRequests = await client.query(
+                `DELETE FROM join_requests jr WHERE jr.room_id = ANY($1::int[])
+                   AND NOT EXISTS (SELECT 1 FROM room_participants rp WHERE rp.room_id = jr.room_id)
+                 RETURNING id, user_id`,
+                [roomIds]
+            );
+            droppedRequests = orphanedRequests.rows;
             const removedRooms = await client.query(
                 `DELETE FROM rooms r WHERE r.id = ANY($1::int[])
                    AND NOT EXISTS (SELECT 1 FROM room_participants rp WHERE rp.room_id = r.id)
@@ -2936,8 +3765,11 @@ async function deleteUserAccount(userId) {
     if (!deleted) return false;
 
     removeUploadedFiles(fileUrls);
+    anonStates.delete(userId);
     io.in('user:' + userId).disconnectSockets(true);
     for (const roomId of survivingRoomIds) notifyRoomMembersChanged(roomId);
+    for (const roomId of requestRoomIds) notifyJoinRequestsChanged(roomId);
+    for (const request of droppedRequests) notifyJoinRequestDecided(request.user_id, { requestId: request.id, approved: false });
     deleteKeysForUser(userId);
     // Сессии на других устройствах. После COMMIT и отдельно: таблицы session
     // может ещё не быть (42P01), а ошибка внутри транзакции откатила бы всё.
@@ -2949,24 +3781,32 @@ async function deleteUserAccount(userId) {
     return true;
 }
 
-// Анонимные аккаунты, чья сессия уже истекла (вкладку просто закрыли, не
-// нажав "Выйти"), раньше оставались в БД навсегда — вопреки обещанию
-// "данные удалятся". Сессия анонима живёт максимум 4 часа (см.
-// isExpiredAnonymousSession), так что через 5 часов после создания его
-// можно удалять; живую сессию дополнительно проверяем по таблице session.
+// Анонимные аккаунты, срок которых вышел (lib/anon-lifetime.js): выбранный
+// срок без активности (users.last_active_at, у совсем старых строк — время
+// создания) или 7 дней с создания. Раньше удаление шло только через 5 часов
+// после создания и откладывалось, пока жива строка в таблице session, —
+// даже если вкладку давно закрыли. Анонимы с открытым сокетом в этом
+// процессе не трогаются (кроме жёсткого потолка): их активность и так
+// продлевается каждые 5 минут, а сокеты других экземпляров сервера
+// продлевают users.last_active_at в БД.
 async function purgeExpiredAnonymousUsers() {
     try {
+        const online = anonSocketCount.keys();
         const rows = await dbAll(`
             SELECT u.id FROM users u
             WHERE u.email IS NULL AND u.password IS NULL
-              AND u.created_at < NOW() - INTERVAL '5 hours'
-              AND NOT EXISTS (
-                  SELECT 1 FROM session s
-                  WHERE s.expire > NOW() AND s.sess->>'userId' = u.id::text
+              AND (
+                  u.created_at < NOW() - $1::integer * INTERVAL '1 second'
+                  OR (
+                      COALESCE(u.last_active_at, u.created_at) < NOW() - (CASE u.anon_lifetime
+                          WHEN 'day' THEN $2::integer WHEN 'week' THEN $3::integer ELSE $4::integer
+                      END) * INTERVAL '1 second'
+                      AND NOT (u.id = ANY($5::int[]))
+                  )
               )
             ORDER BY u.created_at
             LIMIT 200
-        `);
+        `, [ANON_MAX_AGE_SECONDS, ANON_LIFETIMES.day, ANON_LIFETIMES.week, ANON_LIFETIMES.tab, online]);
         // В лог — только счётчики, без id анонимных аккаунтов.
         let failed = 0;
         for (const row of rows) {
@@ -2979,8 +3819,20 @@ async function purgeExpiredAnonymousUsers() {
         }
         if (rows.length > 0) console.log(`[Anon] Удалено просроченных анонимных аккаунтов: ${rows.length - failed}`);
     } catch (error) {
-        // 42P01 — таблица session ещё не создана (ни одного входа с запуска БД)
-        if (error.code !== '42P01') console.error('[Anon] Purge error:', error.message);
+        console.error('[Anon] Purge error:', error.message);
+    }
+}
+
+// Заявки на вступление старше недели: заявителю — "отклонена", участникам
+// — обновить список (в выборках просроченные заявки и так не видны).
+async function purgeExpiredJoinRequests() {
+    try {
+        const rows = await dbAll(`DELETE FROM join_requests WHERE NOT (${JOIN_REQUEST_LIVE_SQL}) RETURNING id, room_id, user_id`);
+        for (const roomId of new Set(rows.map(r => r.room_id))) notifyJoinRequestsChanged(roomId);
+        for (const row of rows) notifyJoinRequestDecided(row.user_id, { requestId: row.id, approved: false });
+        if (rows.length > 0) console.log(`[Invites] Удалено просроченных заявок на вступление: ${rows.length}`);
+    } catch (error) {
+        console.error('[Invites] Purge error:', error.message);
     }
 }
 
@@ -3005,22 +3857,27 @@ function onServerListening() {
     // Фоновые задачи: брошенные временные файлы обработки вложений,
     // просроченные анонимные аккаунты и (однократно) строки, оставшиеся от
     // soft-delete старой схемы.
+    // Анонимы проверяются каждые 5 минут: самый короткий срок — 30 минут
+    // без активности, и опоздание с удалением не должно быть сравнимо с ним.
     setInterval(() => cleanupStaleTempFiles(UPLOADS_DIR, 60 * 60 * 1000), 60 * 60 * 1000);
     setTimeout(purgeExpiredAnonymousUsers, 60 * 1000);
-    setInterval(purgeExpiredAnonymousUsers, 30 * 60 * 1000);
+    setInterval(purgeExpiredAnonymousUsers, 5 * 60 * 1000);
+    setInterval(touchAnonymousSockets, ANON_SOCKET_ACTIVITY_INTERVAL_MS);
+    setTimeout(purgeExpiredJoinRequests, 90 * 1000);
+    setInterval(purgeExpiredJoinRequests, 60 * 60 * 1000);
     setImmediate(purgeLegacySoftDeletedMessages);
 
     // Только то, что действительно включено в этом запуске.
     console.log('Функции безопасности:');
-    console.log('  ✓ CSRF-токен и проверка Origin (HTTP и WebSocket)');
-    console.log('  ✓ Rate limiting (IP, аккаунт) и proof-of-work при регистрации');
-    console.log('  ✓ Очистка метаданных и обезличенные имена вложений');
-    console.log('  ✓ Исчезающие сообщения, физическое удаление');
-    console.log('  ✓ Шифрование текста сообщений в БД (AES-256-GCM с привязкой к комнате)');
-    console.log('  ✓ CSP с nonce, заголовки приватности' + (IS_PRODUCTION ? ', HSTS по https' : ''));
-    console.log('  ✓ Выравнивание времени ответа при входе');
-    if (process.env.INTERNAL_KEY_SERVER_SECRET) console.log('  ✓ E2EE key server (прокси /api/keys)');
-    if (ONION_ADDRESS && ONION_PORT) console.log(`  ✓ Onion-сервис: http://${ONION_ADDRESS} (внутренний порт ${ONION_PORT})`);
+    console.log('  + CSRF-токен и проверка Origin (HTTP и WebSocket)');
+    console.log('  + Rate limiting (IP, аккаунт) и proof-of-work при регистрации');
+    console.log('  + Очистка метаданных и обезличенные имена вложений');
+    console.log('  + Исчезающие сообщения, физическое удаление');
+    console.log('  + Шифрование текста сообщений в БД (AES-256-GCM с привязкой к комнате)');
+    console.log('  + CSP с nonce, заголовки приватности' + (IS_PRODUCTION ? ', HSTS по https' : ''));
+    console.log('  + Выравнивание времени ответа при входе');
+    if (process.env.INTERNAL_KEY_SERVER_SECRET) console.log('  + E2EE key server (прокси /api/keys)');
+    if (ONION_ADDRESS && ONION_PORT) console.log(`  + Onion-сервис: http://${ONION_ADDRESS} (внутренний порт ${ONION_PORT})`);
     console.log(`\n${'='.repeat(60)}\n`);
 }
 
