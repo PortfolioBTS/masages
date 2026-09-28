@@ -1,5 +1,14 @@
 require('dotenv').config();
 
+// Отчёт о настройках и секретах — первым делом, до модулей, которые могут
+// упасть на неверном значении: в логах деплоя будет видно, что именно не так
+// (значения не печатаются). То же вручную: npm run check-env.
+{
+    const { checkEnv, formatEnvReport } = require('./lib/env-check');
+    const envReport = checkEnv(process.env);
+    (envReport.errors.length > 0 ? console.error : console.log)('[Env] ' + formatEnvReport(envReport));
+}
+
 // 1. IMPORTS
 const express = require('express');
 const { Pool } = require('pg');
@@ -83,7 +92,8 @@ const {
 
 // Импорт E2EE прокси (маршруты регистрируются после sessionMiddleware —
 // см. вызов registerE2eeProxyRoutes ниже)
-const { registerE2eeProxyRoutes, deleteKeysForUser } = require('./lib/e2ee-proxy');
+const { registerE2eeProxyRoutes, deleteKeysForUser, keyStoreMode } = require('./lib/e2ee-proxy');
+const { initKeyStoreSchema } = require('./lib/key-store');
 // Групповой E2EE: участники чата + попарная доставка Sender Key
 // (key-shares). Тоже регистрируется после sessionMiddleware.
 const { initE2eeGroupsSchema, registerE2eeGroupRoutes } = require('./lib/e2ee-groups');
@@ -838,6 +848,9 @@ async function initDatabase() {
     await ensureForeignKey('room_participants', 'room_participants_room_id_fkey', 'room_id', 'rooms', 'CASCADE');
 
     await initE2eeGroupsSchema(pool);
+    // Публичные E2EE-ключи — в этой же базе, если отдельный e2ee-key-server
+    // не подключён (lib/key-store.js). Таблицы те же, что в его миграциях.
+    if (keyStoreMode() === 'builtin') await initKeyStoreSchema(pool);
     // Таблицы message_expiry/chat_settings ссылаются на messages/chats,
     // поэтому создаются только после них. Раньше initialize() вызывался в
     // самом начале — на пустой БД сервер падал с "relation messages does
@@ -3876,7 +3889,9 @@ function onServerListening() {
     console.log('  + Шифрование текста сообщений в БД (AES-256-GCM с привязкой к комнате)');
     console.log('  + CSP с nonce, заголовки приватности' + (IS_PRODUCTION ? ', HSTS по https' : ''));
     console.log('  + Выравнивание времени ответа при входе');
-    if (process.env.INTERNAL_KEY_SERVER_SECRET) console.log('  + E2EE key server (прокси /api/keys)');
+    console.log(keyStoreMode() === 'remote'
+        ? '  + E2EE: ключи в отдельном e2ee-key-server (KEY_SERVER_URL)'
+        : '  + E2EE: ключи во встроенном хранилище (эта же база)');
     if (ONION_ADDRESS && ONION_PORT) console.log(`  + Onion-сервис: http://${ONION_ADDRESS} (внутренний порт ${ONION_PORT})`);
     console.log(`\n${'='.repeat(60)}\n`);
 }

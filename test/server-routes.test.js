@@ -13,6 +13,7 @@
 // Запуск: node test/server-routes.test.js
 
 const assert = require('assert');
+const { makeFakeKeyDb } = require('./fake-key-db');
 
 let passed = 0, failed = 0;
 async function test(name, fn) {
@@ -188,11 +189,14 @@ function restoreFetch() { global.fetch = realFetch; }
 
 const SECRET = 'test-internal-secret';
 
-// KEY_SERVER_SECRET читается при загрузке модуля — поэтому каждый раз
-// свежий require с нужным окружением.
-function loadProxy({ secret = SECRET } = {}) {
+// Окружение читается при загрузке модуля — поэтому каждый раз свежий
+// require. По умолчанию тесты гоняют режим отдельного key-server
+// (E2EE_KEY_STORE=remote); встроенное хранилище — через mode: 'builtin'.
+function loadProxy({ secret = SECRET, mode = 'remote' } = {}) {
     if (secret) process.env.INTERNAL_KEY_SERVER_SECRET = secret;
     else delete process.env.INTERNAL_KEY_SERVER_SECRET;
+    if (mode === 'remote') process.env.E2EE_KEY_STORE = 'remote';
+    else delete process.env.E2EE_KEY_STORE;
     process.env.KEY_SERVER_URL = 'http://key-server.test';
     delete require.cache[require.resolve('../lib/e2ee-proxy.js')];
     return require('../lib/e2ee-proxy.js');
@@ -211,9 +215,13 @@ function makeProxyFixture(opts) {
         { room_id: 200, user_id: 5, username: 'eve' },
         { room_id: 300, user_id: 4, username: 'dave' },
     );
+    // Запросы к таблицам ключей (встроенное хранилище) — в отдельную
+    // фейковую БД, остальное — в общую.
+    const keyDb = makeFakeKeyDb();
+    const route = (fn) => (sql, params) => (keyDb.isKeySql(sql) ? keyDb[fn](sql, params) : db[fn](sql, params));
     const app = makeFakeApp();
-    registerE2eeProxyRoutes(app, { dbGet: db.dbGet, dbAll: db.dbAll });
-    return { app, db };
+    registerE2eeProxyRoutes(app, { dbGet: route('dbGet'), dbAll: route('dbAll') });
+    return { app, db, keyDb };
 }
 
 async function withFrozenTime(start, fn) {
@@ -269,8 +277,8 @@ async function main() {
         assert.throws(() => registerE2eeProxyRoutes(makeFakeApp(), { dbGet: async () => null }), TypeError);
     });
 
-    await test('e2ee-proxy.js: proxied route responds 503 without crashing when KEY_SERVER_SECRET unset', async () => {
-        const { app } = makeProxyFixture({ secret: null });
+    await test('e2ee-proxy.js: E2EE_KEY_STORE=remote without KEY_SERVER_SECRET → 503, nothing forwarded', async () => {
+        const { app } = makeProxyFixture({ secret: null, mode: 'remote' });
         const calls = installFakeFetch(() => ({ body: {} }));
         try {
             for (const [method, path, params] of [
@@ -285,6 +293,37 @@ async function main() {
         } finally {
             restoreFetch();
         }
+    });
+
+    await test('e2ee-proxy.js: default (no E2EE_KEY_STORE) uses the built-in store — no network, even with a leftover secret', async () => {
+        for (const secret of [null, SECRET]) {
+            const { app, keyDb } = makeProxyFixture({ secret, mode: 'builtin' });
+            const calls = installFakeFetch(() => ({ body: {} }));
+            try {
+                const count = await call(app, 'get', '/api/keys/one-time-prekeys/count', { session: { userId: 1 } });
+                assert.strictEqual(count.statusCode, 200);
+                assert.deepStrictEqual(count.body, { count: 0 });
+                const bad = await call(app, 'put', '/api/keys/identity', { session: { userId: 1 }, body: { identity_signing_key: 'x', identity_dh_key: 'y' } });
+                assert.strictEqual(bad.statusCode, 400);
+                const bundle = await call(app, 'get', '/api/keys/bundle/:targetUserId', { session: { userId: 1 }, params: { targetUserId: '2' } });
+                assert.strictEqual(bundle.statusCode, 404, 'co-member without keys → 404 from the store');
+                const ids = await call(app, 'get', '/api/keys/identities', { session: { userId: 1 }, query: { ids: '2,4' } });
+                assert.deepStrictEqual(ids.body, { success: true, identities: [] });
+                keyDb.failNextQuery(new Error('db down'));
+                const down = await withQuietConsole(async () => {
+                    const r = await call(app, 'get', '/api/keys/one-time-prekeys/count', { session: { userId: 1 } });
+                    assert.strictEqual(r.statusCode, 502);
+                });
+                assert.ok(down.some(l => /db down/.test(l)));
+                assert.strictEqual(calls.length, 0, 'built-in mode never calls the network');
+            } finally {
+                restoreFetch();
+            }
+        }
+        const { deleteKeysForUser, keyStoreMode } = loadProxy({ mode: 'builtin' });
+        assert.strictEqual(keyStoreMode(), 'builtin');
+        assert.strictEqual(typeof deleteKeysForUser, 'function');
+        assert.strictEqual(loadProxy({ mode: 'remote' }).keyStoreMode(), 'remote');
     });
 
     await test('e2ee-proxy.js: unauthenticated request is rejected with 401, not forwarded', async () => {

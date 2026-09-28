@@ -435,10 +435,32 @@ function getE2eeClient() {
     return e2eeClient;
 }
 
-function warnE2eeUnavailable() {
+// Причина — чтобы было понятно, что делать: обновить браузер, выйти из
+// приватного режима или ждать, пока починят сервер.
+function describeE2eeInitError(err) {
+    const name = err && err.name;
+    const message = String((err && err.message) || '');
+    if (err && err.code === 'key-server') {
+        return err.status === 503 || err.status === 404
+            ? 'Сквозное шифрование не настроено на сервере'
+            : 'Сервер ключей шифрования сейчас не отвечает';
+    }
+    if (name === 'NotSupportedError' || /X25519|Ed25519|ML-KEM|mlkem|not supported|Unrecognized/i.test(message)) {
+        return 'Этот браузер не поддерживает нужные алгоритмы шифрования (X25519/Ed25519) — обновите его';
+    }
+    if (name === 'InvalidStateError' || name === 'QuotaExceededError' || name === 'UnknownError' || /indexedDB/i.test(message)) {
+        return 'Браузер не разрешает сохранить ключи шифрования (приватный режим или запрет хранилища)';
+    }
+    if (err instanceof TypeError && /fetch|network/i.test(message)) {
+        return 'Нет связи с сервером ключей шифрования';
+    }
+    return 'Не удалось подготовить ключи шифрования';
+}
+
+function warnE2eeUnavailable(err) {
     if (e2eeUnavailableWarned) return;
     e2eeUnavailableWarned = true;
-    showToast('Сквозное шифрование недоступно: не удалось подготовить ключи. Сообщения будут отправляться без него', 'error', 7000);
+    showToast(`Сквозное шифрование недоступно: ${describeE2eeInitError(err).replace(/^./, c => c.toLowerCase())}. Сообщения будут отправляться без него`, 'error', 8000);
 }
 
 function initE2eeForCurrentUser() {
@@ -465,7 +487,7 @@ function initE2eeForCurrentUser() {
             console.error('E2EE: инициализация ключей устройства не удалась:', err);
             if (!currentUser || currentUser.id !== userId) return false;
             e2eeState = 'unavailable';
-            warnE2eeUnavailable();
+            warnE2eeUnavailable(err);
             refreshE2eeUi();
             return false;
         });

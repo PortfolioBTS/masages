@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node test/mlkem.test.js && node test/e2ee.protocol.test.js && node test/media-sanitizer.test.js && node test/server-routes.test.js && node test/server-libs.test.js && node test/security-utils.test.js && node test/pow.test.js && node test/lib.test.js"
+    "check-env": "node scripts/check-env.js",
+    "test": "node test/mlkem.test.js && node test/e2ee.protocol.test.js && node test/media-sanitizer.test.js && node test/server-routes.test.js && node test/server-libs.test.js && node test/security-utils.test.js && node test/key-store.test.js && node test/env-check.test.js && node test/pow.test.js && node test/lib.test.js"
   },
   "engines": {
     "node": "24.x"

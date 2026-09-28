@@ -1038,13 +1038,22 @@
             }
         }
 
+        // Ошибка сервера ключей помечается code/status: интерфейсу нужно
+        // отличать «сервер ключей не отвечает» от «браузер не умеет X25519».
+        function keyServerError(what, res) {
+            const err = new Error('E2EE: не удалось зарегистрировать ' + what);
+            err.code = 'key-server';
+            err.status = res && typeof res.status === 'number' ? res.status : 0;
+            return err;
+        }
+
         async function putIdentity(identity) {
             const res = await transport.putIdentity({
                 identity_signing_key: identity.signPub,
                 identity_dh_key: identity.dhPub,
             });
             if (!res || !res.data || res.data.success !== true) {
-                throw new Error('E2EE: не удалось зарегистрировать identity-ключи');
+                throw keyServerError('identity-ключи', res);
             }
         }
 
@@ -1057,7 +1066,7 @@
                 res = await doPut();
             }
             if (!res || !res.data || res.data.success !== true) {
-                throw new Error('E2EE: не удалось зарегистрировать ' + what);
+                throw keyServerError(what, res);
             }
         }
 
