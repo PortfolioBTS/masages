@@ -1180,12 +1180,15 @@
             return out;
         }
 
-        async function checkPeerIdentities(userIds) {
+        // Сверка закреплённых ключей с сервером. serverKnown — множество id, у
+        // которых identity на сервере есть, или null, если сервер не ответил
+        // (тогда "ключей нет" и "не удалось узнать" неразличимы).
+        async function checkPeersWithServer(userIds) {
             await ensureLocal();
             const me = Number(userId);
             const ids = normalizeIds(userIds).filter(id => id !== me);
             const server = await fetchServerIdentities(ids);
-            return withLock(async () => {
+            const statuses = await withLock(async () => {
                 const out = [];
                 for (const id of ids) {
                     const s = server && server.get(id);
@@ -1196,6 +1199,11 @@
                 }
                 return out;
             });
+            return { statuses, serverKnown: server ? new Set(server.keys()) : null };
+        }
+
+        async function checkPeerIdentities(userIds) {
+            return (await checkPeersWithServer(userIds)).statuses;
         }
 
         async function getPeerIdentityStatus(peerId) {
@@ -1737,7 +1745,7 @@
             });
 
             const others = current.filter(p => p.id !== me);
-            const statuses = await checkPeerIdentities(others.map(p => p.id));
+            const { statuses, serverKnown } = await checkPeersWithServer(others.map(p => p.id));
             const changedIds = new Set(statuses.filter(s => s.status === 'changed').map(s => s.userId));
 
             const warnings = [];
@@ -1751,6 +1759,14 @@
 
             for (const peer of others) {
                 if (changedIds.has(peer.id)) { noteChanged(peer); continue; }
+                // У собеседника нет identity на сервере — bundle заведомо 404.
+                // Не запрашиваем его: каждый запрос bundle расходует лимит на
+                // пару (5 в час), и после нескольких открытий комнаты ключ не
+                // ушёл бы даже тогда, когда собеседник E2EE настроит.
+                if (serverKnown && !serverKnown.has(peer.id)) {
+                    warnings.push({ userId: peer.id, reason: REASON_NOT_READY });
+                    continue;
+                }
                 const own = await storage.get(ownKeyName(roomId));
                 if (own && await storage.get(sharedMarkName(roomId, own.senderKeyId, peer.id))) continue;
                 let prepared;

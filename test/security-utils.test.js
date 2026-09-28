@@ -247,9 +247,53 @@ async function main() {
         const c = utils.createCounter();
         c.increment('a'); c.increment('a'); c.increment('b');
         assert.strictEqual(c.get('a'), 2);
+        assert.deepStrictEqual(c.keys().sort(), ['a', 'b']);
         c.decrement('a'); c.decrement('a'); c.decrement('b'); c.decrement('zzz');
         assert.strictEqual(c.get('a'), 0);
         assert.strictEqual(c.size(), 0);
+        assert.deepStrictEqual(c.keys(), []);
+    });
+
+    // ---- журнал безопасности: семейство клиента ----
+
+    await test('classifyUserAgent: common browsers and systems', () => {
+        const cases = [
+            ['Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36', 'Chrome · Windows'],
+            ['Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 Edg/128.0.0.0', 'Edge · Windows'],
+            ['Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 OPR/113.0.0.0', 'Opera · Windows'],
+            ['Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 YaBrowser/24.7.0.0 Safari/537.36', 'Яндекс Браузер · Windows'],
+            ['Mozilla/5.0 (Android 14; Mobile; rv:130.0) Gecko/130.0 Firefox/130.0', 'Firefox · Android'],
+            ['Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/25.0 Chrome/121.0.0.0 Mobile Safari/537.36', 'Samsung Internet · Android'],
+            ['Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36', 'Chrome · Android'],
+            ['Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1', 'Safari · iOS'],
+            ['Mozilla/5.0 (iPad; CPU OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/128.0.0.0 Mobile/15E148 Safari/604.1', 'Chrome · iOS'],
+            ['Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/130.0 Mobile/15E148 Safari/605.1.15', 'Firefox · iOS'],
+            ['Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15', 'Safari · macOS'],
+            ['Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0', 'Firefox · Linux'],
+            ['Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36', 'Chrome · ChromeOS'],
+            // Tor Browser выдаёт себя за Firefox на Windows — так и показываем.
+            ['Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0', 'Firefox · Windows'],
+        ];
+        for (const [ua, expected] of cases) assert.strictEqual(utils.classifyUserAgent(ua), expected, ua);
+    });
+
+    await test('classifyUserAgent: unknown input never leaks into the result', () => {
+        assert.strictEqual(utils.classifyUserAgent(undefined), utils.UNKNOWN_CLIENT);
+        assert.strictEqual(utils.classifyUserAgent(''), 'Неизвестный клиент');
+        assert.strictEqual(utils.classifyUserAgent('   '), utils.UNKNOWN_CLIENT);
+        assert.strictEqual(utils.classifyUserAgent(['Chrome/1']), utils.UNKNOWN_CLIENT);
+        assert.strictEqual(utils.classifyUserAgent('curl/8.5.0'), utils.UNKNOWN_CLIENT);
+        assert.strictEqual(utils.classifyUserAgent('<script>alert(1)</script>'), utils.UNKNOWN_CLIENT);
+        // Только ОС или только браузер — без разделителя.
+        assert.strictEqual(utils.classifyUserAgent('SomeBot (Windows)'), 'Windows');
+        assert.strictEqual(utils.classifyUserAgent('Firefox/130.0'), 'Firefox');
+        // Результат — всегда из фиксированного набора, без версий и мусора.
+        const allowed = /^(?:(?:Edge|Opera|Яндекс Браузер|Samsung Internet|Firefox|Chrome|Safari)(?: · (?:iOS|Android|Windows|ChromeOS|macOS|Linux))?|iOS|Android|Windows|ChromeOS|macOS|Linux|Неизвестный клиент)$/;
+        const hostile = 'Mozilla/5.0 (Windows NT 10.0) Chrome/1.0 ' + 'x'.repeat(100000) + ' Firefox/2';
+        const started = Date.now();
+        assert.match(utils.classifyUserAgent(hostile), allowed);
+        assert.ok(Date.now() - started < 200, 'long User-Agent is cut before matching');
+        assert.doesNotMatch(utils.classifyUserAgent('Chrome/128.0.6613.84 (Windows NT 10.0)'), /\d/);
     });
 
     await test('normalizeEmail and positiveNumberOr', () => {

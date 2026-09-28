@@ -1,5 +1,7 @@
 'use strict';
-// Тесты lib/metadata-stripper.js и lib/disappearing-messages.js без БД.
+// Тесты lib/metadata-stripper.js, lib/disappearing-messages.js и чистых
+// модулей новых функций (lib/invites.js, lib/chat-settings.js,
+// lib/anon-lifetime.js) без БД.
 // Запуск: node test/lib.test.js
 
 const assert = require('assert');
@@ -9,6 +11,9 @@ const path = require('path');
 const sharp = require('sharp');
 const { stripMetadataFromFile, cleanupStaleTempFiles, _internal } = require('../lib/metadata-stripper');
 const DisappearingMessagesManager = require('../lib/disappearing-messages');
+const invites = require('../lib/invites');
+const chatSettings = require('../lib/chat-settings');
+const anon = require('../lib/anon-lifetime');
 
 let passed = 0, failed = 0;
 async function test(name, fn) {
@@ -280,6 +285,200 @@ async function main() {
         }
         assert.strictEqual(called, false);
         assert.deepStrictEqual(await manager.deleteMessages([]), []);
+    });
+
+    await test('disappearing: room timer is stored per room; 0 turns it off', async () => {
+        const queries = [];
+        const pool = { query: async (sql, params) => { queries.push({ sql, params }); return { rows: [] }; } };
+        const manager = new DisappearingMessagesManager(pool);
+        await manager.setRoomDefaultExpiry(42, 3600);
+        assert.match(queries[0].sql, /INSERT INTO room_settings/);
+        assert.deepStrictEqual(queries[0].params, [42, 3600]);
+        await manager.setRoomDefaultExpiry(42, 0);
+        assert.match(queries[1].sql, /DELETE FROM room_settings WHERE room_id = \$1/);
+        assert.deepStrictEqual(queries[1].params, [42]);
+        await assert.rejects(() => manager.setRoomDefaultExpiry(42, 'abc'), RangeError);
+        assert.strictEqual(await manager.getRoomSettings(42), null);
+    });
+
+    await test('disappearing: shortenOnly never extends an existing expiry; timer follows the DB', async () => {
+        const queries = [];
+        // БД вернула, что до удаления осталось 10 с (срок уже был ближе запрошенного часа).
+        const pool = { query: async (sql, params) => { queries.push({ sql, params }); return { rows: [{ remaining: 10 }] }; } };
+        const manager = new DisappearingMessagesManager(pool);
+        await manager.setMessageExpiry(9, 3600, false, { shortenOnly: true });
+        assert.match(queries[0].sql, /LEAST\(message_expiry\.expires_at, EXCLUDED\.expires_at\)/);
+        const timer = manager.scheduledDeletions.get(9);
+        assert.ok(timer, 'timer scheduled');
+        assert.ok(timer._idleTimeout <= 10 * 1000, 'timer uses the remaining time from the DB, not the requested hour');
+        clearTimeout(timer);
+        await manager.setMessageExpiry(10, 60);
+        assert.doesNotMatch(queries[1].sql, /LEAST\(/, 'without shortenOnly the expiry is simply replaced');
+        clearTimeout(manager.scheduledDeletions.get(10));
+    });
+
+    // ---- приглашения (lib/invites.js) ----
+
+    await test('invites: rotate parameters — defaults, allowed TTLs, member limit, approval', () => {
+        const { parseInviteSettings } = invites;
+        assert.deepStrictEqual(parseInviteSettings({}, { defaultTtlSeconds: 604800 }), { ttlSeconds: 604800, maxMembers: null, requireApproval: true });
+        assert.deepStrictEqual(parseInviteSettings(undefined, { defaultTtlSeconds: 7200 }), { ttlSeconds: 7200, maxMembers: null, requireApproval: true }, 'INVITE_TTL_HOURS default may be any value');
+        for (const ttl of [3600, 86400, 604800, 2592000]) {
+            assert.strictEqual(parseInviteSettings({ ttlSeconds: ttl }, { defaultTtlSeconds: 1 }).ttlSeconds, ttl);
+        }
+        assert.strictEqual(parseInviteSettings({ ttlSeconds: '86400' }, { defaultTtlSeconds: 1 }).ttlSeconds, 86400);
+        for (const bad of [60, 7200, -3600, 3600.5, true, 'abc', [3600], { v: 1 }]) {
+            assert.throws(() => parseInviteSettings({ ttlSeconds: bad }, { defaultTtlSeconds: 3600 }), RangeError, JSON.stringify(bad));
+        }
+        const p = parseInviteSettings({ ttlSeconds: 3600, maxMembers: 10, requireApproval: false }, { defaultTtlSeconds: 1 });
+        assert.deepStrictEqual(p, { ttlSeconds: 3600, maxMembers: 10, requireApproval: false });
+        assert.strictEqual(parseInviteSettings({ maxMembers: 2 }, { defaultTtlSeconds: 1 }).maxMembers, 2);
+        assert.strictEqual(parseInviteSettings({ maxMembers: 1000 }, { defaultTtlSeconds: 1 }).maxMembers, 1000);
+        assert.strictEqual(parseInviteSettings({ maxMembers: null }, { defaultTtlSeconds: 1 }).maxMembers, null);
+        for (const bad of [1, 0, 1001, 2.5, -5, true, 'ten']) {
+            assert.throws(() => parseInviteSettings({ maxMembers: bad }, { defaultTtlSeconds: 1 }), RangeError, JSON.stringify(bad));
+        }
+        for (const bad of ['true', 1, 0, 'false']) {
+            assert.throws(() => parseInviteSettings({ requireApproval: bad }, { defaultTtlSeconds: 1 }), RangeError, JSON.stringify(bad));
+        }
+        assert.throws(() => parseInviteSettings({}, {}), RangeError, 'no default TTL');
+    });
+
+    await test('invites: usable code, room limit, description for members', () => {
+        const now = Date.parse('2026-09-27T12:00:00Z');
+        const room = { code: 'A'.repeat(26), code_expires_at: '2026-09-28T12:00:00Z', invite_disabled: false, invite_max_members: null, invite_require_approval: true };
+        assert.strictEqual(invites.isInviteUsable(room, now), true);
+        assert.strictEqual(invites.isInviteUsable({ ...room, invite_disabled: true }, now), false);
+        assert.strictEqual(invites.isInviteUsable({ ...room, code_expires_at: '2026-09-27T11:00:00Z' }, now), false);
+        assert.strictEqual(invites.isInviteUsable({ ...room, code_expires_at: null }, now), false);
+        assert.strictEqual(invites.isInviteUsable(null, now), false);
+
+        assert.strictEqual(invites.isRoomFull(5, null), false);
+        assert.strictEqual(invites.isRoomFull(4, 5), false);
+        assert.strictEqual(invites.isRoomFull(5, 5), true);
+        assert.strictEqual(invites.isRoomFull(7, 5), true, 'limit lowered below the current size — nobody else gets in');
+
+        assert.deepStrictEqual(invites.describeInvite(room, 3, now), {
+            code: room.code, expiresAt: '2026-09-28T12:00:00.000Z', expired: false, disabled: false,
+            maxMembers: null, requireApproval: true, memberCount: 3,
+        });
+        const disabled = invites.describeInvite({ ...room, invite_disabled: true, invite_max_members: 10, invite_require_approval: false }, '4', now);
+        assert.deepStrictEqual(disabled, { code: null, expiresAt: null, expired: false, disabled: true, maxMembers: 10, requireApproval: false, memberCount: 4 });
+        assert.strictEqual(invites.describeInvite({ ...room, code_expires_at: '2026-09-27T11:00:00Z' }, 1, now).expired, true);
+    });
+
+    await test('invites: one message for missing, expired and disabled codes; join requests live 7 days', () => {
+        assert.strictEqual(invites.INVALID_INVITE_MESSAGE, 'Код недействителен');
+        assert.strictEqual(invites.ROOM_FULL_MESSAGE, 'В группе нет свободных мест');
+        assert.strictEqual(invites.JOIN_REQUEST_TTL_SECONDS, 7 * 24 * 3600);
+        const now = Date.parse('2026-09-27T12:00:00Z');
+        assert.strictEqual(invites.isJoinRequestExpired('2026-09-21T12:00:01Z', now), false);
+        assert.strictEqual(invites.isJoinRequestExpired('2026-09-20T12:00:00Z', now), true);
+        assert.strictEqual(invites.isJoinRequestExpired('garbage', now), true);
+    });
+
+    // ---- настройки чата (lib/chat-settings.js) ----
+
+    await test('chat settings: only the fixed expiry options are accepted', () => {
+        for (const s of [0, 300, 3600, 86400, 604800]) assert.strictEqual(chatSettings.parseChatExpirySeconds(s), s);
+        assert.strictEqual(chatSettings.parseChatExpirySeconds('3600'), 3600);
+        for (const bad of [60, 1, 7200, -300, 300.5, null, undefined, '', 'abc', true, [300]]) {
+            assert.throws(() => chatSettings.parseChatExpirySeconds(bad), RangeError, JSON.stringify(bad));
+        }
+    });
+
+    await test('chat settings: legacy personal timers → the shortest one, never longer than asked', () => {
+        const { snapLegacyExpirySeconds, pickRoomExpiryFromLegacy } = chatSettings;
+        assert.strictEqual(snapLegacyExpirySeconds(3600), 3600);
+        assert.strictEqual(snapLegacyExpirySeconds(7200), 3600, '2 h → 1 h, not 1 day');
+        assert.strictEqual(snapLegacyExpirySeconds(90000), 86400);
+        assert.strictEqual(snapLegacyExpirySeconds(365 * 86400), 604800);
+        assert.strictEqual(snapLegacyExpirySeconds(60), 300, 'shorter than every option → the shortest option');
+        assert.strictEqual(snapLegacyExpirySeconds(0), 0);
+        assert.strictEqual(snapLegacyExpirySeconds(null), 0);
+        assert.strictEqual(pickRoomExpiryFromLegacy([86400, 3600, 604800]), 3600);
+        assert.strictEqual(pickRoomExpiryFromLegacy([null, 0, 7200]), 3600);
+        assert.strictEqual(pickRoomExpiryFromLegacy([null, 0]), 0);
+        assert.strictEqual(pickRoomExpiryFromLegacy([]), 0);
+    });
+
+    await test('chat settings: a personal expiry cannot outlive the chat timer', () => {
+        const { effectiveMessageExpiry } = chatSettings;
+        assert.strictEqual(effectiveMessageExpiry(null, null), null);
+        assert.strictEqual(effectiveMessageExpiry(60, null), 60);
+        assert.strictEqual(effectiveMessageExpiry(null, 3600), 3600);
+        assert.strictEqual(effectiveMessageExpiry(60, 3600), 60);
+        assert.strictEqual(effectiveMessageExpiry(86400, 3600), 3600);
+        assert.strictEqual(effectiveMessageExpiry(0, 300), 300);
+    });
+
+    await test('chat settings: prefs must be booleans, at least one', () => {
+        const { parseChatPrefs } = chatSettings;
+        assert.deepStrictEqual(parseChatPrefs({ pinned: true }), { pinned: true, muted: null, archived: null });
+        assert.deepStrictEqual(parseChatPrefs({ pinned: false, muted: true, archived: false, extra: 1 }), { pinned: false, muted: true, archived: false });
+        for (const bad of [{}, null, undefined, { pinned: 'true' }, { muted: 1 }, { archived: null }, { other: true }]) {
+            assert.throws(() => parseChatPrefs(bad), RangeError, JSON.stringify(bad));
+        }
+    });
+
+    // ---- срок жизни анонима (lib/anon-lifetime.js) ----
+
+    await test('anon lifetime: allowed values, default and legacy NULL', () => {
+        assert.strictEqual(anon.parseAnonLifetime(undefined), 'tab');
+        assert.strictEqual(anon.parseAnonLifetime(null), 'tab');
+        assert.strictEqual(anon.parseAnonLifetime(''), 'tab');
+        for (const v of ['tab', 'day', 'week']) assert.strictEqual(anon.parseAnonLifetime(v), v);
+        for (const bad of ['month', 'TAB', 1, true, {}, '__proto__', 'constructor', 'toString']) {
+            assert.throws(() => anon.parseAnonLifetime(bad), RangeError, String(bad));
+        }
+        assert.strictEqual(anon.storedAnonLifetime(null), 'tab', 'accounts created before the choice live by the shortest rule');
+        assert.strictEqual(anon.storedAnonLifetime('week'), 'week');
+        assert.strictEqual(anon.storedAnonLifetime('__proto__'), 'tab');
+        assert.deepStrictEqual(anon.ANON_LIFETIMES, { tab: 1800, day: 86400, week: 604800 });
+    });
+
+    await test('anon lifetime: expiry = last activity + TTL, capped at 7 days from creation', () => {
+        const created = Date.parse('2026-09-20T00:00:00Z');
+        const min = 60 * 1000, day = 24 * 60 * min;
+        // Без активности — от создания.
+        assert.strictEqual(anon.anonExpiresAtMs({ lifetime: 'tab', createdAtMs: created }), created + 30 * min);
+        assert.strictEqual(anon.anonExpiresAtMs({ lifetime: 'tab', createdAtMs: created, lastActiveMs: null }), created + 30 * min);
+        assert.strictEqual(anon.anonExpiresAtMs({ lifetime: 'day', createdAtMs: created, lastActiveMs: created + 2 * day }), created + 3 * day);
+        // Активность не продлевает дальше 7 дней с создания.
+        assert.strictEqual(anon.anonExpiresAtMs({ lifetime: 'week', createdAtMs: created, lastActiveMs: created + 5 * day }), created + 7 * day);
+        assert.strictEqual(anon.anonExpiresAtMs({ lifetime: 'tab', createdAtMs: created, lastActiveMs: created + 7 * day - min }), created + 7 * day);
+        assert.strictEqual(anon.anonExpiresAtMs({ lifetime: null, createdAtMs: created, lastActiveMs: created + day }), created + day + 30 * min, 'legacy NULL = tab');
+
+        const active = { lifetime: 'tab', createdAtMs: created, lastActiveMs: created + day };
+        assert.strictEqual(anon.isAnonExpired({ ...active, now: created + day + 29 * min }), false);
+        assert.strictEqual(anon.isAnonExpired({ ...active, now: created + day + 30 * min }), true);
+        assert.strictEqual(anon.isAnonExpired({ lifetime: 'week', createdAtMs: created, lastActiveMs: created + 7 * day - 1, now: created + 7 * day }), true, 'hard cap');
+        assert.strictEqual(anon.isAnonExpired({ lifetime: 'week', createdAtMs: undefined, lastActiveMs: Date.now(), now: Date.now() }), true, 'no creation time — fail closed');
+    });
+
+    await test('anon lifetime: cookie max-age and activity throttling', () => {
+        const created = Date.parse('2026-09-20T00:00:00Z');
+        const day = 24 * 3600 * 1000;
+        assert.strictEqual(anon.anonCookieMaxAgeMs({ lifetime: 'tab', createdAtMs: created, now: created }), null, "'tab' — browser-session cookie");
+        assert.strictEqual(anon.anonCookieMaxAgeMs({ lifetime: 'day', createdAtMs: created, now: created }), 7 * day);
+        assert.strictEqual(anon.anonCookieMaxAgeMs({ lifetime: 'week', createdAtMs: created, now: created + 2 * day }), 5 * day);
+        assert.strictEqual(anon.anonCookieMaxAgeMs({ lifetime: 'week', createdAtMs: created, now: created + 8 * day }), 0);
+
+        const t = 1_000_000;
+        assert.strictEqual(anon.shouldPersistActivity(undefined, t), true);
+        assert.strictEqual(anon.shouldPersistActivity(t - 59 * 1000, t), false, 'API activity is written at most once a minute');
+        assert.strictEqual(anon.shouldPersistActivity(t - 60 * 1000, t), true);
+        assert.ok(anon.ANON_SOCKET_ACTIVITY_INTERVAL_MS < anon.ANON_LIFETIMES.tab * 1000 / 2, 'open sockets refresh well within the shortest TTL');
+    });
+
+    await test('anon lifetime: welcome text names the chosen rule and has no emoji', () => {
+        const emoji = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}️•]/u;
+        for (const [lifetime, phrase] of [['tab', '30 минут'], ['day', 'сутки'], ['week', '7 дней без активности'], [null, '30 минут']]) {
+            const text = anon.anonWelcomeText(lifetime);
+            assert.ok(text.includes(phrase), `${lifetime}: ${text}`);
+            assert.ok(text.includes('не позже чем через 7 дней'), 'hard cap is mentioned');
+            assert.doesNotMatch(text, emoji);
+        }
     });
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
