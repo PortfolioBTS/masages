@@ -1,0 +1,39 @@
+{
+  "description": "БД, засеянная версией 2.0.0 (до этапа 1: аккаунты с email и паролем) через её же HTTP API. Тестовые данные, секретов не содержит.",
+  "sql": "legacy-2.0.0.sql",
+  "sourceCommit": "12f7aa8",
+  "packageVersion": "2.0.0",
+  "anchorTime": "2026-09-28T21:15:53.111Z",
+  "anchorNote": "самая поздняя метка времени в данных; загрузчик сдвигает все timestamp/timestamptz на (сейчас - anchorTime), чтобы сроки жизни считались от момента теста",
+  "testOnlySecrets": {
+    "MESSAGE_ENCRYPTION_KEY": "bnl4by10ZXN0LWZpeHR1cmUtbWVzc2FnZS1rZXktMzI=",
+    "SESSION_SECRET": "test-fixture-session-secret-0123456789abcdef",
+    "note": "значения только для этой фикстуры: тексты сообщений в ней зашифрованы этим ключом, строки session подписаны этим секретом. В production не использовать."
+  },
+  "users": {
+    "alice": { "id": 369265884, "legacy": true, "email": "alice@example.test", "password": "Correct-Horse-7351", "sid": "V9D5vcrb1SJCWgCm4hxfGhGx0NPUMkBs" },
+    "bob": { "id": 1955890954, "legacy": true, "email": "bob@example.test", "password": "Correct-Horse-7351", "sid": "lsdTxc30KijLjws7sTlHIs1EZhwt9kLA" },
+    "guest": { "id": 1141387901, "legacy": false, "anonLifetime": "day", "sid": "Z6DHJQ6mfjY9r76NGajJ0sYDixNQg9nJ" }
+  },
+  "rooms": {
+    "team": { "id": 934210995, "name": "Команда", "members": ["alice", "bob", "guest"] },
+    "bobPrivate": { "id": 2101399303, "name": "Личное bob", "members": ["bob"] }
+  },
+  "messages": {
+    "1": { "author": "alice", "kind": "приветствие бота", "chatId": 476638372 },
+    "2": { "author": "bob", "kind": "приветствие бота", "chatId": 251202473 },
+    "3": { "author": "guest", "kind": "приветствие бота", "chatId": 1079503621 },
+    "4": { "author": "alice", "room": "team", "text": "Привет всем" },
+    "5": { "author": "bob", "room": "team", "text": "Привет, alice" },
+    "6": { "author": "guest", "room": "team", "text": "Я гость" },
+    "7": { "author": "alice", "room": "team", "text": "Второе сообщение alice" }
+  },
+  "afterLegacyPurge": {
+    "users": ["guest"],
+    "messageIds": [3, 6],
+    "rooms": ["team"],
+    "teamMembers": ["guest"],
+    "sessions": 1
+  },
+  "notInFixture": "E2EE-ключей, key-shares, заявок, реакций, вложений и таймеров в дампе нет — сквозные тесты досеивают их сами, чтобы проверить все ветки удаления"
+}
