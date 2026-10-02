@@ -46,115 +46,128 @@ const REACTIONS = [
 const REACTION_BY_EMOJI = new Map(REACTIONS.map(r => [r.emoji, r]));
 
 const elements = {
-    authScreen: document.getElementById('auth-screen'),
+    // ---- Каркас приложения ----
     app: document.getElementById('app'),
-    sidebar: document.querySelector('.sidebar'),
+    mainContent: document.querySelector('.main-content'),
+    emptyState: document.getElementById('empty-state'),
+    toast: document.getElementById('toast'),
+    overlay: document.getElementById('overlay'),
+    connectionStatus: document.getElementById('connection-status'),
+    connectionStatusIcon: document.getElementById('connection-status-icon'),
+    connectionStatusText: document.getElementById('connection-status-text'),
+
+    // ---- Вход и приватный режим ----
+    authScreen: document.getElementById('auth-screen'),
     loginForm: document.getElementById('login-form'),
     registerForm: document.getElementById('register-form'),
     loginBtn: document.getElementById('login-btn'),
     registerBtn: document.getElementById('register-btn'),
     anonymousLoginBtn: document.getElementById('anonymous-login-btn'),
-    logoutBtn: document.getElementById('logout-btn'),
-    chatsList: document.getElementById('chats-list'),
-    chatMessages: document.getElementById('chat-messages'),
-    messageInput: document.getElementById('message-input'),
-    sendBtn: document.getElementById('send-btn'),
-    attachBtn: document.getElementById('attach-btn'),
-    fileInput: document.getElementById('file-input'),
-    recordBtn: document.getElementById('record-btn'),
+    anonModal: document.getElementById('anon-modal'),
+    anonConfirmBtn: document.getElementById('anon-confirm-btn'),
+
+    // ---- Сайдбар ----
+    sidebar: document.querySelector('.sidebar'),
+    themeToggleBtn: document.getElementById('theme-toggle-btn'),
     newChatBtn: document.getElementById('new-chat-btn'),
-    backBtn: document.getElementById('back-btn'),
+    anonNote: document.getElementById('anon-note'),
+    anonNoteText: document.getElementById('anon-note-text'),
+    searchInput: document.getElementById('search-input'),
+    chatsList: document.getElementById('chats-list'),
+    profileBtn: document.getElementById('profile-btn'),
+    logoutBtn: document.getElementById('logout-btn'),
+
+    // ---- Выход из аккаунта ----
+    logoutModal: document.getElementById('logout-modal'),
+    logoutKeepBtn: document.getElementById('logout-keep-btn'),
+    logoutWipeBtn: document.getElementById('logout-wipe-btn'),
+
+    // ---- Шапка чата ----
     chatHeader: document.getElementById('chat-header'),
+    backBtn: document.getElementById('back-btn'),
+    chatAvatar: document.getElementById('chat-avatar'),
     chatName: document.getElementById('chat-name'),
     chatStatus: document.getElementById('chat-status'),
-    chatAvatar: document.getElementById('chat-avatar'),
-    emptyState: document.getElementById('empty-state'),
-    messageInputContainer: document.getElementById('message-input-container'),
-    searchInput: document.getElementById('search-input'),
-    newChatModal: document.getElementById('new-chat-modal'),
-    chatMenuModal: document.getElementById('chat-menu-modal'),
-    profileModal: document.getElementById('profile-modal'),
-    passwordModal: document.getElementById('password-modal'),
-    inviteModal: document.getElementById('invite-modal'),
-    membersModal: document.getElementById('members-modal'),
-    deleteAccountModal: document.getElementById('delete-account-modal'),
-    createChatBtn: document.getElementById('create-chat-btn'),
-    joinChatBtn: document.getElementById('join-chat-btn'),
-    deleteChatBtn: document.getElementById('delete-chat-btn'),
+    expiryIndicator: document.getElementById('expiry-indicator'),
+    expiryIndicatorText: document.getElementById('expiry-indicator-text'),
+    mutedIndicator: document.getElementById('muted-indicator'),
     getChatCodeBtn: document.getElementById('get-chat-code-btn'),
     chatMenuBtn: document.getElementById('chat-menu-btn'),
-    membersKeysBtn: document.getElementById('members-keys-btn'),
-    profileBtn: document.getElementById('profile-btn'),
-    changePasswordBtn: document.getElementById('change-password-btn'),
-    savePasswordBtn: document.getElementById('save-password-btn'),
-    inviteCodeContainer: document.getElementById('invite-code-container'),
-    inviteCodeDisplay: document.getElementById('invite-code-display'),
-    copyInviteBtn: document.getElementById('copy-invite-btn'),
-    rotateInviteBtn: document.getElementById('rotate-invite-btn'),
-    messageMenu: document.getElementById('message-menu'),
-    replyMessageBtn: document.getElementById('reply-message-btn'),
-    editMessageBtn: document.getElementById('edit-message-btn'),
-    deleteMessageBtn: document.getElementById('delete-message-btn'),
-    replyPreview: document.getElementById('reply-preview'),
-    replyPreviewText: document.getElementById('reply-preview-text'),
-    cancelReplyBtn: document.getElementById('cancel-reply-btn'),
-    toast: document.getElementById('toast'),
-    overlay: document.getElementById('overlay'),
-    profileUsername: document.getElementById('profile-username'),
-    profileEmail: document.getElementById('profile-email'),
-    profileCode: document.getElementById('profile-code'),
-    profileAvatar: document.getElementById('profile-avatar'),
-    profileAnonBadge: document.getElementById('profile-anon-badge'),
-    readReceiptsToggle: document.getElementById('read-receipts-toggle'),
-    deleteAccountBtn: document.getElementById('delete-account-btn'),
-    deleteAccountText: document.getElementById('delete-account-text'),
-    deleteAccountPasswordGroup: document.getElementById('delete-account-password-group'),
-    deleteAccountPassword: document.getElementById('delete-account-password'),
-    confirmDeleteAccountBtn: document.getElementById('confirm-delete-account-btn'),
+
+    // ---- Сквозное шифрование: выключатель и баннер ----
     e2eeToggleBtn: document.getElementById('e2ee-toggle-btn'),
     e2eeBanner: document.getElementById('e2ee-banner'),
     e2eeBannerText: document.getElementById('e2ee-banner-text'),
     e2eeBannerBtn: document.getElementById('e2ee-banner-btn'),
+
+    // ---- Участники и ключи ----
+    membersKeysBtn: document.getElementById('members-keys-btn'),
+    membersModal: document.getElementById('members-modal'),
     membersList: document.getElementById('members-list'),
     membersNote: document.getElementById('members-note'),
-    // Тема, приватный режим, выход
-    themeToggleBtn: document.getElementById('theme-toggle-btn'),
-    profileThemeBtn: document.getElementById('profile-theme-btn'),
-    anonNote: document.getElementById('anon-note'),
-    anonNoteText: document.getElementById('anon-note-text'),
-    anonModal: document.getElementById('anon-modal'),
-    anonConfirmBtn: document.getElementById('anon-confirm-btn'),
-    logoutModal: document.getElementById('logout-modal'),
-    logoutKeepBtn: document.getElementById('logout-keep-btn'),
-    logoutWipeBtn: document.getElementById('logout-wipe-btn'),
-    // Профиль: уведомления и журнал безопасности
-    notifyToggle: document.getElementById('notify-toggle'),
-    securitySection: document.getElementById('security-section'),
-    securityList: document.getElementById('security-list'),
-    // Шапка чата: индикаторы
-    expiryIndicator: document.getElementById('expiry-indicator'),
-    expiryIndicatorText: document.getElementById('expiry-indicator-text'),
-    mutedIndicator: document.getElementById('muted-indicator'),
-    // Меню чата
+
+    // ---- Заявки на вступление: плашка и окно ----
+    requestsBar: document.getElementById('requests-bar'),
+    requestsBarText: document.getElementById('requests-bar-text'),
+    requestsBarBtn: document.getElementById('requests-bar-btn'),
+    requestsModal: document.getElementById('requests-modal'),
+    requestsList: document.getElementById('requests-list'),
+
+    // ---- Лента ----
+    chatMessages: document.getElementById('chat-messages'),
+    jumpDown: document.getElementById('jump-down'),
+    jumpDownBadge: document.getElementById('jump-down-badge'),
+
+    // ---- Поле ввода ----
+    messageInputContainer: document.getElementById('message-input-container'),
+    replyPreview: document.getElementById('reply-preview'),
+    replyPreviewText: document.getElementById('reply-preview-text'),
+    cancelReplyBtn: document.getElementById('cancel-reply-btn'),
+    attachBtn: document.getElementById('attach-btn'),
+    messageInput: document.getElementById('message-input'),
+    sendBtn: document.getElementById('send-btn'),
+    recordBtn: document.getElementById('record-btn'),
+    fileInput: document.getElementById('file-input'),
+
+    // ---- Файлы: перетаскивание, загрузка, окно отправки ----
+    dropZone: document.getElementById('drop-zone'),
+    uploadStatus: document.getElementById('upload-status'),
+    uploadStatusText: document.getElementById('upload-status-text'),
+    uploadProgress: document.getElementById('upload-progress'),
+    uploadProgressBar: document.getElementById('upload-progress-bar'),
+    uploadCancelBtn: document.getElementById('upload-cancel-btn'),
+    sendFilesModal: document.getElementById('send-files-modal'),
+    sendFilesTitle: document.getElementById('send-files-title'),
+    sendFilesList: document.getElementById('send-files-list'),
+    sendFilesBtn: document.getElementById('send-files-btn'),
+
+    // ---- Меню сообщения ----
+    messageMenu: document.getElementById('message-menu'),
+    reactionPicker: document.getElementById('reaction-picker'),
+    replyMessageBtn: document.getElementById('reply-message-btn'),
+    copyMessageBtn: document.getElementById('copy-message-btn'),
+    editMessageBtn: document.getElementById('edit-message-btn'),
+    deleteMessageBtn: document.getElementById('delete-message-btn'),
+
+    // ---- Меню чата ----
+    chatMenuModal: document.getElementById('chat-menu-modal'),
     pinChatBtn: document.getElementById('pin-chat-btn'),
     muteChatBtn: document.getElementById('mute-chat-btn'),
     archiveChatBtn: document.getElementById('archive-chat-btn'),
     expiryFieldset: document.getElementById('expiry-fieldset'),
     expiryHint: document.getElementById('expiry-hint'),
+    deleteChatBtn: document.getElementById('delete-chat-btn'),
+
+    // ---- Контекстное меню элемента списка чатов ----
     chatItemMenu: document.getElementById('chat-item-menu'),
     ctxPinBtn: document.getElementById('ctx-pin-btn'),
     ctxMuteBtn: document.getElementById('ctx-mute-btn'),
     ctxArchiveBtn: document.getElementById('ctx-archive-btn'),
-    // Приглашение
-    inviteStatus: document.getElementById('invite-status'),
-    inviteQr: document.getElementById('invite-qr'),
-    inviteQrCanvas: document.getElementById('invite-qr-canvas'),
-    copyInviteLinkBtn: document.getElementById('copy-invite-link-btn'),
-    inviteTtl: document.getElementById('invite-ttl'),
-    inviteMax: document.getElementById('invite-max'),
-    inviteApproval: document.getElementById('invite-approval'),
-    disableInviteBtn: document.getElementById('disable-invite-btn'),
-    // Вступление по коду
+
+    // ---- Новый чат и вступление по коду ----
+    newChatModal: document.getElementById('new-chat-modal'),
+    createChatBtn: document.getElementById('create-chat-btn'),
+    joinChatBtn: document.getElementById('join-chat-btn'),
     joinChatCode: document.getElementById('join-chat-code'),
     joinPreview: document.getElementById('join-preview'),
     joinPreviewName: document.getElementById('join-preview-name'),
@@ -164,32 +177,47 @@ const elements = {
     joinCancelBtn: document.getElementById('join-cancel-btn'),
     myRequests: document.getElementById('my-requests'),
     myRequestsList: document.getElementById('my-requests-list'),
-    // Заявки у участников
-    requestsBar: document.getElementById('requests-bar'),
-    requestsBarText: document.getElementById('requests-bar-text'),
-    requestsBarBtn: document.getElementById('requests-bar-btn'),
-    requestsModal: document.getElementById('requests-modal'),
-    requestsList: document.getElementById('requests-list'),
-    // Файлы
-    mainContent: document.querySelector('.main-content'),
-    dropZone: document.getElementById('drop-zone'),
-    sendFilesModal: document.getElementById('send-files-modal'),
-    sendFilesTitle: document.getElementById('send-files-title'),
-    sendFilesList: document.getElementById('send-files-list'),
-    sendFilesBtn: document.getElementById('send-files-btn'),
-    uploadStatus: document.getElementById('upload-status'),
-    uploadStatusText: document.getElementById('upload-status-text'),
-    uploadProgress: document.getElementById('upload-progress'),
-    uploadProgressBar: document.getElementById('upload-progress-bar'),
-    uploadCancelBtn: document.getElementById('upload-cancel-btn'),
-    // Лента
-    jumpDown: document.getElementById('jump-down'),
-    jumpDownBadge: document.getElementById('jump-down-badge'),
-    connectionStatus: document.getElementById('connection-status'),
-    connectionStatusIcon: document.getElementById('connection-status-icon'),
-    connectionStatusText: document.getElementById('connection-status-text'),
-    reactionPicker: document.getElementById('reaction-picker'),
-    copyMessageBtn: document.getElementById('copy-message-btn'),
+
+    // ---- Приглашения ----
+    inviteModal: document.getElementById('invite-modal'),
+    inviteStatus: document.getElementById('invite-status'),
+    inviteCodeContainer: document.getElementById('invite-code-container'),
+    inviteCodeDisplay: document.getElementById('invite-code-display'),
+    copyInviteBtn: document.getElementById('copy-invite-btn'),
+    inviteQr: document.getElementById('invite-qr'),
+    inviteQrCanvas: document.getElementById('invite-qr-canvas'),
+    copyInviteLinkBtn: document.getElementById('copy-invite-link-btn'),
+    inviteTtl: document.getElementById('invite-ttl'),
+    inviteMax: document.getElementById('invite-max'),
+    inviteApproval: document.getElementById('invite-approval'),
+    rotateInviteBtn: document.getElementById('rotate-invite-btn'),
+    disableInviteBtn: document.getElementById('disable-invite-btn'),
+
+    // ---- Профиль ----
+    profileModal: document.getElementById('profile-modal'),
+    profileAvatar: document.getElementById('profile-avatar'),
+    profileUsername: document.getElementById('profile-username'),
+    profileEmail: document.getElementById('profile-email'),
+    profileCode: document.getElementById('profile-code'),
+    profileAnonBadge: document.getElementById('profile-anon-badge'),
+    profileThemeBtn: document.getElementById('profile-theme-btn'),
+    readReceiptsToggle: document.getElementById('read-receipts-toggle'),
+    notifyToggle: document.getElementById('notify-toggle'),
+    securitySection: document.getElementById('security-section'),
+    securityList: document.getElementById('security-list'),
+
+    // ---- Смена пароля ----
+    changePasswordBtn: document.getElementById('change-password-btn'),
+    passwordModal: document.getElementById('password-modal'),
+    savePasswordBtn: document.getElementById('save-password-btn'),
+
+    // ---- Удаление аккаунта ----
+    deleteAccountBtn: document.getElementById('delete-account-btn'),
+    deleteAccountModal: document.getElementById('delete-account-modal'),
+    deleteAccountText: document.getElementById('delete-account-text'),
+    deleteAccountPasswordGroup: document.getElementById('delete-account-password-group'),
+    deleteAccountPassword: document.getElementById('delete-account-password'),
+    confirmDeleteAccountBtn: document.getElementById('confirm-delete-account-btn'),
 };
 
 // ==================== Иконки ====================
@@ -826,9 +854,19 @@ async function prepareOutgoingE2ee(chatId, roomId) {
     return client;
 }
 
+// Тексты для причин отказа decryptIncoming (res.reason из e2ee.js). Причина,
+// которой здесь нет, получает общий текст. Новая причина — новая строка.
+const E2EE_FAILURE_TEXTS = {
+    replay: 'Повтор старого сообщения (возможна подмена сервером)',
+};
+const E2EE_FAILURE_DEFAULT_TEXT = 'Не удалось расшифровать';
+
 function e2eeFailureText(reason) {
-    if (reason === 'replay') return 'Повтор старого сообщения (возможна подмена сервером)';
-    return 'Не удалось расшифровать';
+    // hasOwnProperty: причина — строка из кода, но имена вроде 'constructor'
+    // не должны находиться в прототипе объекта.
+    return Object.prototype.hasOwnProperty.call(E2EE_FAILURE_TEXTS, reason)
+        ? E2EE_FAILURE_TEXTS[reason]
+        : E2EE_FAILURE_DEFAULT_TEXT;
 }
 
 function safeDisplayName(name) {
@@ -1691,7 +1729,32 @@ function postFormDataWithProgress(url, formData, options = {}, retried = false) 
     });
 }
 
+// Обработчики навешиваются по областям интерфейса, каждая — в своей функции
+// ниже. Порядок вызовов повторяет прежний порядок регистрации, когда всё
+// было одним длинным телом: он важен там, где на один и тот же элемент и
+// событие вешается несколько обработчиков (например, два keydown на
+// document). Новый обработчик добавляйте в функцию своей области; новая
+// область — новая функция и одна строка в этом списке.
 function setupEventListeners() {
+    setupAuthListeners();        // вход, регистрация, приватный режим
+    setupLogoutListeners();      // выход из аккаунта
+    setupSidebarListeners();     // «Новый чат», вступление по коду, «назад»
+    setupChatMenuListeners();    // меню чата и личные настройки чатов
+    setupE2eeListeners();        // шифрование в шапке чата, участники и ключи
+    setupInviteListeners();      // приглашения и заявки
+    setupProfileListeners();     // профиль, настройки, удаление аккаунта
+    setupComposerListeners();    // поле ввода, вложения
+    setupMessageMenuListeners(); // меню сообщения
+    setupSearchListeners();      // поиск по чатам
+    setupModalListeners();       // модальные окна
+    setupFeedListeners();        // лента сообщений
+    setupSocketListeners();      // события сокета
+    setupMenuDismissListeners(); // закрытие всплывающих меню
+}
+
+// Вход: вкладки «Вход» и «Регистрация», обычный вход, регистрация с
+// PoW-проверкой и приватный режим (кнопка и подтверждение срока жизни).
+function setupAuthListeners() {
     document.querySelectorAll('.auth-tab').forEach(tab => {
         tab.addEventListener('click', () => {
             document.querySelectorAll('.auth-tab').forEach((t) => {
@@ -1754,7 +1817,11 @@ function setupEventListeners() {
         openModal(elements.anonModal);
     });
     elements.anonConfirmBtn.addEventListener('click', anonymousLogin);
+}
 
+// Выход из аккаунта: кнопка в сайдбаре и окно выбора «оставить данные на
+// устройстве или стереть».
+function setupLogoutListeners() {
     elements.logoutBtn.addEventListener('click', () => {
         if (!currentUser) return;
         // Анонимный аккаунт при выходе удаляется всегда — выбирать нечего.
@@ -1766,7 +1833,11 @@ function setupEventListeners() {
     });
     elements.logoutKeepBtn.addEventListener('click', () => logout({ wipe: false }));
     elements.logoutWipeBtn.addEventListener('click', () => logout({ wipe: true }));
+}
 
+// Сайдбар и окно «Новый чат»: создание группы, вступление по коду
+// приглашения; «назад» к списку чатов в мобильной раскладке.
+function setupSidebarListeners() {
     elements.newChatBtn.addEventListener('click', openNewChatModal);
     elements.createChatBtn.addEventListener('click', createChat);
     document.getElementById('new-chat-name').addEventListener('keydown', (e) => {
@@ -1789,8 +1860,11 @@ function setupEventListeners() {
     if (elements.backBtn) {
         elements.backBtn.addEventListener('click', () => elements.sidebar.classList.remove('hidden-mobile'));
     }
+}
 
-    // ---- Меню чата и личные настройки чатов ----
+// Меню чата и личные настройки чатов (закрепить, без звука, архив, срок
+// исчезающих сообщений) — в окне меню и в контекстном меню списка.
+function setupChatMenuListeners() {
     elements.chatMenuBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         openChatMenu();
@@ -1807,12 +1881,18 @@ function setupEventListeners() {
     elements.ctxPinBtn.addEventListener('click', () => onChatItemMenuAction('pinned'));
     elements.ctxMuteBtn.addEventListener('click', () => onChatItemMenuAction('muted'));
     elements.ctxArchiveBtn.addEventListener('click', () => onChatItemMenuAction('archived'));
+}
 
+// Сквозное шифрование в шапке чата: выключатель, окно «Участники и ключи»,
+// баннер о смене ключа собеседника.
+function setupE2eeListeners() {
     elements.e2eeToggleBtn.addEventListener('click', onE2eeToggleClick);
     elements.membersKeysBtn.addEventListener('click', openMembersModal);
     elements.e2eeBannerBtn.addEventListener('click', openMembersModal);
+}
 
-    // ---- Приглашения и заявки ----
+// Приглашения в группу (код, ссылка, QR) и заявки на вступление.
+function setupInviteListeners() {
     elements.getChatCodeBtn.addEventListener('click', openInviteModal);
     elements.rotateInviteBtn.addEventListener('click', rotateInviteCode);
     elements.disableInviteBtn.addEventListener('click', disableInviteCode);
@@ -1825,8 +1905,11 @@ function setupEventListeners() {
         if (code) copyText(inviteLink(code), 'Ссылка скопирована', 'Не удалось скопировать ссылку');
     });
     elements.requestsBarBtn.addEventListener('click', openRequestsModal);
+}
 
-    // ---- Профиль ----
+// Профиль: учётные данные, отметки о прочтении, уведомления, удаление
+// аккаунта.
+function setupProfileListeners() {
     elements.profileBtn.addEventListener('click', openProfile);
 
     elements.changePasswordBtn.addEventListener('click', () => {
@@ -1862,8 +1945,11 @@ function setupEventListeners() {
             deleteAccount();
         }
     });
+}
 
-    // ---- Отправка ----
+// Поле ввода: отправка по кнопке и Enter, Escape (отмена правки и ответа),
+// вложения (скрепка, окно «Отправить файлы», перетаскивание), отмена ответа.
+function setupComposerListeners() {
     elements.sendBtn.addEventListener('click', sendMessage);
     elements.messageInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.isComposing) {
@@ -1891,8 +1977,10 @@ function setupEventListeners() {
     elements.uploadCancelBtn.addEventListener('click', () => cancelUploadQueue(true));
     setupDragAndDrop();
     elements.cancelReplyBtn.addEventListener('click', clearReply);
+}
 
-    // ---- Меню сообщения ----
+// Меню сообщения: панель реакций, ответ, копирование, правка, удаление.
+function setupMessageMenuListeners() {
     buildReactionPicker();
 
     elements.replyMessageBtn.addEventListener('click', () => {
@@ -1933,14 +2021,21 @@ function setupEventListeners() {
             showToast(data.message, 'error');
         }
     });
+}
 
+// Поиск по чатам и сообщениям: запрос уходит на сервер через 300 мс после
+// последнего нажатия клавиши.
+function setupSearchListeners() {
     let searchTimeout;
     elements.searchInput.addEventListener('input', () => {
         clearTimeout(searchTimeout);
         searchTimeout = setTimeout(performSearch, 300);
     });
+}
 
-    // ---- Модальные окна ----
+// Модальные окна: закрытие по крестику и кнопкам «Отмена», по оверлею и
+// Escape (а также удержание фокуса внутри окна — onModalKeydown).
+function setupModalListeners() {
     document.querySelectorAll('.close-modal, [data-close-modal]').forEach(btn => {
         btn.addEventListener('click', closeAllModals);
     });
@@ -1958,8 +2053,11 @@ function setupEventListeners() {
             hideChatItemMenu();
         }
     });
+}
 
-    // ---- Лента ----
+// Лента сообщений: подгрузка истории, отметка «прочитано», кнопка «вниз»,
+// ссылка-приглашение, вставленная в уже открытую вкладку.
+function setupFeedListeners() {
     // Подгрузка более старых сообщений при прокрутке к началу.
     elements.chatMessages.addEventListener('scroll', () => {
         if (elements.chatMessages.scrollTop < 200) loadOlderMessages();
@@ -1974,8 +2072,11 @@ function setupEventListeners() {
 
     // Ссылка-приглашение, вставленная в уже открытую вкладку.
     window.addEventListener('hashchange', consumeJoinFragment);
+}
 
-    // ---- Сокет ----
+// События сокета: новые, изменённые и удалённые сообщения, прочтение,
+// состав комнаты, срок исчезающих сообщений, заявки, список чатов.
+function setupSocketListeners() {
     socket.on('newMessage', async (message) => {
         if (!currentUser) return;
         const mine = isOwnMessage(message);
@@ -2090,7 +2191,11 @@ function setupEventListeners() {
     socket.on('chatListChanged', () => {
         if (currentUser) scheduleLoadChats();
     });
+}
 
+// Всплывающие меню (сообщения и элемента списка чатов) закрываются кликом
+// мимо, прокруткой и изменением размера окна.
+function setupMenuDismissListeners() {
     document.addEventListener('click', onDocumentClickForMenus);
     document.addEventListener('scroll', () => {
         hideMessageMenu();
@@ -4133,7 +4238,72 @@ function cancelEditing() {
 
 // ==================== Отправка ====================
 
+// Замок отправки: пока идёт отправка или правка, повторный Enter/клик
+// ничего не делает. Берёт его вызывающий (sendMessage), а не sendText.
 let sending = false;
+
+// Отправляет уже готовый текст в ЯВНО указанный чат: шифрует (если для чата
+// включено шифрование), шлёт на сервер и сразу показывает сообщение в ленте.
+// Поле ввода не читает и не очищает — это дело вызывающего, поэтому тем же
+// путём можно отправить текст из другого источника, не трогая черновик.
+//
+// Чат и ответ передаются явно и фиксируются в момент вызова: пока шифруем и
+// ждём ответ сервера, пользователь может уйти в другой чат или отменить
+// ответ. Замок `sending` здесь не берётся — его держит вызывающий.
+//
+// Возвращает true, если сообщение ушло. false — отправка прервана, причину
+// пользователю уже показали тостом; поле ввода в этом случае не очищают.
+async function sendText(text, { chatId, roomId, replyToId } = {}) {
+    // Чат обязателен: без него запрос ушёл бы с пустым chatId, а не в открытый чат.
+    if (!chatId) throw new Error('sendText: не указан чат');
+    let client;
+    try {
+        client = await prepareOutgoingE2ee(chatId, roomId);
+    } catch (err) {
+        showToast(err.message, 'error', 6000);
+        return false;
+    }
+    let outgoingText = text;
+    let encrypted = false;
+    if (client) {
+        try {
+            outgoingText = await client.encryptOutgoing(roomId, text);
+            encrypted = true;
+        } catch (err) {
+            console.error('E2EE: encryptOutgoing failed:', err);
+            showToast('Не удалось зашифровать сообщение — попробуйте ещё раз или выключите шифрование', 'error');
+            return false;
+        }
+    }
+    const payload = { chatId, text: outgoingText, encrypted };
+    if (replyToId) payload.replyToId = replyToId;
+    const data = await api('/api/messages', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+    });
+    if (!data.success) {
+        showToast(data.message || 'Не удалось отправить сообщение', 'error');
+        return false;
+    }
+    // Показываем сразу из ответа — не зависим от того, успел ли
+    // прийти (и пришёл ли вообще) newMessage по сокету.
+    if (chatId === currentChatId && data.message) {
+        const message = { ...data.message, text };
+        const reply = message.reply_to;
+        if (reply && reply.encrypted && !reply.deleted) {
+            reply.text = decryptedSummary(await decryptEnvelope(roomId, reply.sender_id, reply.text, reply.id));
+        }
+        if (chatId === currentChatId) {
+            if (appendMessage(message, true)) scrollToBottom();
+            updateChatListOnMessage(message, true);
+        }
+    }
+    return true;
+}
+
+// Отправка из поля ввода: новое сообщение (через sendText) или сохранение
+// правки. Поле и ответ очищаются только после успеха — и только если
+// пользователь остался в том же чате.
 async function sendMessage() {
     const text = elements.messageInput.value.trim();
     if (!text || sending) return;
@@ -4179,48 +4349,8 @@ async function sendMessage() {
                 editingMessageEncrypted = false;
             }
         } else {
-            let client;
-            try {
-                client = await prepareOutgoingE2ee(chatId, roomId);
-            } catch (err) {
-                showToast(err.message, 'error', 6000);
-                return;
-            }
-            let outgoingText = text;
-            let encrypted = false;
-            if (client) {
-                try {
-                    outgoingText = await client.encryptOutgoing(roomId, text);
-                    encrypted = true;
-                } catch (err) {
-                    console.error('E2EE: encryptOutgoing failed:', err);
-                    showToast('Не удалось зашифровать сообщение — попробуйте ещё раз или выключите шифрование', 'error');
-                    return;
-                }
-            }
-            const payload = { chatId, text: outgoingText, encrypted };
-            if (replyToMessageId) payload.replyToId = replyToMessageId;
-            const data = await api('/api/messages', {
-                method: 'POST',
-                body: JSON.stringify(payload),
-            });
-            if (!data.success) {
-                showToast(data.message || 'Не удалось отправить сообщение', 'error');
-                return;
-            }
-            // Показываем сразу из ответа — не зависим от того, успел ли
-            // прийти (и пришёл ли вообще) newMessage по сокету.
-            if (chatId === currentChatId && data.message) {
-                const message = { ...data.message, text };
-                const reply = message.reply_to;
-                if (reply && reply.encrypted && !reply.deleted) {
-                    reply.text = decryptedSummary(await decryptEnvelope(roomId, reply.sender_id, reply.text, reply.id));
-                }
-                if (chatId === currentChatId) {
-                    if (appendMessage(message, true)) scrollToBottom();
-                    updateChatListOnMessage(message, true);
-                }
-            }
+            const sent = await sendText(text, { chatId, roomId, replyToId: replyToMessageId });
+            if (!sent) return;
         }
     } finally {
         sending = false;
