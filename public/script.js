@@ -1691,7 +1691,32 @@ function postFormDataWithProgress(url, formData, options = {}, retried = false) 
     });
 }
 
+// Обработчики навешиваются по областям интерфейса, каждая — в своей функции
+// ниже. Порядок вызовов повторяет прежний порядок регистрации, когда всё
+// было одним длинным телом: он важен там, где на один и тот же элемент и
+// событие вешается несколько обработчиков (например, два keydown на
+// document). Новый обработчик добавляйте в функцию своей области; новая
+// область — новая функция и одна строка в этом списке.
 function setupEventListeners() {
+    setupAuthListeners();        // вход, регистрация, приватный режим
+    setupLogoutListeners();      // выход из аккаунта
+    setupSidebarListeners();     // «Новый чат», вступление по коду, «назад»
+    setupChatMenuListeners();    // меню чата и личные настройки чатов
+    setupE2eeListeners();        // шифрование в шапке чата, участники и ключи
+    setupInviteListeners();      // приглашения и заявки
+    setupProfileListeners();     // профиль, пароль, удаление аккаунта
+    setupComposerListeners();    // поле ввода, вложения
+    setupMessageMenuListeners(); // меню сообщения
+    setupSearchListeners();      // поиск по чатам
+    setupModalListeners();       // модальные окна
+    setupFeedListeners();        // лента сообщений
+    setupSocketListeners();      // события сокета
+    setupMenuDismissListeners(); // закрытие всплывающих меню
+}
+
+// Вход: вкладки «Вход» и «Регистрация», обычный вход, регистрация с
+// PoW-проверкой и приватный режим (кнопка и подтверждение срока жизни).
+function setupAuthListeners() {
     document.querySelectorAll('.auth-tab').forEach(tab => {
         tab.addEventListener('click', () => {
             document.querySelectorAll('.auth-tab').forEach((t) => {
@@ -1754,7 +1779,11 @@ function setupEventListeners() {
         openModal(elements.anonModal);
     });
     elements.anonConfirmBtn.addEventListener('click', anonymousLogin);
+}
 
+// Выход из аккаунта: кнопка в сайдбаре и окно выбора «оставить данные на
+// устройстве или стереть».
+function setupLogoutListeners() {
     elements.logoutBtn.addEventListener('click', () => {
         if (!currentUser) return;
         // Анонимный аккаунт при выходе удаляется всегда — выбирать нечего.
@@ -1766,7 +1795,11 @@ function setupEventListeners() {
     });
     elements.logoutKeepBtn.addEventListener('click', () => logout({ wipe: false }));
     elements.logoutWipeBtn.addEventListener('click', () => logout({ wipe: true }));
+}
 
+// Сайдбар и окно «Новый чат»: создание группы, вступление по коду
+// приглашения; «назад» к списку чатов в мобильной раскладке.
+function setupSidebarListeners() {
     elements.newChatBtn.addEventListener('click', openNewChatModal);
     elements.createChatBtn.addEventListener('click', createChat);
     document.getElementById('new-chat-name').addEventListener('keydown', (e) => {
@@ -1789,8 +1822,11 @@ function setupEventListeners() {
     if (elements.backBtn) {
         elements.backBtn.addEventListener('click', () => elements.sidebar.classList.remove('hidden-mobile'));
     }
+}
 
-    // ---- Меню чата и личные настройки чатов ----
+// Меню чата и личные настройки чатов (закрепить, без звука, архив, срок
+// исчезающих сообщений) — в окне меню и в контекстном меню списка.
+function setupChatMenuListeners() {
     elements.chatMenuBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         openChatMenu();
@@ -1807,12 +1843,18 @@ function setupEventListeners() {
     elements.ctxPinBtn.addEventListener('click', () => onChatItemMenuAction('pinned'));
     elements.ctxMuteBtn.addEventListener('click', () => onChatItemMenuAction('muted'));
     elements.ctxArchiveBtn.addEventListener('click', () => onChatItemMenuAction('archived'));
+}
 
+// Сквозное шифрование в шапке чата: выключатель, окно «Участники и ключи»,
+// баннер о смене ключа собеседника.
+function setupE2eeListeners() {
     elements.e2eeToggleBtn.addEventListener('click', onE2eeToggleClick);
     elements.membersKeysBtn.addEventListener('click', openMembersModal);
     elements.e2eeBannerBtn.addEventListener('click', openMembersModal);
+}
 
-    // ---- Приглашения и заявки ----
+// Приглашения в группу (код, ссылка, QR) и заявки на вступление.
+function setupInviteListeners() {
     elements.getChatCodeBtn.addEventListener('click', openInviteModal);
     elements.rotateInviteBtn.addEventListener('click', rotateInviteCode);
     elements.disableInviteBtn.addEventListener('click', disableInviteCode);
@@ -1825,8 +1867,11 @@ function setupEventListeners() {
         if (code) copyText(inviteLink(code), 'Ссылка скопирована', 'Не удалось скопировать ссылку');
     });
     elements.requestsBarBtn.addEventListener('click', openRequestsModal);
+}
 
-    // ---- Профиль ----
+// Профиль: смена пароля, отметки о прочтении, уведомления, удаление
+// аккаунта.
+function setupProfileListeners() {
     elements.profileBtn.addEventListener('click', openProfile);
 
     elements.changePasswordBtn.addEventListener('click', () => {
@@ -1862,8 +1907,11 @@ function setupEventListeners() {
             deleteAccount();
         }
     });
+}
 
-    // ---- Отправка ----
+// Поле ввода: отправка по кнопке и Enter, Escape (отмена правки и ответа),
+// вложения (скрепка, окно «Отправить файлы», перетаскивание), отмена ответа.
+function setupComposerListeners() {
     elements.sendBtn.addEventListener('click', sendMessage);
     elements.messageInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.isComposing) {
@@ -1891,8 +1939,10 @@ function setupEventListeners() {
     elements.uploadCancelBtn.addEventListener('click', () => cancelUploadQueue(true));
     setupDragAndDrop();
     elements.cancelReplyBtn.addEventListener('click', clearReply);
+}
 
-    // ---- Меню сообщения ----
+// Меню сообщения: панель реакций, ответ, копирование, правка, удаление.
+function setupMessageMenuListeners() {
     buildReactionPicker();
 
     elements.replyMessageBtn.addEventListener('click', () => {
@@ -1933,14 +1983,21 @@ function setupEventListeners() {
             showToast(data.message, 'error');
         }
     });
+}
 
+// Поиск по чатам и сообщениям: запрос уходит на сервер через 300 мс после
+// последнего нажатия клавиши.
+function setupSearchListeners() {
     let searchTimeout;
     elements.searchInput.addEventListener('input', () => {
         clearTimeout(searchTimeout);
         searchTimeout = setTimeout(performSearch, 300);
     });
+}
 
-    // ---- Модальные окна ----
+// Модальные окна: закрытие по крестику и кнопкам «Отмена», по оверлею и
+// Escape (а также удержание фокуса внутри окна — onModalKeydown).
+function setupModalListeners() {
     document.querySelectorAll('.close-modal, [data-close-modal]').forEach(btn => {
         btn.addEventListener('click', closeAllModals);
     });
@@ -1958,8 +2015,11 @@ function setupEventListeners() {
             hideChatItemMenu();
         }
     });
+}
 
-    // ---- Лента ----
+// Лента сообщений: подгрузка истории, отметка «прочитано», кнопка «вниз»,
+// ссылка-приглашение, вставленная в уже открытую вкладку.
+function setupFeedListeners() {
     // Подгрузка более старых сообщений при прокрутке к началу.
     elements.chatMessages.addEventListener('scroll', () => {
         if (elements.chatMessages.scrollTop < 200) loadOlderMessages();
@@ -1974,8 +2034,11 @@ function setupEventListeners() {
 
     // Ссылка-приглашение, вставленная в уже открытую вкладку.
     window.addEventListener('hashchange', consumeJoinFragment);
+}
 
-    // ---- Сокет ----
+// События сокета: новые, изменённые и удалённые сообщения, прочтение,
+// состав комнаты, срок исчезающих сообщений, заявки, список чатов.
+function setupSocketListeners() {
     socket.on('newMessage', async (message) => {
         if (!currentUser) return;
         const mine = isOwnMessage(message);
@@ -2090,7 +2153,11 @@ function setupEventListeners() {
     socket.on('chatListChanged', () => {
         if (currentUser) scheduleLoadChats();
     });
+}
 
+// Всплывающие меню (сообщения и элемента списка чатов) закрываются кликом
+// мимо, прокруткой и изменением размера окна.
+function setupMenuDismissListeners() {
     document.addEventListener('click', onDocumentClickForMenus);
     document.addEventListener('scroll', () => {
         hideMessageMenu();
