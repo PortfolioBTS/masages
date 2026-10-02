@@ -1,0 +1,54 @@
+# Автоматические обновления (пункт 7.1 плана): npm, закреплённые SHA действий
+# GitHub Actions и базовый образ onion-сервиса. Dependabot сам открывает PR, а
+# проверки из ci.yml и codeql.yml прогоняются на каждом из них. Порядок работы с
+# этими PR и ручное обновление закреплений — в docs/dev/ci.md.
+#
+# У файла нет офлайн-валидатора: ошибки конфигурации GitHub показывает на
+# вкладке Insights -> Dependency graph -> Dependabot после слияния в main.
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '05:00' # UTC; в кавычках, иначе YAML 1.1 прочтёт 05:00 как число
+    open-pull-requests-limit: 5
+    # Не предлагать версии моложе 5 дней: вредоносные релизы чаще всего находят и
+    # отзывают за первые дни. На обновления безопасности (уязвимость в уже
+    # используемой версии) пауза не действует.
+    cooldown:
+      default-days: 5
+    groups:
+      # Мелкие обновления прода — одним PR. Мажорные версии сюда не входят и
+      # приходят по одной: каждую нужно читать отдельно.
+      npm-prod-minor-patch:
+        dependency-type: production
+        update-types: [minor, patch]
+      # Инструменты разработки не попадают в работающий сервер — одним PR.
+      npm-dev:
+        dependency-type: development
+
+  # Версии действий закреплены SHA с комментарием «# vX.Y.Z»: Dependabot меняет и
+  # SHA, и комментарий. Все обновления — одним PR.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '05:00'
+    # Короче, чем у npm: действий мало, а исправления в них хочется получать быстро.
+    cooldown:
+      default-days: 3
+    groups:
+      github-actions:
+        patterns: ['*']
+
+  # Базовый образ onion-сервиса (tor-service/Dockerfile).
+  - package-ecosystem: docker
+    directory: /tor-service
+    schedule:
+      interval: weekly
+      day: monday
+      time: '05:00'
