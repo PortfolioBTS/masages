@@ -10,3 +10,4 @@ bd/
 .DS_Store
 anon-service/target/
 Cargo.lock
+test/e2e/.logs/
