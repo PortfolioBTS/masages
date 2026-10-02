@@ -104,32 +104,6 @@ const { createChallenge, verifySolution } = require('./lib/pow');
 
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
-// === RUST ANON SERVICE INTEGRATION ===
-// Только если адрес задан явно. Раньше по умолчанию был 127.0.0.1:8080 — а
-// на Railway PORT=8080, и анонимная регистрация стучалась в сам же сервер.
-const ANON_SERVICE_URL = process.env.ANON_SERVICE_URL || null;
-// Общий секрет с anon-service: без него любой, кто достучится до сервиса
-// по внутренней сети, мог бы сам выпрашивать у него "анонимные" личности.
-const ANON_SERVICE_SECRET = process.env.ANON_SERVICE_SECRET || null;
-
-async function fetchAnonymousIdentity() {
-    if (!ANON_SERVICE_URL) return null;
-    try {
-        const res = await fetch(`${ANON_SERVICE_URL}/generate`, {
-            method: 'POST',
-            headers: ANON_SERVICE_SECRET ? { 'X-Internal-Secret': ANON_SERVICE_SECRET } : {},
-            signal: AbortSignal.timeout(2000)
-        });
-        if (res.ok) {
-            const data = await res.json();
-            if (data.unique_code && data.username) return data;
-        }
-    } catch (e) {
-        console.warn('[Anon] Rust service unavailable, using fallback:', e.message);
-    }
-    return null;
-}
-
 // ALLOWED_MIME_TYPES и MIME_EXTENSIONS (жёсткий маппинг mimetype ->
 // расширение на диске, расширение никогда не берётся из имени файла) —
 // в lib/security-utils.js, рядом с обезличенными именами вложений.
@@ -1824,21 +1798,8 @@ app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
     }
     if (!checkPow(req, 'register-anon')) return res.json(POW_FAILED_RESPONSE);
     try {
-        let uniqueCode, username;
-        const rustIdentity = await fetchAnonymousIdentity();
-        if (rustIdentity) {
-            uniqueCode = rustIdentity.unique_code;
-            username = rustIdentity.username;
-            const existing = await dbGet('SELECT id FROM users WHERE unique_code = $1 OR username = $2', [uniqueCode, username]);
-            if (existing) {
-                console.warn('[Anon] Rust-generated identity collision, using fallback');
-                uniqueCode = await generateUniqueCodeAsync();
-                username = await generateAnonymousUsernameAsync();
-            }
-        } else {
-            uniqueCode = await generateUniqueCodeAsync();
-            username = await generateAnonymousUsernameAsync();
-        }
+        const uniqueCode = await generateUniqueCodeAsync();
+        const username = await generateAnonymousUsernameAsync();
 
         const userId = await withTransaction(client => insertUserWithBotChat(client, {
             uniqueCode, username, email: null, passwordHash: null,
