@@ -1,19 +1,23 @@
 'use strict';
 // Регрессионные тесты серверных маршрутов E2EE:
 //   1) require()+регистрация обоих модулей не должна падать — именно так
-//      выглядел исходный баг lib/e2ee-proxy.js ("app.put(...) на верхнем
+//      выглядел исходный баг lib/e2ee-keys.js ("app.put(...) на верхнем
 //      уровне, где app ещё не существует" — ReferenceError при require(),
 //      до начала прослушивания порта, т.е. crash-loop контейнера).
-//   2) lib/e2ee-proxy.js: доступ к чужим ключам только при общей комнате,
-//      фильтрация /api/keys/identities, лимиты на bundle, проксирование
-//      pq-prekey — против поддельных dbGet/dbAll и подменённого fetch.
+//   2) lib/e2ee-keys.js: доступ к чужим ключам только при общей комнате,
+//      фильтрация /api/keys/identities, лимиты на bundle, регистрация и
+//      выдача ключей встроенным хранилищем (lib/key-store.js) — против
+//      поддельных dbGet/dbAll (test/fake-key-db.js), без сети.
 //   3) Бизнес-логика lib/e2ee-groups.js (резолв chatId->room_id, проверка
 //      членства, fetch-and-delete key-share, лимиты размера и очереди) —
 //      против лёгкой in-memory имитации БД, без реального Postgres.
 // Запуск: node test/server-routes.test.js
 
 const assert = require('assert');
+const crypto = require('crypto');
 const { makeFakeKeyDb } = require('./fake-key-db');
+const { registerE2eeKeyRoutes, deleteKeysForUser } = require('../lib/e2ee-keys.js');
+const MLKEM = require('../public/mlkem.js');
 
 let passed = 0, failed = 0;
 async function test(name, fn) {
@@ -165,47 +169,61 @@ function makeFakeIo() {
     };
 }
 
-// ---- Подмена глобального fetch: key-server "отвечает" из handler'а ----
+// ---- Сеть ключам не нужна: они лежат в БД. global.fetch подменяется
+// шпионом — любой вызов попадает в calls и падает с ошибкой. ----
 const realFetch = global.fetch;
-function installFakeFetch(handler) {
+function spyOnFetch() {
     const calls = [];
     global.fetch = async (url, opts = {}) => {
-        const entry = { url: String(url), method: opts.method || 'GET', headers: opts.headers || {}, body: opts.body };
-        calls.push(entry);
-        const reply = await handler(entry);
-        const status = reply.status || 200;
-        return {
-            status,
-            ok: status >= 200 && status < 300,
-            json: async () => {
-                if (reply.rawText !== undefined) return JSON.parse(reply.rawText);
-                return reply.body;
-            },
-        };
+        calls.push({ url: String(url), method: opts.method || 'GET' });
+        throw new Error('сеть не ожидается: ' + url);
     };
     return calls;
 }
 function restoreFetch() { global.fetch = realFetch; }
 
-const SECRET = 'test-internal-secret';
+const b64 = (buf) => Buffer.from(buf).toString('base64');
 
-// Окружение читается при загрузке модуля — поэтому каждый раз свежий
-// require. По умолчанию тесты гоняют режим отдельного key-server
-// (E2EE_KEY_STORE=remote); встроенное хранилище — через mode: 'builtin'.
-function loadProxy({ secret = SECRET, mode = 'remote' } = {}) {
-    if (secret) process.env.INTERNAL_KEY_SERVER_SECRET = secret;
-    else delete process.env.INTERNAL_KEY_SERVER_SECRET;
-    if (mode === 'remote') process.env.E2EE_KEY_STORE = 'remote';
-    else delete process.env.E2EE_KEY_STORE;
-    process.env.KEY_SERVER_URL = 'http://key-server.test';
-    delete require.cache[require.resolve('../lib/e2ee-proxy.js')];
-    return require('../lib/e2ee-proxy.js');
+function ed25519Pair() {
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+    const raw = publicKey.export({ format: 'der', type: 'spki' }).subarray(-32);
+    return { raw, sign: (msg) => crypto.sign(null, msg, privateKey) };
+}
+
+function x25519Raw() {
+    const { publicKey } = crypto.generateKeyPairSync('x25519');
+    return publicKey.export({ format: 'der', type: 'spki' }).subarray(-32);
+}
+
+// Регистрирует ключи пользователя через сами маршруты /api/keys/*: identity и
+// подписанный prekey всегда, при pq — ML-KEM prekey, при opks > 0 — пул
+// одноразовых (key_id 100, 101, …). Возвращает то, что ушло на сервер, в том
+// же виде, в каком его потом отдаёт bundle.
+async function registerKeys(app, userId, { pq = false, opks = 0 } = {}) {
+    const put = async (method, path, body) => {
+        const res = await call(app, method, path, { session: { userId }, body });
+        assert.strictEqual(res.statusCode, 200, `${method} ${path}: ${JSON.stringify(res.body)}`);
+    };
+    const signing = ed25519Pair();
+    const keys = { identity_signing_key: b64(signing.raw), identity_dh_key: b64(x25519Raw()) };
+    await put('put', '/api/keys/identity', keys);
+    const spk = x25519Raw();
+    keys.signed_prekey = { key_id: 7, public_key: b64(spk), signature: b64(signing.sign(spk)) };
+    await put('put', '/api/keys/signed-prekey', keys.signed_prekey);
+    keys.pq_prekey = null;
+    if (pq) {
+        const ek = Buffer.from(MLKEM.keygen(crypto.randomBytes(64)).publicKey);
+        keys.pq_prekey = { key_id: 9, public_key: b64(ek), signature: b64(signing.sign(ek)) };
+        await put('put', '/api/keys/pq-prekey', keys.pq_prekey);
+    }
+    keys.one_time_prekeys = Array.from({ length: opks }, (_, i) => ({ key_id: 100 + i, public_key: b64(x25519Raw()) }));
+    if (opks > 0) await put('post', '/api/keys/one-time-prekeys', { keys: keys.one_time_prekeys });
+    return keys;
 }
 
 // Пользователи 1, 2, 3 — в комнате 100; 1 и 5 — в комнате 200;
 // 4 ни с кем из них комнат не делит.
-function makeProxyFixture(opts) {
-    const { registerE2eeProxyRoutes } = loadProxy(opts);
+function makeKeysFixture() {
     const db = makeFakeDb();
     db._participants.push(
         { room_id: 100, user_id: 1, username: 'alice' },
@@ -216,12 +234,18 @@ function makeProxyFixture(opts) {
         { room_id: 300, user_id: 4, username: 'dave' },
     );
     // Запросы к таблицам ключей (встроенное хранилище) — в отдельную
-    // фейковую БД, остальное — в общую.
+    // фейковую БД, остальное — в общую. keyQueries считает обращения к
+    // хранилищу: по ним видно, дошёл ли запрос до ключей.
     const keyDb = makeFakeKeyDb();
-    const route = (fn) => (sql, params) => (keyDb.isKeySql(sql) ? keyDb[fn](sql, params) : db[fn](sql, params));
+    const keyQueries = [];
+    const route = (fn) => (sql, params) => {
+        if (!keyDb.isKeySql(sql)) return db[fn](sql, params);
+        keyQueries.push(sql);
+        return keyDb[fn](sql, params);
+    };
     const app = makeFakeApp();
-    registerE2eeProxyRoutes(app, { dbGet: route('dbGet'), dbAll: route('dbAll') });
-    return { app, db, keyDb };
+    registerE2eeKeyRoutes(app, { dbGet: route('dbGet'), dbAll: route('dbAll') });
+    return { app, db, keyDb, keyQueries };
 }
 
 async function withFrozenTime(start, fn) {
@@ -252,10 +276,10 @@ async function withQuietConsole(fn) {
 async function main() {
     console.log('Server route tests\n');
 
-    // ---------------- lib/e2ee-proxy.js ----------------
+    // ---------------- lib/e2ee-keys.js ----------------
 
-    await test('e2ee-proxy.js: require + registration does not throw (the original bug)', async () => {
-        const { app } = makeProxyFixture();
+    await test('e2ee-keys.js: require + registration does not throw (the original bug)', async () => {
+        const { app } = makeKeysFixture();
         const expected = [
             ['put', '/api/keys/identity'],
             ['put', '/api/keys/signed-prekey'],
@@ -271,342 +295,271 @@ async function main() {
         }
     });
 
-    await test('e2ee-proxy.js: registration without { dbGet, dbAll } fails fast', async () => {
-        const { registerE2eeProxyRoutes } = loadProxy();
-        assert.throws(() => registerE2eeProxyRoutes(makeFakeApp()), TypeError);
-        assert.throws(() => registerE2eeProxyRoutes(makeFakeApp(), { dbGet: async () => null }), TypeError);
+    await test('e2ee-keys.js: registration without { dbGet, dbAll } fails fast', async () => {
+        assert.throws(() => registerE2eeKeyRoutes(makeFakeApp()), TypeError);
+        assert.throws(() => registerE2eeKeyRoutes(makeFakeApp(), { dbGet: async () => null }), TypeError);
     });
 
-    await test('e2ee-proxy.js: E2EE_KEY_STORE=remote without KEY_SERVER_SECRET → 503, nothing forwarded', async () => {
-        const { app } = makeProxyFixture({ secret: null, mode: 'remote' });
-        const calls = installFakeFetch(() => ({ body: {} }));
+    await test('e2ee-keys.js: keys are registered, counted, read and deleted by the built-in store — the network is never used', async () => {
+        const { app, keyDb } = makeKeysFixture();
+        const calls = spyOnFetch();
         try {
-            for (const [method, path, params] of [
-                ['get', '/api/keys/one-time-prekeys/count'],
-                ['get', '/api/keys/bundle/:targetUserId', { targetUserId: '2' }],
-            ]) {
-                const res = await call(app, method, path, { session: { userId: 1 }, params });
-                assert.strictEqual(res.statusCode, 503);
-                assert.strictEqual(res.body.success, false);
-            }
-            assert.strictEqual(calls.length, 0);
-        } finally {
-            restoreFetch();
-        }
-    });
-
-    await test('e2ee-proxy.js: default (no E2EE_KEY_STORE) uses the built-in store — no network, even with a leftover secret', async () => {
-        for (const secret of [null, SECRET]) {
-            const { app, keyDb } = makeProxyFixture({ secret, mode: 'builtin' });
-            const calls = installFakeFetch(() => ({ body: {} }));
-            try {
-                const count = await call(app, 'get', '/api/keys/one-time-prekeys/count', { session: { userId: 1 } });
-                assert.strictEqual(count.statusCode, 200);
-                assert.deepStrictEqual(count.body, { count: 0 });
-                const bad = await call(app, 'put', '/api/keys/identity', { session: { userId: 1 }, body: { identity_signing_key: 'x', identity_dh_key: 'y' } });
-                assert.strictEqual(bad.statusCode, 400);
-                const bundle = await call(app, 'get', '/api/keys/bundle/:targetUserId', { session: { userId: 1 }, params: { targetUserId: '2' } });
-                assert.strictEqual(bundle.statusCode, 404, 'co-member without keys → 404 from the store');
-                const ids = await call(app, 'get', '/api/keys/identities', { session: { userId: 1 }, query: { ids: '2,4' } });
-                assert.deepStrictEqual(ids.body, { success: true, identities: [] });
-                keyDb.failNextQuery(new Error('db down'));
-                const down = await withQuietConsole(async () => {
-                    const r = await call(app, 'get', '/api/keys/one-time-prekeys/count', { session: { userId: 1 } });
-                    assert.strictEqual(r.statusCode, 502);
-                });
-                assert.ok(down.some(l => /db down/.test(l)));
-                assert.strictEqual(calls.length, 0, 'built-in mode never calls the network');
-            } finally {
-                restoreFetch();
-            }
-        }
-        const { deleteKeysForUser, keyStoreMode } = loadProxy({ mode: 'builtin' });
-        assert.strictEqual(keyStoreMode(), 'builtin');
-        assert.strictEqual(typeof deleteKeysForUser, 'function');
-        assert.strictEqual(loadProxy({ mode: 'remote' }).keyStoreMode(), 'remote');
-    });
-
-    await test('e2ee-proxy.js: unauthenticated request is rejected with 401, not forwarded', async () => {
-        const { app } = makeProxyFixture();
-        const calls = installFakeFetch(() => ({ body: {} }));
-        try {
-            for (const [method, path] of [['delete', '/api/keys'], ['get', '/api/keys/identities'], ['put', '/api/keys/pq-prekey']]) {
-                const res = await call(app, method, path, { session: null, query: { ids: '1' } });
-                assert.strictEqual(res.statusCode, 401);
-            }
-            assert.strictEqual(calls.length, 0);
-        } finally {
-            restoreFetch();
-        }
-    });
-
-    await test('e2ee-proxy.js: non-numeric / out-of-range targetUserId is rejected with 400 before proxying', async () => {
-        const { app, db } = makeProxyFixture();
-        const calls = installFakeFetch(() => ({ body: {} }));
-        try {
-            for (const bad of ['not-a-number', '0', '-1', '1e3', '2147483648', '12abc']) {
-                const res = await call(app, 'get', '/api/keys/bundle/:targetUserId', { session: { userId: 1 }, params: { targetUserId: bad } });
-                assert.strictEqual(res.statusCode, 400, 'targetUserId=' + bad);
-                assert.strictEqual(res.body.success, false);
-            }
-            assert.strictEqual(calls.length, 0);
-            assert.strictEqual(db._queries.length, 0);
-        } finally {
-            restoreFetch();
-        }
-    });
-
-    await test('bundle: 403 without a shared room, key-server is not called (no OPK drained)', async () => {
-        const { app, db } = makeProxyFixture();
-        const calls = installFakeFetch(() => ({ body: {} }));
-        try {
-            const res = await call(app, 'get', '/api/keys/bundle/:targetUserId', { session: { userId: 1 }, params: { targetUserId: '4' } });
-            assert.strictEqual(res.statusCode, 403);
-            assert.deepStrictEqual(res.body, { success: false, message: 'Нет общего чата с пользователем' });
-            assert.strictEqual(calls.length, 0);
-            // Проверка — именно запросом по room_participants, с (вызывающий, цель).
-            const q = db._queries[0];
-            assert.ok(/FROM room_participants a JOIN room_participants b ON a\.room_id = b\.room_id/.test(q.query));
-            assert.deepStrictEqual(q.params, [1, 4]);
-        } finally {
-            restoreFetch();
-        }
-    });
-
-    await test('bundle: with a shared room the key-server response is passed through as is', async () => {
-        const { app } = makeProxyFixture();
-        const bundle = { identity_signing_key: 'AAA', pq_prekey: { key_id: 7, public_key: 'PQ', signature: 'SIG' }, one_time_prekey: null };
-        const calls = installFakeFetch(() => ({ status: 200, body: bundle }));
-        try {
-            const res = await call(app, 'get', '/api/keys/bundle/:targetUserId', { session: { userId: 1 }, params: { targetUserId: '5' } });
-            assert.strictEqual(res.statusCode, 200);
-            assert.deepStrictEqual(res.body, bundle);
-            assert.strictEqual(calls.length, 1);
-            assert.strictEqual(calls[0].url, 'http://key-server.test/internal/v1/keys/bundle/5');
-            assert.strictEqual(calls[0].method, 'GET');
-            assert.strictEqual(calls[0].headers['X-Internal-Secret'], SECRET);
-            assert.strictEqual(calls[0].headers['X-User-Id'], '1');
-        } finally {
-            restoreFetch();
-        }
-    });
-
-    await test('bundle: key-server errors keep their status; network failure -> 502', async () => {
-        const { app } = makeProxyFixture();
-        installFakeFetch(() => ({ status: 404, body: { success: false, message: 'no bundle' } }));
-        try {
-            const res = await call(app, 'get', '/api/keys/bundle/:targetUserId', { session: { userId: 1 }, params: { targetUserId: '2' } });
-            assert.strictEqual(res.statusCode, 404);
-            assert.strictEqual(res.body.message, 'no bundle');
-        } finally {
-            restoreFetch();
-        }
-        installFakeFetch(() => { throw new Error('ECONNREFUSED'); });
-        try {
-            let res;
-            const logged = await withQuietConsole(async () => {
-                res = await call(app, 'get', '/api/keys/bundle/:targetUserId', { session: { userId: 1 }, params: { targetUserId: '3' } });
+            await registerKeys(app, 5, { pq: true, opks: 2 });
+            assert.ok(keyDb._state.identities.has(5) && keyDb._state.spks.has(5) && keyDb._state.pqs.has(5));
+            const as5 = { session: { userId: 5 } };
+            const count = await call(app, 'get', '/api/keys/one-time-prekeys/count', as5);
+            assert.strictEqual(count.statusCode, 200);
+            assert.deepStrictEqual(count.body, { count: 2 });
+            // Ошибка ввода — статус и тело хранилища идут клиенту как есть.
+            const bad = await call(app, 'put', '/api/keys/identity', { ...as5, body: { identity_signing_key: 'x', identity_dh_key: 'y' } });
+            assert.strictEqual(bad.statusCode, 400);
+            assert.strictEqual(bad.body.success, false);
+            assert.ok(/^bad request: /.test(bad.body.message), bad.body.message);
+            // signed-prekey без зарегистрированной identity — 409 (по нему клиент
+            // регистрирует identity заново, см. putWithIdentityRetry в e2ee.js).
+            const orphan = await call(app, 'put', '/api/keys/signed-prekey', {
+                session: { userId: 6 }, body: { key_id: 1, public_key: b64(x25519Raw()), signature: b64(Buffer.alloc(64, 1)) },
             });
-            assert.strictEqual(res.statusCode, 502);
-            assert.strictEqual(res.body.success, false);
-            assert.ok(logged.some(l => l.includes('ECONNREFUSED')));
+            assert.strictEqual(orphan.statusCode, 409);
+            const ids = await call(app, 'get', '/api/keys/identities', { session: { userId: 1 }, query: { ids: '5' } });
+            assert.deepStrictEqual(ids.body.identities.map(i => i.user_id), [5]);
+            const gone = await call(app, 'delete', '/api/keys', as5);
+            assert.strictEqual(gone.statusCode, 200);
+            assert.deepStrictEqual(gone.body, { success: true });
+            const { identities, spks, pqs, opks } = keyDb._state;
+            assert.strictEqual(identities.size + spks.size + pqs.size + opks.length, 0, 'everything of user 5 is gone');
+            assert.strictEqual(calls.length, 0, 'the built-in store never calls the network');
         } finally {
             restoreFetch();
         }
+    });
+
+    await test('e2ee-keys.js: unauthenticated request is rejected with 401, the store is not touched', async () => {
+        const { app, db, keyQueries } = makeKeysFixture();
+        for (const session of [null, {}]) {
+            for (const [method, path] of [
+                ['delete', '/api/keys'], ['get', '/api/keys/identities'], ['put', '/api/keys/pq-prekey'],
+                ['get', '/api/keys/bundle/:targetUserId'],
+            ]) {
+                const res = await call(app, method, path, { session, query: { ids: '1' }, params: { targetUserId: '2' } });
+                assert.strictEqual(res.statusCode, 401, method + ' ' + path);
+            }
+        }
+        assert.strictEqual(keyQueries.length, 0);
+        assert.strictEqual(db._queries.length, 0);
+    });
+
+    await test('e2ee-keys.js: non-numeric / out-of-range targetUserId is rejected with 400 before any query', async () => {
+        const { app, db, keyQueries } = makeKeysFixture();
+        for (const bad of ['not-a-number', '0', '-1', '1e3', '2147483648', '12abc']) {
+            const res = await call(app, 'get', '/api/keys/bundle/:targetUserId', { session: { userId: 1 }, params: { targetUserId: bad } });
+            assert.strictEqual(res.statusCode, 400, 'targetUserId=' + bad);
+            assert.strictEqual(res.body.success, false);
+        }
+        assert.strictEqual(keyQueries.length, 0);
+        assert.strictEqual(db._queries.length, 0);
+    });
+
+    await test('bundle: 403 without a shared room, the store is not touched (no OPK drained)', async () => {
+        const { app, db, keyDb, keyQueries } = makeKeysFixture();
+        await registerKeys(app, 4, { opks: 1 }); // с пользователем 1 у него нет общей комнаты
+        const queriesBefore = keyQueries.length;
+        const res = await call(app, 'get', '/api/keys/bundle/:targetUserId', { session: { userId: 1 }, params: { targetUserId: '4' } });
+        assert.strictEqual(res.statusCode, 403);
+        assert.deepStrictEqual(res.body, { success: false, message: 'Нет общего чата с пользователем' });
+        assert.strictEqual(keyQueries.length, queriesBefore, 'the store must not be queried');
+        assert.strictEqual(keyDb._state.opks.length, 1, 'the one-time prekey must stay in the pool');
+        // Проверка — именно запросом по room_participants, с (вызывающий, цель).
+        const q = db._queries[0];
+        assert.ok(/FROM room_participants a JOIN room_participants b ON a\.room_id = b\.room_id/.test(q.query));
+        assert.deepStrictEqual(q.params, [1, 4]);
+    });
+
+    await test('bundle: with a shared room the registered keys come out of the store, each one-time prekey only once', async () => {
+        const { app } = makeKeysFixture();
+        const keys = await registerKeys(app, 5, { pq: true, opks: 2 });
+        const get = () => call(app, 'get', '/api/keys/bundle/:targetUserId', { session: { userId: 1 }, params: { targetUserId: '5' } });
+        const expected = (oneTimePrekey) => ({
+            identity_signing_key: keys.identity_signing_key,
+            identity_dh_key: keys.identity_dh_key,
+            signed_prekey: keys.signed_prekey,
+            one_time_prekey: oneTimePrekey,
+            pq_prekey: keys.pq_prekey,
+        });
+        const first = await get();
+        assert.strictEqual(first.statusCode, 200);
+        assert.deepStrictEqual(first.body, expected(keys.one_time_prekeys[0]));
+        assert.deepStrictEqual((await get()).body, expected(keys.one_time_prekeys[1]));
+        // Пул пуст: bundle всё равно отдаётся — без одноразовой части.
+        const drained = await get();
+        assert.strictEqual(drained.statusCode, 200);
+        assert.deepStrictEqual(drained.body, expected(null));
+        const left = await call(app, 'get', '/api/keys/one-time-prekeys/count', { session: { userId: 5 } });
+        assert.deepStrictEqual(left.body, { count: 0 });
+    });
+
+    await test('bundle: a user without keys -> 404 from the store; a DB error in the store -> 502', async () => {
+        const { app, keyDb } = makeKeysFixture();
+        const get = (target) => call(app, 'get', '/api/keys/bundle/:targetUserId', { session: { userId: 1 }, params: { targetUserId: String(target) } });
+        const missing = await get(2);
+        assert.strictEqual(missing.statusCode, 404);
+        assert.strictEqual(missing.body.success, false);
+
+        await registerKeys(app, 3, { opks: 1 });
+        keyDb.failNextQuery(new Error('ECONNREFUSED'));
+        let res;
+        const logged = await withQuietConsole(async () => { res = await get(3); });
+        assert.strictEqual(res.statusCode, 502);
+        assert.deepStrictEqual(res.body, { success: false, message: 'E2EE key server недоступен' });
+        assert.ok(logged.some(l => l.includes('ECONNREFUSED')));
+        // Сбой не потратил одноразовый prekey: следующий запрос получает его.
+        const retry = await get(3);
+        assert.strictEqual(retry.statusCode, 200);
+        assert.strictEqual(retry.body.one_time_prekey.key_id, 100);
     });
 
     await test('bundle: 5 requests per hour per (caller, target) pair, then 429 with Retry-After', async () => {
-        const { app } = makeProxyFixture();
-        const calls = installFakeFetch(() => ({ body: { ok: true } }));
-        try {
-            await withFrozenTime(1_000_000, async (advance) => {
-                const get = (userId, target) => call(app, 'get', '/api/keys/bundle/:targetUserId', { session: { userId }, params: { targetUserId: String(target) } });
-                for (let i = 0; i < 5; i++) {
-                    assert.strictEqual((await get(1, 2)).statusCode, 200, 'request #' + (i + 1));
-                    advance(1000);
-                }
-                const limited = await get(1, 2);
-                assert.strictEqual(limited.statusCode, 429);
-                assert.strictEqual(limited.body.success, false);
-                assert.ok(/этого пользователя/.test(limited.body.message), limited.body.message);
-                assert.ok(Number(limited.headers['retry-after']) > 0);
-                assert.strictEqual(calls.length, 5, 'the limited request must not reach the key-server');
+        const { app, keyDb } = makeKeysFixture();
+        for (const id of [1, 2, 3]) await registerKeys(app, id, { opks: id === 2 ? 10 : 0 });
+        const opksOfBob = () => keyDb._state.opks.filter(o => o.user_id === 2).length;
+        await withFrozenTime(1_000_000, async (advance) => {
+            const get = (userId, target) => call(app, 'get', '/api/keys/bundle/:targetUserId', { session: { userId }, params: { targetUserId: String(target) } });
+            for (let i = 0; i < 5; i++) {
+                assert.strictEqual((await get(1, 2)).statusCode, 200, 'request #' + (i + 1));
+                advance(1000);
+            }
+            const limited = await get(1, 2);
+            assert.strictEqual(limited.statusCode, 429);
+            assert.strictEqual(limited.body.success, false);
+            assert.ok(/этого пользователя/.test(limited.body.message), limited.body.message);
+            assert.ok(Number(limited.headers['retry-after']) > 0);
+            assert.strictEqual(opksOfBob(), 5, 'the limited request must not drain a one-time prekey');
 
-                // Другая цель и другой вызывающий — свои счётчики пар.
-                assert.strictEqual((await get(1, 3)).statusCode, 200);
-                assert.strictEqual((await get(2, 1)).statusCode, 200);
+            // Другая цель и другой вызывающий — свои счётчики пар.
+            assert.strictEqual((await get(1, 3)).statusCode, 200);
+            assert.strictEqual((await get(2, 1)).statusCode, 200);
 
-                // Скользящее окно: через час после первого запроса слот освобождается.
-                advance(60 * 60 * 1000 - 5000);
-                assert.strictEqual((await get(1, 2)).statusCode, 200);
-                assert.strictEqual((await get(1, 2)).statusCode, 429);
-            });
-        } finally {
-            restoreFetch();
-        }
+            // Скользящее окно: через час после первого запроса слот освобождается.
+            advance(60 * 60 * 1000 - 5000);
+            assert.strictEqual((await get(1, 2)).statusCode, 200);
+            assert.strictEqual((await get(1, 2)).statusCode, 429);
+        });
     });
 
     await test('bundle: 60 requests per hour per caller across all targets, then 429', async () => {
-        const { app, db } = makeProxyFixture();
-        // Ещё 12 собеседников в общей комнате с пользователем 1: 13 целей × ≤5 = 65 > 60.
+        const { app, db } = makeKeysFixture();
+        // Ещё 12 собеседников в общей комнате с пользователем 1: 15 целей × ≤5 = 75 > 60.
         for (let id = 10; id < 22; id++) db._participants.push({ room_id: 100, user_id: id, username: 'u' + id });
         const targets = [2, 3, 5, ...Array.from({ length: 12 }, (_, i) => 10 + i)];
-        installFakeFetch(() => ({ body: {} }));
-        try {
-            await withFrozenTime(5_000_000, async (advance) => {
-                let ok = 0;
-                for (const target of targets) {
-                    for (let i = 0; i < 5 && ok < 60; i++) {
-                        const res = await call(app, 'get', '/api/keys/bundle/:targetUserId', { session: { userId: 1 }, params: { targetUserId: String(target) } });
-                        assert.strictEqual(res.statusCode, 200);
-                        ok++;
-                        advance(10);
-                    }
+        for (const id of [1, ...targets]) await registerKeys(app, id);
+        await withFrozenTime(5_000_000, async (advance) => {
+            let ok = 0;
+            for (const target of targets) {
+                for (let i = 0; i < 5 && ok < 60; i++) {
+                    const res = await call(app, 'get', '/api/keys/bundle/:targetUserId', { session: { userId: 1 }, params: { targetUserId: String(target) } });
+                    assert.strictEqual(res.statusCode, 200);
+                    ok++;
+                    advance(10);
                 }
-                assert.strictEqual(ok, 60);
-                const fresh = targets.find((_, i) => i * 5 >= 60); // цель, к которой ещё не обращались
-                const limited = await call(app, 'get', '/api/keys/bundle/:targetUserId', { session: { userId: 1 }, params: { targetUserId: String(fresh) } });
-                assert.strictEqual(limited.statusCode, 429);
-                assert.ok(/шифрования/.test(limited.body.message), limited.body.message);
-                // Лимит вызывающего не задевает других пользователей.
-                const other = await call(app, 'get', '/api/keys/bundle/:targetUserId', { session: { userId: 2 }, params: { targetUserId: '1' } });
-                assert.strictEqual(other.statusCode, 200);
-            });
-        } finally {
-            restoreFetch();
-        }
+            }
+            assert.strictEqual(ok, 60);
+            const fresh = targets.find((_, i) => i * 5 >= 60); // цель, к которой ещё не обращались
+            const limited = await call(app, 'get', '/api/keys/bundle/:targetUserId', { session: { userId: 1 }, params: { targetUserId: String(fresh) } });
+            assert.strictEqual(limited.statusCode, 429);
+            assert.ok(/шифрования/.test(limited.body.message), limited.body.message);
+            // Лимит вызывающего не задевает других пользователей.
+            const other = await call(app, 'get', '/api/keys/bundle/:targetUserId', { session: { userId: 2 }, params: { targetUserId: '1' } });
+            assert.strictEqual(other.statusCode, 200);
+        });
     });
 
     await test('identities: unshared ids are silently dropped, self allowed, response wrapped', async () => {
-        const { app, db } = makeProxyFixture();
-        const calls = installFakeFetch(() => ({
-            body: {
-                identities: [
-                    { user_id: 2, identity_signing_key: 's2', identity_dh_key: 'd2' },
-                    { user_id: 1, identity_signing_key: 's1', identity_dh_key: 'd1' },
-                    // key-server вернул лишнее — прокси всё равно не должен это отдать
-                    { user_id: 4, identity_signing_key: 's4', identity_dh_key: 'd4' },
-                ],
-            },
-        }));
-        try {
-            const res = await call(app, 'get', '/api/keys/identities', { session: { userId: 1 }, query: { ids: '4, 2,1,2,3,999' } });
-            assert.strictEqual(res.statusCode, 200);
-            assert.strictEqual(res.body.success, true);
-            assert.deepStrictEqual(res.body.identities.map(i => i.user_id), [2, 1]);
-            assert.strictEqual(calls.length, 1);
-            assert.strictEqual(calls[0].url, 'http://key-server.test/internal/v1/keys/identities?ids=2,1,3');
-            assert.strictEqual(calls[0].headers['X-User-Id'], '1');
-            // Один запрос к БД на весь список, а не по запросу на id.
-            const accessQueries = db._queries.filter(q => q.query.includes('room_participants a'));
-            assert.strictEqual(accessQueries.length, 1);
-            assert.ok(accessQueries[0].query.includes('= ANY($2::int[])'));
-            assert.deepStrictEqual(accessQueries[0].params, [1, [4, 2, 3, 999]]);
-        } finally {
-            restoreFetch();
-        }
+        const { app, db } = makeKeysFixture();
+        const keys = {};
+        // 4 зарегистрирован, но общей комнаты с 1 нет; у 3 ключей нет; 999 не существует.
+        for (const id of [1, 2, 4]) keys[id] = await registerKeys(app, id);
+        const res = await call(app, 'get', '/api/keys/identities', { session: { userId: 1 }, query: { ids: '4, 2,1,2,3,999' } });
+        assert.strictEqual(res.statusCode, 200);
+        assert.strictEqual(res.body.success, true);
+        assert.deepStrictEqual(res.body.identities, [1, 2].map(id => ({
+            user_id: id,
+            identity_signing_key: keys[id].identity_signing_key,
+            identity_dh_key: keys[id].identity_dh_key,
+        })));
+        // Один запрос к БД на весь список, а не по запросу на id.
+        const accessQueries = db._queries.filter(q => q.query.includes('room_participants a'));
+        assert.strictEqual(accessQueries.length, 1);
+        assert.ok(accessQueries[0].query.includes('= ANY($2::int[])'));
+        assert.deepStrictEqual(accessQueries[0].params, [1, [4, 2, 3, 999]]);
     });
 
-    await test('identities: nothing visible -> empty list without calling the key-server', async () => {
-        const { app } = makeProxyFixture();
-        const calls = installFakeFetch(() => ({ body: { identities: [] } }));
-        try {
-            const res = await call(app, 'get', '/api/keys/identities', { session: { userId: 1 }, query: { ids: '4,999' } });
-            assert.strictEqual(res.statusCode, 200);
-            assert.deepStrictEqual(res.body, { success: true, identities: [] });
-            assert.strictEqual(calls.length, 0);
-        } finally {
-            restoreFetch();
-        }
+    await test('identities: nothing visible -> empty list without querying the key store', async () => {
+        const { app, keyQueries } = makeKeysFixture();
+        await registerKeys(app, 4); // есть ключи, но нет общей комнаты
+        const queriesBefore = keyQueries.length;
+        const res = await call(app, 'get', '/api/keys/identities', { session: { userId: 1 }, query: { ids: '4,999' } });
+        assert.strictEqual(res.statusCode, 200);
+        assert.deepStrictEqual(res.body, { success: true, identities: [] });
+        assert.strictEqual(keyQueries.length, queriesBefore);
     });
 
-    await test('identities: only self requested -> no DB round trip needed, key-server asked for self', async () => {
-        const { app, db } = makeProxyFixture();
-        const calls = installFakeFetch(() => ({ body: { identities: [{ user_id: 1, identity_signing_key: 's', identity_dh_key: 'd' }] } }));
-        try {
-            const res = await call(app, 'get', '/api/keys/identities', { session: { userId: 1 }, query: { ids: '1' } });
-            assert.deepStrictEqual(res.body.identities.map(i => i.user_id), [1]);
-            assert.strictEqual(calls[0].url, 'http://key-server.test/internal/v1/keys/identities?ids=1');
-            assert.strictEqual(db._queries.length, 0);
-        } finally {
-            restoreFetch();
-        }
+    await test('identities: only self requested -> no access-check query needed, store asked for self', async () => {
+        const { app, db } = makeKeysFixture();
+        const keys = await registerKeys(app, 1);
+        const res = await call(app, 'get', '/api/keys/identities', { session: { userId: 1 }, query: { ids: '1' } });
+        assert.deepStrictEqual(res.body.identities, [{
+            user_id: 1, identity_signing_key: keys.identity_signing_key, identity_dh_key: keys.identity_dh_key,
+        }]);
+        assert.strictEqual(db._queries.length, 0);
     });
 
     await test('identities: malformed or oversized id lists are rejected with 400', async () => {
-        const { app } = makeProxyFixture();
-        const calls = installFakeFetch(() => ({ body: { identities: [] } }));
-        try {
-            const tooMany = Array.from({ length: 201 }, (_, i) => i + 1).join(',');
-            for (const ids of [undefined, '', ',', '1,,2', 'a,b', '1;2', '-3', '0', '2147483648', ['1', '2'], tooMany]) {
-                const res = await call(app, 'get', '/api/keys/identities', { session: { userId: 1 }, query: { ids } });
-                assert.strictEqual(res.statusCode, 400, 'ids=' + String(JSON.stringify(ids)).slice(0, 40));
-                assert.strictEqual(res.body.success, false);
-            }
-            assert.strictEqual(calls.length, 0);
-            // Ровно 200 разных id (плюс повторы) — допустимо.
-            const exactly200 = Array.from({ length: 200 }, (_, i) => i + 1).join(',') + ',1,2,3';
-            const ok = await call(app, 'get', '/api/keys/identities', { session: { userId: 1 }, query: { ids: exactly200 } });
-            assert.strictEqual(ok.statusCode, 200);
-            assert.strictEqual(ok.body.success, true);
-        } finally {
-            restoreFetch();
-        }
-    });
-
-    await test('identities: key-server error status is passed through; malformed body -> 502', async () => {
-        const { app } = makeProxyFixture();
-        installFakeFetch(() => ({ status: 400, body: { success: false, message: 'bad ids' } }));
-        try {
-            const res = await call(app, 'get', '/api/keys/identities', { session: { userId: 1 }, query: { ids: '2' } });
-            assert.strictEqual(res.statusCode, 400);
-            assert.strictEqual(res.body.message, 'bad ids');
-        } finally {
-            restoreFetch();
-        }
-        installFakeFetch(() => ({ status: 200, rawText: 'not json' }));
-        try {
-            const res = await call(app, 'get', '/api/keys/identities', { session: { userId: 1 }, query: { ids: '2' } });
-            assert.strictEqual(res.statusCode, 502);
+        const { app, keyQueries } = makeKeysFixture();
+        const tooMany = Array.from({ length: 201 }, (_, i) => i + 1).join(',');
+        for (const ids of [undefined, '', ',', '1,,2', 'a,b', '1;2', '-3', '0', '2147483648', ['1', '2'], tooMany]) {
+            const res = await call(app, 'get', '/api/keys/identities', { session: { userId: 1 }, query: { ids } });
+            assert.strictEqual(res.statusCode, 400, 'ids=' + String(JSON.stringify(ids)).slice(0, 40));
             assert.strictEqual(res.body.success, false);
-        } finally {
-            restoreFetch();
         }
+        assert.strictEqual(keyQueries.length, 0);
+        // Ровно 200 разных id (плюс повторы) — допустимо.
+        const exactly200 = Array.from({ length: 200 }, (_, i) => i + 1).join(',') + ',1,2,3';
+        const ok = await call(app, 'get', '/api/keys/identities', { session: { userId: 1 }, query: { ids: exactly200 } });
+        assert.strictEqual(ok.statusCode, 200);
+        assert.strictEqual(ok.body.success, true);
     });
 
-    await test('pq-prekey: PUT is proxied with the JSON body to the internal endpoint', async () => {
-        const { app } = makeProxyFixture();
-        const calls = installFakeFetch(() => ({ body: { success: true } }));
-        try {
-            const body = { key_id: 42, public_key: 'cHVi', signature: 'c2ln' };
-            const res = await call(app, 'put', '/api/keys/pq-prekey', { session: { userId: 7 }, body });
-            assert.strictEqual(res.statusCode, 200);
-            assert.deepStrictEqual(res.body, { success: true });
-            assert.strictEqual(calls.length, 1);
-            assert.strictEqual(calls[0].url, 'http://key-server.test/internal/v1/keys/pq-prekey');
-            assert.strictEqual(calls[0].method, 'PUT');
-            assert.strictEqual(calls[0].headers['Content-Type'], 'application/json');
-            assert.strictEqual(calls[0].headers['X-User-Id'], '7');
-            assert.deepStrictEqual(JSON.parse(calls[0].body), body);
-        } finally {
-            restoreFetch();
-        }
+    await test('identities: a DB error in the key store -> 502', async () => {
+        const { app, keyDb } = makeKeysFixture();
+        await registerKeys(app, 2);
+        keyDb.failNextQuery(new Error('db down'));
+        let res;
+        const logged = await withQuietConsole(async () => {
+            res = await call(app, 'get', '/api/keys/identities', { session: { userId: 1 }, query: { ids: '2' } });
+        });
+        assert.strictEqual(res.statusCode, 502);
+        assert.deepStrictEqual(res.body, { success: false, message: 'E2EE key server недоступен' });
+        assert.ok(logged.some(l => /db down/.test(l)));
     });
 
-    await test('deleteKeysForUser: best effort DELETE, false without secret', async () => {
-        let { deleteKeysForUser } = loadProxy({ secret: null });
-        const calls = installFakeFetch(() => ({ status: 200, body: { success: true } }));
-        try {
-            assert.strictEqual(await deleteKeysForUser(9), false);
-            assert.strictEqual(calls.length, 0);
-            ({ deleteKeysForUser } = loadProxy());
-            assert.strictEqual(await deleteKeysForUser(9), true);
-            assert.strictEqual(calls[0].method, 'DELETE');
-            assert.strictEqual(calls[0].url, 'http://key-server.test/internal/v1/keys');
-            assert.strictEqual(calls[0].headers['X-User-Id'], '9');
-        } finally {
-            restoreFetch();
-        }
+    await test('deleteKeysForUser: clears the keys in the built-in store, best effort on errors', async () => {
+        // Свежий экземпляр модуля: маршруты ещё не зарегистрированы — чистить нечего.
+        delete require.cache[require.resolve('../lib/e2ee-keys.js')];
+        assert.strictEqual(await require('../lib/e2ee-keys.js').deleteKeysForUser(9), false);
+
+        const { app, keyDb } = makeKeysFixture();
+        await registerKeys(app, 9, { pq: true, opks: 2 });
+        assert.ok(keyDb._state.identities.has(9));
+        assert.strictEqual(await deleteKeysForUser(9), true);
+        const { identities, spks, pqs, opks } = keyDb._state;
+        assert.strictEqual(identities.size + spks.size + pqs.size + opks.length, 0);
+
+        keyDb.failNextQuery(new Error('db down'));
+        let result;
+        const logged = await withQuietConsole(async () => { result = await deleteKeysForUser(9); });
+        assert.strictEqual(result, false);
+        assert.ok(logged.some(l => /db down/.test(l)));
+        assert.ok(!logged.some(l => /\b9\b/.test(l)), 'the user id must not reach the log');
     });
 
     // ---------------- lib/e2ee-groups.js ----------------

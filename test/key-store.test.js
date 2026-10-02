@@ -1,6 +1,6 @@
 'use strict';
 // Встроенное хранилище E2EE-ключей (lib/key-store.js): проверки ввода и
-// подписей, семантика ответов как у e2ee-key-server и полный прогон
+// подписей, статусы и тексты ответов (от них зависит клиент) и полный прогон
 // протокола public/e2ee.js, в котором все операции с ключами идут через него.
 // Запуск: node test/key-store.test.js
 
@@ -66,8 +66,8 @@ async function register(store, userId, { pq = true } = {}) {
 }
 
 // Транспорт клиента E2EE: операции с ключами — во встроенное хранилище (как
-// это делает lib/e2ee-proxy.js без INTERNAL_KEY_SERVER_SECRET), участники и
-// key-share — в фейковый сервер.
+// это делают маршруты lib/e2ee-keys.js), участники и key-share — в фейковый
+// сервер.
 function builtinTransport(server, store, userId) {
     const base = server.transportFor(userId);
     const via = async (method, path, body) => {
@@ -204,7 +204,7 @@ async function main() {
         assert.strictEqual((await store.call(1, 'GET', '/internal/v1/keys/identities?ids=1,x')).status, 400);
     });
 
-    await test('delete removes everything; unknown route → 404; DB errors propagate (proxy answers 502)', async () => {
+    await test('delete removes everything; unknown route → 404; DB errors propagate (the route answers 502)', async () => {
         const { store, db } = makeStore();
         await register(store, 6);
         await store.call(6, 'POST', '/internal/v1/keys/one-time-prekeys', { keys: [{ key_id: 1, public_key: b64(x25519Raw()) }] });

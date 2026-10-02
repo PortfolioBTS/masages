@@ -9,7 +9,7 @@
 //     каждое сообщение — так делает Signal в группах.
 //   - Identity-ключей два отдельных (Ed25519 для подписи + X25519 для DH),
 //     а не один конвертируемый — под эту схему спроектирован
-//     e2ee-key-server (src/crypto.rs).
+//     серверный модуль ключей (lib/key-store.js).
 //   - Из внешнего кода — только ML-KEM (public/mlkem.js, чистый JS: в
 //     браузерах WebCrypto его пока не умеет). Остальное — crypto.subtle и
 //     crypto.getRandomValues. Это и требование CSP (script-src 'self'), и то,

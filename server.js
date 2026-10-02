@@ -90,9 +90,9 @@ const {
     anonWelcomeText
 } = require('./lib/anon-lifetime');
 
-// Импорт E2EE прокси (маршруты регистрируются после sessionMiddleware —
-// см. вызов registerE2eeProxyRoutes ниже)
-const { registerE2eeProxyRoutes, deleteKeysForUser, keyStoreMode } = require('./lib/e2ee-proxy');
+// Маршруты /api/keys/* (регистрируются после sessionMiddleware — см. вызов
+// registerE2eeKeyRoutes ниже) и встроенное хранилище публичных E2EE-ключей
+const { registerE2eeKeyRoutes, deleteKeysForUser } = require('./lib/e2ee-keys');
 const { initKeyStoreSchema } = require('./lib/key-store');
 // Групповой E2EE: участники чата + попарная доставка Sender Key
 // (key-shares). Тоже регистрируется после sessionMiddleware.
@@ -103,32 +103,6 @@ const { ONION_ADDRESS, ONION_PORT, onionMiddleware, isOnionHost, isOnionSocket, 
 const { createChallenge, verifySolution } = require('./lib/pow');
 
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
-
-// === RUST ANON SERVICE INTEGRATION ===
-// Только если адрес задан явно. Раньше по умолчанию был 127.0.0.1:8080 — а
-// на Railway PORT=8080, и анонимная регистрация стучалась в сам же сервер.
-const ANON_SERVICE_URL = process.env.ANON_SERVICE_URL || null;
-// Общий секрет с anon-service: без него любой, кто достучится до сервиса
-// по внутренней сети, мог бы сам выпрашивать у него "анонимные" личности.
-const ANON_SERVICE_SECRET = process.env.ANON_SERVICE_SECRET || null;
-
-async function fetchAnonymousIdentity() {
-    if (!ANON_SERVICE_URL) return null;
-    try {
-        const res = await fetch(`${ANON_SERVICE_URL}/generate`, {
-            method: 'POST',
-            headers: ANON_SERVICE_SECRET ? { 'X-Internal-Secret': ANON_SERVICE_SECRET } : {},
-            signal: AbortSignal.timeout(2000)
-        });
-        if (res.ok) {
-            const data = await res.json();
-            if (data.unique_code && data.username) return data;
-        }
-    } catch (e) {
-        console.warn('[Anon] Rust service unavailable, using fallback:', e.message);
-    }
-    return null;
-}
 
 // ALLOWED_MIME_TYPES и MIME_EXTENSIONS (жёсткий маппинг mimetype ->
 // расширение на диске, расширение никогда не берётся из имени файла) —
@@ -848,9 +822,8 @@ async function initDatabase() {
     await ensureForeignKey('room_participants', 'room_participants_room_id_fkey', 'room_id', 'rooms', 'CASCADE');
 
     await initE2eeGroupsSchema(pool);
-    // Публичные E2EE-ключи — в этой же базе, если отдельный e2ee-key-server
-    // не подключён (lib/key-store.js). Таблицы те же, что в его миграциях.
-    if (keyStoreMode() === 'builtin') await initKeyStoreSchema(pool);
+    // Публичные E2EE-ключи хранятся в этой же базе (lib/key-store.js).
+    await initKeyStoreSchema(pool);
     // Таблицы message_expiry/chat_settings ссылаются на messages/chats,
     // поэтому создаются только после них. Раньше initialize() вызывался в
     // самом начале — на пустой БД сервер падал с "relation messages does
@@ -1624,10 +1597,10 @@ app.use((req, res, next) => {
 // /api/chats/:id/participants шли мимо лимита.
 app.use('/api/', apiLimiter);
 
-// E2EE key-server proxy: /api/keys/* → Rust key-server по loopback.
+// Публичные E2EE-ключи: /api/keys/* → встроенное хранилище (lib/key-store.js).
 // Регистрируется строго ПОСЛЕ sessionMiddleware — маршрутам нужна сессия.
-// Чужие ключи отдаются только при общей комнате — прокси нужна БД.
-registerE2eeProxyRoutes(app, { dbGet, dbAll });
+// Чужие ключи отдаются только при общей комнате — модулю нужна БД.
+registerE2eeKeyRoutes(app, { dbGet, dbAll });
 // Групповой E2EE: список участников чата + key-shares (тоже нужна сессия).
 registerE2eeGroupRoutes(app, { dbGet, dbAll, dbRun, io });
 
@@ -1825,21 +1798,8 @@ app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
     }
     if (!checkPow(req, 'register-anon')) return res.json(POW_FAILED_RESPONSE);
     try {
-        let uniqueCode, username;
-        const rustIdentity = await fetchAnonymousIdentity();
-        if (rustIdentity) {
-            uniqueCode = rustIdentity.unique_code;
-            username = rustIdentity.username;
-            const existing = await dbGet('SELECT id FROM users WHERE unique_code = $1 OR username = $2', [uniqueCode, username]);
-            if (existing) {
-                console.warn('[Anon] Rust-generated identity collision, using fallback');
-                uniqueCode = await generateUniqueCodeAsync();
-                username = await generateAnonymousUsernameAsync();
-            }
-        } else {
-            uniqueCode = await generateUniqueCodeAsync();
-            username = await generateAnonymousUsernameAsync();
-        }
+        const uniqueCode = await generateUniqueCodeAsync();
+        const username = await generateAnonymousUsernameAsync();
 
         const userId = await withTransaction(client => insertUserWithBotChat(client, {
             uniqueCode, username, email: null, passwordHash: null,
@@ -3713,8 +3673,8 @@ app.use((err, req, res, next) => {
 // транзакцией — раньше это была серия отдельных DELETE, и первая же ошибка
 // FK (например, из e2ee_key_shares, который ссылается на users без каскада)
 // оставляла пользователя в БД навсегда. После COMMIT — файлы с диска,
-// сессии на всех устройствах, сокеты, ключи в key-server и уведомление
-// оставшимся участникам комнат.
+// сессии на всех устройствах, сокеты, публичные E2EE-ключи (встроенное
+// хранилище) и уведомление оставшимся участникам комнат.
 async function deleteUserAccount(userId) {
     let fileUrls = [];
     let survivingRoomIds = [];
@@ -3889,9 +3849,7 @@ function onServerListening() {
     console.log('  + Шифрование текста сообщений в БД (AES-256-GCM с привязкой к комнате)');
     console.log('  + CSP с nonce, заголовки приватности' + (IS_PRODUCTION ? ', HSTS по https' : ''));
     console.log('  + Выравнивание времени ответа при входе');
-    console.log(keyStoreMode() === 'remote'
-        ? '  + E2EE: ключи в отдельном e2ee-key-server (KEY_SERVER_URL)'
-        : '  + E2EE: ключи во встроенном хранилище (эта же база)');
+    console.log('  + E2EE: ключи во встроенном хранилище (эта же база)');
     if (ONION_ADDRESS && ONION_PORT) console.log(`  + Onion-сервис: http://${ONION_ADDRESS} (внутренний порт ${ONION_PORT})`);
     console.log(`\n${'='.repeat(60)}\n`);
 }
