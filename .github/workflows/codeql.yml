@@ -1,0 +1,55 @@
+# Статический анализ кода (CodeQL), пункт 7.1 плана. Результаты — на вкладке
+# Security -> Code scanning. Как сделать проверку обязательной в защите main —
+# в docs/dev/ci.md. Все `uses:` закреплены полным SHA коммита (зачем — в ci.yml).
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  # Именно pull_request, а не push в чужие ветки: так рекомендует само действие,
+  # а у запусков по push из веток Dependabot токен только на чтение.
+  pull_request:
+    branches: [main]
+  schedule:
+    # Раз в неделю: GitHub регулярно дополняет запросы CodeQL, и код, не менявшийся
+    # месяцами, всё равно получает новые проверки. Минуты нарочно «некруглые».
+    - cron: '41 4 * * 3'
+
+permissions:
+  contents: read
+
+concurrency:
+  # Как в ci.yml: устаревшие прогоны PR отменяются, прогоны main — нет.
+  group: codeql-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Имена для защиты main: «analyze (javascript-typescript)» и «analyze (actions)».
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      security-events: write # загрузить результаты в Code scanning
+      contents: read
+      actions: read # нужен в приватных репозиториях; в публичных безвреден
+    strategy:
+      fail-fast: false
+      matrix:
+        # build-mode: none допустим только при одном языке на job — отсюда матрица.
+        # actions — анализ самих workflow (внедрение команд через ${{ }}, права токена).
+        language: [javascript-typescript, actions]
+    steps:
+      - name: Получить код
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Инициализировать CodeQL
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+      - name: Анализ
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: '/language:${{ matrix.language }}'
