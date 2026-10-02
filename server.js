@@ -104,11 +104,13 @@ const { createChallenge, verifySolution } = require('./lib/pow');
 
 // Несколько экземпляров сервера на одной базе (миграции и фоновые задачи
 // под advisory-блокировками) и запись ошибок в лог без id из detail.
-const { runMigrationsExclusive, LOCK_NOT_AVAILABLE } = require('./lib/advisory-locks');
+const { runMigrationsExclusive, createRunExclusive, LOCK_NOT_AVAILABLE } = require('./lib/advisory-locks');
 const { loadMigrations, migrateSchema } = require('./lib/migrations');
 const { logError } = require('./lib/log-error');
 // Точки регистрации маршрутов вне server.js и JSON-404 для /api.
 const { registerPreSessionRoutes, registerApiRoutes, registerApiNotFound } = require('./lib/routes');
+// Реестр фоновых задач (под runExclusive) и тестовая ручка NYXO_TEST_MAINTENANCE_MS.
+const { createJobScheduler, registerJobModules } = require('./lib/jobs');
 
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
@@ -1610,8 +1612,9 @@ app.use(express.static(path.join(__dirname, 'public'), {
 
 // Маршруты из lib/routes/ (см. lib/routes/index.js): здесь — те, которым
 // сессия не нужна; ниже, после лимитера /api/, — обычные маршруты API.
-const routeContext = Object.freeze({ pool, dbGet, dbAll, dbRun, withTransaction, io, logError, isProduction: IS_PRODUCTION });
-registerPreSessionRoutes(app, routeContext);
+// serverContext — общий контекст маршрутов и задач из lib/ (lib/jobs).
+const serverContext = Object.freeze({ pool, dbGet, dbAll, dbRun, withTransaction, io, logError, isProduction: IS_PRODUCTION });
+registerPreSessionRoutes(app, serverContext);
 
 app.use(sessionMiddleware);
 
@@ -1646,7 +1649,7 @@ app.use('/api/', apiLimiter);
 registerE2eeProxyRoutes(app, { dbGet, dbAll });
 // Групповой E2EE: список участников чата + key-shares (тоже нужна сессия).
 registerE2eeGroupRoutes(app, { dbGet, dbAll, dbRun, io });
-registerApiRoutes(app, routeContext);
+registerApiRoutes(app, serverContext);
 
 app.get('/uploads/:filename', async (req, res) => {
     if (!req.session.userId) return res.status(401).json({ success: false, message: 'Не авторизован' });
@@ -3869,6 +3872,56 @@ async function purgeExpiredJoinRequests() {
     }
 }
 
+// ---- Фоновые задачи (lib/jobs/index.js) ----
+//
+// По умолчанию задача идёт под runExclusive (lib/advisory-locks.js): в
+// каждый момент её выполняет один экземпляр сервера на базу, у остальных
+// запуск пропускается. Клиенты блокировок — из отдельного маленького пула:
+// блокировка держит соединение всю задачу, а в основном пуле (в тестах
+// PG_POOL_MAX=3) они отнимали бы соединения у самих задач.
+const jobLockPool = new Pool({ ...DB_POOL_CONFIG, max: 4 });
+jobLockPool.on('error', (err) => logError('[DB] Ошибка простаивающего соединения блокировок', err));
+
+// Тестовые ручки сквозных тестов (NYXO_TEST_*, docs/dev/testing.md):
+// действуют ТОЛЬКО при NODE_ENV=test, в production env-check считает их
+// ошибкой. Целое число мс > 0, иначе null.
+function testKnobMs(name) {
+    if (process.env.NODE_ENV !== 'test') return null;
+    const value = Number(process.env[name]);
+    return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+const jobs = createJobScheduler({
+    runExclusive: createRunExclusive(jobLockPool),
+    // Задачи с maintenance: true — каждые N мс вместо минут.
+    maintenanceMs: testKnobMs('NYXO_TEST_MAINTENANCE_MS'),
+});
+// Анонимы проверяются каждые 5 минут: самый короткий срок — 30 минут
+// без активности, и опоздание с удалением не должно быть сравнимо с ним.
+jobs.register({
+    name: 'purgeExpiredAnonymousUsers', run: purgeExpiredAnonymousUsers,
+    firstDelayMs: 60 * 1000, intervalMs: 5 * 60 * 1000, maintenance: true, testTick: true,
+});
+// Продление активности анонимов с открытыми сокетами ЭТОГО процесса: у
+// каждого экземпляра свои сокеты, поэтому без блокировки.
+jobs.register({
+    name: 'touchAnonymousSockets', run: touchAnonymousSockets,
+    intervalMs: ANON_SOCKET_ACTIVITY_INTERVAL_MS, exclusive: false, maintenance: true,
+});
+jobs.register({
+    name: 'purgeExpiredJoinRequests', run: purgeExpiredJoinRequests,
+    firstDelayMs: 90 * 1000, intervalMs: 60 * 60 * 1000, maintenance: true,
+});
+// Однократно после старта: строки, оставшиеся от soft-delete старой схемы.
+jobs.register({ name: 'purgeLegacySoftDeletedMessages', run: purgeLegacySoftDeletedMessages, firstDelayMs: 0 });
+// Брошенные временные файлы обработки вложений — в папке этого процесса.
+jobs.register({
+    name: 'cleanupStaleTempFiles', run: () => cleanupStaleTempFiles(UPLOADS_DIR, 60 * 60 * 1000),
+    intervalMs: 60 * 60 * 1000, exclusive: false,
+});
+// Задачи lib-модулей (JOB_MODULES в lib/jobs/index.js).
+registerJobModules(jobs, serverContext);
+
 // Страховка: ошибка в фоновой задаче (таймеры, сокеты) не должна ронять
 // весь сервер. Маршруты уже защищены wrapAsync.
 process.on('unhandledRejection', (reason) => {
@@ -3887,18 +3940,8 @@ function onServerListening() {
         console.log('');
     }
 
-    // Фоновые задачи: брошенные временные файлы обработки вложений,
-    // просроченные анонимные аккаунты и (однократно) строки, оставшиеся от
-    // soft-delete старой схемы.
-    // Анонимы проверяются каждые 5 минут: самый короткий срок — 30 минут
-    // без активности, и опоздание с удалением не должно быть сравнимо с ним.
-    setInterval(() => cleanupStaleTempFiles(UPLOADS_DIR, 60 * 60 * 1000), 60 * 60 * 1000);
-    setTimeout(purgeExpiredAnonymousUsers, 60 * 1000);
-    setInterval(purgeExpiredAnonymousUsers, 5 * 60 * 1000);
-    setInterval(touchAnonymousSockets, ANON_SOCKET_ACTIVITY_INTERVAL_MS);
-    setTimeout(purgeExpiredJoinRequests, 90 * 1000);
-    setInterval(purgeExpiredJoinRequests, 60 * 60 * 1000);
-    setImmediate(purgeLegacySoftDeletedMessages);
+    // Фоновые задачи (реестр — выше, у определения jobs).
+    jobs.start();
 
     // Только то, что действительно включено в этом запуске.
     console.log('Функции безопасности:');
