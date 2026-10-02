@@ -74,11 +74,17 @@
     const subtle = crypto.subtle;
 
     // ===================== Константы =====================
+    // Блоки разделены, чтобы новые значения добавлялись в «свой» блок, а не в
+    // общий хвост списка.
+
+    // ---- Время: ротация prekey и возраст сессий ----
 
     const DAY_MS = 24 * 60 * 60 * 1000;
     const PREKEY_ROTATE_MS = 7 * DAY_MS;   // SPK и PQ-prekey
     const PREKEY_RETAIN_MS = 14 * DAY_MS;  // сколько держим приватную часть после ротации
     const PAIRWISE_SESSION_MAX_AGE_MS = 7 * DAY_MS;
+
+    // ---- Пределы состояния: кэши ключей, пропуски цепочек, таблицы повторов ----
 
     const MAX_CACHED_KEYS = 2000;
     // Насколько далеко вперёд по цепочке Sender Key можно "перескочить" за
@@ -94,6 +100,8 @@
     const MAX_SEEN_EPHEMERAL = 64;
     const MAX_PENDING_SHARES = 50;
 
+    // ---- Размеры: дополнение, конверты, пакеты key-share ----
+
     const MSG_PAD_MIN = 256;
     const FILE_PAD_MIN = 4096;
     // Сервер принимает зашифрованный текст до 12000 символов.
@@ -104,18 +112,48 @@
     const SHARE_BATCH = 50;
     const MAX_SHARE_CHARS = 8192;
 
+    // ---- Код безопасности и ML-KEM ----
+
     const FINGERPRINT_ITERATIONS = 5200;
     const PQ_PUBLIC_KEY_BYTES = 1184;
     const PQ_CIPHERTEXT_BYTES = 1088;
     const PQ_SEED_BYTES = 64;
 
+    // ---- Пул одноразовых prekey и версия хранилища ----
+
     const LOW_WATER_OPK = 10;
     const TOPUP_OPK = 30;
     const SCHEMA_VERSION = 2;
 
+    // ---- Причины отказа в обмене ключами (тексты для интерфейса) ----
+
     const REASON_NOT_READY = 'у собеседника ещё не настроен E2EE';
     const REASON_OUTDATED = 'у собеседника устаревшая версия E2EE';
     const REASON_IDENTITY_CHANGED = 'ключ безопасности собеседника изменился — нужно подтверждение';
+
+    // ===================== Ошибки =====================
+
+    // Коды типизированных ошибок инициализации: по ним интерфейс выбирает
+    // текст и решает, предлагать ли «Повторить».
+    //   unsupported — браузер не умеет нужную криптографию (X25519, Ed25519, HKDF, ML-KEM);
+    //   storage     — локальное хранилище (IndexedDB) недоступно или отказало;
+    //   network     — запрос к серверу ключей не дошёл (fetch отклонён);
+    //   server      — сервер ключей ответил ошибкой (5xx, 401, 403, 404);
+    //   protocol    — ответ не того формата или ключ неверной длины.
+    const ERROR_CODES = Object.freeze(['unsupported', 'storage', 'network', 'server', 'protocol']);
+
+    // Заготовка: пока нигде не бросается. init() и транспорт перейдут на неё
+    // вместе с типизацией ошибок инициализации; класс и коды уже входят в API
+    // модуля, чтобы script.js и тесты могли на них ссылаться. status — HTTP-
+    // статус для network/server, у остальных кодов его нет.
+    class E2eeError extends Error {
+        constructor(code, message, { status, cause } = {}) {
+            super(message || ('E2EE: ' + code), cause === undefined ? undefined : { cause });
+            this.name = 'E2eeError';
+            this.code = code;
+            if (status !== undefined) this.status = status;
+        }
+    }
 
     // ===================== Кодирование =====================
 
@@ -848,6 +886,15 @@
 
     // ===================== Клиент =====================
 
+    // Параметры (кроме storage все необязательны):
+    //   storage   — хранилище ключей устройства (MemoryStorage, makeIndexedDbStorage);
+    //   transport — обмен с сервером ключей (по умолчанию makeFetchTransport());
+    //   kem       — реализация ML-KEM (по умолчанию public/mlkem.js);
+    //   userId    — id пользователя (можно задать позже через setUserId);
+    //   now       — часы: () => миллисекунды (по умолчанию Date.now). По ним
+    //               считаются ротация prekey и возраст сессий, а подмена часов
+    //               позволяет тестам проверять сроки в 7 и 14 дней;
+    //   lock      — внешняя блокировка lock(fn) → Promise, см. withLock ниже.
     function createClient(options) {
         const storage = options.storage;
         const transport = options.transport || makeFetchTransport();
@@ -868,9 +915,18 @@
         // перезаписывало продвижение его старой цепочки. Сетевые запросы по
         // возможности делаются вне очереди, чтобы не тормозить расшифровку.
         // Функции *Locked вызываются только изнутри withLock.
+        //
+        // Внешняя блокировка options.lock нужна, когда одно хранилище делят
+        // несколько клиентов, — например, две вкладки одного пользователя
+        // пишут в одну IndexedDB (Web Locks). Это функция lock(fn) → Promise:
+        // она выполняет fn эксклюзивно и возвращает его результат. Очередь
+        // клиента остаётся снаружи: свои секции идут строго по порядку вызова,
+        // а к внешней блокировке клиент обращается не более чем за одной
+        // секцией сразу. Без lock работает одна внутренняя очередь, как раньше.
+        const externalLock = typeof options.lock === 'function' ? options.lock : null;
         let lockTail = Promise.resolve();
         function withLock(fn) {
-            const run = lockTail.then(() => fn());
+            const run = lockTail.then(() => (externalLock ? externalLock(fn) : fn()));
             lockTail = run.then(() => undefined, () => undefined);
             return run;
         }
@@ -1967,29 +2023,79 @@
             });
         }
 
+        // Публичный API клиента: по одному имени в строке, группы разделены —
+        // новый метод добавляется в свою группу (и в test/e2ee-api.test.js).
         return {
-            init, setUserId,
-            ensureRoomSession, syncKeyShares, hasRoomKey, rotateRoomKey,
-            encryptOutgoing, decryptIncoming,
-            encryptFile, decryptFile,
-            checkPeerIdentities, getPeerIdentityStatus, getSafetyNumber,
-            markPeerVerified, acceptPeerIdentityChange,
+            // Инициализация и пользователь
+            init,
+            setUserId,
+
+            // Комнаты: Sender Key и key-share
+            ensureRoomSession,
+            syncKeyShares,
+            hasRoomKey,
+            rotateRoomKey,
+
+            // Сообщения и файлы
+            encryptOutgoing,
+            decryptIncoming,
+            encryptFile,
+            decryptFile,
+
+            // Identity собеседников и код безопасности
+            checkPeerIdentities,
+            getPeerIdentityStatus,
+            getSafetyNumber,
+            markPeerVerified,
+            acceptPeerIdentityChange,
         };
     }
 
+    // Экспорт модуля: по одному имени в строке, группы разделены.
     return {
+        // Клиент
         createClient,
+
+        // Хранилища и транспорт (внедряются в createClient)
         MemoryStorage,
         makeIndexedDbStorage,
         makeFetchTransport,
+
+        // Очистка локальных данных (выход с удалением данных, удаление аккаунта)
         deleteLocalData,
-        // для тестов
+
+        // Ошибки (заготовка: пока нигде не бросаются)
+        E2eeError,
+        ERROR_CODES,
+
+        // Для тестов
         _internal: {
-            b64encode, b64decode, bytesEqual,
-            padmeLength, padMessage, unpadMessage, filePaddedLength,
+            // Кодирование
+            b64encode,
+            b64decode,
+            bytesEqual,
+
+            // Дополнение (Padmé) и размеры
+            padmeLength,
+            padMessage,
+            unpadMessage,
+            filePaddedLength,
+
+            // Код безопасности
             computeSafetyNumber,
-            MAX_SKIP, MAX_PW_SKIP, PREKEY_ROTATE_MS, PREKEY_RETAIN_MS,
-            MSG_PAD_MIN, FILE_PAD_MIN, MAX_ENVELOPE_CHARS, MAX_SHARE_CHARS, SHARE_BATCH,
+
+            // Пределы и сроки
+            MAX_SKIP,
+            MAX_PW_SKIP,
+            PREKEY_ROTATE_MS,
+            PREKEY_RETAIN_MS,
+
+            // Размеры
+            MSG_PAD_MIN,
+            FILE_PAD_MIN,
+            MAX_ENVELOPE_CHARS,
+            MAX_SHARE_CHARS,
+            SHARE_BATCH,
         },
     };
 });
