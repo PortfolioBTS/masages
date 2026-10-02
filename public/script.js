@@ -854,9 +854,19 @@ async function prepareOutgoingE2ee(chatId, roomId) {
     return client;
 }
 
+// Тексты для причин отказа decryptIncoming (res.reason из e2ee.js). Причина,
+// которой здесь нет, получает общий текст. Новая причина — новая строка.
+const E2EE_FAILURE_TEXTS = {
+    replay: 'Повтор старого сообщения (возможна подмена сервером)',
+};
+const E2EE_FAILURE_DEFAULT_TEXT = 'Не удалось расшифровать';
+
 function e2eeFailureText(reason) {
-    if (reason === 'replay') return 'Повтор старого сообщения (возможна подмена сервером)';
-    return 'Не удалось расшифровать';
+    // hasOwnProperty: причина — строка из кода, но имена вроде 'constructor'
+    // не должны находиться в прототипе объекта.
+    return Object.prototype.hasOwnProperty.call(E2EE_FAILURE_TEXTS, reason)
+        ? E2EE_FAILURE_TEXTS[reason]
+        : E2EE_FAILURE_DEFAULT_TEXT;
 }
 
 function safeDisplayName(name) {
@@ -4228,7 +4238,72 @@ function cancelEditing() {
 
 // ==================== Отправка ====================
 
+// Замок отправки: пока идёт отправка или правка, повторный Enter/клик
+// ничего не делает. Берёт его вызывающий (sendMessage), а не sendText.
 let sending = false;
+
+// Отправляет уже готовый текст в ЯВНО указанный чат: шифрует (если для чата
+// включено шифрование), шлёт на сервер и сразу показывает сообщение в ленте.
+// Поле ввода не читает и не очищает — это дело вызывающего, поэтому тем же
+// путём можно отправить текст из другого источника, не трогая черновик.
+//
+// Чат и ответ передаются явно и фиксируются в момент вызова: пока шифруем и
+// ждём ответ сервера, пользователь может уйти в другой чат или отменить
+// ответ. Замок `sending` здесь не берётся — его держит вызывающий.
+//
+// Возвращает true, если сообщение ушло. false — отправка прервана, причину
+// пользователю уже показали тостом; поле ввода в этом случае не очищают.
+async function sendText(text, { chatId, roomId, replyToId } = {}) {
+    // Чат обязателен: без него запрос ушёл бы с пустым chatId, а не в открытый чат.
+    if (!chatId) throw new Error('sendText: не указан чат');
+    let client;
+    try {
+        client = await prepareOutgoingE2ee(chatId, roomId);
+    } catch (err) {
+        showToast(err.message, 'error', 6000);
+        return false;
+    }
+    let outgoingText = text;
+    let encrypted = false;
+    if (client) {
+        try {
+            outgoingText = await client.encryptOutgoing(roomId, text);
+            encrypted = true;
+        } catch (err) {
+            console.error('E2EE: encryptOutgoing failed:', err);
+            showToast('Не удалось зашифровать сообщение — попробуйте ещё раз или выключите шифрование', 'error');
+            return false;
+        }
+    }
+    const payload = { chatId, text: outgoingText, encrypted };
+    if (replyToId) payload.replyToId = replyToId;
+    const data = await api('/api/messages', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+    });
+    if (!data.success) {
+        showToast(data.message || 'Не удалось отправить сообщение', 'error');
+        return false;
+    }
+    // Показываем сразу из ответа — не зависим от того, успел ли
+    // прийти (и пришёл ли вообще) newMessage по сокету.
+    if (chatId === currentChatId && data.message) {
+        const message = { ...data.message, text };
+        const reply = message.reply_to;
+        if (reply && reply.encrypted && !reply.deleted) {
+            reply.text = decryptedSummary(await decryptEnvelope(roomId, reply.sender_id, reply.text, reply.id));
+        }
+        if (chatId === currentChatId) {
+            if (appendMessage(message, true)) scrollToBottom();
+            updateChatListOnMessage(message, true);
+        }
+    }
+    return true;
+}
+
+// Отправка из поля ввода: новое сообщение (через sendText) или сохранение
+// правки. Поле и ответ очищаются только после успеха — и только если
+// пользователь остался в том же чате.
 async function sendMessage() {
     const text = elements.messageInput.value.trim();
     if (!text || sending) return;
@@ -4274,48 +4349,8 @@ async function sendMessage() {
                 editingMessageEncrypted = false;
             }
         } else {
-            let client;
-            try {
-                client = await prepareOutgoingE2ee(chatId, roomId);
-            } catch (err) {
-                showToast(err.message, 'error', 6000);
-                return;
-            }
-            let outgoingText = text;
-            let encrypted = false;
-            if (client) {
-                try {
-                    outgoingText = await client.encryptOutgoing(roomId, text);
-                    encrypted = true;
-                } catch (err) {
-                    console.error('E2EE: encryptOutgoing failed:', err);
-                    showToast('Не удалось зашифровать сообщение — попробуйте ещё раз или выключите шифрование', 'error');
-                    return;
-                }
-            }
-            const payload = { chatId, text: outgoingText, encrypted };
-            if (replyToMessageId) payload.replyToId = replyToMessageId;
-            const data = await api('/api/messages', {
-                method: 'POST',
-                body: JSON.stringify(payload),
-            });
-            if (!data.success) {
-                showToast(data.message || 'Не удалось отправить сообщение', 'error');
-                return;
-            }
-            // Показываем сразу из ответа — не зависим от того, успел ли
-            // прийти (и пришёл ли вообще) newMessage по сокету.
-            if (chatId === currentChatId && data.message) {
-                const message = { ...data.message, text };
-                const reply = message.reply_to;
-                if (reply && reply.encrypted && !reply.deleted) {
-                    reply.text = decryptedSummary(await decryptEnvelope(roomId, reply.sender_id, reply.text, reply.id));
-                }
-                if (chatId === currentChatId) {
-                    if (appendMessage(message, true)) scrollToBottom();
-                    updateChatListOnMessage(message, true);
-                }
-            }
+            const sent = await sendText(text, { chatId, roomId, replyToId: replyToMessageId });
+            if (!sent) return;
         }
     } finally {
         sending = false;
