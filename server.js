@@ -105,6 +105,7 @@ const { createChallenge, verifySolution } = require('./lib/pow');
 // Несколько экземпляров сервера на одной базе (миграции и фоновые задачи
 // под advisory-блокировками) и запись ошибок в лог без id из detail.
 const { runMigrationsExclusive, LOCK_NOT_AVAILABLE } = require('./lib/advisory-locks');
+const { loadMigrations, migrateSchema } = require('./lib/migrations');
 const { logError } = require('./lib/log-error');
 
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
@@ -3912,11 +3913,23 @@ function onServerListening() {
 // задерживая за собой все запросы к этой таблице, а падает, и миграции
 // повторяются целиком (они идемпотентны). Не помогли и повторы — сервер
 // выходит с ошибкой, хостинг его перезапускает.
-function initDatabaseExclusive() {
+//
+// Новые изменения схемы — не в initDatabase, а файлами lib/migrations/
+// (см. lib/migrations/index.js): они выполняются после initDatabase, а
+// версия схемы в schema_meta не даёт старому коду стартовать на новой схеме.
+async function initDatabaseExclusive() {
     // DUMP_CA=true — служебный режим (TLS к базе ещё не настроен): он
     // завершает процесс в начале initDatabase и не должен ждать соединения.
     if (process.env.DUMP_CA === 'true') return initDatabase();
-    return runMigrationsExclusive(pool, initDatabase, {
+    // Файлы миграций читаются до первого соединения: ошибка в них — сразу.
+    const migrations = loadMigrations();
+    return runMigrationsExclusive(pool, ({ client }) => migrateSchema({
+        pool,
+        client,
+        migrations,
+        initialSteps: initDatabase,
+        config: Object.freeze({ isProduction: IS_PRODUCTION, uploadsDir: UPLOADS_DIR, env: process.env }),
+    }), {
         createMigrationPool: (options) => new Pool({ ...DB_POOL_CONFIG, ...options }),
     });
 }
