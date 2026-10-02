@@ -90,9 +90,9 @@ const {
     anonWelcomeText
 } = require('./lib/anon-lifetime');
 
-// Импорт E2EE прокси (маршруты регистрируются после sessionMiddleware —
-// см. вызов registerE2eeProxyRoutes ниже)
-const { registerE2eeProxyRoutes, deleteKeysForUser, keyStoreMode } = require('./lib/e2ee-keys');
+// Маршруты /api/keys/* (регистрируются после sessionMiddleware — см. вызов
+// registerE2eeKeyRoutes ниже) и встроенное хранилище публичных E2EE-ключей
+const { registerE2eeKeyRoutes, deleteKeysForUser } = require('./lib/e2ee-keys');
 const { initKeyStoreSchema } = require('./lib/key-store');
 // Групповой E2EE: участники чата + попарная доставка Sender Key
 // (key-shares). Тоже регистрируется после sessionMiddleware.
@@ -848,9 +848,8 @@ async function initDatabase() {
     await ensureForeignKey('room_participants', 'room_participants_room_id_fkey', 'room_id', 'rooms', 'CASCADE');
 
     await initE2eeGroupsSchema(pool);
-    // Публичные E2EE-ключи — в этой же базе, если отдельный e2ee-key-server
-    // не подключён (lib/key-store.js). Таблицы те же, что в его миграциях.
-    if (keyStoreMode() === 'builtin') await initKeyStoreSchema(pool);
+    // Публичные E2EE-ключи хранятся в этой же базе (lib/key-store.js).
+    await initKeyStoreSchema(pool);
     // Таблицы message_expiry/chat_settings ссылаются на messages/chats,
     // поэтому создаются только после них. Раньше initialize() вызывался в
     // самом начале — на пустой БД сервер падал с "relation messages does
@@ -1624,10 +1623,10 @@ app.use((req, res, next) => {
 // /api/chats/:id/participants шли мимо лимита.
 app.use('/api/', apiLimiter);
 
-// E2EE key-server proxy: /api/keys/* → Rust key-server по loopback.
+// Публичные E2EE-ключи: /api/keys/* → встроенное хранилище (lib/key-store.js).
 // Регистрируется строго ПОСЛЕ sessionMiddleware — маршрутам нужна сессия.
-// Чужие ключи отдаются только при общей комнате — прокси нужна БД.
-registerE2eeProxyRoutes(app, { dbGet, dbAll });
+// Чужие ключи отдаются только при общей комнате — модулю нужна БД.
+registerE2eeKeyRoutes(app, { dbGet, dbAll });
 // Групповой E2EE: список участников чата + key-shares (тоже нужна сессия).
 registerE2eeGroupRoutes(app, { dbGet, dbAll, dbRun, io });
 
@@ -3713,8 +3712,8 @@ app.use((err, req, res, next) => {
 // транзакцией — раньше это была серия отдельных DELETE, и первая же ошибка
 // FK (например, из e2ee_key_shares, который ссылается на users без каскада)
 // оставляла пользователя в БД навсегда. После COMMIT — файлы с диска,
-// сессии на всех устройствах, сокеты, ключи в key-server и уведомление
-// оставшимся участникам комнат.
+// сессии на всех устройствах, сокеты, публичные E2EE-ключи (встроенное
+// хранилище) и уведомление оставшимся участникам комнат.
 async function deleteUserAccount(userId) {
     let fileUrls = [];
     let survivingRoomIds = [];
@@ -3889,9 +3888,7 @@ function onServerListening() {
     console.log('  + Шифрование текста сообщений в БД (AES-256-GCM с привязкой к комнате)');
     console.log('  + CSP с nonce, заголовки приватности' + (IS_PRODUCTION ? ', HSTS по https' : ''));
     console.log('  + Выравнивание времени ответа при входе');
-    console.log(keyStoreMode() === 'remote'
-        ? '  + E2EE: ключи в отдельном e2ee-key-server (KEY_SERVER_URL)'
-        : '  + E2EE: ключи во встроенном хранилище (эта же база)');
+    console.log('  + E2EE: ключи во встроенном хранилище (эта же база)');
     if (ONION_ADDRESS && ONION_PORT) console.log(`  + Onion-сервис: http://${ONION_ADDRESS} (внутренний порт ${ONION_PORT})`);
     console.log(`\n${'='.repeat(60)}\n`);
 }

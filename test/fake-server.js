@@ -1,9 +1,9 @@
 'use strict';
-// Имитация серверного контракта (Node-прокси + Rust e2ee-key-server +
-// маршруты participants/key-shares, см. К1 в контрактах) в памяти — то же
-// поведение (порядок проверок, консюминг one-time prekey, 404 без ключей,
-// 403 без общей комнаты, проверка подписей prekey), без реального
-// Postgres/HTTP. Используется только тестами.
+// Имитация серверного контракта (маршруты /api/keys/* с встроенным
+// хранилищем ключей lib/key-store.js + маршруты participants/key-shares,
+// см. К1 в контрактах) в памяти — то же поведение (порядок проверок,
+// консюминг one-time prekey, 404 без ключей, 403 без общей комнаты, проверка
+// подписей prekey), без реального Postgres/HTTP. Используется только тестами.
 //
 // server.evil — хелперы "злонамеренного сервера": сервер в модели угроз
 // E2EE недоверенный, и протокол обязан выдерживать именно такие подмены.
@@ -132,7 +132,7 @@ function makeFakeServer() {
                 return { status: 200, data: { success: true } };
             },
             async getBundle(targetUserId) {
-                // Node-прокси (К1): bundle только собеседнику с общей комнатой.
+                // Маршрут /api/keys/bundle (К1): только собеседнику с общей комнатой.
                 if (targetUserId !== userId && !sharesRoom(userId, targetUserId)) {
                     return { status: 403, data: { success: false, message: 'Нет общего чата с пользователем' } };
                 }
@@ -166,7 +166,7 @@ function makeFakeServer() {
                 const out = [];
                 for (const raw of ids) {
                     const id = Number(raw);
-                    // Node-прокси молча выкидывает тех, с кем нет общей комнаты.
+                    // Маршрут /api/keys/identities молча выкидывает тех, с кем нет общей комнаты.
                     if (id !== userId && !sharesRoom(userId, id)) continue;
                     const identity = identityKeys.get(effectiveKeysOwner(id));
                     if (!identity) continue;
