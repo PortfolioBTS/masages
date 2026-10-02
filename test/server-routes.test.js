@@ -198,8 +198,8 @@ function loadProxy({ secret = SECRET, mode = 'remote' } = {}) {
     if (mode === 'remote') process.env.E2EE_KEY_STORE = 'remote';
     else delete process.env.E2EE_KEY_STORE;
     process.env.KEY_SERVER_URL = 'http://key-server.test';
-    delete require.cache[require.resolve('../lib/e2ee-proxy.js')];
-    return require('../lib/e2ee-proxy.js');
+    delete require.cache[require.resolve('../lib/e2ee-keys.js')];
+    return require('../lib/e2ee-keys.js');
 }
 
 // Пользователи 1, 2, 3 — в комнате 100; 1 и 5 — в комнате 200;

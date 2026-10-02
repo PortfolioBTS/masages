@@ -92,7 +92,7 @@ const {
 
 // Импорт E2EE прокси (маршруты регистрируются после sessionMiddleware —
 // см. вызов registerE2eeProxyRoutes ниже)
-const { registerE2eeProxyRoutes, deleteKeysForUser, keyStoreMode } = require('./lib/e2ee-proxy');
+const { registerE2eeProxyRoutes, deleteKeysForUser, keyStoreMode } = require('./lib/e2ee-keys');
 const { initKeyStoreSchema } = require('./lib/key-store');
 // Групповой E2EE: участники чата + попарная доставка Sender Key
 // (key-shares). Тоже регистрируется после sessionMiddleware.
