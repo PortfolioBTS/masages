@@ -103,6 +103,20 @@ function saveLogs(suite) {
     }
 }
 
+// Ожидание условия, которое не сообщает о себе событием (файл удалён с
+// диска, строка исчезла из базы): проверка раз в intervalMs до timeoutMs.
+// Не «подождать N мс на всякий случай» — выход сразу, как только условие
+// выполнено.
+async function waitUntil(check, { timeoutMs = 5000, intervalMs = 25, what = 'условие' } = {}) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+        const value = await check();
+        if (value) return value;
+        if (Date.now() > deadline) throw new Error(`не дождались за ${timeoutMs} мс: ${what}`);
+        await new Promise(resolve => setTimeout(resolve, intervalMs));
+    }
+}
+
 // ---- Общие сценарии ----
 
 // Комната owner, в которую member вошёл по коду через заявку и одобрение:
@@ -118,4 +132,4 @@ async function roomWithMember(owner, member, { name = 'Комната' } = {}) {
     return { roomId: ownerChat.room_id, code, ownerChat, memberChat, requestId: pending.requestId };
 }
 
-module.exports = { createSuite, roomWithMember, HOOK_TIMEOUT_MS };
+module.exports = { createSuite, roomWithMember, waitUntil, HOOK_TIMEOUT_MS };
