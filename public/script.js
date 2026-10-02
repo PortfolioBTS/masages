@@ -1742,7 +1742,7 @@ function setupEventListeners() {
     setupChatMenuListeners();    // меню чата и личные настройки чатов
     setupE2eeListeners();        // шифрование в шапке чата, участники и ключи
     setupInviteListeners();      // приглашения и заявки
-    setupProfileListeners();     // профиль, пароль, удаление аккаунта
+    setupProfileListeners();     // профиль, настройки, удаление аккаунта
     setupComposerListeners();    // поле ввода, вложения
     setupMessageMenuListeners(); // меню сообщения
     setupSearchListeners();      // поиск по чатам
@@ -1907,7 +1907,7 @@ function setupInviteListeners() {
     elements.requestsBarBtn.addEventListener('click', openRequestsModal);
 }
 
-// Профиль: смена пароля, отметки о прочтении, уведомления, удаление
+// Профиль: учётные данные, отметки о прочтении, уведомления, удаление
 // аккаунта.
 function setupProfileListeners() {
     elements.profileBtn.addEventListener('click', openProfile);
