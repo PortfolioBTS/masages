@@ -107,6 +107,8 @@ const { createChallenge, verifySolution } = require('./lib/pow');
 const { runMigrationsExclusive, LOCK_NOT_AVAILABLE } = require('./lib/advisory-locks');
 const { loadMigrations, migrateSchema } = require('./lib/migrations');
 const { logError } = require('./lib/log-error');
+// Точки регистрации маршрутов вне server.js и JSON-404 для /api.
+const { registerPreSessionRoutes, registerApiRoutes, registerApiNotFound } = require('./lib/routes');
 
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
@@ -1606,6 +1608,11 @@ app.use(express.static(path.join(__dirname, 'public'), {
     setHeaders: (res) => setRevalidateCacheHeaders(res, false),
 }));
 
+// Маршруты из lib/routes/ (см. lib/routes/index.js): здесь — те, которым
+// сессия не нужна; ниже, после лимитера /api/, — обычные маршруты API.
+const routeContext = Object.freeze({ pool, dbGet, dbAll, dbRun, withTransaction, io, logError, isProduction: IS_PRODUCTION });
+registerPreSessionRoutes(app, routeContext);
+
 app.use(sessionMiddleware);
 
 // Анонимная сессия проверяется на КАЖДОМ запросе (раньше — только в
@@ -1639,6 +1646,7 @@ app.use('/api/', apiLimiter);
 registerE2eeProxyRoutes(app, { dbGet, dbAll });
 // Групповой E2EE: список участников чата + key-shares (тоже нужна сессия).
 registerE2eeGroupRoutes(app, { dbGet, dbAll, dbRun, io });
+registerApiRoutes(app, routeContext);
 
 app.get('/uploads/:filename', async (req, res) => {
     if (!req.session.userId) return res.status(401).json({ success: false, message: 'Не авторизован' });
@@ -3691,6 +3699,9 @@ app.post('/api/change-password', passwordLimiter, async (req, res) => {
         res.json({ success: false, message: 'Ошибка изменения пароля' });
     }
 });
+
+// После ВСЕХ маршрутов: неизвестный /api/* — JSON-404.
+registerApiNotFound(app);
 
 app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
