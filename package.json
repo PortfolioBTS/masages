@@ -4,6 +4,7 @@
   "description": "Secure anonymous messenger with post-quantum E2EE, onion service, and disappearing messages",
   "main": "server.js",
   "scripts": {
+    "audit:check": "node scripts/audit-check.js",
     "start": "node server.js",
     "dev": "node --watch server.js",
     "check-env": "node scripts/check-env.js",

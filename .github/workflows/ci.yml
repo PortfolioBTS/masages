@@ -1,0 +1,148 @@
+# Непрерывная проверка (пункт 7.1 плана). Что проверяется, как повторить локально,
+# как обновлять закреплённые версии и какие jobs сделать обязательными в защите
+# main — в docs/dev/ci.md.
+#
+# Все `uses:` закреплены полным SHA коммита, версия — в комментарии. Тег в чужом
+# репозитории можно перепривязать на другой код (так уже крали секреты из CI),
+# SHA — нельзя. Обновляет их Dependabot (.github/dependabot.yml).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # По понедельникам: ловит новые уязвимости в зависимостях и поломки окружения
+    # без единого коммита. Минуты нарочно «некруглые»: на ровные часы у GitHub
+    # очередь и запуски задерживаются.
+    - cron: '17 3 * * 1'
+
+# Токен только на чтение: ни одному шагу запись в репозиторий не нужна.
+permissions:
+  contents: read
+
+concurrency:
+  # Новый push в тот же PR отменяет устаревший прогон. Прогоны main и ручные не
+  # отменяются и не ждут друг друга (группа по SHA): у каждого коммита должен
+  # быть свой законченный результат.
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Имена для защиты main: «unit (ubuntu-latest)» и «unit (windows-latest)».
+  # Windows ловит проблемы с путями и окончаниями строк — разработка идёт на нём.
+  unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - name: Получить код
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Установить Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Установить зависимости
+        run: npm ci
+      - name: Юнит-тесты
+        run: npm test
+
+  # Сквозные тесты на настоящем Postgres. Только Linux: контейнеры сервисов
+  # работают лишь там. Версия образа совпадает с локальным nyxo-pg-test.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: nyxo
+          POSTGRES_PASSWORD: nyxo-ci-only
+          POSTGRES_DB: nyxo
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nyxo -d nyxo"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: Получить код
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Установить Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Установить зависимости
+        run: npm ci
+      - name: Сквозные тесты
+        # Адрес администраторский: раннер сам создаёт отдельную БД на каждый набор
+        # и удаляет её после. Пароль одноразовый, от контейнера, снаружи недоступного.
+        env:
+          E2E_DATABASE_URL: postgresql://nyxo:nyxo-ci-only@127.0.0.1:5432/postgres
+        run: npm run test:e2e
+      - name: Сохранить логи серверов
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-logs
+          path: test/e2e/.logs/
+          # Папка .logs скрытая — без этого флага артефакт был бы пустым.
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # Зависимости: политика уязвимостей (scripts/audit-check.js, docs/dev/ci.md) и
+  # подписи реестра. Скрипты установки не нужны и не запускаются: проверка не
+  # должна исполнять чужой код.
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Получить код
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Установить Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Установить зависимости без скриптов установки
+        id: install
+        run: npm ci --ignore-scripts
+      - name: Политика npm audit
+        run: node scripts/audit-check.js
+      # Выполняется, даже если политика не пройдена: обе проверки независимы,
+      # и обе причины падения лучше увидеть за один прогон.
+      - name: Подписи и происхождение пакетов
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: npm audit signatures
+
+  # Синтаксис workflow, выражения ${{ }}, входы популярных actions и shellcheck
+  # блоков run. Образ закреплён по digest, а не по тегу: тег в реестре тоже можно
+  # перепривязать. Dependabot образы из `docker run` не обновляет — порядок
+  # обновления в docs/dev/ci.md.
+  workflows-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Получить код
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: actionlint
+        run: |
+          docker run --rm -v "$PWD:/repo:ro" -w /repo \
+            rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
+            -color .github/workflows/*.y*ml
