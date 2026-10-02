@@ -102,6 +102,11 @@ const { initE2eeGroupsSchema, registerE2eeGroupRoutes } = require('./lib/e2ee-gr
 const { ONION_ADDRESS, ONION_PORT, onionMiddleware, isOnionHost, isOnionSocket, listenOnionPort } = require('./lib/tor-support');
 const { createChallenge, verifySolution } = require('./lib/pow');
 
+// Несколько экземпляров сервера на одной базе (миграции и фоновые задачи
+// под advisory-блокировками) и запись ошибок в лог без id из detail.
+const { runMigrationsExclusive, LOCK_NOT_AVAILABLE } = require('./lib/advisory-locks');
+const { logError } = require('./lib/log-error');
+
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
 // === RUST ANON SERVICE INTEGRATION ===
@@ -575,13 +580,16 @@ if (dbTls.info) console.log(dbTls.info);
 if (dbTls.warning) console.warn(dbTls.warning);
 const sslConfig = dbTls.ssl;
 
-const pool = new Pool({
+// Параметры подключения — общие для основного пула и служебных (пул
+// миграций и пул блокировок фоновых задач, см. lib/advisory-locks.js).
+const DB_POOL_CONFIG = {
     connectionString: process.env.DATABASE_URL,
     ssl: sslConfig,
     max: Number(process.env.PG_POOL_MAX) || 10,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 10000,
-});
+};
+const pool = new Pool(DB_POOL_CONFIG);
 // Без обработчика 'error' обрыв простаивающего соединения (рестарт или
 // failover Postgres, сетевой сбой) — необработанное событие 'error',
 // которое завершает весь процесс.
@@ -1175,7 +1183,7 @@ async function purgeLegacySoftDeletedMessages() {
         }
         if (total > 0) console.log(`[DB] Удалено сообщений, помеченных удалёнными в старой схеме: ${total}`);
     } catch (err) {
-        console.error('[DB] Не удалось удалить старые soft-deleted сообщения:', err.message);
+        logError('[DB] Не удалось удалить старые soft-deleted сообщения', err);
     }
 }
 
@@ -1335,7 +1343,7 @@ function persistAnonActivity(userIds) {
     dbRun(
         'UPDATE users SET last_active_at = NOW() WHERE id = ANY($1::int[]) AND email IS NULL AND password IS NULL',
         [userIds]
-    ).catch(err => console.error('[Anon] Не удалось записать активность:', err.message));
+    ).catch(err => logError('[Anon] Не удалось записать активность', err));
 }
 
 // Отметить активность анонима: в памяти — всегда, в БД — не чаще раза в
@@ -3827,12 +3835,12 @@ async function purgeExpiredAnonymousUsers() {
                 await deleteUserAccount(row.id);
             } catch (err) {
                 failed++;
-                console.error('[Anon] Не удалось удалить просроченный аккаунт:', err.message);
+                logError('[Anon] Не удалось удалить просроченный аккаунт', err);
             }
         }
         if (rows.length > 0) console.log(`[Anon] Удалено просроченных анонимных аккаунтов: ${rows.length - failed}`);
     } catch (error) {
-        console.error('[Anon] Purge error:', error.message);
+        logError('[Anon] Purge error', error);
     }
 }
 
@@ -3845,7 +3853,7 @@ async function purgeExpiredJoinRequests() {
         for (const row of rows) notifyJoinRequestDecided(row.user_id, { requestId: row.id, approved: false });
         if (rows.length > 0) console.log(`[Invites] Удалено просроченных заявок на вступление: ${rows.length}`);
     } catch (error) {
-        console.error('[Invites] Purge error:', error.message);
+        logError('[Invites] Purge error', error);
     }
 }
 
@@ -3896,10 +3904,27 @@ function onServerListening() {
     console.log(`\n${'='.repeat(60)}\n`);
 }
 
+// Миграции — под advisory-блокировкой (lib/advisory-locks.js): два
+// одновременно стартующих экземпляра (реплики, деплой без простоя) раньше
+// выполняли DDL наперегонки, и один из них падал. На время миграций у их
+// запросов короткий lock_timeout: DDL, не дождавшийся блокировки таблицы
+// (её держат запросы работающего экземпляра), не стоит в очереди,
+// задерживая за собой все запросы к этой таблице, а падает, и миграции
+// повторяются целиком (они идемпотентны). Не помогли и повторы — сервер
+// выходит с ошибкой, хостинг его перезапускает.
+function initDatabaseExclusive() {
+    // DUMP_CA=true — служебный режим (TLS к базе ещё не настроен): он
+    // завершает процесс в начале initDatabase и не должен ждать соединения.
+    if (process.env.DUMP_CA === 'true') return initDatabase();
+    return runMigrationsExclusive(pool, initDatabase, {
+        createMigrationPool: (options) => new Pool({ ...DB_POOL_CONFIG, ...options }),
+    });
+}
+
 // Порт открывается только ПОСЛЕ миграций. Раньше listen() вызывался сразу,
 // параллельно с initDatabase(): первые запросы попадали на недомигрированную
 // БД и висели на блокировках ALTER TABLE.
-initDatabase()
+initDatabaseExclusive()
     .then(() => {
         server.listen(PORT, HOST, onServerListening);
         // Отдельный внутренний порт для tor-service: соединения с него
@@ -3907,6 +3932,8 @@ initDatabase()
         listenOnionPort(server, HOST, () => console.log(`[Tor] Onion-порт ${ONION_PORT} слушается`));
     })
     .catch((err) => {
-        console.error('Ошибка инициализации БД:', err);
+        logError(err && err.code === LOCK_NOT_AVAILABLE
+            ? 'Ошибка инициализации БД: миграция не дождалась блокировки таблицы (идут долгие запросы), нужен перезапуск'
+            : 'Ошибка инициализации БД', err);
         process.exit(1);
     });
