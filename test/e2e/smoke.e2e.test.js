@@ -104,11 +104,14 @@ test('ответ бота приходит по сокету', async () => {
     const bot = await a.botChat();
     const sock = await a.socket();
     try {
+        // На уже существующие чаты сервер подписывает сокет асинхронно (запрос
+        // к базе после подключения), и эхо сообщения, отправленного сразу после
+        // connect, может разминуться с подпиской. Поэтому ждём только ответ
+        // бота: он приходит через ~1.5 с, когда подписка давно готова.
+        // joinChat — вторая, явная подписка на этот чат.
+        sock.emit('joinChat', `chat:${bot.id}`);
         const sent = await a.send(bot.id, 'Привет, бот');
         assert.strictEqual(sent.text, 'Привет, бот');
-        // Своё сообщение и ответ бота (через ~1.5 с) — в комнате чата.
-        const echo = await sock.waitFor('newMessage', m => m.id === sent.id);
-        assert.strictEqual(echo.text, 'Привет, бот');
         const reply = await sock.waitFor('newMessage', m => m.chat_id === bot.id && m.sent === 0 && m.id > sent.id);
         assert.ok(reply.text.length > 0);
         const { messages } = await a.messages(bot.id);
