@@ -46,6 +46,34 @@ function randomSecrets() {
     };
 }
 
+function base32(bytes) {
+    const alphabet = 'abcdefghijklmnopqrstuvwxyz234567';
+    let out = '';
+    let value = 0;
+    let bits = 0;
+    for (const byte of bytes) {
+        value = (value << 8) | byte;
+        bits += 8;
+        while (bits >= 5) {
+            out += alphabet[(value >>> (bits - 5)) & 31];
+            bits -= 5;
+        }
+    }
+    if (bits > 0) out += alphabet[(value << (5 - bits)) & 31];
+    return out;
+}
+
+// Валидный v3-адрес .onion для тестов и локального запуска (сервер
+// проверяет контрольную сумму): base32(ключ ‖ checksum ‖ 0x03), checksum =
+// SHA3-256(".onion checksum" ‖ ключ ‖ 0x03)[0..2]. «Ключ» — SHA-256 от
+// строки, а не настоящий ключ ed25519: такой onion-сервис никто не поднимет.
+function testOnionAddress(seed = 'nyxo-test-onion') {
+    const key = crypto.createHash('sha256').update(seed, 'utf8').digest();
+    const version = Buffer.from([3]);
+    const checksum = crypto.createHash('sha3-256').update('.onion checksum').update(key).update(version).digest().subarray(0, 2);
+    return `${base32(Buffer.concat([key, checksum, version]))}.onion`;
+}
+
 // Окружение процесса server.js. extra переопределяет значения по умолчанию;
 // значение null или undefined убирает переменную.
 function serverEnv({ databaseUrl, port, uploadsDir, secrets, extra = {} }) {
@@ -79,4 +107,5 @@ module.exports = {
     systemEnv,
     randomSecrets,
     serverEnv,
+    testOnionAddress,
 };

@@ -13,11 +13,10 @@
 //   файл — отдельным процессом, по 2 одновременно, тайм-аут теста 60 с;
 //   --grep превращается в --test-name-pattern; --junit — ещё и отчёт JUnit.
 
-const { spawn, execFileSync } = require('child_process');
-const crypto = require('crypto');
+const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { Client } = require('pg');
+const { describeUrl, tryQuery, startDockerPostgres } = require('./helpers/postgres-docker');
 
 const E2E_DIR = __dirname;
 const REPO_ROOT = path.resolve(E2E_DIR, '..', '..');
@@ -46,69 +45,6 @@ const HINT = `Сквозным тестам нужен Postgres 16 с право
      и E2E_DATABASE_URL=postgresql://nyxo:<пароль>@127.0.0.1:55432/postgres npm run test:e2e
 Подробнее — docs/dev/testing.md.`;
 
-// Адрес без пароля — для сообщений.
-function describeUrl(url) {
-    try {
-        const u = new URL(url);
-        return `${u.hostname}:${u.port || 5432}`;
-    } catch {
-        return '(некорректный URL)';
-    }
-}
-
-async function tryQuery(url) {
-    const client = new Client({ connectionString: url, connectionTimeoutMillis: 3000 });
-    try {
-        await client.connect();
-        await client.query('SELECT 1');
-        return null;
-    } catch (err) {
-        return err;
-    } finally {
-        await client.end().catch(() => {});
-    }
-}
-
-// Ожидание готовности Postgres: повторные попытки подключения до срока.
-async function waitForPostgres(url, timeoutMs) {
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-        const err = await tryQuery(url);
-        if (!err) return;
-        if (Date.now() > deadline) throw new Error(`Postgres ${describeUrl(url)} не ответил за ${timeoutMs / 1000} с: ${err.message}`);
-        await new Promise(resolve => setTimeout(resolve, 250));
-    }
-}
-
-async function startDockerPostgres() {
-    const password = crypto.randomBytes(24).toString('base64url');
-    const name = `nyxo-e2e-${process.pid}-${crypto.randomBytes(3).toString('hex')}`;
-    // Пароль — через окружение docker CLI («-e ИМЯ» без значения), а не в
-    // аргументах командной строки.
-    const id = execFileSync('docker', [
-        'run', '-d', '--rm', '--name', name,
-        '-e', 'POSTGRES_USER=nyxo', '-e', 'POSTGRES_PASSWORD', '-e', 'POSTGRES_DB=postgres',
-        '--tmpfs', '/var/lib/postgresql/data:rw',
-        '-p', '127.0.0.1::5432',
-        'postgres:16-alpine',
-        '-c', 'fsync=off', '-c', 'synchronous_commit=off', '-c', 'full_page_writes=off', '-c', 'max_connections=300',
-    ], { encoding: 'utf8', env: { ...process.env, POSTGRES_PASSWORD: password } }).trim();
-    const stop = () => {
-        try { execFileSync('docker', ['rm', '-f', id], { stdio: 'ignore' }); } catch { /* уже удалён */ }
-    };
-    try {
-        const mapping = execFileSync('docker', ['port', id, '5432/tcp'], { encoding: 'utf8' }).trim().split(/\r?\n/)[0];
-        const port = mapping.split(':').pop();
-        const url = `postgresql://nyxo:${encodeURIComponent(password)}@127.0.0.1:${port}/postgres`;
-        console.log(`[e2e] Временный Postgres: контейнер ${name}, 127.0.0.1:${port}`);
-        await waitForPostgres(url, 60000);
-        return { url, stop };
-    } catch (err) {
-        stop();
-        throw err;
-    }
-}
-
 function testFiles(filters) {
     return fs.readdirSync(E2E_DIR)
         .filter(name => name.endsWith('.e2e.test.js'))
@@ -128,8 +64,9 @@ async function main() {
     let docker = null;
     let url = process.env.E2E_DATABASE_URL;
     if (opts.docker) {
-        docker = await startDockerPostgres();
+        docker = await startDockerPostgres({ label: 'e2e' });
         url = docker.url;
+        console.log(`[e2e] Временный Postgres: контейнер ${docker.name}, ${describeUrl(url)}`);
     } else if (!url) {
         console.error(HINT);
         return 1;
