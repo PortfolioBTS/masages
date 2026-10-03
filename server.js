@@ -102,6 +102,16 @@ const { initE2eeGroupsSchema, registerE2eeGroupRoutes } = require('./lib/e2ee-gr
 const { ONION_ADDRESS, ONION_PORT, onionMiddleware, isOnionHost, isOnionSocket, listenOnionPort } = require('./lib/tor-support');
 const { createChallenge, verifySolution } = require('./lib/pow');
 
+// Несколько экземпляров сервера на одной базе (миграции и фоновые задачи
+// под advisory-блокировками) и запись ошибок в лог без id из detail.
+const { runMigrationsExclusive, createRunExclusive, LOCK_NOT_AVAILABLE } = require('./lib/advisory-locks');
+const { loadMigrations, migrateSchema } = require('./lib/migrations');
+const { logError } = require('./lib/log-error');
+// Точки регистрации маршрутов вне server.js и JSON-404 для /api.
+const { registerPreSessionRoutes, registerApiRoutes, registerApiNotFound } = require('./lib/routes');
+// Реестр фоновых задач (под runExclusive) и тестовая ручка NYXO_TEST_MAINTENANCE_MS.
+const { createJobScheduler, registerJobModules } = require('./lib/jobs');
+
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
 // ALLOWED_MIME_TYPES и MIME_EXTENSIONS (жёсткий маппинг mimetype ->
@@ -549,13 +559,16 @@ if (dbTls.info) console.log(dbTls.info);
 if (dbTls.warning) console.warn(dbTls.warning);
 const sslConfig = dbTls.ssl;
 
-const pool = new Pool({
+// Параметры подключения — общие для основного пула и служебных (пул
+// миграций и пул блокировок фоновых задач, см. lib/advisory-locks.js).
+const DB_POOL_CONFIG = {
     connectionString: process.env.DATABASE_URL,
     ssl: sslConfig,
     max: Number(process.env.PG_POOL_MAX) || 10,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 10000,
-});
+};
+const pool = new Pool(DB_POOL_CONFIG);
 // Без обработчика 'error' обрыв простаивающего соединения (рестарт или
 // failover Postgres, сетевой сбой) — необработанное событие 'error',
 // которое завершает весь процесс.
@@ -1148,7 +1161,7 @@ async function purgeLegacySoftDeletedMessages() {
         }
         if (total > 0) console.log(`[DB] Удалено сообщений, помеченных удалёнными в старой схеме: ${total}`);
     } catch (err) {
-        console.error('[DB] Не удалось удалить старые soft-deleted сообщения:', err.message);
+        logError('[DB] Не удалось удалить старые soft-deleted сообщения', err);
     }
 }
 
@@ -1308,7 +1321,7 @@ function persistAnonActivity(userIds) {
     dbRun(
         'UPDATE users SET last_active_at = NOW() WHERE id = ANY($1::int[]) AND email IS NULL AND password IS NULL',
         [userIds]
-    ).catch(err => console.error('[Anon] Не удалось записать активность:', err.message));
+    ).catch(err => logError('[Anon] Не удалось записать активность', err));
 }
 
 // Отметить активность анонима: в памяти — всегда, в БД — не чаще раза в
@@ -1570,6 +1583,12 @@ app.use(express.static(path.join(__dirname, 'public'), {
     setHeaders: (res) => setRevalidateCacheHeaders(res, false),
 }));
 
+// Маршруты из lib/routes/ (см. lib/routes/index.js): здесь — те, которым
+// сессия не нужна; ниже, после лимитера /api/, — обычные маршруты API.
+// serverContext — общий контекст маршрутов и задач из lib/ (lib/jobs).
+const serverContext = Object.freeze({ pool, dbGet, dbAll, dbRun, withTransaction, io, logError, isProduction: IS_PRODUCTION });
+registerPreSessionRoutes(app, serverContext);
+
 app.use(sessionMiddleware);
 
 // Анонимная сессия проверяется на КАЖДОМ запросе (раньше — только в
@@ -1603,6 +1622,7 @@ app.use('/api/', apiLimiter);
 registerE2eeKeyRoutes(app, { dbGet, dbAll });
 // Групповой E2EE: список участников чата + key-shares (тоже нужна сессия).
 registerE2eeGroupRoutes(app, { dbGet, dbAll, dbRun, io });
+registerApiRoutes(app, serverContext);
 
 app.get('/uploads/:filename', async (req, res) => {
     if (!req.session.userId) return res.status(401).json({ success: false, message: 'Не авторизован' });
@@ -3643,6 +3663,9 @@ app.post('/api/change-password', passwordLimiter, async (req, res) => {
     }
 });
 
+// После ВСЕХ маршрутов: неизвестный /api/* — JSON-404.
+registerApiNotFound(app);
+
 app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
     if (err instanceof multer.MulterError) {
@@ -3787,12 +3810,12 @@ async function purgeExpiredAnonymousUsers() {
                 await deleteUserAccount(row.id);
             } catch (err) {
                 failed++;
-                console.error('[Anon] Не удалось удалить просроченный аккаунт:', err.message);
+                logError('[Anon] Не удалось удалить просроченный аккаунт', err);
             }
         }
         if (rows.length > 0) console.log(`[Anon] Удалено просроченных анонимных аккаунтов: ${rows.length - failed}`);
     } catch (error) {
-        console.error('[Anon] Purge error:', error.message);
+        logError('[Anon] Purge error', error);
     }
 }
 
@@ -3805,9 +3828,59 @@ async function purgeExpiredJoinRequests() {
         for (const row of rows) notifyJoinRequestDecided(row.user_id, { requestId: row.id, approved: false });
         if (rows.length > 0) console.log(`[Invites] Удалено просроченных заявок на вступление: ${rows.length}`);
     } catch (error) {
-        console.error('[Invites] Purge error:', error.message);
+        logError('[Invites] Purge error', error);
     }
 }
+
+// ---- Фоновые задачи (lib/jobs/index.js) ----
+//
+// По умолчанию задача идёт под runExclusive (lib/advisory-locks.js): в
+// каждый момент её выполняет один экземпляр сервера на базу, у остальных
+// запуск пропускается. Клиенты блокировок — из отдельного маленького пула:
+// блокировка держит соединение всю задачу, а в основном пуле (в тестах
+// PG_POOL_MAX=3) они отнимали бы соединения у самих задач.
+const jobLockPool = new Pool({ ...DB_POOL_CONFIG, max: 4 });
+jobLockPool.on('error', (err) => logError('[DB] Ошибка простаивающего соединения блокировок', err));
+
+// Тестовые ручки сквозных тестов (NYXO_TEST_*, docs/dev/testing.md):
+// действуют ТОЛЬКО при NODE_ENV=test, в production env-check считает их
+// ошибкой. Целое число мс > 0, иначе null.
+function testKnobMs(name) {
+    if (process.env.NODE_ENV !== 'test') return null;
+    const value = Number(process.env[name]);
+    return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+const jobs = createJobScheduler({
+    runExclusive: createRunExclusive(jobLockPool),
+    // Задачи с maintenance: true — каждые N мс вместо минут.
+    maintenanceMs: testKnobMs('NYXO_TEST_MAINTENANCE_MS'),
+});
+// Анонимы проверяются каждые 5 минут: самый короткий срок — 30 минут
+// без активности, и опоздание с удалением не должно быть сравнимо с ним.
+jobs.register({
+    name: 'purgeExpiredAnonymousUsers', run: purgeExpiredAnonymousUsers,
+    firstDelayMs: 60 * 1000, intervalMs: 5 * 60 * 1000, maintenance: true, testTick: true,
+});
+// Продление активности анонимов с открытыми сокетами ЭТОГО процесса: у
+// каждого экземпляра свои сокеты, поэтому без блокировки.
+jobs.register({
+    name: 'touchAnonymousSockets', run: touchAnonymousSockets,
+    intervalMs: ANON_SOCKET_ACTIVITY_INTERVAL_MS, exclusive: false, maintenance: true,
+});
+jobs.register({
+    name: 'purgeExpiredJoinRequests', run: purgeExpiredJoinRequests,
+    firstDelayMs: 90 * 1000, intervalMs: 60 * 60 * 1000, maintenance: true,
+});
+// Однократно после старта: строки, оставшиеся от soft-delete старой схемы.
+jobs.register({ name: 'purgeLegacySoftDeletedMessages', run: purgeLegacySoftDeletedMessages, firstDelayMs: 0 });
+// Брошенные временные файлы обработки вложений — в папке этого процесса.
+jobs.register({
+    name: 'cleanupStaleTempFiles', run: () => cleanupStaleTempFiles(UPLOADS_DIR, 60 * 60 * 1000),
+    intervalMs: 60 * 60 * 1000, exclusive: false,
+});
+// Задачи lib-модулей (JOB_MODULES в lib/jobs/index.js).
+registerJobModules(jobs, serverContext);
 
 // Страховка: ошибка в фоновой задаче (таймеры, сокеты) не должна ронять
 // весь сервер. Маршруты уже защищены wrapAsync.
@@ -3827,18 +3900,8 @@ function onServerListening() {
         console.log('');
     }
 
-    // Фоновые задачи: брошенные временные файлы обработки вложений,
-    // просроченные анонимные аккаунты и (однократно) строки, оставшиеся от
-    // soft-delete старой схемы.
-    // Анонимы проверяются каждые 5 минут: самый короткий срок — 30 минут
-    // без активности, и опоздание с удалением не должно быть сравнимо с ним.
-    setInterval(() => cleanupStaleTempFiles(UPLOADS_DIR, 60 * 60 * 1000), 60 * 60 * 1000);
-    setTimeout(purgeExpiredAnonymousUsers, 60 * 1000);
-    setInterval(purgeExpiredAnonymousUsers, 5 * 60 * 1000);
-    setInterval(touchAnonymousSockets, ANON_SOCKET_ACTIVITY_INTERVAL_MS);
-    setTimeout(purgeExpiredJoinRequests, 90 * 1000);
-    setInterval(purgeExpiredJoinRequests, 60 * 60 * 1000);
-    setImmediate(purgeLegacySoftDeletedMessages);
+    // Фоновые задачи (реестр — выше, у определения jobs).
+    jobs.start();
 
     // Только то, что действительно включено в этом запуске.
     console.log('Функции безопасности:');
@@ -3854,10 +3917,39 @@ function onServerListening() {
     console.log(`\n${'='.repeat(60)}\n`);
 }
 
+// Миграции — под advisory-блокировкой (lib/advisory-locks.js): два
+// одновременно стартующих экземпляра (реплики, деплой без простоя) раньше
+// выполняли DDL наперегонки, и один из них падал. На время миграций у их
+// запросов короткий lock_timeout: DDL, не дождавшийся блокировки таблицы
+// (её держат запросы работающего экземпляра), не стоит в очереди,
+// задерживая за собой все запросы к этой таблице, а падает, и миграции
+// повторяются целиком (они идемпотентны). Не помогли и повторы — сервер
+// выходит с ошибкой, хостинг его перезапускает.
+//
+// Новые изменения схемы — не в initDatabase, а файлами lib/migrations/
+// (см. lib/migrations/index.js): они выполняются после initDatabase, а
+// версия схемы в schema_meta не даёт старому коду стартовать на новой схеме.
+async function initDatabaseExclusive() {
+    // DUMP_CA=true — служебный режим (TLS к базе ещё не настроен): он
+    // завершает процесс в начале initDatabase и не должен ждать соединения.
+    if (process.env.DUMP_CA === 'true') return initDatabase();
+    // Файлы миграций читаются до первого соединения: ошибка в них — сразу.
+    const migrations = loadMigrations();
+    return runMigrationsExclusive(pool, ({ client }) => migrateSchema({
+        pool,
+        client,
+        migrations,
+        initialSteps: initDatabase,
+        config: Object.freeze({ isProduction: IS_PRODUCTION, uploadsDir: UPLOADS_DIR, env: process.env }),
+    }), {
+        createMigrationPool: (options) => new Pool({ ...DB_POOL_CONFIG, ...options }),
+    });
+}
+
 // Порт открывается только ПОСЛЕ миграций. Раньше listen() вызывался сразу,
 // параллельно с initDatabase(): первые запросы попадали на недомигрированную
 // БД и висели на блокировках ALTER TABLE.
-initDatabase()
+initDatabaseExclusive()
     .then(() => {
         server.listen(PORT, HOST, onServerListening);
         // Отдельный внутренний порт для tor-service: соединения с него
@@ -3865,6 +3957,8 @@ initDatabase()
         listenOnionPort(server, HOST, () => console.log(`[Tor] Onion-порт ${ONION_PORT} слушается`));
     })
     .catch((err) => {
-        console.error('Ошибка инициализации БД:', err);
+        logError(err && err.code === LOCK_NOT_AVAILABLE
+            ? 'Ошибка инициализации БД: миграция не дождалась блокировки таблицы (идут долгие запросы), нужен перезапуск'
+            : 'Ошибка инициализации БД', err);
         process.exit(1);
     });
