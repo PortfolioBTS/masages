@@ -13,10 +13,10 @@
 //     "пропускается как есть", а отклоняется с исключением: частично
 //     понятый файл — это файл, в котором метаданные могли остаться.
 //   - Где формат позволяет — правка "на месте": метаданные затираются, а
-//     длины и смещения остаются прежними (MP4/MOV, WebM, OGG, WAV, PDF).
+//     длины и смещения остаются прежними (MP4/MOV, WebM, PDF).
 //     Так не нужно пересчитывать таблицы смещений (stco, SeekHead, xref),
 //     в которых легко ошибиться и сломать воспроизведение.
-//   - Белые списки вместо чёрных там, где это возможно (PNG, WebP, WAV):
+//   - Белые списки вместо чёрных там, где это возможно (PNG, WebP):
 //     неизвестный чанк — потенциальный носитель метаданных.
 //   - Любое чтение проверяет границы буфера, все циклы ограничены по числу
 //     итераций, рекурсия — по глубине. Испорченный или специально
@@ -27,13 +27,12 @@
 //     сжатые (FlateDecode) XMP-потоки не разбираются — такие метаданные
 //     остаются. Ключ /Title затирается в любом несжатом словаре, поэтому
 //     названия закладок (outline) тоже становятся пустыми.
-//   - OGG: поддерживаются только потоки Opus и Vorbis; FLAC/Speex/Theora
-//     в OGG отклоняются.
-//   - MP3: теги снимаются только в начале и в конце файла; заголовок
-//     Xing/LAME (название энкодера) остаётся — это не данные пользователя.
-//   - WAV: RF64 (файлы > 4 ГБ) не поддерживается.
 //   - MP4/MOV: не трогаются описания сэмплов (stsd) и имена обработчиков
 //     (hdlr) — там только названия кодеков/софта, а не данные о съёмке.
+//   - Звуковые форматы не поддерживаются вовсе: мессенджер не принимает
+//     звук, поэтому такой файл — неподдерживаемый тип (isSupported → false,
+//     sanitize бросает исключение). Контейнер WebM разбирается только как
+//     video/webm.
 
 (function (root, factory) {
     if (typeof module !== 'undefined' && module.exports) {
@@ -47,19 +46,14 @@
     const SUPPORTED_TYPES = Object.freeze([
         'image/jpeg', 'image/png', 'image/gif', 'image/webp',
         'video/mp4', 'video/quicktime', 'video/webm',
-        'audio/webm', 'audio/ogg', 'audio/mpeg', 'audio/wav',
         'application/pdf', 'text/plain',
     ]);
 
     // Браузеры и ОС называют одни и те же форматы по-разному (File.type у
-    // WAV в разных браузерах — audio/wav или audio/x-wav).
+    // JPEG бывает image/jpeg, image/jpg и image/pjpeg).
     const MIME_ALIASES = {
         'image/jpg': 'image/jpeg',
         'image/pjpeg': 'image/jpeg',
-        'audio/mp3': 'audio/mpeg',
-        'audio/x-wav': 'audio/wav',
-        'audio/wave': 'audio/wav',
-        'audio/vnd.wave': 'audio/wav',
     };
 
     // Потолок числа структурных элементов (сегментов, боксов, страниц...)
@@ -159,26 +153,6 @@
         let crc = 0xFFFFFFFF;
         for (let i = start; i < end; i++) crc = crc32Table[(crc ^ b[i]) & 0xFF] ^ (crc >>> 8);
         return (crc ^ 0xFFFFFFFF) >>> 0;
-    }
-
-    // CRC страниц OGG: полином 0x04C11DB7 без отражения, начальное значение 0,
-    // без финального XOR. Поле CRC самой страницы (4 байта с crcPos) при
-    // расчёте считается нулевым — поэтому считаем тремя кусками.
-    let oggCrcTable = null;
-    function oggCrc(b, start, end, crcPos) {
-        if (!oggCrcTable) {
-            oggCrcTable = new Uint32Array(256);
-            for (let i = 0; i < 256; i++) {
-                let c = i << 24;
-                for (let k = 0; k < 8; k++) c = c & 0x80000000 ? (c << 1) ^ 0x04C11DB7 : c << 1;
-                oggCrcTable[i] = c >>> 0;
-            }
-        }
-        let crc = 0;
-        for (let i = start; i < crcPos; i++) crc = (crc << 8) ^ oggCrcTable[((crc >>> 24) ^ b[i]) & 0xFF];
-        for (let i = 0; i < 4; i++) crc = (crc << 8) ^ oggCrcTable[(crc >>> 24) & 0xFF];
-        for (let i = crcPos + 4; i < end; i++) crc = (crc << 8) ^ oggCrcTable[((crc >>> 24) ^ b[i]) & 0xFF];
-        return crc >>> 0;
     }
 
     // ===================== JPEG =====================
@@ -914,8 +888,9 @@
         fixEbmlCrc(b, el);
     }
 
-    // Кластер неизвестного размера (так пишет MediaRecorder) кончается там,
-    // где начинается элемент уровня Segment или новый EBML/Segment.
+    // Кластер неизвестного размера (так пишут потоковые энкодеры, которым
+    // длина заранее неизвестна) кончается там, где начинается элемент уровня
+    // Segment или новый EBML/Segment.
     function skipUnknownCluster(b, pos, end, guard) {
         while (pos < end) {
             guard();
@@ -971,259 +946,6 @@
             pos = el.end;
         }
         if (!segments) fail('нет элемента Segment');
-        return b;
-    }
-
-    // ===================== MP3 =====================
-
-    function synchsafe32(b, o) {
-        need(b, o, 4);
-        if ((b[o] | b[o + 1] | b[o + 2] | b[o + 3]) & 0x80) fail('некорректный размер тега ID3v2');
-        return (b[o] << 21) | (b[o + 1] << 14) | (b[o + 2] << 7) | b[o + 3];
-    }
-
-    function isMpegFrameHeader(b, o, end) {
-        if (end - o < 4) return false;
-        if (b[o] !== 0xFF || (b[o + 1] & 0xE0) !== 0xE0) return false;
-        if (((b[o + 1] >> 3) & 3) === 1) return false; // зарезервированная версия
-        if (((b[o + 1] >> 1) & 3) === 0) return false; // зарезервированный layer
-        if ((b[o + 2] >> 4) === 15) return false; // запрещённый битрейт
-        if (((b[o + 2] >> 2) & 3) === 3) return false; // зарезервированная частота
-        return true;
-    }
-
-    function lastIndexOfAscii(b, s, from, to) {
-        for (let i = to - s.length; i >= from; i--) if (asciiAt(b, i, s)) return i;
-        return -1;
-    }
-
-    function sanitizeMp3(src) {
-        const guard = makeGuard();
-        let start = 0;
-        let end = src.length;
-        // Ведущие ID3v2 (их бывает несколько подряд) и нулевой паддинг между ними.
-        for (;;) {
-            guard();
-            const padLimit = Math.min(end, start + 65536);
-            while (start < padLimit && src[start] === 0) start++;
-            if (end - start < 10 || !asciiAt(src, start, 'ID3')) break;
-            const flags = src[start + 5];
-            const total = 10 + synchsafe32(src, start + 6) + (flags & 0x10 ? 10 : 0); // +футер
-            if (total > end - start) fail('тег ID3v2 выходит за конец файла');
-            start += total;
-        }
-        // Хвостовые теги: порядок бывает разный, поэтому снимаем, пока снимается.
-        for (;;) {
-            guard();
-            const avail = end - start;
-            if (avail >= 128 && asciiAt(src, end - 128, 'TAG')) { // ID3v1
-                end -= 128;
-                if (end - start >= 227 && asciiAt(src, end - 227, 'TAG+')) end -= 227; // расширенный ID3v1
-                continue;
-            }
-            if (avail >= 32 && asciiAt(src, end - 32, 'APETAGEX')) { // футер APEv1/v2
-                const size = u32le(src, end - 32 + 12);
-                const flags = u32le(src, end - 32 + 20);
-                const total = size + (flags & 0x80000000 ? 32 : 0); // + заголовок
-                if (size < 32 || total > avail) fail('некорректный тег APE');
-                end -= total;
-                continue;
-            }
-            if (avail >= 15 && asciiAt(src, end - 9, 'LYRICS200')) { // Lyrics3v2
-                let size = 0;
-                for (let i = end - 15; i < end - 9; i++) {
-                    if (src[i] < 0x30 || src[i] > 0x39) fail('некорректный тег Lyrics3');
-                    size = size * 10 + (src[i] - 0x30);
-                }
-                const total = size + 15;
-                if (total > avail || !asciiAt(src, end - total, 'LYRICSBEGIN')) fail('некорректный тег Lyrics3');
-                end -= total;
-                continue;
-            }
-            if (avail >= 20 && asciiAt(src, end - 9, 'LYRICSEND')) { // Lyrics3v1: не длиннее 5100 байт
-                const at = lastIndexOfAscii(src, 'LYRICSBEGIN', Math.max(start, end - 9 - 5100 - 11), end - 9);
-                if (at === -1) fail('некорректный тег Lyrics3');
-                end = at;
-                continue;
-            }
-            if (avail >= 20 && asciiAt(src, end - 10, '3DI')) { // ID3v2.4 в конце файла (с футером)
-                const total = synchsafe32(src, end - 4) + 20;
-                if (total > avail || !asciiAt(src, end - total, 'ID3')) fail('некорректный тег ID3v2');
-                end -= total;
-                continue;
-            }
-            break;
-        }
-        if (!isMpegFrameHeader(src, start, end)) fail('после тегов нет заголовка MPEG-кадра');
-        return src.slice(start, end);
-    }
-
-    // ===================== OGG (Opus, Vorbis) =====================
-    //
-    // Второй пакет каждого логического потока — заголовок комментариев. Он
-    // может тянуться через несколько страниц (обложка в
-    // METADATA_BLOCK_PICTURE занимает сотни килобайт), поэтому пакеты
-    // собираются по lacing-таблицам как список кусков в файле. Правка на
-    // месте: длины полей сохраняются, у изменённых страниц пересчитывается CRC.
-
-    // Затирает vendor и все комментарии. Возвращает смещение сразу за списком.
-    function blankVorbisComments(p, off) {
-        const vendorLen = u32le(p, off);
-        off += 4;
-        if (vendorLen > p.length - off) fail('некорректная длина vendor-строки');
-        p.fill(0x20, off, off + vendorLen);
-        off += vendorLen;
-        const count = u32le(p, off);
-        off += 4;
-        if (count > (p.length - off) / 4) fail('некорректное число комментариев');
-        for (let i = 0; i < count; i++) {
-            const len = u32le(p, off);
-            off += 4;
-            if (len > p.length - off) fail('некорректная длина комментария');
-            // "X=" + пробелы: поле остаётся синтаксически корректным, а имя и
-            // значение (GPS, обложка, автор) исчезают.
-            if (len >= 2) {
-                p[off] = 0x58;
-                p[off + 1] = 0x3D;
-                p.fill(0x20, off + 2, off + len);
-            } else if (len === 1) {
-                p[off] = 0x3D;
-            }
-            off += len;
-        }
-        return off;
-    }
-
-    function sanitizeOggCommentPacket(p, codec) {
-        if (codec === 'opus') {
-            if (!asciiAt(p, 0, 'OpusTags')) fail('второй пакет Opus не OpusTags');
-            const off = blankVorbisComments(p, 8);
-            p.fill(0, off); // бинарный хвост OpusTags
-        } else {
-            if (!(p[0] === 3 && asciiAt(p, 1, 'vorbis'))) fail('второй пакет Vorbis не заголовок комментариев');
-            const off = blankVorbisComments(p, 7);
-            if (off >= p.length || !(p[off] & 1)) fail('нет framing-бита в заголовке комментариев');
-            p.fill(0, off + 1);
-        }
-    }
-
-    function finishOggPacket(b, st, pages) {
-        const index = st.packets++;
-        const spans = st.spans;
-        st.spans = [];
-        if (index > 1) return;
-        let len = 0;
-        for (const s of spans) len += s.len;
-        const p = new Uint8Array(len);
-        let o = 0;
-        for (const s of spans) { p.set(b.subarray(s.off, s.off + s.len), o); o += s.len; }
-        if (index === 0) {
-            if (asciiAt(p, 0, 'OpusHead')) st.codec = 'opus';
-            else if (p[0] === 1 && asciiAt(p, 1, 'vorbis')) st.codec = 'vorbis';
-            else fail('неподдерживаемый кодек в OGG (поддерживаются Opus и Vorbis)');
-            return;
-        }
-        sanitizeOggCommentPacket(p, st.codec);
-        o = 0;
-        for (const s of spans) {
-            b.set(p.subarray(o, o + s.len), s.off);
-            o += s.len;
-            pages[s.page].dirty = true;
-        }
-        st.done = true;
-    }
-
-    function sanitizeOgg(src) {
-        const b = new Uint8Array(src);
-        const n = b.length;
-        const guard = makeGuard();
-        const pages = [];
-        const streams = new Map();
-        let pos = 0;
-        while (pos < n) {
-            guard();
-            if (n - pos < 27 || !asciiAt(b, pos, 'OggS')) fail('ожидалась страница OggS');
-            if (b[pos + 4] !== 0) fail('неизвестная версия формата страницы');
-            const flags = b[pos + 5];
-            const serial = u32le(b, pos + 14);
-            const nseg = b[pos + 26];
-            const table = pos + 27;
-            const dataStart = table + nseg;
-            if (dataStart > n) fail('обрезана таблица сегментов');
-            let dataLen = 0;
-            for (let i = 0; i < nseg; i++) dataLen += b[table + i];
-            const end = dataStart + dataLen;
-            if (end > n) fail('страница выходит за конец файла');
-            if (oggCrc(b, pos, end, pos + 22) !== u32le(b, pos + 22)) fail('неверная контрольная сумма страницы');
-            const pageIndex = pages.length;
-            pages.push({ start: pos, end, dirty: false });
-
-            let st = streams.get(serial);
-            if (!st) {
-                if (!(flags & 0x02)) fail('страница потока без начала потока');
-                st = { packets: 0, spans: [], codec: null, done: false };
-                streams.set(serial, st);
-            }
-            let off = dataStart;
-            for (let i = 0; i < nseg && !st.done; i++) {
-                const lace = b[table + i];
-                if (lace) st.spans.push({ off, len: lace, page: pageIndex });
-                off += lace;
-                if (lace < 255) finishOggPacket(b, st, pages); // lacing < 255 завершает пакет
-            }
-            pos = end;
-        }
-        if (!streams.size) fail('нет ни одной страницы');
-        for (const st of streams.values()) if (!st.done) fail('нет заголовка комментариев');
-        for (const page of pages) {
-            if (!page.dirty) continue;
-            const crc = oggCrc(b, page.start, page.end, page.start + 22);
-            b[page.start + 22] = crc & 0xFF;
-            b[page.start + 23] = (crc >>> 8) & 0xFF;
-            b[page.start + 24] = (crc >>> 16) & 0xFF;
-            b[page.start + 25] = (crc >>> 24) & 0xFF;
-        }
-        return b;
-    }
-
-    // ===================== WAV =====================
-
-    // Белый список: формат, звук и то, что нужно семплерам. LIST/INFO,
-    // LIST/adtl, bext (BWF: автор, дата, место), iXML, id3, _PMX (XMP),
-    // cart, DISP, axml и всё незнакомое становятся JUNK с нулями.
-    const WAV_KEEP = new Set(['fmt ', 'data', 'fact', 'cue ', 'smpl', 'inst']);
-
-    function sanitizeWav(src) {
-        const n = src.length;
-        if (n >= 12 && (asciiAt(src, 0, 'RF64') || asciiAt(src, 0, 'BW64'))) fail('формат RF64 не поддерживается');
-        if (n < 12 || !asciiAt(src, 0, 'RIFF') || !asciiAt(src, 8, 'WAVE')) fail('неверная сигнатура');
-        const riffEnd = 8 + u32le(src, 4);
-        if (riffEnd > n) fail('размер RIFF больше файла');
-        if (riffEnd < 12) fail('некорректный размер RIFF');
-        // Байты за пределами RIFF — не часть WAV (туда, например, дописывают ID3).
-        const b = src.slice(0, riffEnd);
-        const guard = makeGuard();
-        let sawFmt = false;
-        let sawData = false;
-        let pos = 12;
-        while (pos < riffEnd) {
-            guard();
-            if (riffEnd - pos < 8) fail('обрезан чанк');
-            const id = fourcc(b, pos);
-            const size = u32le(b, pos + 4);
-            const dataEnd = pos + 8 + size;
-            if (dataEnd > riffEnd) fail('чанк выходит за конец файла');
-            // Байт выравнивания у последнего чанка иногда не записан — терпимо.
-            const next = Math.min(dataEnd + (size & 1), riffEnd);
-            if (id === 'fmt ') sawFmt = true;
-            else if (id === 'data') sawData = true;
-            if (!WAV_KEEP.has(id)) {
-                writeAscii(b, pos, 'JUNK');
-                b.fill(0, pos + 8, next);
-            }
-            pos = next;
-        }
-        if (!sawFmt || !sawData) fail('нет чанков fmt/data');
         return b;
     }
 
@@ -1371,15 +1093,12 @@
         'video/mp4': { label: 'MP4', fn: sanitizeBmff },
         'video/quicktime': { label: 'MOV', fn: sanitizeBmff },
         'video/webm': { label: 'WebM', fn: sanitizeMatroska },
-        'audio/webm': { label: 'WebM', fn: sanitizeMatroska },
-        'audio/ogg': { label: 'OGG', fn: sanitizeOgg },
-        'audio/mpeg': { label: 'MP3', fn: sanitizeMp3 },
-        'audio/wav': { label: 'WAV', fn: sanitizeWav },
         'application/pdf': { label: 'PDF', fn: sanitizePdf },
         'text/plain': { label: 'TXT', fn: (src) => src.slice() },
     };
 
-    // 'audio/webm;codecs=opus' (так MediaRecorder подписывает записи) → 'audio/webm'.
+    // Параметры типа отбрасываются, регистр и синонимы приводятся к
+    // каноническому виду: 'Video/WebM;codecs=vp9' → 'video/webm'.
     function normalizeMimeType(mimeType) {
         if (typeof mimeType !== 'string') return '';
         const base = mimeType.split(';')[0].trim().toLowerCase();
@@ -1410,6 +1129,6 @@
         sanitize,
         isSupported,
         SUPPORTED_TYPES,
-        _internal: { MediaSanitizeError, normalizeMimeType, blankPdfMetadata, crc32, oggCrc }, // для тестов и сервера
+        _internal: { MediaSanitizeError, normalizeMimeType, blankPdfMetadata, crc32 }, // для тестов и сервера
     };
 });
