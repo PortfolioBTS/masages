@@ -3028,6 +3028,9 @@ a.file-attachment:hover {
 
 .send-file-row {
     display: flex;
+    /* Строки не сжимаются: при многих файлах (или длинном пояснении об отказе
+       на узком экране) список прокручивается, а не накладывает строки друг на друга. */
+    flex: none;
     align-items: center;
     gap: 12px;
     min-height: 48px;
