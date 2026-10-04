@@ -94,11 +94,6 @@ const elements = {
     profileBtn: document.getElementById('profile-btn'),
     logoutBtn: document.getElementById('logout-btn'),
 
-    // ---- Выход из аккаунта ----
-    logoutModal: document.getElementById('logout-modal'),
-    logoutKeepBtn: document.getElementById('logout-keep-btn'),
-    logoutWipeBtn: document.getElementById('logout-wipe-btn'),
-
     // ---- Шапка чата ----
     chatHeader: document.getElementById('chat-header'),
     backBtn: document.getElementById('back-btn'),
@@ -214,26 +209,18 @@ const elements = {
     profileModal: document.getElementById('profile-modal'),
     profileAvatar: document.getElementById('profile-avatar'),
     profileUsername: document.getElementById('profile-username'),
-    profileEmail: document.getElementById('profile-email'),
-    profileCode: document.getElementById('profile-code'),
-    profileAnonBadge: document.getElementById('profile-anon-badge'),
+    profileLifetime: document.getElementById('profile-lifetime'),
+    profileLifetimeStatus: document.getElementById('profile-lifetime-status'),
     profileThemeBtn: document.getElementById('profile-theme-btn'),
     readReceiptsToggle: document.getElementById('read-receipts-toggle'),
     notifyToggle: document.getElementById('notify-toggle'),
-    securitySection: document.getElementById('security-section'),
-    securityList: document.getElementById('security-list'),
+    profileAboutBtn: document.getElementById('profile-about-btn'),
 
-    // ---- Смена пароля ----
-    changePasswordBtn: document.getElementById('change-password-btn'),
-    passwordModal: document.getElementById('password-modal'),
-    savePasswordBtn: document.getElementById('save-password-btn'),
-
-    // ---- Удаление аккаунта ----
+    // ---- «Удалить и выйти» ----
     deleteAccountBtn: document.getElementById('delete-account-btn'),
     deleteAccountModal: document.getElementById('delete-account-modal'),
-    deleteAccountText: document.getElementById('delete-account-text'),
-    deleteAccountPasswordGroup: document.getElementById('delete-account-password-group'),
-    deleteAccountPassword: document.getElementById('delete-account-password'),
+    deleteAccountAlt: document.getElementById('delete-account-alt'),
+    deleteAccountError: document.getElementById('delete-account-error'),
     confirmDeleteAccountBtn: document.getElementById('confirm-delete-account-btn'),
 };
 
@@ -346,12 +333,12 @@ function formatFileSize(bytes) {
 
 // ==================== Следы на устройстве ====================
 // Всё, что клиент хранит локально: ключи E2EE (IndexedDB nyxo-e2ee-<id>,
-// удаляется через E2EE.deleteLocalData) и выбор тумблера шифрования по
-// чатам (localStorage e2ee-enabled:<id>:<chatId>). Для анонимного режима
-// ("данные удалятся при выходе") и после удаления аккаунта это должно
-// исчезать вместе с сессией. Хранилище браузера может быть недоступно
-// (приватный режим, запрет cookies) — отсюда try/catch вокруг каждого
-// обращения: интерфейс должен работать и без него.
+// удаляется через E2EE.deleteLocalData) и флаги пользователя в localStorage.
+// Все аккаунты временные, поэтому при выходе (он же удаление) и после
+// удаления аккаунта по сроку это должно исчезать вместе с сессией.
+// Хранилище браузера может быть недоступно (окно инкогнито, запрет
+// cookies) — отсюда try/catch вокруг каждого обращения: интерфейс должен
+// работать и без него.
 
 function readAnonIds() {
     try {
@@ -371,8 +358,9 @@ function writeAnonIds(ids) {
 }
 
 // Список "чьи локальные данные стереть, как только этот пользователь не
-// текущая сессия". Туда попадают анонимные сессии (вкладку могли просто
-// закрыть, а сервер удалит анонима сам по сроку без активности) и удалённые аккаунты.
+// текущая сессия". Туда попадает каждый аккаунт при входе (вкладку могли
+// просто закрыть, а сервер удалит аккаунт сам по сроку без входа) и
+// удалённые аккаунты, чью базу ключей не удалось стереть сразу.
 function rememberIdForWipe(userId) {
     writeAnonIds([...readAnonIds(), Number(userId)]);
 }
@@ -481,8 +469,8 @@ function getE2eeClient() {
     return e2eeClient;
 }
 
-// Причина — чтобы было понятно, что делать: обновить браузер, выйти из
-// приватного режима или ждать, пока починят сервер.
+// Причина — чтобы было понятно, что делать: обновить браузер, открыть
+// Nyxo не в окне инкогнито или ждать, пока починят сервер.
 function describeE2eeInitError(err) {
     const name = err && err.name;
     const message = String((err && err.message) || '');
@@ -495,7 +483,7 @@ function describeE2eeInitError(err) {
         return 'Этот браузер не поддерживает нужные алгоритмы шифрования (X25519/Ed25519) — обновите его';
     }
     if (name === 'InvalidStateError' || name === 'QuotaExceededError' || name === 'UnknownError' || /indexedDB/i.test(message)) {
-        return 'Браузер не разрешает сохранить ключи шифрования (приватный режим или запрет хранилища)';
+        return 'Браузер не разрешает сохранить ключи шифрования (окно инкогнито или запрет хранилища)';
     }
     if (err instanceof TypeError && /fetch|network/i.test(message)) {
         return 'Нет связи с сервером ключей шифрования';
@@ -572,7 +560,7 @@ function isE2eePreferred(chatId) {
 function setE2eePreferred(chatId, enabled) {
     try {
         localStorage.setItem(e2eePrefKey(chatId), enabled ? '1' : '0');
-    } catch { /* приватный режим браузера без localStorage — выбор не запомнится */ }
+    } catch { /* окно инкогнито без localStorage — выбор не запомнится */ }
 }
 
 // Фактическое состояние: выбрано и доступно на этом устройстве.
@@ -1422,9 +1410,10 @@ async function checkAuth() {
 
 function enterApp(user) {
     currentUser = user;
-    // До всего остального: если вкладку просто закроют, при следующем
-    // старте данные этой анонимной сессии будут стёрты (см. purgeStaleLocalData).
-    if (user.isAnonymous) rememberIdForWipe(user.id);
+    // До всего остального: если вкладку просто закроют, данные этого
+    // аккаунта будут стёрты, как только он перестанет быть текущим (см.
+    // purgeStaleLocalData) — все аккаунты временные.
+    rememberIdForWipe(user.id);
     purgeStaleLocalData(user.id);
     e2eeUnavailableWarned = false;
     warnedRooms.clear();
@@ -1435,10 +1424,8 @@ function enterApp(user) {
     socket.connect();
     loadChats();
     updateAnonNote();
-    // Ответы входа/регистрации не несут настроек приватности и срока
-    // жизни анонимного аккаунта — их знает /api/auth.
-    if (typeof user.readReceipts !== 'boolean' || (user.isAnonymous && !user.anonExpiresAt)) refreshAccountFlags();
-    startAnonNoteRefresh();
+    // Ответ регистрации мог прийти без настроек и срока — их знает /api/auth.
+    if (typeof user.readReceipts !== 'boolean' || !NyxoLifetime.isLifetime(user.anonLifetime)) pingSession();
     if (pendingJoin) {
         openPendingJoin();
     } else if (pendingJoinBroken) {
@@ -1447,57 +1434,78 @@ function enterApp(user) {
     }
 }
 
-// Ответ /api/login и /api/register не содержит настроек приватности —
-// берём их из /api/auth.
-async function refreshAccountFlags() {
-    const userId = currentUser ? currentUser.id : null;
-    try {
-        const res = await fetch('/api/auth');
-        const data = await res.json();
-        if (!currentUser || currentUser.id !== userId) return;
-        if (data && data.authenticated === false) {
-            leaveApp('Сессия истекла, войдите снова');
-            return;
+// ---- Состояние аккаунта с сервера ----
+// GET /api/auth для вошедшего: продлевает сессию (сокет куку продлить не
+// может — её ставит только HTTP-ответ) и приносит свежие срок, дату
+// удаления и настройки. Параллельные вызовы склеиваются. Сетевая ошибка не
+// разлогинивает никогда. authenticated:false без причины перепроверяется
+// через 2 с: разовый сбой сервера не должен стирать ключи живого аккаунта.
+const AUTH_RECHECK_MS = 2000;
+let authPing = null;
+
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isCurrentUser(userId) {
+    return Boolean(currentUser) && currentUser.id === userId;
+}
+
+function pingSession() {
+    if (!currentUser) return Promise.resolve(null);
+    if (authPing) return authPing;
+    const userId = currentUser.id;
+    authPing = (async () => {
+        let data = await fetchAuthState();
+        if (!isCurrentUser(userId)) return null;
+        if (data && !data.authenticated && !data.expired && !data.reason) {
+            await delay(AUTH_RECHECK_MS);
+            if (!isCurrentUser(userId)) return null;
+            data = await fetchAuthState();
+            if (!isCurrentUser(userId)) return null;
         }
-        if (!data.authenticated || !data.user) return;
-        if (typeof data.user.readReceipts === 'boolean') currentUser.readReceipts = data.user.readReceipts;
-        if (typeof data.user.isAnonymous === 'boolean') currentUser.isAnonymous = data.user.isAnonymous;
-        if ('anonLifetime' in data.user) currentUser.anonLifetime = data.user.anonLifetime;
-        if ('anonExpiresAt' in data.user) currentUser.anonExpiresAt = data.user.anonExpiresAt;
-        refreshOwnMessageStatuses();
-        updateAnonNote();
-    } catch { /* останется значение по умолчанию */ }
+        if (!data) return null;
+        if (!data.authenticated) {
+            leaveApp(data.expired || data.reason === 'expired' ? AUTH_NOTICES.expired : AUTH_NOTICES.sessionLost);
+            return data;
+        }
+        if (!data.user) return data;
+        // Кука принадлежит уже другому аккаунту (его создали в соседней
+        // вкладке): этот из браузера недоступен, его ключи бесполезны.
+        if (Number(data.user.id) !== Number(userId)) {
+            leaveApp(AUTH_NOTICES.otherAccount);
+            return data;
+        }
+        applyAuthUser(data.user);
+        return data;
+    })().finally(() => { authPing = null; });
+    return authPing;
 }
 
-// ---- Приватный режим: заметка «Аккаунт удалится …» в сайдбаре ----
-// Срок считается от последней активности (открытая вкладка = активность),
-// поэтому оценка сдвигается, пока пользователь здесь: перечитываем её раз в
-// 5 минут — так же часто сервер продлевает last_active_at открытому сокету.
-let anonNoteTimer = null;
-
-function anonNoteText(user) {
-    if (user.anonLifetime === 'tab') return 'Аккаунт удалится через 30 минут после закрытия вкладки';
-    const expires = parseDate(user.anonExpiresAt);
-    if (expires) return `Аккаунт удалится ${formatShortDateTime(expires)}, если не заходить`;
-    if (user.anonLifetime === 'day') return 'Аккаунт удалится через сутки без активности';
-    if (user.anonLifetime === 'week') return 'Аккаунт удалится через 7 дней без активности';
-    return 'Аккаунт удалится при выходе';
+// Поля аккаунта из /api/auth; каждое проверяется: сервер другой версии
+// может прислать не всё.
+function applyAuthUser(user) {
+    if (!currentUser || !user) return;
+    const receiptsBefore = readReceiptsEnabled();
+    if (typeof user.username === 'string' && user.username) currentUser.username = user.username;
+    if (typeof user.readReceipts === 'boolean') currentUser.readReceipts = user.readReceipts;
+    if (NyxoLifetime.isLifetime(user.anonLifetime)) currentUser.anonLifetime = user.anonLifetime;
+    if ('anonExpiresAt' in user) currentUser.anonExpiresAt = user.anonExpiresAt;
+    if (typeof user.anonInactivitySeconds === 'number') currentUser.anonInactivitySeconds = user.anonInactivitySeconds;
+    if (readReceiptsEnabled() !== receiptsBefore) refreshOwnMessageStatuses();
+    updateAnonNote();
+    renderProfileLifetime();
 }
 
+// ---- Заметка о сроке хранения в сайдбаре ----
+// Текст статичный («Удалится, если не заходить 1 день»): дата удаления
+// сдвигается при каждом входе, её место — в профиле. Заметка — кнопка,
+// открывающая профиль, где срок можно поменять.
 function updateAnonNote() {
-    const user = currentUser;
-    const show = Boolean(user && user.isAnonymous);
-    elements.anonNote.classList.toggle('hidden', !show);
-    elements.anonNoteText.textContent = show ? anonNoteText(user) : '';
-}
-
-function startAnonNoteRefresh() {
-    clearInterval(anonNoteTimer);
-    anonNoteTimer = null;
-    if (!currentUser || !currentUser.isAnonymous) return;
-    anonNoteTimer = setInterval(() => {
-        if (currentUser && currentUser.isAnonymous && currentUser.anonLifetime !== 'tab') refreshAccountFlags();
-    }, 5 * 60 * 1000);
+    const text = currentUser ? NyxoLifetime.lifetimeNote(currentUser.anonLifetime) : '';
+    elements.anonNote.classList.toggle('hidden', !text);
+    elements.anonNoteText.textContent = text;
+    elements.anonNote.setAttribute('aria-label', text ? `Срок хранения аккаунта: ${text}. Открыть профиль` : 'Открыть профиль');
 }
 
 function resetChatView() {
@@ -1537,20 +1545,25 @@ function releaseChatResources() {
     hideDropZone();
 }
 
-// options.wipe — стереть локальные данные пользователя (ключи E2EE,
-// настройки шифрования). Для анонимного режима — всегда.
-function leaveApp(message, options = {}) {
+// Выход из приложения. Все аккаунты временные: локальные данные аккаунта
+// (ключи E2EE, флаги) стираются всегда, а страница перезагружается — так
+// закрываются соединения с IndexedDB и из памяти уходит расшифрованная
+// переписка. message — уведомление на экране входа после перезагрузки.
+// Повторный вызов (например, ответ «Не авторизован» на несколько запросов
+// сразу) ничего не делает.
+let leavingApp = false;
+function leaveApp(message) {
+    if (leavingApp) return;
+    leavingApp = true;
     const user = currentUser;
     socket.disconnect();
     currentUser = null;
-    e2eeClient = null; // ключи обычного аккаунта остаются в IndexedDB под его userId для следующего входа
+    e2eeClient = null;
     e2eeClientUserId = null;
     e2eeInitPromise = null;
     e2eeState = 'off';
     clearTimeout(markReadTimer);
     clearTimeout(loadChatsTimer);
-    clearInterval(anonNoteTimer);
-    anonNoteTimer = null;
     cancelUploadQueue();
     roomParticipants.clear();
     chatListData = [];
@@ -1563,33 +1576,28 @@ function leaveApp(message, options = {}) {
     updateAnonNote();
     setConnectionStatus(null);
     showAuth();
-    if (user && (user.isAnonymous || options.wipe)) {
-        rememberIdForWipe(user.id);
-        wipeLocalUserData(user.id, 1500).finally(() => reloadWithNotice(message));
+    if (!user) {
+        reloadWithNotice(message);
         return;
     }
-    if (message) showToast(message, 'info');
+    rememberIdForWipe(user.id);
+    wipeLocalUserData(user.id, 1500).finally(() => reloadWithNotice(message));
 }
 
-let authRecheckPending = false;
 socket.on('connect_error', (err) => {
-    // Сессия истекла (например, анонимный аккаунт удалён по сроку) — сервер
-    // отклоняет рукопожатие. Перепроверяем вход и показываем экран входа.
-    if (err && err.message === 'Не авторизован' && !authRecheckPending) {
-        authRecheckPending = true;
-        fetch('/api/auth').then(r => r.json()).then((data) => {
-            if (!data.authenticated && currentUser) leaveApp('Сессия истекла, войдите снова');
-        }).catch(() => {}).finally(() => { authRecheckPending = false; });
-    }
+    // Сессия истекла (например, аккаунт удалён по сроку) — сервер отклоняет
+    // рукопожатие. Перепроверяем вход: pingSession сам уведёт на экран входа.
+    if (err && err.message === 'Не авторизован' && currentUser) pingSession();
 });
 
 socket.io.on('reconnect', () => {
-    // После обрыва связи (или рестарта сервера) догружаем пропущенное.
+    // После обрыва связи (или рестарта сервера) догружаем пропущенное и
+    // продлеваем сессию: пока связи не было, HTTP-запросов тоже не было.
     if (!currentUser) return;
     if (chatListMode === 'chats') loadChats();
     if (currentChatId) refreshCurrentChat();
     if (currentChatId && currentRoomId) loadJoinRequestsCount();
-    if (currentUser.isAnonymous) refreshAccountFlags();
+    pingSession();
 });
 
 // ---- Индикатор соединения ----
@@ -1668,22 +1676,33 @@ function getCsrfToken() {
     return match ? match[1] : '';
 }
 
+// Ответ «Не авторизован» посреди работы: сессии может уже не быть (аккаунт
+// удалён по сроку или в другой вкладке), а может, запрос просто ушёл со
+// старой кукой, пока сервер пересоздавал сессию (смена срока). Решает
+// свежий /api/auth (pingSession): сам ответ ключи не стирает.
+function onUnauthorizedResponse(data) {
+    if (currentUser && data && data.success === false && data.message === 'Не авторизован') pingSession();
+}
+
 // Любой ответ сервера приводится к { success, message, ... }. Раньше
 // ответ не-JSON (502 от прокси, обрыв сети) бросал исключение прямо в
-// обработчике клика, и кнопка просто "ничего не делала".
+// обработчике клика, и кнопка просто "ничего не делала". networkError —
+// запрос не дошёл до сервера (важно для «Удалить и выйти»: тогда аккаунт
+// точно не удалён). skipAuthCheck — вызывающий сам разбирает «Не авторизован».
 async function api(url, options = {}, retried = false) {
+    const { skipAuthCheck = false, ...init } = options;
     let res;
     try {
         res = await fetch(url, {
-            ...options,
+            ...init,
             headers: {
                 'Content-Type': 'application/json',
                 'X-CSRF-Token': getCsrfToken(),
-                ...options.headers,
+                ...init.headers,
             },
         });
     } catch {
-        return { success: false, message: 'Нет соединения с сервером' };
+        return { success: false, networkError: true, message: 'Нет соединения с сервером' };
     }
     let data;
     try {
@@ -1691,14 +1710,13 @@ async function api(url, options = {}, retried = false) {
     } catch {
         return { success: false, message: `Ошибка сервера (HTTP ${res.status})` };
     }
+    if (!data || typeof data !== 'object') return { success: false, message: `Ошибка сервера (HTTP ${res.status})` };
     // Кука csrf_token живёт сутки; если она истекла, любой GET выдаст новую.
     if (res.status === 403 && !retried && /CSRF/i.test(data.message || '')) {
         await fetch('/api/auth').catch(() => {});
         return api(url, options, true);
     }
-    if (currentUser && data && data.success === false && data.message === 'Не авторизован') {
-        leaveApp('Сессия истекла, войдите снова');
-    }
+    if (!skipAuthCheck) onUnauthorizedResponse(data);
     return data;
 }
 
@@ -1720,9 +1738,7 @@ async function postFormData(url, formData, retried = false) {
         await fetch('/api/auth').catch(() => {});
         return postFormData(url, formData, true);
     }
-    if (currentUser && data && data.success === false && data.message === 'Не авторизован') {
-        leaveApp('Сессия истекла, войдите снова');
-    }
+    onUnauthorizedResponse(data);
     return data;
 }
 
@@ -1756,9 +1772,7 @@ function postFormDataWithProgress(url, formData, options = {}, retried = false) 
                 resolve(postFormDataWithProgress(url, formData, options, true));
                 return;
             }
-            if (currentUser && data && data.success === false && data.message === 'Не авторизован') {
-                leaveApp('Сессия истекла, войдите снова');
-            }
+            onUnauthorizedResponse(data);
             resolve(data || { success: false });
         };
         xhr.send(formData);
@@ -1810,20 +1824,12 @@ function setupAuthListeners() {
     applyOnionUrl(onionUrl);
 }
 
-// Выход из аккаунта: кнопка в сайдбаре и окно выбора «оставить данные на
-// устройстве или стереть».
+// «Удалить и выйти» в сайдбаре: аккаунт держится только на cookie этого
+// браузера, поэтому выход и есть удаление — то же подтверждение, что и у
+// кнопки в профиле.
 function setupLogoutListeners() {
-    elements.logoutBtn.addEventListener('click', () => {
-        if (!currentUser) return;
-        // Анонимный аккаунт при выходе удаляется всегда — выбирать нечего.
-        if (currentUser.isAnonymous) {
-            logout({ wipe: true });
-            return;
-        }
-        openModal(elements.logoutModal);
-    });
-    elements.logoutKeepBtn.addEventListener('click', () => logout({ wipe: false }));
-    elements.logoutWipeBtn.addEventListener('click', () => logout({ wipe: true }));
+    elements.logoutBtn.addEventListener('click', openDeleteAccountModal);
+    elements.confirmDeleteAccountBtn.addEventListener('click', deleteAccountAndLeave);
 }
 
 // Сайдбар и окно «Новый чат»: создание группы, вступление по коду
@@ -1898,44 +1904,17 @@ function setupInviteListeners() {
     elements.requestsBarBtn.addEventListener('click', openRequestsModal);
 }
 
-// Профиль: учётные данные, отметки о прочтении, уведомления, удаление
-// аккаунта.
+// Профиль: срок хранения, отметки о прочтении, уведомления, «Как устроен
+// Nyxo», «Удалить аккаунт и выйти». Заметка о сроке в сайдбаре тоже
+// открывает профиль — там срок и меняется.
 function setupProfileListeners() {
     elements.profileBtn.addEventListener('click', openProfile);
-
-    elements.changePasswordBtn.addEventListener('click', () => {
-        closeModal(elements.profileModal);
-        openModal(elements.passwordModal);
-    });
-
-    elements.savePasswordBtn.addEventListener('click', async () => {
-        const currentPassword = document.getElementById('current-password').value;
-        const newPassword = document.getElementById('new-password').value;
-        const confirmPassword = document.getElementById('confirm-new-password').value;
-        const data = await api('/api/change-password', {
-            method: 'POST',
-            body: JSON.stringify({ currentPassword, newPassword, confirmPassword }),
-        });
-        if (data.success) {
-            showToast(data.message, 'success');
-            closeModal(elements.passwordModal);
-            ['current-password', 'new-password', 'confirm-new-password'].forEach(id => { document.getElementById(id).value = ''; });
-            setTimeout(() => leaveApp(), 1500);
-        } else {
-            showToast(data.message, 'error');
-        }
-    });
-
+    elements.anonNote.addEventListener('click', openProfile);
+    elements.profileLifetime.addEventListener('change', onProfileLifetimeChange);
     elements.readReceiptsToggle.addEventListener('change', onReadReceiptsToggle);
     elements.notifyToggle.addEventListener('change', onNotifyToggle);
+    elements.profileAboutBtn.addEventListener('click', () => openAboutModal());
     elements.deleteAccountBtn.addEventListener('click', openDeleteAccountModal);
-    elements.confirmDeleteAccountBtn.addEventListener('click', deleteAccount);
-    elements.deleteAccountPassword.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.isComposing) {
-            e.preventDefault();
-            deleteAccount();
-        }
-    });
 }
 
 // Поле ввода: отправка по кнопке и Enter, Escape (отмена правки и ответа),
@@ -2208,7 +2187,7 @@ function isFocusable(el) {
 
 // Фокус при открытии окна: элемент с data-autofocus, иначе первое видимое
 // текстовое поле, иначе первая кнопка окна, иначе "закрыть" (скрытые
-// элементы, например поле пароля у анонимного аккаунта, пропускаются).
+// элементы пропускаются).
 function initialFocusTarget(modal) {
     const groups = ['[data-autofocus]', '.modal-body input:not([type="checkbox"]):not([type="radio"]):not([type="number"])', '.modal-body button', '.close-modal'];
     for (const selector of groups) {
@@ -2268,9 +2247,7 @@ function onModalKeydown(e) {
     }
 }
 
-// ==================== Профиль, приватность, удаление аккаунта ====================
-
-let profileIsAnonymous = false;
+// ==================== Профиль, срок хранения, удаление аккаунта ====================
 
 // Аватар в монохроме — буква на нейтральном фоне (цвет задаёт тема, не
 // пользователь), у бота — иконка.
@@ -2282,82 +2259,103 @@ function renderAvatar(el, name, isBot) {
     el.textContent = (String(name || '').trim().charAt(0) || '?').toUpperCase();
 }
 
-async function openProfile() {
-    const data = await api('/api/user');
-    if (!data.success) {
-        showToast(data.message || 'Не удалось загрузить профиль', 'error');
-        return;
-    }
-    elements.profileUsername.textContent = data.user.username;
-    elements.profileEmail.textContent = data.user.email || 'Нет email (приватный режим)';
-    elements.profileCode.textContent = `Код: ${data.user.uniqueCode}`;
-    renderAvatar(elements.profileAvatar, data.user.username, false);
-    profileIsAnonymous = data.user.email === null || data.user.email === undefined;
-    elements.profileAnonBadge.classList.toggle('hidden', !profileIsAnonymous);
-    elements.changePasswordBtn.classList.toggle('hidden', profileIsAnonymous);
-    elements.securitySection.classList.toggle('hidden', profileIsAnonymous);
-    if (typeof data.user.readReceipts === 'boolean' && currentUser) currentUser.readReceipts = data.user.readReceipts;
+// Профиль рисуется из currentUser — его держит свежим pingSession (ответ
+// /api/auth), отдельный запрос за профилем не нужен. Открытие профиля —
+// тоже повод сверить срок и дату удаления с сервером.
+function openProfile() {
+    if (!currentUser) return;
+    elements.profileUsername.textContent = currentUser.username || '';
+    renderAvatar(elements.profileAvatar, currentUser.username, false);
+    renderProfileLifetime();
     elements.readReceiptsToggle.checked = readReceiptsEnabled();
     elements.notifyToggle.checked = isNotifyEnabled();
     refreshThemeButtons();
     openModal(elements.profileModal);
-    if (!profileIsAnonymous) loadSecurityEvents();
+    pingSession();
 }
 
-// ---- Журнал безопасности ----
-
-const SECURITY_EVENT_VIEW = {
-    login: { icon: 'log-in', text: 'Вход в аккаунт' },
-    login_failed: { icon: 'alert-triangle', text: 'Неудачная попытка входа' },
-    password_changed: { icon: 'key', text: 'Пароль изменён' },
-    register: { icon: 'user-plus', text: 'Регистрация аккаунта' },
-};
-
-let securitySeq = 0;
-function setSecurityPlaceholder(text) {
-    const li = document.createElement('li');
-    li.className = 'security-item muted';
-    li.textContent = text;
-    elements.securityList.replaceChildren(li);
-}
-
-async function loadSecurityEvents() {
-    const seq = ++securitySeq;
-    setSecurityPlaceholder('Загрузка…');
-    const data = await api('/api/security-events');
-    if (seq !== securitySeq) return;
-    if (!data.success || !Array.isArray(data.events)) {
-        setSecurityPlaceholder(data.message || 'Не удалось загрузить журнал');
-        return;
-    }
-    if (data.events.length === 0) {
-        setSecurityPlaceholder('Событий пока нет');
-        return;
-    }
-    const fragment = document.createDocumentFragment();
-    data.events.forEach((event) => {
-        const view = SECURITY_EVENT_VIEW[event.type] || { icon: 'shield', text: 'Событие безопасности' };
-        const li = document.createElement('li');
-        li.className = 'security-item' + (event.type === 'login_failed' ? ' is-warning' : '');
-        const body = document.createElement('div');
-        const title = document.createElement('div');
-        title.textContent = view.text;
-        const meta = document.createElement('small');
-        meta.className = 'muted';
-        meta.textContent = event.client || 'Неизвестный клиент';
-        body.append(title, meta);
-        const time = document.createElement('time');
-        time.className = 'muted';
-        const date = parseDate(event.createdAt);
-        if (date) {
-            time.dateTime = date.toISOString();
-            time.title = date.toLocaleString('ru-RU');
-        }
-        time.textContent = formatRelativeTime(event.createdAt);
-        li.append(icon(view.icon), body, time);
-        fragment.appendChild(li);
+// «Сколько хранить аккаунт» в профиле: выбранный срок и статус «удалится,
+// если не заходить до …» (для tab — «через 30 минут после закрытия
+// последней вкладки»).
+function renderProfileLifetime() {
+    if (!currentUser) return;
+    const lifetime = lifetimeWanted || currentUser.anonLifetime;
+    elements.profileLifetime.querySelectorAll('input[name="profile-lifetime"]').forEach((radio) => {
+        radio.checked = radio.value === lifetime;
     });
-    elements.securityList.replaceChildren(fragment);
+    elements.profileLifetimeStatus.textContent = NyxoLifetime.lifetimeStatus(currentUser, new Date());
+}
+
+// «Пока открыта вкладка» → «пока открыта вкладка» для середины фразы.
+function lifetimeLabelInline(lifetime) {
+    const label = NyxoLifetime.LIFETIME_LABELS[lifetime] || '';
+    return label.charAt(0).toLowerCase() + label.slice(1);
+}
+
+// Смена срока: POST /api/user/lifetime. Сервер пересоздаёт сессию (новый
+// sid и кука с новым сроком), поэтому после успеха сокет переподключается —
+// старое рукопожатие держится за прежнюю сессию. Без подтверждения, как у
+// отметок о прочтении. Пока запрос в пути, выбор не блокируется (иначе
+// клавиатурный фокус слетел бы с radio): последний выбор запоминается и
+// отправляется следом. Ошибка откатывает выбор к тому, что знает сервер.
+let lifetimeRequest = null;
+let lifetimeWanted = null;
+
+function changeLifetime(lifetime) {
+    if (!currentUser || !NyxoLifetime.isLifetime(lifetime)) return Promise.resolve(false);
+    lifetimeWanted = lifetime;
+    if (lifetimeRequest) return lifetimeRequest;
+    const userId = currentUser.id;
+    elements.profileLifetime.setAttribute('aria-busy', 'true');
+    lifetimeRequest = (async () => {
+        let ok = true;
+        while (isCurrentUser(userId) && lifetimeWanted && lifetimeWanted !== currentUser.anonLifetime) {
+            const target = lifetimeWanted;
+            const data = await api('/api/user/lifetime', { method: 'POST', body: JSON.stringify({ lifetime: target }) });
+            if (!isCurrentUser(userId)) return false;
+            if (!data.success) {
+                ok = false;
+                lifetimeWanted = null;
+                showToast(data.message || 'Не удалось сменить срок хранения', 'error');
+                break;
+            }
+            // Следующий круг — только если за время запроса выбрали другой срок.
+            if (lifetimeWanted === target) lifetimeWanted = null;
+            currentUser.anonLifetime = NyxoLifetime.isLifetime(data.anonLifetime) ? data.anonLifetime : target;
+            if ('anonExpiresAt' in data) currentUser.anonExpiresAt = data.anonExpiresAt;
+            if (typeof data.anonInactivitySeconds === 'number') currentUser.anonInactivitySeconds = data.anonInactivitySeconds;
+            reconnectSocket();
+            onLifetimeChanged();
+            showToast(`Срок хранения: ${lifetimeLabelInline(currentUser.anonLifetime)}`, 'success');
+        }
+        return ok;
+    })().finally(() => {
+        lifetimeRequest = null;
+        lifetimeWanted = null;
+        elements.profileLifetime.removeAttribute('aria-busy');
+        renderProfileLifetime();
+    });
+    return lifetimeRequest;
+}
+
+// Срок поменялся (здесь или в соседней вкладке): заметка в сайдбаре,
+// статус в профиле.
+function onLifetimeChanged() {
+    updateAnonNote();
+    renderProfileLifetime();
+}
+
+function onProfileLifetimeChange(e) {
+    const radio = e.target;
+    if (!radio || radio.name !== 'profile-lifetime' || !radio.checked) return;
+    changeLifetime(radio.value);
+}
+
+// Новое рукопожатие сокета с актуальной кукой сессии.
+function reconnectSocket() {
+    if (!currentUser) return;
+    if (socket.connected) socket.disconnect();
+    socket.connect();
 }
 
 // ---- Уведомления ----
@@ -2438,8 +2436,11 @@ function maybeNotify(message) {
     } catch { /* например, мобильный Chrome без service worker — просто без уведомления */ }
 }
 
+// Отметки о прочтении по умолчанию выключены (4.2): включены, только если
+// сервер прямо сказал readReceipts === true. Неизвестное значение (ответ
+// без поля, сервер другой версии) — выключены.
 function readReceiptsEnabled() {
-    return !currentUser || currentUser.readReceipts !== false;
+    return Boolean(currentUser && currentUser.readReceipts === true);
 }
 
 async function onReadReceiptsToggle() {
@@ -2465,42 +2466,66 @@ async function onReadReceiptsToggle() {
         : 'Отметки о прочтении выключены — вы тоже не будете видеть, что ваши сообщения прочитаны', 'success', 5000);
 }
 
+// «Удалить и выйти» — одна кнопка в сайдбаре и «Удалить аккаунт и выйти»
+// в профиле, одно подтверждение (alertdialog, фокус на «Отмена»). Подсказка
+// под предупреждением — как уйти, НЕ удаляя аккаунт (зависит от срока).
 function openDeleteAccountModal() {
-    elements.deleteAccountText.textContent = profileIsAnonymous
-        ? 'Все данные приватного режима — чаты, сообщения, файлы и ключи шифрования на этом устройстве — будут удалены безвозвратно.'
-        : 'Аккаунт, все ваши чаты, сообщения и файлы будут удалены безвозвратно. Ключи шифрования на этом устройстве тоже будут стёрты. Введите пароль для подтверждения.';
-    elements.deleteAccountPasswordGroup.classList.toggle('hidden', profileIsAnonymous);
-    elements.deleteAccountPassword.value = '';
-    closeModal(elements.profileModal);
+    if (!currentUser) return;
+    const alt = NyxoLifetime.leaveAlternative(currentUser.anonLifetime);
+    elements.deleteAccountAlt.textContent = alt;
+    elements.deleteAccountAlt.classList.toggle('hidden', !alt);
+    showDeleteAccountError('');
+    closeAllModals();
     openModal(elements.deleteAccountModal);
 }
 
-async function deleteAccount() {
-    const btn = elements.confirmDeleteAccountBtn;
-    if (btn.disabled || !currentUser) return;
-    const password = elements.deleteAccountPassword.value;
-    if (!profileIsAnonymous && !password) {
-        showToast('Введите пароль', 'error');
-        elements.deleteAccountPassword.focus();
-        return;
-    }
-    btn.disabled = true;
-    const data = await api('/api/account/delete', {
-        method: 'POST',
-        body: JSON.stringify(profileIsAnonymous ? {} : { password }),
-    });
-    btn.disabled = false;
-    elements.deleteAccountPassword.value = '';
-    if (!data.success) {
-        showToast(data.message || 'Не удалось удалить аккаунт', 'error');
-        return;
-    }
-    leaveApp(data.message || 'Аккаунт удалён', { wipe: true });
+function showDeleteAccountError(text) {
+    elements.deleteAccountError.textContent = text;
+    elements.deleteAccountError.classList.toggle('hidden', !text);
 }
 
-// ==================== Экран входа, выход, тема ====================
-// Аккаунт только временный: без почты, номера и пароля, с выбранным сроком
-// хранения. Экран один: выбор срока, «Начать анонимно» и, если есть,
+// Аккаунт удалён — стираем локальные данные и перезагружаемся с
+// уведомлением. Не удалён (нет сети, ошибка сервера) — локальные ключи НЕ
+// трогаем: иначе живой аккаунт остался бы на сервере без ключей.
+let deletingAccount = false;
+async function deleteAccountAndLeave() {
+    if (deletingAccount || !currentUser) return;
+    deletingAccount = true;
+    const userId = currentUser.id;
+    const btn = elements.confirmDeleteAccountBtn;
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    showDeleteAccountError('');
+    let gone = false;
+    let failure = '';
+    const data = await api('/api/account/delete', { method: 'POST', body: '{}', skipAuthCheck: true });
+    if (data.success) {
+        gone = true;
+    } else if (data.message === 'Не авторизован' || data.message === 'Пользователь не найден') {
+        // Сессии уже нет — проверяем, что аккаунта действительно нет, а не
+        // запрос ушёл со старой кукой (пока сервер пересоздавал сессию).
+        const state = await fetchAuthState();
+        if (state && !state.authenticated) gone = true;
+        else failure = state ? 'Не удалось удалить аккаунт. Попробуйте ещё раз.' : 'Нет связи с сервером — аккаунт не удалён. Попробуйте ещё раз.';
+    } else if (data.networkError) {
+        failure = 'Нет связи с сервером — аккаунт не удалён. Попробуйте ещё раз.';
+    } else {
+        failure = `${String(data.message || 'Не удалось удалить аккаунт').replace(/[.!]+$/, '')}. Аккаунт не удалён — попробуйте ещё раз.`;
+    }
+    deletingAccount = false;
+    btn.disabled = false;
+    btn.removeAttribute('aria-busy');
+    if (!isCurrentUser(userId)) return;
+    if (gone) {
+        leaveApp(AUTH_NOTICES.deleted);
+        return;
+    }
+    showDeleteAccountError(failure);
+}
+
+// ==================== Экран входа и тема ====================
+// Аккаунт только временный: без почты и номера телефона, с выбранным
+// сроком хранения. Экран один: выбор срока, «Начать анонимно» и, если есть,
 // приглашение в группу (ссылка или код). Формат приглашения проверяется ДО
 // PoW: битый код не должен стоить человеку проверки и лишнего аккаунта.
 // Ход проверки и ошибки остаются на экране (#auth-progress), а не только в
@@ -2726,35 +2751,6 @@ function applyOnionUrl(value) {
     elements.aboutOnionAddress.textContent = show ? onionUrl : '';
     if (show) elements.aboutOnionLink.href = onionUrl;
     else elements.aboutOnionLink.removeAttribute('href');
-}
-
-// wipe — «Выйти и стереть данные с устройства»: сначала публичные ключи на
-// сервере (иначе собеседники продолжали бы шифровать на ключ, которого
-// больше нет), потом сессия, потом локальные ключи и флаги
-// (leaveApp → wipeLocalUserData → E2EE.deleteLocalData). Анонимный аккаунт
-// сервер удаляет целиком при выходе, ключи — вместе с ним.
-let loggingOut = false;
-async function logout({ wipe }) {
-    if (loggingOut || !currentUser) return;
-    loggingOut = true;
-    const isAnonymous = Boolean(currentUser.isAnonymous);
-    [elements.logoutKeepBtn, elements.logoutWipeBtn].forEach((b) => { b.disabled = true; });
-    try {
-        let keysNote = '';
-        if (wipe && !isAnonymous) {
-            const res = await api('/api/keys', { method: 'DELETE' });
-            if (!res || res.success === false) {
-                keysNote = '. Ключи на сервере удалить не удалось — они заменятся новыми при следующем входе';
-            }
-        }
-        await api('/api/logout', { method: 'POST' });
-        if (isAnonymous) leaveApp('Данные приватного режима удалены');
-        else if (wipe) leaveApp(`Вы вышли, данные стёрты с этого устройства${keysNote}`, { wipe: true });
-        else leaveApp('Вы вышли из аккаунта');
-    } finally {
-        loggingOut = false;
-        [elements.logoutKeepBtn, elements.logoutWipeBtn].forEach((b) => { b.disabled = false; });
-    }
 }
 
 // Тема — через window.NyxoTheme (public/theme.js). Кнопка показывает, КУДА
