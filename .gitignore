@@ -8,3 +8,4 @@ public/uploads/
 tmp_*.js
 bd/
 .DS_Store
+test/e2e/.logs/
