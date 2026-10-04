@@ -1,9 +1,13 @@
 'use strict';
 // Тесты lib/bot-guide.js (этап 3, бот-помощник): разбор запроса, ключевые
-// слова и подписи кнопок, тексты ответов и приветствие. Чистый Node, без БД.
+// слова и подписи кнопок, тексты ответов и приветствие, а также статические
+// проверки клиентской части (контейнер подсказок, пределы, стили). Чистый
+// Node, без БД и браузера.
 // Запуск: node test/bot-guide.test.js
 
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 const guide = require('../lib/bot-guide');
 
 let passed = 0, failed = 0;
@@ -19,9 +23,9 @@ function test(name, fn) {
     }
 }
 
-// Обязательные строки записаны escape-последовательностями, а не взяты из
-// модуля: опечатка в кавычках или тире самого модуля иначе «подтвердила» бы
-// сама себя. „ и “ — «„» и «“», — — длинное тире.
+// Обязательные строки записаны в тесте заново, а не взяты из модуля: опечатка
+// в кавычках или тире самого модуля иначе «подтвердила» бы сама себя.
+// „ и “ — нижняя и верхняя «лапки», — — длинное тире.
 const DISCLAIMER = 'Чат со мной не защищён сквозным шифрованием — не пишите сюда личного';
 const UNKNOWN_HINT = 'Напишите „гайд“ или выберите тему кнопкой ниже';
 const WELCOME_CLOSING = 'Напишите „гайд“, чтобы узнать, как всё устроено';
@@ -448,6 +452,79 @@ test('welcomeText: неизвестный срок считается самым
     for (const value of [undefined, null, '', 'month', 'Tab', 'constructor', '__proto__', 'toString', 7, {}, []]) {
         assert.strictEqual(guide.welcomeText(value), expected, String(value));
     }
+});
+
+// ---------- Клиентская часть (статические проверки) ----------
+
+// Исходники клиента читаются как текст. Если script.js или style.css разобьют
+// на части (волна 6), список файлов здесь придётся обновить.
+const PUBLIC_DIR = path.join(__dirname, '..', 'public');
+const readPublic = name => fs.readFileSync(path.join(PUBLIC_DIR, name), 'utf8');
+
+// Тело функции по имени: от первой «{» после заголовка до парной «}».
+function functionBody(source, name) {
+    const start = source.indexOf(`function ${name}(`);
+    assert.ok(start >= 0, `в script.js нет функции ${name}`);
+    const open = source.indexOf('{', source.indexOf(')', start));
+    let depth = 0;
+    for (let i = open; i < source.length; i++) {
+        if (source[i] === '{') depth++;
+        else if (source[i] === '}' && --depth === 0) return source.slice(open, i + 1);
+    }
+    throw new Error(`не найден конец функции ${name}`);
+}
+
+test('index.html: контейнер подсказок скрыт, пуст, подписан как группа и стоит в поле ввода', () => {
+    const html = readPublic('index.html');
+    const tags = html.match(/<div\b[^>]*\bid="bot-suggestions"[^>]*>/g) || [];
+    assert.strictEqual(tags.length, 1, 'ровно один #bot-suggestions');
+    assert.match(tags[0], /\brole="group"/);
+    assert.match(tags[0], /\baria-label="Темы для бота"/);
+    assert.match(tags[0], /\bclass="[^"]*\bhidden\b[^"]*"/, 'по умолчанию скрыт');
+    // Кнопок в разметке нет: подписи приходят с сервера (chat.quickReplies).
+    assert.match(html, /id="bot-suggestions"[^>]*><\/div>/);
+    const container = html.indexOf('id="message-input-container"');
+    const box = html.indexOf('id="bot-suggestions"');
+    const input = html.indexOf('class="input-wrapper"');
+    assert.ok(container >= 0 && container < box && box < input, 'контейнер подсказок — внутри #message-input-container, над полем ввода');
+});
+
+test('script.js: пределы клиента вмещают подписи сервера, подписи берутся из chat.quickReplies', () => {
+    const script = readPublic('script.js');
+    const maxCount = Number((/const MAX_BOT_SUGGESTIONS = (\d+);/.exec(script) || [])[1]);
+    const maxLength = Number((/const MAX_BOT_SUGGESTION_LENGTH = (\d+);/.exec(script) || [])[1]);
+    assert.strictEqual(maxCount, 6, 'не больше 6 кнопок');
+    assert.strictEqual(maxLength, 60, 'подпись не длиннее 60 символов');
+    assert.ok(guide.QUICK_REPLIES.length <= maxCount);
+    for (const label of guide.QUICK_REPLIES) assert.ok(label.length <= maxLength, label);
+    assert.match(script, /renderBotSuggestions\(chatId, data\.chat && data\.chat\.quickReplies\)/);
+});
+
+test('script.js: подсказки рисуются через textContent и нажатие идёт в запомненный чат через sendText', () => {
+    const script = readPublic('script.js');
+    const render = functionBody(script, 'renderBotSuggestions');
+    assert.ok(render.includes('.textContent = label'));
+    assert.doesNotMatch(render, /innerHTML|insertAdjacentHTML|outerHTML/);
+    const click = functionBody(script, 'onBotSuggestionClick');
+    assert.match(click, /sendText\(button\.textContent, \{ chatId \}\)/, 'без replyToId и без чтения поля ввода');
+    assert.doesNotMatch(click, /messageInput/, 'черновик в поле ввода не трогаем');
+    assert.match(click, /chatId !== currentChatId/, 'чужой чат — не отправляем');
+    // Подсказки гасятся и стираются при смене чата и сбросе вида.
+    assert.match(functionBody(script, 'releaseChatResources'), /clearBotSuggestions\(\)/);
+});
+
+test('script.js: плейсхолдер и статус шапки чата с ботом', () => {
+    const script = readPublic('script.js');
+    assert.ok(script.includes("const BOT_INPUT_PLACEHOLDER = 'Спросите бота или выберите тему';"));
+    assert.ok(script.includes("'Бот · без сквозного шифрования'"));
+});
+
+test('style.css: ряд подсказок прокручивается на телефоне без полосы, на сенсорном экране кнопки 40 px', () => {
+    const css = readPublic('style.css');
+    assert.match(css, /\.suggestions\s*\{[^}]*display:\s*flex;[^}]*flex-wrap:\s*wrap;[^}]*gap:\s*8px;/);
+    assert.match(css, /\.suggestion\s*\{[^}]*height:\s*32px;[^}]*font-size:\s*13px;/);
+    assert.match(css, /@media \(max-width: 768px\)\s*\{\s*\.suggestions\s*\{[^}]*flex-wrap:\s*nowrap;[^}]*overflow-x:\s*auto;[^}]*scrollbar-width:\s*none;/);
+    assert.match(css, /@media \(pointer: coarse\)\s*\{\s*\.suggestion\s*\{\s*height:\s*40px;/);
 });
 
 // ---------- Чистота ----------

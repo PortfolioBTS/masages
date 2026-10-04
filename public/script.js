@@ -129,6 +129,9 @@ const elements = {
     recordBtn: document.getElementById('record-btn'),
     fileInput: document.getElementById('file-input'),
 
+    // ---- Подсказки в чате с ботом ----
+    botSuggestions: document.getElementById('bot-suggestions'),
+
     // ---- Файлы: перетаскивание, загрузка, окно отправки ----
     dropZone: document.getElementById('drop-zone'),
     uploadStatus: document.getElementById('upload-status'),
@@ -572,7 +575,7 @@ function updateE2eeToggleUI(chatId, roomId) {
     elements.getChatCodeBtn.classList.toggle('hidden', !inRoom);
     btn.classList.remove('e2ee-active', 'e2ee-unavailable', 'is-active');
     if (!inRoom) {
-        elements.messageInput.placeholder = 'Сообщение...';
+        elements.messageInput.placeholder = currentChatIsBot() ? BOT_INPUT_PLACEHOLDER : 'Сообщение...';
         return;
     }
     let label;
@@ -1485,9 +1488,11 @@ function resetChatView() {
 
 // Всё, что привязано к открытому чату и должно исчезнуть при его смене:
 // расшифрованные вложения (object URL), очередь их расшифровки, баннер
-// смены ключей, отложенные служебные строки, полоса заявок, кнопка «вниз».
+// смены ключей, отложенные служебные строки, полоса заявок, кнопка «вниз»,
+// подсказки бота (они рисуются заново после загрузки истории).
 function releaseChatResources() {
     resetAttachmentDecrypts();
+    clearBotSuggestions();
     pendingIdentityChanges.clear();
     renderIdentityBanner();
     noticesReady = false;
@@ -1977,6 +1982,7 @@ function setupComposerListeners() {
     elements.uploadCancelBtn.addEventListener('click', () => cancelUploadQueue(true));
     setupDragAndDrop();
     elements.cancelReplyBtn.addEventListener('click', clearReply);
+    elements.botSuggestions.addEventListener('click', onBotSuggestionClick);
 }
 
 // Меню сообщения: панель реакций, ответ, копирование, правка, удаление.
@@ -3684,7 +3690,8 @@ async function setChatExpiry(seconds) {
 }
 
 // Подпись под названием чата: у группы — число участников (из списка
-// чатов), у бота — «Бот», иначе — в сети / не в сети.
+// чатов), у бота — «Бот · без сквозного шифрования» (с ним переписка идёт
+// открытым текстом, и это видно сразу), иначе — в сети / не в сети.
 function renderChatStatus() {
     if (!currentChatId) return;
     const meta = getCurrentChatMeta();
@@ -3695,7 +3702,7 @@ function renderChatStatus() {
         return;
     }
     const online = Boolean(Number(meta.online !== undefined ? meta.online : currentChatExtra.online));
-    elements.chatStatus.textContent = Number(meta.is_bot) ? 'Бот' : (currentRoomId ? 'Группа' : (online ? 'В сети' : 'Не в сети'));
+    elements.chatStatus.textContent = Number(meta.is_bot) ? 'Бот · без сквозного шифрования' : (currentRoomId ? 'Группа' : (online ? 'В сети' : 'Не в сети'));
     elements.chatStatus.className = 'status ' + (online ? 'online' : 'offline');
 }
 
@@ -3770,6 +3777,9 @@ async function openChat(chatId, roomId, name, avatar, online, isBot) {
     await decryptMessagesInPlace(data.messages, room);
     if (seq !== openChatSeq) return;
     renderMessages(data.messages, 'replace');
+    // Подсказки бота — до прокрутки вниз: они занимают место над полем ввода,
+    // и лента ужмётся.
+    if (bot) renderBotSuggestions(chatId, data.chat && data.chat.quickReplies);
     hasMoreHistory = Boolean(data.hasMore);
     lastSeenMessageId = data.messages.length ? data.messages[data.messages.length - 1].id : 0;
     flushSystemNotices();
@@ -4316,7 +4326,7 @@ async function sendMessage() {
     const chatId = currentChatId;
     const roomId = currentRoomId;
 
-    sending = true; // двойной Enter/клик не отправляет сообщение дважды
+    setSending(true); // двойной Enter/клик не отправляет сообщение дважды
     try {
         if (editingMessageId) {
             // Шифруем правку так же, как было зашифровано исходное
@@ -4353,7 +4363,7 @@ async function sendMessage() {
             if (!sent) return;
         }
     } finally {
-        sending = false;
+        setSending(false);
     }
 
     // Если пользователь успел уйти в другой чат, там в поле может быть уже
@@ -4361,6 +4371,86 @@ async function sendMessage() {
     if (chatId === currentChatId) {
         elements.messageInput.value = '';
         clearReply();
+    }
+}
+
+// ==================== Подсказки в чате с ботом ====================
+// Над полем ввода в чате с ботом — кнопки с темами («Гайд», «Шифрование», …).
+// Нажатие — обычное сообщение с подписью кнопки, тем же путём (sendText), что и
+// набранный текст: ответ бота приходит как на любое другое сообщение. Подписи
+// отдаёт сервер (chat.quickReplies в ответе истории): это же ключевые слова
+// бота (lib/bot-guide.js), и разойтись они не должны.
+
+const MAX_BOT_SUGGESTIONS = 6;         // больше кнопок на экране не поместится
+const MAX_BOT_SUGGESTION_LENGTH = 60;  // подпись длиннее — уже не подсказка
+const BOT_INPUT_PLACEHOLDER = 'Спросите бота или выберите тему';
+
+let botSuggestionsChatId = null;       // чат, для которого нарисованы кнопки: нажатие уходит только в него
+
+function currentChatIsBot() {
+    return Boolean(Number(getCurrentChatMeta().is_bot));
+}
+
+function clearBotSuggestions() {
+    botSuggestionsChatId = null;
+    elements.botSuggestions.classList.add('hidden');
+    elements.botSuggestions.replaceChildren();
+}
+
+// Пока идёт отправка, кнопки помечены aria-disabled, а не disabled: фокус
+// остаётся на нажатой кнопке (клавиатура и скринридер не теряют место), а
+// повторное нажатие всё равно ничего не делает.
+function syncBotSuggestionsBusy() {
+    elements.botSuggestions.querySelectorAll('button.suggestion').forEach((button) => {
+        if (sending) button.setAttribute('aria-disabled', 'true');
+        else button.removeAttribute('aria-disabled');
+    });
+}
+
+// Единственное место, где меняется замок отправки: кнопки подсказок должны
+// отражать его и тогда, когда сообщение уходит из поля ввода.
+function setSending(value) {
+    sending = value;
+    syncBotSuggestionsBusy();
+}
+
+// labels — chat.quickReplies из ответа сервера. Рисуем только строки разумной
+// длины и не больше MAX_BOT_SUGGESTIONS, через textContent, как любой текст,
+// пришедший с сервера. chatId запоминается: нажатие отправит сообщение именно
+// в этот чат, даже если к тому времени открыт другой.
+function renderBotSuggestions(chatId, labels) {
+    clearBotSuggestions();
+    if (!Array.isArray(labels)) return;
+    const shown = labels
+        .filter(label => typeof label === 'string' && label.trim() !== '' && label.length <= MAX_BOT_SUGGESTION_LENGTH)
+        .slice(0, MAX_BOT_SUGGESTIONS);
+    if (shown.length === 0) return;
+    const fragment = document.createDocumentFragment();
+    shown.forEach((label) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'chip suggestion';
+        button.textContent = label;
+        fragment.appendChild(button);
+    });
+    elements.botSuggestions.appendChild(fragment);
+    elements.botSuggestions.classList.remove('hidden');
+    botSuggestionsChatId = chatId;
+    syncBotSuggestionsBusy();
+}
+
+// Один обработчик на весь контейнер: кнопки пересоздаются при каждом открытии чата.
+async function onBotSuggestionClick(event) {
+    const button = event.target.closest('button.suggestion');
+    if (!button || !elements.botSuggestions.contains(button)) return;
+    const chatId = botSuggestionsChatId;
+    if (!chatId || chatId !== currentChatId || sending) return;
+    setSending(true);
+    try {
+        // Поле ввода не читаем и не очищаем: черновик пользователя остаётся как был.
+        await sendText(button.textContent, { chatId });
+    } finally {
+        setSending(false);
     }
 }
 
