@@ -98,6 +98,10 @@ const { initKeyStoreSchema } = require('./lib/key-store');
 // (key-shares). Тоже регистрируется после sessionMiddleware.
 const { initE2eeGroupsSchema, registerE2eeGroupRoutes } = require('./lib/e2ee-groups');
 
+// Бот-помощник: ответ по теме запроса, приветствие нового аккаунта и подписи
+// кнопок-подсказок — чистые функции без БД (lib/bot-guide.js).
+const botGuide = require('./lib/bot-guide');
+
 // Onion-сервис (контейнер tor-service/) и proof-of-work для регистрации
 const { ONION_ADDRESS, ONION_PORT, onionMiddleware, isOnionHost, isOnionSocket, listenOnionPort } = require('./lib/tor-support');
 const { createChallenge, verifySolution } = require('./lib/pow');
@@ -1803,7 +1807,7 @@ app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
 
         const userId = await withTransaction(client => insertUserWithBotChat(client, {
             uniqueCode, username, email: null, passwordHash: null,
-            welcomeText: anonWelcomeText(lifetime), anonLifetime: lifetime,
+            welcomeText: botGuide.welcomeText(lifetime), anonLifetime: lifetime,
         }));
 
         const createdAtMs = Date.now();
@@ -2332,7 +2336,12 @@ app.get('/api/messages/:chatId', async (req, res) => {
             success: true,
             messages,
             hasMore,
-            chat: { id: chat.id, room_id: chat.room_id, name: chat.name, avatar: chat.avatar, is_bot: chat.is_bot },
+            chat: {
+                id: chat.id, room_id: chat.room_id, name: chat.name, avatar: chat.avatar, is_bot: chat.is_bot,
+                // Подписи кнопок-подсказок — только у чата с ботом. Их отдаёт сервер,
+                // чтобы кнопки и ключевые слова бота не расходились (lib/bot-guide.js).
+                ...(chat.is_bot ? { quickReplies: [...botGuide.QUICK_REPLIES] } : {}),
+            },
         });
     } catch (error) {
         console.error('Get messages error:', error);
@@ -2407,9 +2416,13 @@ function parseRequestedExpiry(value) {
     return DisappearingMessagesManager.normalizeExpirySeconds(value);
 }
 
-const BOT_RESPONSES = ['Интересный вопрос! Расскажите подробнее.', 'Я получил ваше сообщение!', 'Хмм, дайте подумать...', 'Отличное сообщение! Продолжайте.', 'Я бот, но стараюсь быть полезным!', 'Можете уточнить, что именно вас интересует?'];
+// Небольшая пауза перед ответом: он должен выглядеть ответом на сообщение, а
+// не выскакивать одновременно с ним.
+const BOT_REPLY_DELAY_MS = 600;
 
-function scheduleBotReply(chat) {
+// userText — открытый текст сообщения пользователя (чат с ботом не
+// шифруется). Что ответить, решает lib/bot-guide.js по теме запроса.
+function scheduleBotReply(chat, userText) {
     const socketRoomKey = getSocketRoomKey(chat.id, null);
     setTimeout(async () => {
         // Весь колбэк в try: раньше ошибка БД в первом же запросе здесь
@@ -2418,7 +2431,7 @@ function scheduleBotReply(chat) {
             const stillExists = await dbGet('SELECT id FROM chats WHERE id = $1 AND is_bot = 1', [chat.id]);
             if (!stillExists) return;
 
-            const replyText = BOT_RESPONSES[Math.floor(Math.random() * BOT_RESPONSES.length)];
+            const replyText = botGuide.botReply(userText).text;
             // Сообщения бота хранятся от имени владельца чата (sent = 0).
             const botMessage = await dbGet(
                 `INSERT INTO messages (chat_id, room_id, user_id, text, sent, time, status)
@@ -2444,7 +2457,7 @@ function scheduleBotReply(chat) {
         } catch (e) {
             console.error('Bot error:', e);
         }
-    }, 1500);
+    }, BOT_REPLY_DELAY_MS);
 }
 
 app.post('/api/messages', async (req, res) => {
@@ -2522,7 +2535,9 @@ app.post('/api/messages', async (req, res) => {
         res.json({ success: true, message });
 
         if (roomId) unarchiveForRecipients(chat, userId);
-        if (chat.is_bot) scheduleBotReply(chat);
+        // Чат с ботом ходит открытым текстом. Конверт E2EE сюда слать незачем, а
+        // если он всё же пришёл, прочитать его бот не может — ответит подсказкой.
+        if (chat.is_bot) scheduleBotReply(chat, encrypted ? '' : safeText);
     } catch (error) {
         console.error('Send message error:', error);
         res.json({ success: false, message: 'Ошибка отправки' });
