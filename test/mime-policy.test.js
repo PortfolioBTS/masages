@@ -1,6 +1,6 @@
 'use strict';
-// Тесты политики типов вложений на клиенте (public/lib/mime-policy.js).
-// Без браузера, БД и сети.
+// Тесты политики типов вложений на клиенте (public/lib/mime-policy.js) и
+// того, как она подключена к странице. Без браузера, БД и сети.
 //
 // Что проверяется:
 //   1. сам модуль: белый список, определение типа файла, строгое
@@ -8,7 +8,9 @@
 //      не проходит;
 //   2. клиентский список совпадает с серверным (lib/security-utils.js): если
 //      они разойдутся, клиент начнёт отправлять то, что сервер отклонит, или
-//      наоборот.
+//      наоборот;
+//   3. страница подключена правильно: скрипт модуля стоит до script.js —
+//      иначе script.js упал бы на первом же обращении к MimePolicy.
 //
 // Запуск: node test/mime-policy.test.js
 
@@ -36,6 +38,8 @@ function test(name, fn) {
         console.error('       ', err && err.stack ? err.stack : err);
     }
 }
+
+const readPublic = (relative) => fs.readFileSync(path.join(PUBLIC_DIR, relative), 'utf8');
 
 // Звуковые типы во всех видах, в которых их называют браузеры и ОС, плюс
 // контейнеры, которые чаще всего прячут звук. Ни один не должен пройти.
@@ -214,6 +218,21 @@ test('the browser path: a plain script with no module system publishes MimePolic
     assert.strictEqual(loaded.safeBlobMime('audio/ogg'), 'application/octet-stream');
     assert.strictEqual(loaded.fileIconName('audio/wav'), 'file');
     assert.strictEqual(loaded.detectFileMime({ type: 'image/jpg', name: 'a.jpg' }), 'image/jpeg');
+});
+
+// ---------- Подключение к странице ----------
+
+const html = readPublic('index.html');
+
+test('index.html: the module script is loaded exactly once and before script.js', () => {
+    const sources = [...html.matchAll(/<script\b[^>]*\ssrc="([^"]+)"/g)].map(m => m[1]);
+    const moduleAt = sources.indexOf('lib/mime-policy.js');
+    const scriptAt = sources.indexOf('script.js');
+    assert.ok(moduleAt >= 0, 'lib/mime-policy.js is not linked from index.html: ' + sources.join(', '));
+    assert.ok(scriptAt >= 0);
+    assert.strictEqual(sources.lastIndexOf('lib/mime-policy.js'), moduleAt, 'linked more than once');
+    assert.ok(moduleAt < scriptAt, 'script.js would start without MimePolicy');
+    assert.ok(fs.existsSync(MODULE_FILE));
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
