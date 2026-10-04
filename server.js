@@ -31,14 +31,7 @@ const { ipKeyGenerator } = rateLimit;
 const { stripMetadataFromFile, cleanupStaleTempFiles } = require('./lib/metadata-stripper');
 const DisappearingMessagesManager = require('./lib/disappearing-messages');
 const { encryptText, decryptText, messageAad } = require('./lib/message-crypto');
-const { addRandomDelay, sanitizeText, getPrivacyHeaders } = require('./lib/privacy');
-const {
-    hashPassword,
-    verifyPassword,
-    needsRehash,
-    checkPasswordPolicy,
-    DUMMY_PASSWORD_HASH
-} = require('./lib/passwords');
+const { sanitizeText, getPrivacyHeaders } = require('./lib/privacy');
 const {
     ALLOWED_MIME_TYPES,
     MIME_EXTENSIONS,
@@ -56,9 +49,7 @@ const {
     buildContentSecurityPolicy,
     resolveDbTlsConfig,
     createCounter,
-    normalizeEmail,
-    positiveNumberOr,
-    classifyUserAgent
+    positiveNumberOr
 } = require('./lib/security-utils');
 const {
     JOIN_REQUEST_TTL_SECONDS,
@@ -340,27 +331,6 @@ app.use((req, res, next) => {
 const rateLimitKeyGenerator = (req) => ipKeyGenerator(req.realIp || req.ip);
 const sessionUserId = (req) => (req.session && req.session.userId) || null;
 const RATE_LIMIT_DEFAULTS = { standardHeaders: true, legacyHeaders: false };
-
-// Вход: для clearnet — по IP; для onion IP общий у всех, поэтому ключ —
-// email (перебор паролей одного аккаунта через Tor всё равно упирается
-// в loginAccountLimiter ниже).
-const loginLimiter = rateLimit({
-    ...RATE_LIMIT_DEFAULTS,
-    windowMs: 15 * 60 * 1000,
-    max: 5,
-    keyGenerator: (req) => (req.isOnion ? `onion:${normalizeEmail(req.body && req.body.email)}` : rateLimitKeyGenerator(req)),
-    message: { success: false, message: 'Слишком много попыток входа. Попробуйте позже.' }
-});
-
-// Лимит на аккаунт для всех: смена IP (ботнет, новые цепочки Tor) не даёт
-// перебирать пароль одного пользователя быстрее 10 попыток в час.
-const loginAccountLimiter = rateLimit({
-    ...RATE_LIMIT_DEFAULTS,
-    windowMs: 60 * 60 * 1000,
-    max: 10,
-    keyGenerator: (req) => `account:${normalizeEmail(req.body && req.body.email)}`,
-    message: { success: false, message: 'Слишком много попыток входа в этот аккаунт. Попробуйте позже.' }
-});
 
 // Массовую регистрацию теперь сдерживает proof-of-work (lib/pow.js). IP-лимит
 // остался мягким и только для clearnet: для onion он запер бы регистрацию
@@ -1220,13 +1190,6 @@ const INVITE_TTL_SECONDS = Math.min(
     10 * 365 * 24 * 3600
 );
 
-// Длина пароля: при регистрации и смене — не больше 256 символов (политика
-// в lib/passwords.js); при входе — лишь анти-DoS порог, чтобы мегабайтная
-// строка не уходила в HMAC/bcrypt, но и пароль, заданный по старым
-// правилам, не отвергался заранее.
-const MAX_PASSWORD_LENGTH = 256;
-const MAX_LOGIN_PASSWORD_LENGTH = 1024;
-
 const sessionSecret = process.env.SESSION_SECRET;
 if (!sessionSecret) throw new Error('SESSION_SECRET не задан в переменных окружения');
 
@@ -1280,7 +1243,7 @@ async function loadAnonState(userId, sess) {
         `SELECT anon_lifetime,
                 EXTRACT(EPOCH FROM last_active_at) * 1000 AS last_active_ms,
                 EXTRACT(EPOCH FROM created_at::timestamptz) * 1000 AS created_ms
-         FROM users WHERE id = $1 AND email IS NULL AND password IS NULL`,
+         FROM users WHERE id = $1`,
         [userId]
     );
     if (!row) {
@@ -1319,7 +1282,7 @@ async function isExpiredAnonymousSession(sess) {
 function persistAnonActivity(userIds) {
     if (userIds.length === 0) return;
     dbRun(
-        'UPDATE users SET last_active_at = NOW() WHERE id = ANY($1::int[]) AND email IS NULL AND password IS NULL',
+        'UPDATE users SET last_active_at = NOW() WHERE id = ANY($1::int[])',
         [userIds]
     ).catch(err => logError('[Anon] Не удалось записать активность', err));
 }
@@ -1726,13 +1689,14 @@ app.get('/api/pow/challenge', (req, res) => {
 });
 
 // Новый аккаунт и его чат с ботом с приветствием — внутри транзакции client.
-// anonLifetime — только у анонимного аккаунта (у него же отсчёт активности).
-async function insertUserWithBotChat(client, { uniqueCode, username, email, passwordHash, welcomeText, anonLifetime = null }) {
+// Аккаунты только временные: anonLifetime обязателен (users.anon_lifetime NOT
+// NULL), с него же начинается отсчёт активности.
+async function insertUserWithBotChat(client, { uniqueCode, username, welcomeText, anonLifetime }) {
     const userResult = await client.query(
-        `INSERT INTO users (unique_code, username, email, password, avatar, anon_lifetime, last_active_at)
-         VALUES ($1, $2, $3, $4, $5, $6::text, CASE WHEN $6::text IS NULL THEN NULL ELSE NOW() END)
+        `INSERT INTO users (unique_code, username, avatar, anon_lifetime, last_active_at)
+         VALUES ($1, $2, $3, $4, NOW())
          RETURNING id`,
-        [uniqueCode, username, email, passwordHash, '#667EEA', anonLifetime]
+        [uniqueCode, username, '#667EEA', anonLifetime]
     );
     const userId = userResult.rows[0].id;
     const botResult = await client.query(
@@ -1762,50 +1726,6 @@ async function withTransaction(work) {
     }
 }
 
-app.post('/api/register', registerLimiter, async (req, res) => {
-    const { email, password, confirmPassword } = req.body || {};
-    const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
-    if (!username || !isNonEmptyString(email) || !isNonEmptyString(password) || typeof confirmPassword !== 'string')
-        return res.json({ success: false, message: 'Заполните все поля' });
-    if (username.length > 32)
-        return res.json({ success: false, message: 'Имя не может быть длиннее 32 символов' });
-    if (email.length > 254)
-        return res.json({ success: false, message: 'Email слишком длинный' });
-    if (password.length > MAX_PASSWORD_LENGTH)
-        return res.json({ success: false, message: `Пароль не может быть длиннее ${MAX_PASSWORD_LENGTH} символов` });
-    if (password !== confirmPassword)
-        return res.json({ success: false, message: 'Пароли не совпадают' });
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
-        return res.json({ success: false, message: 'Введите корректный email' });
-
-    try {
-        // Политика — до PoW: решение одноразовое, и отказ из-за слабого
-        // пароля не должен заставлять решать задачу заново.
-        const policyError = await checkPasswordPolicy(password, { username, email });
-        if (policyError) return res.json({ success: false, message: policyError });
-        // PoW — до любых обращений к users: иначе ответ "такие данные уже
-        // заняты" можно было бы получать бесплатно, перебирая email.
-        if (!checkPow(req, 'register')) return res.json(POW_FAILED_RESPONSE);
-
-        const existing = await dbGet('SELECT id FROM users WHERE email = $1 OR username = $2', [email, username]);
-        if (existing) return res.json({ success: false, message: 'Ошибка регистрации. Проверьте введённые данные.' });
-
-        const uniqueCode = await generateUniqueCodeAsync();
-        const passwordHash = await hashPassword(password);
-        const userId = await withTransaction(client => insertUserWithBotChat(client, {
-            uniqueCode, username, email, passwordHash,
-            welcomeText: 'Привет! Я бот-помощник. Чем могу помочь?',
-        }));
-
-        await startUserSession(req, { userId, username, uniqueCode, avatar: '#667EEA' });
-        recordSecurityEvent(userId, 'register', req);
-        res.json({ success: true, message: 'Регистрация успешна!', user: { id: userId, username, uniqueCode, avatar: '#667EEA', readReceipts: true } });
-    } catch (error) {
-        console.error('Register error:', error);
-        res.json({ success: false, message: 'Ошибка сервера' });
-    }
-});
-
 // lifetime: 'tab' | 'day' | 'week' (по умолчанию 'tab') — см.
 // lib/anon-lifetime.js. Проверяется до PoW: решение одноразовое, и отказ
 // из-за опечатки в параметре не должен заставлять решать задачу заново.
@@ -1822,7 +1742,7 @@ app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
         const username = await generateAnonymousUsernameAsync();
 
         const userId = await withTransaction(client => insertUserWithBotChat(client, {
-            uniqueCode, username, email: null, passwordHash: null,
+            uniqueCode, username,
             welcomeText: anonWelcomeText(lifetime), anonLifetime: lifetime,
         }));
 
@@ -1862,58 +1782,6 @@ app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
     }
 });
 
-app.post('/api/login', loginLimiter, loginAccountLimiter, async (req, res) => {
-    const { email, password } = req.body || {};
-    if (!isNonEmptyString(email) || !isNonEmptyString(password)) return res.json({ success: false, message: 'Введите email и пароль' });
-    if (email.length > 254 || password.length > MAX_LOGIN_PASSWORD_LENGTH) return res.json({ success: false, message: 'Неверный email или пароль' });
-
-    try {
-        // Добавляем случайную задержку для защиты от timing attacks
-        await addRandomDelay(50, 150);
-
-        const user = await dbGet('SELECT id, username, unique_code, avatar, password, read_receipts FROM users WHERE email = $1', [email]);
-        // Проверка пароля выполняется независимо от того, найден ли юзер —
-        // это убирает разницу во времени ответа между "нет такого email"
-        // и "неверный пароль" (см. п.4 аудита).
-        const hashToCheck = (user && user.password) ? user.password : DUMMY_PASSWORD_HASH;
-        const validPassword = await verifyPassword(password, hashToCheck);
-
-        // Дополнительная случайная задержка
-        await addRandomDelay(20, 80);
-
-        if (!user || !user.password || !validPassword) {
-            // Неудачный вход в СУЩЕСТВУЮЩИЙ аккаунт — в его журнал. Запись не
-            // ожидается: иначе ответ для существующего email приходил бы
-            // заметно позже, чем для несуществующего (оракул по времени).
-            if (user && user.password) recordSecurityEvent(user.id, 'login_failed', req);
-            return res.json({ success: false, message: 'Неверный email или пароль' });
-        }
-
-        // Хэш старого формата (bcrypt без предхэша обрезал пароль на 72
-        // байтах) или с устаревшей стоимостью — перехэшируем, пока пароль
-        // известен. Условие на старый хэш: параллельная смена пароля важнее.
-        if (needsRehash(user.password)) {
-            try {
-                await dbRun('UPDATE users SET password = $1 WHERE id = $2 AND password = $3', [await hashPassword(password), user.id, user.password]);
-            } catch (rehashError) {
-                console.error('[Auth] Не удалось обновить хэш пароля:', rehashError.message);
-            }
-        }
-
-        await startUserSession(req, {
-            userId: user.id, username: user.username, uniqueCode: user.unique_code, avatar: user.avatar || '',
-        });
-        recordSecurityEvent(user.id, 'login', req);
-        res.json({
-            success: true, message: 'Вход выполнен!',
-            user: { id: user.id, username: user.username, uniqueCode: user.unique_code, avatar: user.avatar || '', readReceipts: user.read_receipts },
-        });
-    } catch (error) {
-        console.error('Login error:', error);
-        res.json({ success: false, message: 'Ошибка базы данных' });
-    }
-});
-
 // Завершает сессию после выхода/удаления аккаунта. clearSiteCache —
 // Clear-Site-Data: "cache": браузер выбрасывает кэш сайта (страницы,
 // вложения), чтобы на общем устройстве не оставалось следов переписки.
@@ -1921,8 +1789,9 @@ function endSession(req, res, { clearSiteCache, message }) {
     req.session.destroy((err) => {
         res.clearCookie('connect.sid');
         // CSRF-куку НЕ удаляем, а выдаём новую: после выхода страница не
-        // перезагружается, и следующий POST /api/login без куки получал
-        // 403 "неверный CSRF-токен" — войти снова можно было только после F5.
+        // перезагружается, и следующий POST без куки (например, новая
+        // регистрация) получал бы 403 "неверный CSRF-токен" — продолжить
+        // можно было бы только после F5.
         issueCsrfCookie(req, res);
         if (clearSiteCache) res.set('Clear-Site-Data', '"cache"');
         if (err) console.error('Session destroy error:', err);
@@ -1946,25 +1815,13 @@ app.post('/api/logout', async (req, res) => {
     endSession(req, res, { clearSiteCache: isAnonymous, message: isAnonymous ? 'Данные удалены' : 'Выход выполнен' });
 });
 
-// Удаление аккаунта со всеми данными (см. deleteUserAccount). Обычному
-// аккаунту нужен пароль — украденной сессии (или забытой открытой вкладки)
-// недостаточно; анонимный аккаунт пароля не имеет и удаляется сразу.
+// Удаление аккаунта со всеми данными (см. deleteUserAccount). Аккаунты только
+// временные и без пароля, поэтому удаляется сразу.
 app.post('/api/account/delete', passwordLimiter, async (req, res) => {
     const userId = req.session.userId;
     if (!userId) return res.json({ success: false, message: 'Не авторизован' });
     try {
-        const user = await dbGet('SELECT password FROM users WHERE id = $1', [userId]);
-        if (!user) return res.json({ success: false, message: 'Пользователь не найден' });
-        if (user.password) {
-            const password = req.body?.password;
-            if (!isNonEmptyString(password) || password.length > MAX_LOGIN_PASSWORD_LENGTH) {
-                return res.json({ success: false, message: 'Введите пароль' });
-            }
-            if (!(await verifyPassword(password, user.password))) {
-                return res.json({ success: false, message: 'Неверный пароль' });
-            }
-        }
-        await deleteUserAccount(userId);
+        if (!(await deleteUserAccount(userId))) return res.json({ success: false, message: 'Пользователь не найден' });
         endSession(req, res, { clearSiteCache: true, message: 'Аккаунт и все данные удалены' });
     } catch (error) {
         console.error('Delete account error:', error);
@@ -2008,50 +1865,6 @@ app.get('/api/auth', async (req, res) => {
     }
 });
 
-// ---- Журнал безопасности ----
-//
-// Последние SECURITY_EVENTS_PER_USER событий входа и смены пароля — чтобы
-// пользователь заметил чужой вход. Хранится только тип, грубое семейство
-// клиента (classifyUserAgent: «Firefox · Android») и время; ни IP, ни
-// полной строки User-Agent. Для анонимов не ведётся. Запись — в фоне: её
-// сбой не должен ломать вход, а ожидание — выдавать по времени ответа,
-// существует ли аккаунт (см. login_failed в /api/login).
-const SECURITY_EVENT_TYPES = new Set(['login', 'login_failed', 'password_changed', 'register']);
-const SECURITY_EVENTS_PER_USER = 50;
-
-function recordSecurityEvent(userId, type, req) {
-    if (!SECURITY_EVENT_TYPES.has(type)) return;
-    const client = classifyUserAgent(req && req.headers && req.headers['user-agent']);
-    (async () => {
-        await dbRun('INSERT INTO security_events (user_id, type, client) VALUES ($1, $2, $3)', [userId, type, client]);
-        await dbRun(
-            `DELETE FROM security_events WHERE user_id = $1 AND id <= (
-                 SELECT id FROM security_events WHERE user_id = $1 ORDER BY id DESC OFFSET $2 LIMIT 1
-             )`,
-            [userId, SECURITY_EVENTS_PER_USER]
-        );
-    })().catch((err) => {
-        // 23503 — аккаунт удалён в этот же момент: писать уже некуда.
-        if (err.code !== '23503') console.error('[Security] Не удалось записать событие:', err.message);
-    });
-}
-
-app.get('/api/security-events', async (req, res) => {
-    const userId = req.session.userId;
-    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
-    if (req.session.isAnonymous) return res.json({ success: true, events: [] });
-    try {
-        const rows = await dbAll(
-            'SELECT type, client, created_at FROM security_events WHERE user_id = $1 ORDER BY id DESC LIMIT $2',
-            [userId, SECURITY_EVENTS_PER_USER]
-        );
-        res.json({ success: true, events: rows.map(r => ({ type: r.type, client: r.client, createdAt: r.created_at })) });
-    } catch (error) {
-        console.error('Security events error:', error);
-        res.json({ success: false, message: 'Ошибка загрузки журнала' });
-    }
-});
-
 // Отметки прочтения: выключенные — собеседники не видят ✓✓ и не получают
 // messagesRead от этого пользователя (см. markChatRead).
 app.post('/api/user/privacy', async (req, res) => {
@@ -2072,9 +1885,9 @@ app.post('/api/user/privacy', async (req, res) => {
 app.get('/api/user', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false });
     try {
-        const user = await dbGet('SELECT id, unique_code, username, email, avatar, created_at FROM users WHERE id = $1', [req.session.userId]);
+        const user = await dbGet('SELECT id, unique_code, username, avatar, created_at FROM users WHERE id = $1', [req.session.userId]);
         if (!user) return res.json({ success: false });
-        res.json({ success: true, user: { id: user.id, uniqueCode: user.unique_code, username: user.username, avatar: user.avatar || '', email: user.email, createdAt: user.created_at } });
+        res.json({ success: true, user: { id: user.id, uniqueCode: user.unique_code, username: user.username, avatar: user.avatar || '', createdAt: user.created_at } });
     } catch (error) {
         res.json({ success: false });
     }
@@ -3035,7 +2848,6 @@ app.delete('/api/chats/:chatId', async (req, res) => {
                 await client.query('SELECT id FROM rooms WHERE id = $1 FOR UPDATE', [chat.room_id]);
                 await client.query('DELETE FROM room_participants WHERE room_id = $1 AND user_id = $2', [chat.room_id, userId]);
                 await client.query('DELETE FROM e2ee_key_shares WHERE room_id = $1 AND recipient_id = $2', [chat.room_id, userId]);
-                await client.query('DELETE FROM unread WHERE chat_id = $1', [chat.id]);
                 await client.query('DELETE FROM chats WHERE id = $1 AND user_id = $2', [chat.id, userId]);
                 const remaining = await client.query('SELECT 1 FROM room_participants WHERE room_id = $1 LIMIT 1', [chat.room_id]);
                 if (remaining.rows.length === 0) {
@@ -3056,7 +2868,6 @@ app.delete('/api/chats/:chatId', async (req, res) => {
             } else {
                 const deleted = await client.query('DELETE FROM messages WHERE chat_id = $1 RETURNING file_url', [chat.id]);
                 fileUrls = deleted.rows.map(r => r.file_url);
-                await client.query('DELETE FROM unread WHERE chat_id = $1', [chat.id]);
                 await client.query('DELETE FROM chats WHERE id = $1 AND user_id = $2', [chat.id, userId]);
             }
             await client.query('COMMIT');
@@ -3624,45 +3435,6 @@ app.post('/api/chats/:chatId/prefs', async (req, res) => {
     }
 });
 
-app.post('/api/change-password', passwordLimiter, async (req, res) => {
-    const userId = req.session.userId;
-    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
-    const { currentPassword, newPassword, confirmPassword } = req.body || {};
-    if (!isNonEmptyString(currentPassword) || !isNonEmptyString(newPassword) || typeof confirmPassword !== 'string') return res.json({ success: false, message: 'Заполните все поля' });
-    if (newPassword !== confirmPassword) return res.json({ success: false, message: 'Новые пароли не совпадают' });
-    if (newPassword.length > MAX_PASSWORD_LENGTH) return res.json({ success: false, message: `Пароль не может быть длиннее ${MAX_PASSWORD_LENGTH} символов` });
-    if (currentPassword.length > MAX_LOGIN_PASSWORD_LENGTH) return res.json({ success: false, message: 'Неверный текущий пароль' });
-
-    try {
-        const user = await dbGet('SELECT username, email, password FROM users WHERE id = $1', [userId]);
-        if (!user) return res.json({ success: false, message: 'Пользователь не найден' });
-        if (!user.password) return res.json({ success: false, message: 'У этого аккаунта нет пароля (приватный режим)' });
-        const validPassword = await verifyPassword(currentPassword, user.password);
-        if (!validPassword) return res.json({ success: false, message: 'Неверный текущий пароль' });
-        // Та же политика, что и при регистрации (длина, блок-лист, не
-        // содержит имя/почту — поэтому они и выбираются выше).
-        const policyError = await checkPasswordPolicy(newPassword, { username: user.username, email: user.email });
-        if (policyError) return res.json({ success: false, message: policyError });
-        const hashedPassword = await hashPassword(newPassword);
-
-        await dbRun('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, userId]);
-        recordSecurityEvent(userId, 'password_changed', req);
-        // Смена пароля завершает ВСЕ сессии пользователя (другие устройства,
-        // в т.ч. того, кто мог узнать старый пароль), а не только текущую.
-        await dbRun(`DELETE FROM session WHERE sess->>'userId' = $1`, [String(userId)]);
-        io.in('user:' + userId).disconnectSockets(true);
-
-        req.session.destroy((err) => {
-            res.clearCookie('connect.sid');
-            if (err) console.error('Session destroy error on password change:', err);
-            res.json({ success: true, message: 'Пароль успешно изменён. Войдите заново.' });
-        });
-    } catch (error) {
-        console.error('Change password error:', error);
-        res.json({ success: false, message: 'Ошибка изменения пароля' });
-    }
-});
-
 // После ВСЕХ маршрутов: неизвестный /api/* — JSON-404.
 registerApiNotFound(app);
 
@@ -3689,10 +3461,10 @@ app.use((err, req, res, next) => {
 
 // Полное удаление пользователя (анонимного при выходе/по сроку или любого
 // по POST /api/account/delete): его сообщения (и их файлы), реакции, E2EE
-// key-shares, участие в комнатах, его заявки на вступление, журнал
-// безопасности, опустевшие комнаты со всей историей и заявками в них,
-// chats (chat_settings — каскадом), unread, сама строка users;
-// message_expiry и реакции на его сообщения уходят каскадом. Одной
+// key-shares, участие в комнатах, его заявки на вступление, опустевшие
+// комнаты со всей историей и заявками в них, chats (chat_settings —
+// каскадом), сама строка users; message_expiry и реакции на его
+// сообщения уходят каскадом. Одной
 // транзакцией — раньше это была серия отдельных DELETE, и первая же ошибка
 // FK (например, из e2ee_key_shares, который ссылается на users без каскада)
 // оставляла пользователя в БД навсегда. После COMMIT — файлы с диска,
@@ -3723,11 +3495,9 @@ async function deleteUserAccount(userId) {
         await client.query('DELETE FROM reactions WHERE user_id = $1', [userId]);
         await client.query('DELETE FROM e2ee_key_shares WHERE sender_id = $1 OR recipient_id = $1', [userId]);
         await client.query('DELETE FROM room_participants WHERE user_id = $1', [userId]);
-        await client.query('DELETE FROM unread WHERE user_id = $1', [userId]);
         await client.query('DELETE FROM chats WHERE user_id = $1', [userId]);
         const ownRequests = await client.query('DELETE FROM join_requests WHERE user_id = $1 RETURNING room_id', [userId]);
         requestRoomIds = [...new Set(ownRequests.rows.map(r => r.room_id))];
-        await client.query('DELETE FROM security_events WHERE user_id = $1', [userId]);
 
         if (roomIds.length > 0) {
             const orphaned = await client.query(
@@ -3790,16 +3560,13 @@ async function purgeExpiredAnonymousUsers() {
         const online = anonSocketCount.keys();
         const rows = await dbAll(`
             SELECT u.id FROM users u
-            WHERE u.email IS NULL AND u.password IS NULL
-              AND (
-                  u.created_at < NOW() - $1::integer * INTERVAL '1 second'
-                  OR (
-                      COALESCE(u.last_active_at, u.created_at) < NOW() - (CASE u.anon_lifetime
-                          WHEN 'day' THEN $2::integer WHEN 'week' THEN $3::integer ELSE $4::integer
-                      END) * INTERVAL '1 second'
-                      AND NOT (u.id = ANY($5::int[]))
-                  )
-              )
+            WHERE u.created_at < NOW() - $1::integer * INTERVAL '1 second'
+               OR (
+                   COALESCE(u.last_active_at, u.created_at) < NOW() - (CASE u.anon_lifetime
+                       WHEN 'day' THEN $2::integer WHEN 'week' THEN $3::integer ELSE $4::integer
+                   END) * INTERVAL '1 second'
+                   AND NOT (u.id = ANY($5::int[]))
+               )
             ORDER BY u.created_at
             LIMIT 200
         `, [ANON_MAX_AGE_SECONDS, ANON_LIFETIMES.day, ANON_LIFETIMES.week, ANON_LIFETIMES.tab, online]);
