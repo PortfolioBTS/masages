@@ -12,6 +12,9 @@
 // * Запускает node --test с явным списком test/e2e/*.e2e.test.js: каждый
 //   файл — отдельным процессом, по 2 одновременно, тайм-аут теста 60 с;
 //   --grep превращается в --test-name-pattern; --junit — ещё и отчёт JUnit.
+// * Упавшие наборы оставляют в test/e2e/.logs логи серверов и «…-suite.log» с
+//   причинами (helpers/failure-log.js); в конце прогона раннер напоминает,
+//   если в этой папке появились свежие файлы.
 
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -51,6 +54,21 @@ function testFiles(filters) {
         .filter(name => filters.length === 0 || filters.some(f => name.includes(f)))
         .sort()
         .map(name => path.join(E2E_DIR, name));
+}
+
+// Свежие файлы в папке логов — след упавшего набора (или сбоя уборки): их
+// имена и подсказка, где причины. Нормальный прогон ничего не печатает.
+function reportSavedLogs(sinceMs) {
+    const { LOGS_DIR } = require('./helpers/env');
+    let fresh = [];
+    try {
+        fresh = fs.readdirSync(LOGS_DIR).filter(name => fs.statSync(path.join(LOGS_DIR, name)).mtimeMs >= sinceMs);
+    } catch {
+        return; // папки нет — набор ничего не сохранял
+    }
+    if (fresh.length === 0) return;
+    const reports = fresh.filter(name => name.endsWith('-suite.log'));
+    console.log(`[e2e] Логи упавших наборов сохранены в ${path.relative(REPO_ROOT, LOGS_DIR)} (файлов: ${fresh.length}); причины сбоев — в ${reports.join(', ') || '*-suite.log'}`);
 }
 
 async function main() {
@@ -94,6 +112,7 @@ async function main() {
         if (opts.junit) nodeArgs.push('--test-reporter=junit', `--test-reporter-destination=${opts.junit}`);
         nodeArgs.push(...files);
         console.log(`[e2e] Postgres ${describeUrl(url)}, наборов: ${files.length}`);
+        const startedAt = Date.now();
         const code = await new Promise((resolve) => {
             const child = spawn(process.execPath, nodeArgs, {
                 cwd: REPO_ROOT,
@@ -102,6 +121,7 @@ async function main() {
             });
             child.on('exit', (exitCode, signal) => resolve(signal ? 1 : exitCode));
         });
+        reportSavedLogs(startedAt);
         return code;
     } finally {
         cleanup();
