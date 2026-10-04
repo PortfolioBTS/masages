@@ -129,13 +129,14 @@ async function main() {
         assert.strictEqual(await detectLegacySchema(empty), false, 'нет строки — нет признаков');
     });
 
-    await test('detectLegacySchema: схема — current_schema(), колонки ищутся именно email и password', async () => {
+    await test('detectLegacySchema: схема — current_schema(), колонки ищутся именно email и password, удалённые не считаются', async () => {
         const client = makeFakeClient();
         await detectLegacySchema(client);
         const sql = client.events[0];
         assert.match(sql, /current_schema\(\)/);
-        assert.match(sql, /table_name = 'users'/);
-        assert.match(sql, /column_name IN \('email', 'password'\)/);
+        assert.match(sql, /\.users'\)/);
+        assert.match(sql, /attname IN \('email', 'password'\)/);
+        assert.match(sql, /NOT attisdropped/);
         assert.match(sql, /schema_meta/);
     });
 
