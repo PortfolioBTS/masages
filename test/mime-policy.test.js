@@ -9,8 +9,9 @@
 //   2. клиентский список совпадает с серверным (lib/security-utils.js): если
 //      они разойдутся, клиент начнёт отправлять то, что сервер отклонит, или
 //      наоборот;
-//   3. страница подключена правильно: скрипт модуля стоит до script.js —
-//      иначе script.js упал бы на первом же обращении к MimePolicy.
+//   3. страница подключена правильно: скрипт модуля стоит до script.js,
+//      accept у выбора файла равен списку, нет кнопки записи, иконок звука и
+//      любого следа записи и звука в public/ (критерий 2.4 из roadmap).
 //
 // Запуск: node test/mime-policy.test.js
 
@@ -224,6 +225,11 @@ test('the browser path: a plain script with no module system publishes MimePolic
 
 const html = readPublic('index.html');
 
+function tagWithId(id) {
+    const match = new RegExp(`<[a-zA-Z][^>]*\\sid="${id}"[^>]*>`).exec(html);
+    return match ? match[0] : null;
+}
+
 test('index.html: the module script is loaded exactly once and before script.js', () => {
     const sources = [...html.matchAll(/<script\b[^>]*\ssrc="([^"]+)"/g)].map(m => m[1]);
     const moduleAt = sources.indexOf('lib/mime-policy.js');
@@ -233,6 +239,93 @@ test('index.html: the module script is loaded exactly once and before script.js'
     assert.strictEqual(sources.lastIndexOf('lib/mime-policy.js'), moduleAt, 'linked more than once');
     assert.ok(moduleAt < scriptAt, 'script.js would start without MimePolicy');
     assert.ok(fs.existsSync(MODULE_FILE));
+});
+
+test('index.html: the file picker accept list is exactly the white list (plus .pdf and .txt for systems with no type)', () => {
+    const input = tagWithId('file-input');
+    assert.ok(input, 'no #file-input');
+    const accept = /\saccept="([^"]*)"/.exec(input);
+    assert.ok(accept, 'no accept attribute on #file-input');
+    const tokens = accept[1].split(',').map(t => t.trim());
+    const types = tokens.filter(t => t.includes('/')).sort();
+    const extensions = tokens.filter(t => t.startsWith('.')).sort();
+    assert.deepStrictEqual(types, [...policy.ALLOWED_UPLOAD_MIMES].sort());
+    assert.deepStrictEqual(extensions, ['.pdf', '.txt']);
+    assert.strictEqual(tokens.length, types.length + extensions.length, 'unexpected token in accept: ' + accept[1]);
+});
+
+test('index.html: no voice button and every static icon reference exists in icons.js', () => {
+    assert.strictEqual(tagWithId('record-btn'), null);
+    const iconsSource = readPublic('icons.js');
+    const defined = new Set([...iconsSource.matchAll(/^\s+'([a-z0-9-]+)':\s*'</gm)].map(m => m[1]));
+    assert.ok(defined.size > 40 && defined.has('send') && defined.has('paperclip'), 'icons.js was not parsed');
+    const used = new Set([...html.matchAll(/<use\s+href="#i-([a-z0-9-]+)"/g)].map(m => m[1]));
+    assert.ok(used.size > 10);
+    const missing = [...used].filter(name => !defined.has(name));
+    assert.deepStrictEqual(missing, [], 'index.html references icons that icons.js does not define');
+});
+
+test('icons.js: every icon fileIconName can return exists, and the microphone and note icons are gone', () => {
+    const iconsSource = readPublic('icons.js');
+    const defined = new Set([...iconsSource.matchAll(/^\s+'([a-z0-9-]+)':\s*'</gm)].map(m => m[1]));
+    for (const mime of ['image/png', 'video/mp4', 'application/pdf', 'text/plain', 'application/octet-stream']) {
+        assert.ok(defined.has(policy.fileIconName(mime)), `no icon for ${mime}`);
+    }
+    assert.ok(!defined.has('mic'), 'the microphone icon is still defined');
+    assert.ok(!defined.has('music'), 'the note icon is still defined');
+});
+
+// Критерий 2.4 (docs/dev/roadmap.md): в клиентском коде нет записи и звука.
+// Единственное допустимое совпадение по всему проду — запрет микрофона в
+// Permissions-Policy (lib/privacy.js), а это не public/.
+function listFiles(dir, base) {
+    const found = [];
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const relative = base ? `${base}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+            if (relative === 'vendor') continue; // чужие библиотеки не правим и не ищем в них
+            found.push(...listFiles(path.join(dir, entry.name), relative));
+        } else if (/\.(js|html|css|webmanifest|svg|json|txt)$/i.test(entry.name)) {
+            found.push(relative);
+        }
+    }
+    return found;
+}
+
+test('public/ (except vendor) has no voice recording, microphone or audio code (criterion 2.4)', () => {
+    const files = listFiles(PUBLIC_DIR, '');
+    assert.ok(files.includes('script.js') && files.includes('index.html') && files.includes('lib/mime-policy.js'), 'file list is broken');
+    const forbidden = /record|mic|голосов|MediaRecorder|getUserMedia|audio\/|\bmusic\b/i;
+    const hits = [];
+    for (const file of files) {
+        readPublic(file).split('\n').forEach((line, index) => {
+            if (forbidden.test(line)) hits.push(`public/${file}:${index + 1}  ${line.trim().slice(0, 120)}`);
+        });
+    }
+    assert.deepStrictEqual(hits, [], 'в клиентском коде остались следы записи или звука:\n' + hits.join('\n'));
+});
+
+// Тексты интерфейса — тоже клиентский код. «Аудио» по-русски латинские
+// подстроки критерия 2.4 не видят, а обещание звука в подсказке — та же
+// ошибка, что и лишняя кнопка. «Без звука» (отключённые уведомления чата) —
+// другое, поэтому слово «звук» целиком не запрещено.
+test('interface texts do not mention audio, voice or a microphone', () => {
+    const forbidden = /аудио|голос|микрофон|диктофон/i;
+    const hits = [];
+    for (const file of listFiles(PUBLIC_DIR, '')) {
+        readPublic(file).split('\n').forEach((line, index) => {
+            if (forbidden.test(line)) hits.push(`public/${file}:${index + 1}  ${line.trim().slice(0, 120)}`);
+        });
+    }
+    assert.deepStrictEqual(hits, [], 'в клиентских текстах остались упоминания звука:\n' + hits.join('\n'));
+});
+
+test('style.css and script.js have no player or recording leftovers', () => {
+    const css = readPublic('style.css');
+    const script = readPublic('script.js');
+    assert.ok(!/\.message-audio|\.recording\b|rec-blink|#record-btn/.test(css));
+    assert.ok(!/createElement\(\s*['"]audio['"]\s*\)|message_type\s*===\s*['"]audio['"]|message-audio/.test(script));
+    assert.ok(!/\brecordBtn\b/.test(script));
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');

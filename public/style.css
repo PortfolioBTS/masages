@@ -2444,17 +2444,11 @@ button.reply-to:hover {
     opacity: 0.9;
 }
 
-.message-video,
-.message-audio {
+.message-video {
     display: block;
     max-width: min(320px, 100%);
     margin-bottom: 4px;
     border-radius: var(--radius-sm);
-}
-
-.message-audio {
-    width: 280px;
-    height: 40px;
 }
 
 .file-attachment {
@@ -2940,18 +2934,6 @@ a.file-attachment:hover {
     border-color: var(--surface-3);
     color: var(--text-3);
     opacity: 1;
-}
-
-/* Запись голосового (зарезервировано): мигающая обводка вместо красной точки. */
-.recording {
-    background: var(--text) !important;
-    color: var(--bg) !important;
-    animation: rec-blink 1.2s steps(2, jump-none) infinite;
-}
-
-@keyframes rec-blink {
-    from { outline: 2px solid var(--text); outline-offset: 2px; }
-    to { outline: 2px solid transparent; outline-offset: 2px; }
 }
 
 /* Статус загрузки: подпись + полоса прогресса (ширина — el.style.width). */
@@ -4457,10 +4439,6 @@ a.file-attachment:hover {
 
     .footer-btn {
         padding: 0 8px;
-    }
-
-    .input-wrapper #record-btn:disabled {
-        display: none;
     }
 
     .request-row {

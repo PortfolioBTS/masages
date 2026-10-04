@@ -126,7 +126,6 @@ const elements = {
     attachBtn: document.getElementById('attach-btn'),
     messageInput: document.getElementById('message-input'),
     sendBtn: document.getElementById('send-btn'),
-    recordBtn: document.getElementById('record-btn'),
     fileInput: document.getElementById('file-input'),
 
     // ---- Файлы: перетаскивание, загрузка, окно отправки ----
@@ -1122,14 +1121,6 @@ function createMediaElement(mime, url, name) {
         video.preload = 'metadata';
         video.className = 'message-video';
         return video;
-    }
-    if (mime.startsWith('audio/')) {
-        const audio = document.createElement('audio');
-        audio.src = url;
-        audio.controls = true;
-        audio.preload = 'metadata';
-        audio.className = 'message-audio';
-        return audio;
     }
     // Документы только скачиваются (download), а не открываются во вкладке.
     return createDocumentLink(url, name, mime);
@@ -3904,7 +3895,7 @@ function markVisibleMessagesRead() {
 
 // ---- Отрисовка сообщения ----
 
-// Элементы с файлом (img/video/audio/a) собираются через DOM API, а не через
+// Элементы с файлом (img/video/a) собираются через DOM API, а не через
 // шаблонную строку с сырым message.file_url — см. п.2 аудита. file_url сейчас
 // всегда безопасен (имя генерируется сервером из Date.now()+random), но даже
 // если бы в нём оказались произвольные символы, .src/.href — это присвоение
@@ -3931,14 +3922,7 @@ function createFileAttachmentElement(message) {
         video.className = 'message-video';
         return video;
     }
-    if (message_type === 'audio') {
-        const audio = document.createElement('audio');
-        audio.src = file_url;
-        audio.controls = true;
-        audio.preload = 'metadata';
-        audio.className = 'message-audio';
-        return audio;
-    }
+    // Всё остальное (PDF, TXT и любой неизвестный тип) — ссылка на скачивание.
     return createDocumentLink(file_url, file_name || 'Файл', String(message.file_type || ''), { newTab: true });
 }
 
