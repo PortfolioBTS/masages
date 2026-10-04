@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="theme-color" content="#000000">
-    <title>Nyxo — Мессенджер</title>
+    <title>Nyxo — разговор без следов</title>
     <link rel="icon" type="image/svg+xml" href="icons/favicon.svg">
     <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
     <link rel="manifest" href="manifest.webmanifest">
@@ -13,52 +13,56 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div id="auth-screen" class="auth-screen">
+    <main id="auth-screen" class="auth-screen" aria-labelledby="auth-title">
+        <button id="auth-theme-btn" class="icon-btn auth-theme-toggle" type="button" title="Сменить тему" aria-label="Сменить тему"><svg class="icon" aria-hidden="true"><use href="#i-sun"></use></svg></button>
         <div class="auth-container">
-            <div class="auth-logo">
+            <noscript><p class="auth-noscript">Nyxo работает только с JavaScript. В Tor Browser выберите уровень безопасности «Стандартный» или «Повышенный».</p></noscript>
+            <p id="auth-notice" class="auth-notice hidden" role="status"></p>
+            <header class="auth-hero">
                 <div class="logo-icon" aria-hidden="true"><svg class="icon icon-xl" aria-hidden="true"><use href="#i-brand"></use></svg></div>
-                <h1>Nyxo</h1>
-                <p>Безопасный мессенджер</p>
+                <h1 id="auth-title">Nyxo — разговор без следов</h1>
+                <p class="auth-tagline">Без номера. Без почты. Без регистрации.</p>
+            </header>
+
+            <section id="auth-invite" class="auth-invite hidden" aria-label="Приглашение в группу">
+                <label for="auth-invite-input" class="field-label">Ссылка или код приглашения</label>
+                <input type="text" id="auth-invite-input" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="300" aria-describedby="auth-invite-error auth-invite-hint">
+                <p id="auth-invite-error" class="field-error hidden"></p>
+                <p id="auth-invite-hint" class="field-hint">Ссылка вида …/#join=… или код из 26 символов. Код уйдёт на сервер только после создания аккаунта.</p>
+            </section>
+
+            <fieldset id="auth-lifetime" class="lifetime-picker">
+                <legend class="field-label">Сколько хранить аккаунт</legend>
+                <div class="segmented">
+                    <label class="segmented-option"><input type="radio" name="auth-lifetime" value="tab" checked><span>Пока открыта вкладка</span></label>
+                    <label class="segmented-option"><input type="radio" name="auth-lifetime" value="day"><span>1 день</span></label>
+                    <label class="segmented-option"><input type="radio" name="auth-lifetime" value="week"><span>7 дней</span></label>
+                </div>
+                <p class="field-hint">Аккаунт удалится, если не заходить дольше выбранного срока.</p>
+                <p id="auth-lifetime-detail" class="field-hint" aria-live="polite">Удалится через 30 минут после закрытия последней вкладки. Закроете браузер — вход пропадёт сразу.</p>
+                <p id="auth-invite-advice" class="field-hint auth-invite-advice hidden" aria-live="polite"></p>
+            </fieldset>
+
+            <p id="auth-warning" class="auth-warning"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-alert-triangle"></use></svg><span>Если очистить данные браузера или сменить устройство, доступ к аккаунту пропадёт навсегда.</span></p>
+            <p id="auth-progress" class="auth-progress" role="status"></p>
+
+            <div class="auth-actions">
+                <button id="anon-start-btn" class="btn btn-primary btn-block auth-btn" type="button" aria-describedby="auth-lifetime-detail auth-warning"><span>Начать анонимно</span></button>
+                <button id="invite-toggle-btn" class="btn btn-secondary btn-block auth-btn auth-invite-toggle" type="button" aria-expanded="false" aria-controls="auth-invite"><span>У меня есть приглашение</span><svg class="icon icon-sm auth-invite-chevron" aria-hidden="true"><use href="#i-chevron-down"></use></svg></button>
             </div>
-            <div class="auth-tabs" role="tablist">
-                <button class="auth-tab active" data-tab="login" role="tab" aria-selected="true">Вход</button>
-                <button class="auth-tab" data-tab="register" role="tab" aria-selected="false">Регистрация</button>
-            </div>
-            <div id="login-form" class="auth-form active">
-                <div class="form-group">
-                    <label for="login-email">Email</label>
-                    <input type="email" id="login-email" placeholder="Введите email" autocomplete="username" required>
-                </div>
-                <div class="form-group">
-                    <label for="login-password">Пароль</label>
-                    <input type="password" id="login-password" placeholder="Введите пароль" autocomplete="current-password" required>
-                </div>
-                <button id="login-btn" class="auth-btn"><svg class="icon" aria-hidden="true"><use href="#i-log-in"></use></svg><span>Войти</span></button>
-                <div class="auth-divider"><span>или</span></div>
-                <button id="anonymous-login-btn" class="auth-btn anonymous-btn"><svg class="icon" aria-hidden="true"><use href="#i-eye-off"></use></svg><span>Войти в приватном режиме</span></button>
-                <p class="anonymous-hint">Без email и пароля. Аккаунт удалится при выходе или после выбранного срока без активности.</p>
-            </div>
-            <div id="register-form" class="auth-form">
-                <div class="form-group">
-                    <label for="register-username">Имя пользователя</label>
-                    <input type="text" id="register-username" placeholder="Введите имя" autocomplete="nickname" required maxlength="32">
-                </div>
-                <div class="form-group">
-                    <label for="register-email">Email</label>
-                    <input type="email" id="register-email" placeholder="Введите email" autocomplete="email" required>
-                </div>
-                <div class="form-group">
-                    <label for="register-password">Пароль</label>
-                    <input type="password" id="register-password" placeholder="Придумайте пароль (минимум 8 символов)" autocomplete="new-password" required minlength="8">
-                </div>
-                <div class="form-group">
-                    <label for="register-confirm-password">Подтвердите пароль</label>
-                    <input type="password" id="register-confirm-password" placeholder="Повторите пароль" autocomplete="new-password" required>
-                </div>
-                <button id="register-btn" class="auth-btn"><svg class="icon" aria-hidden="true"><use href="#i-user-plus"></use></svg><span>Зарегистрироваться</span></button>
-            </div>
+
+            <ul class="auth-points">
+                <li><svg class="icon" aria-hidden="true"><use href="#i-lock"></use></svg><span>Мы не спрашиваем, кто вы — ни email, ни телефона, ни паролей</span></li>
+                <li><svg class="icon" aria-hidden="true"><use href="#i-shield"></use></svg><span>Сервер не читает переписку в группах — сквозное шифрование</span></li>
+                <li><svg class="icon" aria-hidden="true"><use href="#i-timer"></use></svg><span>Всё исчезает само — аккаунт и сообщения удаляются</span></li>
+            </ul>
+            <nav class="auth-links" aria-label="Подробнее о Nyxo">
+                <button id="about-open-btn" class="link-btn" type="button" aria-haspopup="dialog">Как это работает</button>
+                <span id="auth-links-sep" class="auth-links-sep hidden" aria-hidden="true">·</span>
+                <button id="onion-open-btn" class="link-btn hidden" type="button" aria-haspopup="dialog">Открыть через Tor (onion)</button>
+            </nav>
         </div>
-    </div>
+    </main>
 
     <div id="app" class="app hidden">
         <div class="sidebar">
@@ -397,44 +401,58 @@
         </div>
     </div>
 
-    <div id="anon-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="anon-title" aria-describedby="anon-desc">
-        <div class="modal-content modal-sm">
+    <div id="about-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="about-title">
+        <div class="modal-content modal-wide">
             <div class="modal-header">
-                <h3 id="anon-title">Приватный режим</h3>
-                <button class="close-modal icon-btn" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+                <h3 id="about-title">Как это работает</h3>
+                <button class="close-modal icon-btn" type="button" aria-label="Закрыть" data-autofocus><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
             </div>
             <div class="modal-body">
-                <p id="anon-desc">Аккаунт без email и пароля. Выберите, когда удалить его, если вы перестанете им пользоваться.</p>
-                <fieldset class="field">
-                    <legend class="field-label">Удалить аккаунт</legend>
-                    <label class="radio-row">
-                        <input type="radio" name="anon-lifetime" value="tab" checked>
-                        <span>
-                            <span class="switch-title">Когда закрою вкладку</span>
-                            <small class="field-hint">Через 30 минут после закрытия вкладки или потери связи</small>
-                        </span>
-                    </label>
-                    <label class="radio-row">
-                        <input type="radio" name="anon-lifetime" value="day">
-                        <span>
-                            <span class="switch-title">Через 1 день без активности</span>
-                            <small class="field-hint">Можно закрыть вкладку и вернуться в течение суток</small>
-                        </span>
-                    </label>
-                    <label class="radio-row">
-                        <input type="radio" name="anon-lifetime" value="week">
-                        <span>
-                            <span class="switch-title">Через 7 дней без активности</span>
-                            <small class="field-hint">Дольше аккаунт не живёт в любом случае</small>
-                        </span>
-                    </label>
-                </fieldset>
-                <p class="field-hint">Активность — это открытая вкладка Nyxo. Независимо от выбора аккаунт удалится не позже чем через 7 дней после создания, а кнопка «Выйти» удаляет его сразу. Удаляются чаты, сообщения и файлы на сервере и ключи шифрования на этом устройстве — восстановить их будет нельзя.</p>
-                <p class="field-hint">Приватный режим не скрывает ваш IP-адрес от сервера и провайдера. Для этого используйте Tor Browser.</p>
-            </div>
-            <div class="modal-footer">
-                <button class="btn btn-ghost" type="button" data-close-modal>Отмена</button>
-                <button id="anon-confirm-btn" class="btn btn-primary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-eye-off"></use></svg><span>Войти</span></button>
+                <section class="about-section" aria-labelledby="about-server-title">
+                    <h4 id="about-server-title">Что видит сервер</h4>
+                    <ul class="about-list">
+                        <li>Случайное имя-псевдоним, выбранный срок хранения и примерное время последнего входа.</li>
+                        <li>В каких группах вы состоите, когда отправлены сообщения и какого они примерно размера.</li>
+                        <li>Содержимое сообщений и файлов в группах сервер не видит: оно шифруется на вашем устройстве, ключи есть только у участников.</li>
+                        <li>Чат с ботом сквозным шифрованием не защищён: бот работает на сервере. Не пишите туда личного.</li>
+                    </ul>
+                </section>
+                <section class="about-section" aria-labelledby="about-absent-title">
+                    <h4 id="about-absent-title">Чего у сервера нет</h4>
+                    <p>Ваших контактов — почты и номера телефона. Аккаунт создаётся без них, поэтому связать его с вами по ним нельзя.</p>
+                </section>
+                <section id="about-tor" class="about-section" tabindex="-1" aria-labelledby="about-tor-title">
+                    <h4 id="about-tor-title">IP-адрес и Tor</h4>
+                    <p>Сервер и ваш провайдер видят IP-адрес, с которого вы заходите. Nyxo не хранит его вместе с аккаунтом, но у хостинга могут быть свои журналы.</p>
+                    <p>Чтобы скрыть IP, откройте Nyxo в Tor Browser по onion-адресу.</p>
+                    <div id="about-onion" class="about-onion hidden">
+                        <code id="about-onion-address" class="mono"></code>
+                        <div class="about-onion-actions">
+                            <button id="about-onion-copy-btn" class="btn btn-secondary btn-sm" type="button"><svg class="icon" aria-hidden="true"><use href="#i-copy"></use></svg><span>Скопировать адрес</span></button>
+                            <a id="about-onion-link" class="btn btn-ghost btn-sm" target="_blank" rel="noreferrer noopener"><svg class="icon" aria-hidden="true"><use href="#i-external-link"></use></svg><span>Открыть в Tor Browser</span></a>
+                        </div>
+                    </div>
+                    <p id="about-onion-missing" class="field-hint">Onion-адрес для этого сервера не настроен.</p>
+                    <p id="about-onion-current" class="field-hint hidden">Вы уже открыли Nyxo через Tor по onion-адресу.</p>
+                    <p class="field-hint">При уровне безопасности «Наивысший» JavaScript выключен, и Nyxo не работает.</p>
+                </section>
+                <section class="about-section" aria-labelledby="about-device-title">
+                    <h4 id="about-device-title">Если очистить браузер или сменить устройство</h4>
+                    <ul class="about-list">
+                        <li>Аккаунт живёт только в этом браузере: вход держится на cookie, ключи шифрования лежат в хранилище браузера. Почты и номера нет, поэтому узнать вас иначе нельзя.</li>
+                        <li>Очистка данных сайта, другой браузер или устройство, закрытое окно инкогнито — и доступ пропадёт навсегда. Сам аккаунт удалится по сроку.</li>
+                        <li>В окне инкогнито и в Tor Browser всё стирается при закрытии окна, так что сроки «1 день» и «7 дней» там не помогут.</li>
+                        <li>На iPhone значок на экране «Домой» — отдельное хранилище: аккаунт из Safari там не откроется.</li>
+                    </ul>
+                </section>
+                <section class="about-section" aria-labelledby="about-delete-title">
+                    <h4 id="about-delete-title">Когда всё удаляется</h4>
+                    <ul class="about-list">
+                        <li>Когда вы не заходите дольше выбранного срока. Сразу — кнопкой «Удалить и выйти».</li>
+                        <li>Вместе с аккаунтом исчезают ваши сообщения, в том числе у собеседников. Группы, где вы остались последним участником, удаляются целиком.</li>
+                        <li>Исчезающие сообщения удаляются по таймеру группы.</li>
+                    </ul>
+                </section>
             </div>
         </div>
     </div>
