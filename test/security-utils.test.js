@@ -153,6 +153,7 @@ async function main() {
     const EBML = head(0x1A, 0x45, 0xDF, 0xA3);
     const OGG = ascii(0, 'OggS');
     const RIFF_WAVE = Buffer.concat([ascii(0, 'RIFF').subarray(0, 8), Buffer.from('WAVE', 'latin1')]);
+    const RIFF_WEBP = Buffer.concat([ascii(0, 'RIFF').subarray(0, 8), Buffer.from('WEBP', 'latin1')]);
     const ID3 = ascii(0, 'ID3\x03');
     const MPEG_FRAME = head(0xFF, 0xFB, 0x90, 0x00);
     const FTYP = ascii(4, 'ftyp');
@@ -161,7 +162,7 @@ async function main() {
         assert.strictEqual(utils.checkMagicBytes(head(0xFF, 0xD8, 0xFF, 0xE0), 'image/jpeg'), true);
         assert.strictEqual(utils.checkMagicBytes(head(0x89, 0x50, 0x4E, 0x47), 'image/png'), true);
         assert.strictEqual(utils.checkMagicBytes(ascii(0, 'GIF89a'), 'image/gif'), true);
-        assert.strictEqual(utils.checkMagicBytes(ascii(0, 'RIFF'), 'image/webp'), true);
+        assert.strictEqual(utils.checkMagicBytes(RIFF_WEBP, 'image/webp'), true);
         assert.strictEqual(utils.checkMagicBytes(ascii(0, '%PDF-1.7'), 'application/pdf'), true);
         assert.strictEqual(utils.checkMagicBytes(FTYP, 'video/mp4'), true);
         assert.strictEqual(utils.checkMagicBytes(FTYP, 'video/quicktime'), true);
@@ -193,6 +194,12 @@ async function main() {
         for (const [mime, samples] of Object.entries(withSignature)) {
             for (const sample of samples) assert.strictEqual(utils.checkMagicBytes(sample, mime), false, mime);
         }
+    });
+
+    await test('checkMagicBytes: image/webp needs WEBP after RIFF (WAV and bare RIFF are rejected)', () => {
+        assert.strictEqual(utils.checkMagicBytes(RIFF_WAVE, 'image/webp'), false, 'WAV posing as WebP');
+        assert.strictEqual(utils.checkMagicBytes(ascii(0, 'RIFF'), 'image/webp'), false, 'RIFF without a form type');
+        assert.strictEqual(utils.checkMagicBytes(RIFF_WEBP.subarray(0, 11), 'image/webp'), false, 'shorter than 12 bytes');
     });
 
     await test('checkMagicBytes: signature of another type, unknown type and short input are rejected', () => {
