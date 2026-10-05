@@ -46,6 +46,8 @@ const {
     ENCRYPTED_FILE_EXTENSION,
     ALL_ANONYMIZED_FILE_NAMES,
     anonymizedFileName,
+    checkMagicBytes,
+    isInlineUpload,
     randomString,
     generateUniqueCode,
     generateInviteCode,
@@ -136,34 +138,8 @@ const BLOCKED_EXTENSIONS = new Set(['.html', '.htm', '.php', '.exe', '.js', '.sh
 // итоговое имя файла регуляркой").
 const SAFE_FILENAME_RE = /^[\w.-]+$/;
 
-function checkMagicBytes(buffer, mimetype) {
-    if (!buffer || buffer.length < 4) return false;
-    const b = buffer;
-    if (mimetype === 'image/jpeg') return b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF;
-    if (mimetype === 'image/png')  return b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47;
-    if (mimetype === 'image/gif')  return b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46;
-    if (mimetype === 'image/webp') return b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46;
-    if (mimetype === 'application/pdf') return b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46;
-    // Единственная надёжная сигнатура MP4/ISO-BMFF — 'ftyp' на смещении 4-7.
-    // Раньше был ещё fallback b[0]===0 && b[1]===0 — под него подходит куча
-    // произвольных бинарных форматов, так что от него больше вреда, чем пользы.
-    if (mimetype === 'video/mp4')  return b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70;
-    if (mimetype === 'audio/mpeg') return (b[0] === 0xFF && (b[1] & 0xE0) === 0xE0) || (b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33);
-    if (mimetype === 'audio/ogg' || mimetype === 'video/webm' || mimetype === 'audio/webm') {
-        return (b[0] === 0x4F && b[1] === 0x67 && b[2] === 0x67) || (b[0] === 0x1A && b[1] === 0x45 && b[2] === 0xDF && b[3] === 0xA3);
-    }
-    // WAV — RIFF-контейнер: контейнер сам по себе (байты 0-3 'RIFF') общий с
-    // любым другим RIFF-форматом (в т.ч. WebP/AVI), поэтому дополнительно
-    // проверяем 'WAVE' на смещении 8-11, как и положено для формата WAVE.
-    if (mimetype === 'audio/wav') {
-        return buffer.length >= 12
-            && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46
-            && b[8] === 0x57 && b[9] === 0x41 && b[10] === 0x56 && b[11] === 0x45;
-    }
-    if (mimetype === 'text/plain') return true;
-    if (mimetype === 'video/quicktime') return b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70;
-    return false;
-}
+// checkMagicBytes (сигнатура файла против заявленного типа) — в
+// lib/security-utils.js: чистая функция, её проверяют юнит-тесты.
 
 // Вложения должны лежать на постоянном диске: файловая система контейнера
 // (Railway и т.п.) очищается при каждом деплое. UPLOADS_DIR — явный путь;
@@ -1638,8 +1614,14 @@ app.get('/uploads/:filename', async (req, res) => {
     res.set('Cache-Control', 'no-store, private');
     res.removeHeader('Pragma');
     res.removeHeader('Expires');
+    // Прямо на странице показываются только фото и видео. PDF, TXT и
+    // шифротекст скачиваются (attachment), а не открываются внутри нашего
+    // origin; неизвестное расширение тоже считается скачиваемым.
+    if (!isInlineUpload(filename)) res.set('Content-Disposition', 'attachment');
     res.sendFile(path.join(UPLOADS_DIR, filename), { lastModified: false, etag: false, cacheControl: false }, (err) => {
         if (err && !res.headersSent) {
+            // JSON с ошибкой не должен уходить как «скачиваемый файл».
+            res.removeHeader('Content-Disposition');
             res.status(err.status === 404 ? 404 : 500).json({ success: false, message: 'Файл не найден' });
         }
     });
@@ -3241,7 +3223,7 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
             if (!checkMagicBytes(head, file.mimetype)) {
                 return rejectUpload(res, file, 400, 'Содержимое файла не соответствует его типу');
             }
-            // Метаданные (EXIF/GPS, автор PDF, теги аудио/видео...) снимаются
+            // Метаданные (EXIF/GPS, автор PDF, теги видео...) снимаются
             // у ВСЕХ типов — раньше только у картинок и PDF.
             await stripMetadataFromFile(uploadedFilePath, file.mimetype);
             fileSize = (await fs.promises.stat(uploadedFilePath)).size;
@@ -3263,8 +3245,8 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
         const fileName = encrypted ? null : anonymizedFileName(fileType);
 
         const messageType = encrypted ? 'file'
-            : fileType.startsWith('image/') ? 'image' : fileType.startsWith('video/') ? 'video' : fileType.startsWith('audio/') ? 'audio' : 'file';
-        const messageText = encrypted ? envelope : (caption || (messageType === 'audio' ? 'Голосовое сообщение' : fileName));
+            : fileType.startsWith('image/') ? 'image' : fileType.startsWith('video/') ? 'video' : 'file';
+        const messageText = encrypted ? envelope : (caption || fileName);
 
         const inserted = await dbGet(
             `INSERT INTO messages (chat_id, room_id, user_id, text, file_url, file_name, file_type, message_type, sent, time, status, encrypted, file_size)
@@ -3675,7 +3657,7 @@ app.use((err, req, res, next) => {
         return res.status(400).json({ success: false, message: `Ошибка загрузки: ${err.message}` });
     }
     if (err.message === 'Неподдерживаемый тип файла') {
-        return res.status(400).json({ success: false, message: 'Разрешены только фото, видео, аудио, PDF и TXT' });
+        return res.status(400).json({ success: false, message: 'Разрешены только фото, видео, PDF и TXT' });
     }
     if (err.type === 'entity.parse.failed') {
         return res.status(400).json({ success: false, message: 'Некорректный JSON в запросе' });

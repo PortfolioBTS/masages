@@ -126,7 +126,6 @@ const elements = {
     attachBtn: document.getElementById('attach-btn'),
     messageInput: document.getElementById('message-input'),
     sendBtn: document.getElementById('send-btn'),
-    recordBtn: document.getElementById('record-btn'),
     fileInput: document.getElementById('file-input'),
 
     // ---- Файлы: перетаскивание, загрузка, окно отправки ----
@@ -995,73 +994,29 @@ async function onE2eeToggleClick() {
 }
 
 // ==================== Файлы: белый список, очистка, шифрование ====================
+// Какие типы можно отправлять, как их распознавать, называть и показывать —
+// решает public/lib/mime-policy.js (MimePolicy): он подключён до этого
+// файла и проверяется юнит-тестами. Здесь только то, что связывает политику
+// с санитайзером.
 
-const MIME_ALIASES = {
-    'image/jpg': 'image/jpeg',
-    'image/pjpeg': 'image/jpeg',
-    'audio/mp3': 'audio/mpeg',
-    'audio/x-wav': 'audio/wav',
-    'audio/wave': 'audio/wav',
-    'audio/vnd.wave': 'audio/wav',
-    'audio/x-pn-wav': 'audio/wav',
-};
-
-// Обезличенные имена — как у сервера для незашифрованных вложений (К6):
-// исходное имя файла часто содержит имя человека, дату, номер телефона.
-const ANONYMOUS_FILE_NAMES = {
-    'image/jpeg': 'photo.jpg',
-    'image/png': 'photo.png',
-    'image/gif': 'photo.gif',
-    'image/webp': 'photo.webp',
-    'video/mp4': 'video.mp4',
-    'video/quicktime': 'video.mov',
-    'video/webm': 'video.webm',
-    'audio/webm': 'audio.webm',
-    'audio/ogg': 'audio.ogg',
-    'audio/mpeg': 'audio.mp3',
-    'audio/wav': 'audio.wav',
-    'application/pdf': 'document.pdf',
-    'text/plain': 'text.txt',
-};
-
-function detectFileMime(file) {
-    let mime = String(file.type || '').toLowerCase().split(';')[0].trim();
-    mime = MIME_ALIASES[mime] || mime;
-    if (!mime) {
-        const name = String(file.name || '').toLowerCase();
-        if (name.endsWith('.txt')) mime = 'text/plain';
-        else if (name.endsWith('.pdf')) mime = 'application/pdf';
-    }
-    return mime;
-}
-
-// Только точные MIME из белого списка К3 (синонимы вроде image/jpg
-// приводятся к ним заранее, в detectFileMime).
+// Отправить можно то, что и разрешено политикой, и умеет чистить санитайзер.
+// Списки независимы: формат, которому санитайзер научился, сам по себе
+// отправку не включит (его нет в политике), а тип из политики, который
+// санитайзер чистить не умеет, в очередь не попадёт. Вторая страховка —
+// sendOneFile: MediaSanitizer.sanitize бросает исключение на неизвестном типе.
 function isSupportedMime(mime) {
-    return typeof MediaSanitizer !== 'undefined' && Array.isArray(MediaSanitizer.SUPPORTED_TYPES)
+    return MimePolicy.isAllowedUpload(mime)
+        && typeof MediaSanitizer !== 'undefined' && Array.isArray(MediaSanitizer.SUPPORTED_TYPES)
         && MediaSanitizer.SUPPORTED_TYPES.includes(mime);
 }
 
-function isMediaMime(mime) {
-    return /^(image|video|audio)\//.test(mime);
-}
-
-function anonymousFileName(mime) {
-    return ANONYMOUS_FILE_NAMES[mime] || 'file';
-}
-
-// Имя внутри E2EE-конверта: у фото/видео/аудио — обезличенное, у
-// документов — исходное (без него документ не отличить от других), но
-// сервер его не видит — только участники комнаты.
+// Имя внутри E2EE-конверта: у фото и видео — обезличенное, у документов —
+// исходное (без него документ не отличить от других), но сервер его не
+// видит — только участники комнаты.
 function encryptedFileName(file, mime) {
-    return isMediaMime(mime) ? anonymousFileName(mime) : safeDisplayName(file.name || anonymousFileName(mime));
-}
-
-// MIME из конверта задаёт отправитель, то есть любой участник комнаты.
-// Всё вне белого списка отдаётся как octet-stream: blob: URL живёт в
-// origin приложения, и, например, text/html в нём был бы готовой XSS.
-function safeBlobMime(mime) {
-    return isSupportedMime(mime) ? mime : 'application/octet-stream';
+    return MimePolicy.isMediaMime(mime)
+        ? MimePolicy.anonymousFileName(mime)
+        : safeDisplayName(file.name || MimePolicy.anonymousFileName(mime));
 }
 
 // ---- Расшифровка вложений: лениво и не больше двух за раз ----
@@ -1132,15 +1087,6 @@ function setAttachmentStatus(box, text, failed) {
     box.replaceChildren(span);
 }
 
-// Иконка по MIME: для списка отправляемых файлов и ссылок на документы.
-function fileIconName(mime) {
-    if (/^image\//.test(mime)) return 'image';
-    if (/^video\//.test(mime)) return 'video';
-    if (/^audio\//.test(mime)) return 'music';
-    if (mime === 'text/plain' || mime === 'application/pdf') return 'file-text';
-    return 'file';
-}
-
 function createDocumentLink(url, name, mime, extra = {}) {
     const wrapper = document.createElement('div');
     wrapper.className = 'file-attachment';
@@ -1153,7 +1099,7 @@ function createDocumentLink(url, name, mime, extra = {}) {
     }
     const label = document.createElement('span');
     label.textContent = name;
-    a.append(icon(fileIconName(mime)), label, icon('download', { size: 'sm' }));
+    a.append(icon(MimePolicy.fileIconName(mime)), label, icon('download', { size: 'sm' }));
     wrapper.appendChild(a);
     return wrapper;
 }
@@ -1176,22 +1122,14 @@ function createMediaElement(mime, url, name) {
         video.className = 'message-video';
         return video;
     }
-    if (mime.startsWith('audio/')) {
-        const audio = document.createElement('audio');
-        audio.src = url;
-        audio.controls = true;
-        audio.preload = 'metadata';
-        audio.className = 'message-audio';
-        return audio;
-    }
     // Документы только скачиваются (download), а не открываются во вкладке.
     return createDocumentLink(url, name, mime);
 }
 
 function showDecryptedAttachment(box, message, bytes) {
     const file = message._file;
-    const mime = safeBlobMime(file.mime);
-    const name = safeDisplayName(file.name || anonymousFileName(mime));
+    const mime = MimePolicy.safeBlobMime(file.mime);
+    const name = safeDisplayName(file.name || MimePolicy.anonymousFileName(mime));
     const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
     registerObjectUrl(message.id, url);
     const stick = isNearBottom();
@@ -3957,7 +3895,7 @@ function markVisibleMessagesRead() {
 
 // ---- Отрисовка сообщения ----
 
-// Элементы с файлом (img/video/audio/a) собираются через DOM API, а не через
+// Элементы с файлом (img/video/a) собираются через DOM API, а не через
 // шаблонную строку с сырым message.file_url — см. п.2 аудита. file_url сейчас
 // всегда безопасен (имя генерируется сервером из Date.now()+random), но даже
 // если бы в нём оказались произвольные символы, .src/.href — это присвоение
@@ -3984,14 +3922,7 @@ function createFileAttachmentElement(message) {
         video.className = 'message-video';
         return video;
     }
-    if (message_type === 'audio') {
-        const audio = document.createElement('audio');
-        audio.src = file_url;
-        audio.controls = true;
-        audio.preload = 'metadata';
-        audio.className = 'message-audio';
-        return audio;
-    }
+    // Всё остальное (PDF, TXT и любой неизвестный тип) — ссылка на скачивание.
     return createDocumentLink(file_url, file_name || 'Файл', String(message.file_type || ''), { newTab: true });
 }
 
@@ -4378,19 +4309,19 @@ let chosenFilesChat = null;    // { chatId, roomId } — для какого ч�
 let uploadQueue = null;        // { chatId, roomId, xhr, cancelled } — идёт отправка
 
 function describeFile(file) {
-    const mime = detectFileMime(file);
+    const mime = MimePolicy.detectFileMime(file);
     let error = '';
-    if (!isSupportedMime(mime)) error = 'такой тип файлов не поддерживается';
+    if (!isSupportedMime(mime)) error = 'такой тип файлов не поддерживается (можно фото, видео, PDF и TXT)';
     else if (file.size > MAX_UPLOAD_BYTES) error = 'больше 50 МБ';
     else if (file.size === 0) error = 'пустой файл';
     return { file, mime, error };
 }
 
-// Имя, под которым файл увидят собеседники: у фото/видео/аудио — всегда
+// Имя, под которым файл увидят собеседники: у фото и видео — всегда
 // обезличенное; у документа в E2EE-комнате — исходное (оно внутри конверта,
 // сервер его не видит), без E2EE сервер тоже получает обезличенное.
 function outgoingFileName(file, mime, encrypted) {
-    return encrypted ? encryptedFileName(file, mime) : anonymousFileName(mime);
+    return encrypted ? encryptedFileName(file, mime) : MimePolicy.anonymousFileName(mime);
 }
 
 function onFilesChosen(files) {
@@ -4448,7 +4379,7 @@ function renderSendFilesList() {
             const next = elements.sendFilesList.querySelectorAll('.send-file-row .icon-btn')[Math.min(index, chosenFiles.length - 1)];
             (next || elements.sendFilesBtn).focus({ preventScroll: true });
         });
-        li.append(icon(item.error ? 'alert-triangle' : fileIconName(item.mime)), info, remove);
+        li.append(icon(item.error ? 'alert-triangle' : MimePolicy.fileIconName(item.mime)), info, remove);
         return li;
     });
     elements.sendFilesList.replaceChildren(...rows);
@@ -4555,7 +4486,7 @@ async function sendOneFile(queue, item, index, total) {
             return { ok: false, message: 'Не удалось зашифровать файл' };
         }
     } else {
-        formData.append('file', new Blob([clean], { type: item.mime }), anonymousFileName(item.mime));
+        formData.append('file', new Blob([clean], { type: item.mime }), MimePolicy.anonymousFileName(item.mime));
     }
     if (queue.cancelled) return { ok: false };
 
