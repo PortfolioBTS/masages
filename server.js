@@ -44,8 +44,9 @@ const {
     MIME_EXTENSIONS,
     ENCRYPTED_FILE_MIME,
     ENCRYPTED_FILE_EXTENSION,
-    ALL_ANONYMIZED_FILE_NAMES,
     anonymizedFileName,
+    checkMagicBytes,
+    isInlineUpload,
     randomString,
     generateUniqueCode,
     generateInviteCode,
@@ -72,7 +73,6 @@ const {
 } = require('./lib/invites');
 const {
     parseChatExpirySeconds,
-    pickRoomExpiryFromLegacy,
     effectiveMessageExpiry,
     parseChatPrefs
 } = require('./lib/chat-settings');
@@ -98,9 +98,25 @@ const { initKeyStoreSchema } = require('./lib/key-store');
 // (key-shares). Тоже регистрируется после sessionMiddleware.
 const { initE2eeGroupsSchema, registerE2eeGroupRoutes } = require('./lib/e2ee-groups');
 
+// Бот-помощник: ответ по теме запроса, приветствие нового аккаунта и подписи
+// кнопок-подсказок — чистые функции без БД (lib/bot-guide.js).
+const botGuide = require('./lib/bot-guide');
+
 // Onion-сервис (контейнер tor-service/) и proof-of-work для регистрации
 const { ONION_ADDRESS, ONION_PORT, onionMiddleware, isOnionHost, isOnionSocket, listenOnionPort } = require('./lib/tor-support');
 const { createChallenge, verifySolution } = require('./lib/pow');
+
+// Несколько экземпляров сервера на одной базе (миграции и фоновые задачи
+// под advisory-блокировками) и запись ошибок в лог без id из detail.
+const { runMigrationsExclusive, createRunExclusive, LOCK_NOT_AVAILABLE } = require('./lib/advisory-locks');
+const { loadMigrations, migrateSchema } = require('./lib/migrations');
+// Сброс схемы версии 2.0.0 при первом старте (вызывается из initDatabase).
+const { resetLegacyDatabase } = require('./lib/legacy-reset');
+const { logError } = require('./lib/log-error');
+// Точки регистрации маршрутов вне server.js и JSON-404 для /api.
+const { registerPreSessionRoutes, registerApiRoutes, registerApiNotFound } = require('./lib/routes');
+// Реестр фоновых задач (под runExclusive) и тестовая ручка NYXO_TEST_MAINTENANCE_MS.
+const { createJobScheduler, registerJobModules } = require('./lib/jobs');
 
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
@@ -126,34 +142,8 @@ const BLOCKED_EXTENSIONS = new Set(['.html', '.htm', '.php', '.exe', '.js', '.sh
 // итоговое имя файла регуляркой").
 const SAFE_FILENAME_RE = /^[\w.-]+$/;
 
-function checkMagicBytes(buffer, mimetype) {
-    if (!buffer || buffer.length < 4) return false;
-    const b = buffer;
-    if (mimetype === 'image/jpeg') return b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF;
-    if (mimetype === 'image/png')  return b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47;
-    if (mimetype === 'image/gif')  return b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46;
-    if (mimetype === 'image/webp') return b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46;
-    if (mimetype === 'application/pdf') return b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46;
-    // Единственная надёжная сигнатура MP4/ISO-BMFF — 'ftyp' на смещении 4-7.
-    // Раньше был ещё fallback b[0]===0 && b[1]===0 — под него подходит куча
-    // произвольных бинарных форматов, так что от него больше вреда, чем пользы.
-    if (mimetype === 'video/mp4')  return b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70;
-    if (mimetype === 'audio/mpeg') return (b[0] === 0xFF && (b[1] & 0xE0) === 0xE0) || (b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33);
-    if (mimetype === 'audio/ogg' || mimetype === 'video/webm' || mimetype === 'audio/webm') {
-        return (b[0] === 0x4F && b[1] === 0x67 && b[2] === 0x67) || (b[0] === 0x1A && b[1] === 0x45 && b[2] === 0xDF && b[3] === 0xA3);
-    }
-    // WAV — RIFF-контейнер: контейнер сам по себе (байты 0-3 'RIFF') общий с
-    // любым другим RIFF-форматом (в т.ч. WebP/AVI), поэтому дополнительно
-    // проверяем 'WAVE' на смещении 8-11, как и положено для формата WAVE.
-    if (mimetype === 'audio/wav') {
-        return buffer.length >= 12
-            && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46
-            && b[8] === 0x57 && b[9] === 0x41 && b[10] === 0x56 && b[11] === 0x45;
-    }
-    if (mimetype === 'text/plain') return true;
-    if (mimetype === 'video/quicktime') return b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70;
-    return false;
-}
+// checkMagicBytes (сигнатура файла против заявленного типа) — в
+// lib/security-utils.js: чистая функция, её проверяют юнит-тесты.
 
 // Вложения должны лежать на постоянном диске: файловая система контейнера
 // (Railway и т.п.) очищается при каждом деплое. UPLOADS_DIR — явный путь;
@@ -549,13 +539,16 @@ if (dbTls.info) console.log(dbTls.info);
 if (dbTls.warning) console.warn(dbTls.warning);
 const sslConfig = dbTls.ssl;
 
-const pool = new Pool({
+// Параметры подключения — общие для основного пула и служебных (пул
+// миграций и пул блокировок фоновых задач, см. lib/advisory-locks.js).
+const DB_POOL_CONFIG = {
     connectionString: process.env.DATABASE_URL,
     ssl: sslConfig,
     max: Number(process.env.PG_POOL_MAX) || 10,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 10000,
-});
+};
+const pool = new Pool(DB_POOL_CONFIG);
 // Без обработчика 'error' обрыв простаивающего соединения (рестарт или
 // failover Postgres, сетевой сбой) — необработанное событие 'error',
 // которое завершает весь процесс.
@@ -593,63 +586,102 @@ const disappearingMessagesManager = new DisappearingMessagesManager(pool, {
 });
 const GLOBAL_DEFAULT_EXPIRY_SECONDS = Math.max(0, Number(process.env.DEFAULT_MESSAGE_EXPIRY_SECONDS) || 0);
 
-// Пересоздаёт внешний ключ, только если его нет или у него другое
-// ON DELETE-поведение. Раньше КАЖДЫЙ старт делал DROP + ADD CONSTRAINT для
-// восьми FK: ADD CONSTRAINT перепроверяет всю таблицу под ACCESS EXCLUSIVE
-// блокировкой — на большой БД запуск шёл минутами, и всё это время любые
-// запросы к messages/chats висели.
-const FK_DELETE_ACTIONS = { 'NO ACTION': 'a', 'RESTRICT': 'r', 'CASCADE': 'c', 'SET NULL': 'n' };
-async function ensureForeignKey(table, constraint, column, refTable, onDelete) {
-    const existing = await dbGet(
-        'SELECT confdeltype FROM pg_constraint WHERE conname = $1 AND conrelid = $2::regclass',
-        [constraint, table]
-    );
-    if (existing && existing.confdeltype === FK_DELETE_ACTIONS[onDelete]) return;
-    await pool.query(`ALTER TABLE ${table} DROP CONSTRAINT IF EXISTS ${constraint}`);
-    await pool.query(`ALTER TABLE ${table} ADD CONSTRAINT ${constraint} FOREIGN KEY (${column}) REFERENCES ${refTable}(id) ON DELETE ${onDelete}`);
-}
-
+// ---- Итоговая схема базы (roadmap R0) ----
+//
+// Пока новая версия не выкачена, схема описана прямо в DDL initDatabase: все
+// изменения волн вносятся в эти CREATE TABLE, без ALTER-миграций, а после
+// выката схему меняют только файлы lib/migrations/ (docs/dev/migrations.md).
+// Шагов совместимости со старыми схемами здесь нет: схема версии 2.0.0 при
+// первом старте сбрасывается целиком (lib/legacy-reset.js), а локальные и
+// тестовые базы создаются заново.
+//
+// initDatabase идемпотентна и идёт под блокировкой миграций на каждом старте:
+// CREATE ... IF NOT EXISTS по готовой схеме ничего не меняет. Внешние ключи и
+// их ON DELETE заданы прямо в CREATE TABLE. Ключи на users — без каскада:
+// deleteUserAccount удаляет строки пользователя сам, в нужном порядке, одной
+// транзакцией. Таблицы со своими init*Schema (ключи E2EE, key-share, таймеры
+// исчезающих сообщений) создаются в lib/ рядом с кодом, который ими владеет.
 async function initDatabase() {
     await maybeDumpCa().catch(err => { console.error('[DUMP_CA] Ошибка:', err.message); process.exit(1); });
 
+    // Схема версии 2.0.0 (аккаунты с email и паролем) — сбросить до создания
+    // таблиц: реальных пользователей нет, а переносить тестовые данные незачем.
+    await resetLegacyDatabase({ pool, uploadsDir: UPLOADS_DIR });
+
+    // Аккаунты только временные (roadmap R2): срок жизни и последняя активность
+    // обязательны, по ним чистка удаляет неактивных. created_at — до минуты:
+    // точное время регистрации никому не нужно и лишь помогает сопоставить
+    // аккаунт с логами. Отметки прочтения выключены, пока пользователь их не
+    // включит (POST /api/user/privacy).
     await pool.query(`
         CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
+            id INTEGER PRIMARY KEY,
             unique_code TEXT UNIQUE NOT NULL,
             username TEXT UNIQUE NOT NULL,
-            email TEXT,
-            password TEXT,
             avatar TEXT DEFAULT '',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMPTZ NOT NULL DEFAULT date_trunc('minute', now()),
+            read_receipts BOOLEAN NOT NULL DEFAULT FALSE,
+            anon_lifetime TEXT NOT NULL CHECK (anon_lifetime IN ('tab', 'day', 'week')),
+            last_active_at TIMESTAMPTZ NOT NULL
         )
     `);
+    // Чистка неактивных аккаунтов (раз в несколько минут) идёт по сроку жизни и
+    // последней активности, без прохода по всей таблице users.
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_users_lifetime ON users(anon_lifetime, last_active_at)');
 
     await pool.query(`
         CREATE TABLE IF NOT EXISTS rooms (
-            id SERIAL PRIMARY KEY,
+            id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
             code TEXT UNIQUE NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            -- срок жизни кода приглашения (INVITE_TTL_HOURS)
+            code_expires_at TIMESTAMPTZ,
+            -- параметры кода (POST /api/chats/:chatId/invite/rotate): лимит
+            -- участников (NULL — без лимита), вступление только с одобрения
+            -- участника, выключенный код
+            invite_max_members INTEGER,
+            invite_require_approval BOOLEAN NOT NULL DEFAULT TRUE,
+            invite_disabled BOOLEAN NOT NULL DEFAULT FALSE
         )
     `);
 
+    // chats.id у каждого участника своя (личная строка), общий для всех —
+    // room_id. Комната удаляется целиком — строки chats уходят вместе с ней.
     await pool.query(`
         CREATE TABLE IF NOT EXISTS chats (
-            id SERIAL PRIMARY KEY,
+            id INTEGER PRIMARY KEY,
             user_id INTEGER NOT NULL REFERENCES users(id),
-            room_id INTEGER REFERENCES rooms(id),
+            room_id INTEGER REFERENCES rooms(id) ON DELETE CASCADE,
             name TEXT NOT NULL,
             avatar TEXT NOT NULL,
             online INTEGER DEFAULT 0,
-            is_bot INTEGER DEFAULT 0
+            is_bot INTEGER DEFAULT 0,
+            -- непрочитанные: id последнего прочитанного сообщения в личной строке
+            -- chats каждого участника
+            last_read_message_id INTEGER NOT NULL DEFAULT 0,
+            -- порядок чатов без сообщений: id случайные и порядка не несут
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            -- личные флаги чата (POST /api/chats/:chatId/prefs): собеседники их
+            -- не видят
+            pinned BOOLEAN NOT NULL DEFAULT FALSE,
+            muted BOOLEAN NOT NULL DEFAULT FALSE,
+            archived BOOLEAN NOT NULL DEFAULT FALSE
         )
     `);
 
+    // chat_id может стать NULL (ON DELETE SET NULL): когда участник выходит из
+    // комнаты, его строка chats удаляется, а история остаётся видна остальным
+    // по room_id. Комната удаляется — сообщения уходят каскадом; ответ на
+    // удалённое сообщение теряет связь с оригиналом (SET NULL), а не блокирует
+    // удаление. Приложение и так удаляет в правильном порядке (DELETE
+    // /api/chats/:chatId, deleteUserAccount), каскады — страховка на случай,
+    // если порядок там по ошибке изменят.
     await pool.query(`
         CREATE TABLE IF NOT EXISTS messages (
             id SERIAL PRIMARY KEY,
-            chat_id INTEGER NOT NULL REFERENCES chats(id),
-            room_id INTEGER REFERENCES rooms(id),
+            chat_id INTEGER REFERENCES chats(id) ON DELETE SET NULL,
+            room_id INTEGER REFERENCES rooms(id) ON DELETE CASCADE,
             user_id INTEGER NOT NULL REFERENCES users(id),
             text TEXT NOT NULL,
             file_url TEXT,
@@ -661,175 +693,70 @@ async function initDatabase() {
             status TEXT DEFAULT 'sent',
             edited_at TEXT,
             deleted INTEGER DEFAULT 0,
-            reply_to_id INTEGER REFERENCES messages(id)
+            reply_to_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+            -- E2EE: text хранит клиентский шифроконверт вместо обычного текста
+            -- (public/e2ee.js). Серверное шифрование "at rest" (lib/message-crypto.js)
+            -- применяется поверх в обоих случаях — флаг только про то, что лежит
+            -- ВНУТРИ после его снятия.
+            encrypted BOOLEAN NOT NULL DEFAULT FALSE,
+            -- точное время отправки: поле time ('HH:MM') считается в часовом поясе
+            -- СЕРВЕРА, и пользователи из других поясов видели бы сдвиг — клиент
+            -- форматирует created_at сам
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            -- размер вложения — для квоты UPLOAD_QUOTA_MB
+            file_size BIGINT
         )
     `);
 
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS unread (
-            id SERIAL PRIMARY KEY,
-            chat_id INTEGER NOT NULL REFERENCES chats(id),
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            count INTEGER DEFAULT 0
-        )
-    `);
-
+    // Новичок видит только сообщения комнаты, отправленные ПОСЛЕ его вступления
+    // (visible_from_id — id последнего сообщения на тот момент). Уникальный
+    // (room_id, user_id): проверка "участник ли комнаты" идёт на каждый файл,
+    // реакцию и joinChat, и один пользователь не может оказаться в комнате
+    // дважды (с двумя visible_from_id).
     await pool.query(`
         CREATE TABLE IF NOT EXISTS room_participants (
             id SERIAL PRIMARY KEY,
-            room_id INTEGER NOT NULL REFERENCES rooms(id),
-            user_id INTEGER NOT NULL REFERENCES users(id)
+            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            visible_from_id INTEGER NOT NULL DEFAULT 0,
+            UNIQUE (room_id, user_id)
         )
     `);
 
+    // Реакции исчезают вместе со своим сообщением: иначе снос всех сообщений
+    // комнаты падал бы на внешнем ключе, как только у любого есть реакция.
     await pool.query(`
         CREATE TABLE IF NOT EXISTS reactions (
             id SERIAL PRIMARY KEY,
-            message_id INTEGER NOT NULL REFERENCES messages(id),
+            message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
             user_id INTEGER NOT NULL REFERENCES users(id),
             emoji TEXT NOT NULL,
-            UNIQUE(message_id, user_id, emoji)
+            UNIQUE (message_id, user_id, emoji)
         )
     `);
+    await initJoinRequests();
 
-    // Текущее состояние колонок — одним запросом. ALTER TABLE ... IF NOT
-    // EXISTS всё равно берёт ACCESS EXCLUSIVE блокировку таблицы, поэтому
-    // миграции ниже выполняются только если они действительно нужны.
-    const columns = await dbAll(`
-        SELECT table_name, column_name, is_nullable, column_default
-        FROM information_schema.columns
-        WHERE table_schema = current_schema()
-          AND table_name IN ('users', 'chats', 'messages', 'rooms', 'room_participants')
+    // Сессии: тот же DDL, что у connect-pg-simple (его table.sql). Стор создал
+    // бы таблицу сам при первом запросе, но индекс по пользователю нужен сразу:
+    // выход и удаление аккаунта сбрасывают все его сессии (sess->>'userId'), и
+    // без индекса это проход по всей таблице.
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS session (
+            sid VARCHAR NOT NULL COLLATE "default",
+            sess JSON NOT NULL,
+            expire TIMESTAMP(6) NOT NULL,
+            CONSTRAINT session_pkey PRIMARY KEY (sid)
+        )
     `);
-    const column = (table, name) => columns.find(c => c.table_name === table && c.column_name === name);
-
-    // Миграция: если таблицы chats/messages были созданы ДО появления комнат,
-    // CREATE TABLE IF NOT EXISTS их не тронет и колонки room_id не будет.
-    if (!column('chats', 'room_id')) await pool.query('ALTER TABLE chats ADD COLUMN room_id INTEGER REFERENCES rooms(id)');
-    if (!column('messages', 'room_id')) await pool.query('ALTER TABLE messages ADD COLUMN room_id INTEGER REFERENCES rooms(id)');
-    // E2EE: сообщение хранит клиентский шифроконверт вместо обычного
-    // текста (см. public/e2ee.js). Серверное шифрование "at rest" из
-    // lib/message-crypto.js применяется поверх в обоих случаях —
-    // этот флаг только про то, что лежит ВНУТРИ, после его снятия.
-    if (!column('messages', 'encrypted')) await pool.query('ALTER TABLE messages ADD COLUMN encrypted BOOLEAN NOT NULL DEFAULT FALSE');
-    // Точное время отправки. Поле time ('HH:MM') формируется в часовом
-    // поясе СЕРВЕРА (на хостинге это UTC), и пользователи из других поясов
-    // видели время со сдвигом. Клиент теперь форматирует created_at сам.
-    // Колонка добавляется без DEFAULT, чтобы у старых сообщений было NULL
-    // (клиент покажет их time), а не момент миграции.
-    if (!column('messages', 'created_at')) {
-        await pool.query('ALTER TABLE messages ADD COLUMN created_at TIMESTAMPTZ');
-        await pool.query('ALTER TABLE messages ALTER COLUMN created_at SET DEFAULT NOW()');
-    }
-    // Непрочитанные: id последнего прочитанного сообщения в личной строке
-    // chats каждого участника. Раньше счётчик считал только сообщения с
-    // sent = 0 (их пишет лишь бот, и сразу со статусом 'read'), т.е. всегда 0.
-    const lastReadColumn = column('chats', 'last_read_message_id');
-    if (!lastReadColumn) await pool.query('ALTER TABLE chats ADD COLUMN last_read_message_id INTEGER');
-
-    // Все ADD COLUMN ниже — с NULL или константой по умолчанию: в PG 11+
-    // это правка только метаданных, без перезаписи таблицы.
-    //
-    // Отметки прочтения можно выключить (POST /api/user/privacy).
-    if (!column('users', 'read_receipts')) {
-        await pool.query('ALTER TABLE users ADD COLUMN read_receipts BOOLEAN NOT NULL DEFAULT TRUE');
-    }
-    // Срок жизни инвайт-кода; коды старых комнат перевыпускаются ниже
-    // (regenerateLegacyInviteCodes).
-    if (!column('rooms', 'code_expires_at')) {
-        await pool.query('ALTER TABLE rooms ADD COLUMN code_expires_at TIMESTAMPTZ');
-    }
-    // С какого сообщения участник видит историю комнаты: новичок видит
-    // только то, что отправлено ПОСЛЕ его вступления (раньше код приглашения
-    // открывал всю переписку с самого начала). Уже состоящие участники — 0,
-    // то есть всё, как и раньше.
-    if (!column('room_participants', 'visible_from_id')) {
-        await pool.query('ALTER TABLE room_participants ADD COLUMN visible_from_id INTEGER NOT NULL DEFAULT 0');
-    }
-    // Размер вложения — для квоты UPLOAD_QUOTA_MB. У старых вложений NULL
-    // (в квоту не засчитываются).
-    if (!column('messages', 'file_size')) {
-        await pool.query('ALTER TABLE messages ADD COLUMN file_size BIGINT');
-    }
-    // Порядок чатов без сообщений раньше давал chats.id DESC — с случайными
-    // id (ensureRandomIdDefaults) он больше ничего не значит. У старых
-    // строк NULL: между собой они по-прежнему упорядочены по id.
-    if (!column('chats', 'created_at')) {
-        await pool.query('ALTER TABLE chats ADD COLUMN created_at TIMESTAMPTZ');
-        await pool.query('ALTER TABLE chats ALTER COLUMN created_at SET DEFAULT NOW()');
-    }
-    // Параметры кода приглашения (POST /api/chats/:chatId/invite/rotate):
-    // лимит участников (NULL — без лимита), вступление только с одобрения
-    // участника и выключенный код. Одобрение включено и у УЖЕ существующих
-    // комнат (DEFAULT TRUE применяется к старым строкам): их коды
-    // разосланы в старом режиме, где код сразу открывал переписку, и
-    // проверить, кому они успели уйти, уже нельзя.
-    if (!column('rooms', 'invite_max_members')) {
-        await pool.query('ALTER TABLE rooms ADD COLUMN invite_max_members INTEGER');
-    }
-    if (!column('rooms', 'invite_require_approval')) {
-        await pool.query('ALTER TABLE rooms ADD COLUMN invite_require_approval BOOLEAN NOT NULL DEFAULT TRUE');
-    }
-    if (!column('rooms', 'invite_disabled')) {
-        await pool.query('ALTER TABLE rooms ADD COLUMN invite_disabled BOOLEAN NOT NULL DEFAULT FALSE');
-    }
-    // Личные флаги чата (POST /api/chats/:chatId/prefs) — в строке chats
-    // самого пользователя, собеседники их не видят.
-    for (const flag of ['pinned', 'muted', 'archived']) {
-        if (!column('chats', flag)) await pool.query(`ALTER TABLE chats ADD COLUMN ${flag} BOOLEAN NOT NULL DEFAULT FALSE`);
-    }
-    // Срок жизни анонимного аккаунта (lib/anon-lifetime.js): выбранный
-    // вариант и последняя активность. У обычных аккаунтов обе колонки
-    // NULL — их активность не записывается вовсе (лишние метаданные).
-    // Анонимам, созданным до этой версии (срок NULL = 'tab'), отсчёт
-    // неактивности начинается с момента обновления, а не с создания —
-    // иначе обновление сервера выкинуло бы всех, кто сейчас в сети.
-    if (!column('users', 'anon_lifetime')) {
-        await pool.query('ALTER TABLE users ADD COLUMN anon_lifetime TEXT');
-    }
-    if (!column('users', 'last_active_at')) {
-        await pool.query('ALTER TABLE users ADD COLUMN last_active_at TIMESTAMPTZ');
-        await pool.query('UPDATE users SET last_active_at = NOW() WHERE email IS NULL AND password IS NULL');
-    }
-
-    await ensureRandomIdDefaults(column);
-    await initJoinRequestsAndSecurityEvents();
-
-    // Миграция: удаление чата/выход из комнаты падало с нарушением FK —
-    // messages.chat_id (NOT NULL, без ON DELETE) не давал снести свою же
-    // запись в chats, если пользователь уже что-то написал, а chats.room_id
-    // не давал снести саму комнату, пока на неё ссылалась хоть одна запись в
-    // chats. Разрешаем chat_id уходить в NULL (история комнаты остаётся
-    // видна остальным по room_id) и каскадно чистим осиротевшие chats при
-    // удалении room.
-    if (column('messages', 'chat_id')?.is_nullable === 'NO') {
-        await pool.query('ALTER TABLE messages ALTER COLUMN chat_id DROP NOT NULL');
-    }
-    await ensureForeignKey('messages', 'messages_chat_id_fkey', 'chat_id', 'chats', 'SET NULL');
-    await ensureForeignKey('chats', 'chats_room_id_fkey', 'room_id', 'rooms', 'CASCADE');
-    // Реакции должны исчезать вместе со своим сообщением (иначе снос всех
-    // сообщений комнаты падает с reactions_message_id_fkey, как только у
-    // любого из них есть хоть одна реакция).
-    await ensureForeignKey('reactions', 'reactions_message_id_fkey', 'message_id', 'messages', 'CASCADE');
-    // Ответ на удалённое сообщение просто теряет связь с оригиналом, а не
-    // блокирует его удаление и не удаляется сам.
-    await ensureForeignKey('messages', 'messages_reply_to_id_fkey', 'reply_to_id', 'messages', 'SET NULL');
-    // Остальное уже удаляется в правильном порядке на уровне приложения
-    // (см. DELETE /api/chats/:chatId), но каскад добавлен как страховка на
-    // случай, если порядок операций там в будущем изменят по ошибке.
-    await ensureForeignKey('messages', 'messages_room_id_fkey', 'room_id', 'rooms', 'CASCADE');
-    await ensureForeignKey('unread', 'unread_chat_id_fkey', 'chat_id', 'chats', 'CASCADE');
-    await ensureForeignKey('room_participants', 'room_participants_room_id_fkey', 'room_id', 'rooms', 'CASCADE');
+    await pool.query('CREATE INDEX IF NOT EXISTS "IDX_session_expire" ON session(expire)');
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_session_user ON session((sess->>'userId'))`);
 
     await initE2eeGroupsSchema(pool);
     // Публичные E2EE-ключи хранятся в этой же базе (lib/key-store.js).
     await initKeyStoreSchema(pool);
-    // Таблицы message_expiry/chat_settings ссылаются на messages/chats,
-    // поэтому создаются только после них. Раньше initialize() вызывался в
-    // самом начале — на пустой БД сервер падал с "relation messages does
-    // not exist" и не запускался вообще.
+    // Таблицы message_expiry/chat_settings/room_settings ссылаются на
+    // messages/chats/rooms, поэтому создаются только после них.
     await disappearingMessagesManager.initialize();
-    await migrateLegacyRoomExpiry();
 
     // Индексы для выборок "сообщения чата по id". Включённые колонки
     // позволяют последнему сообщению, счётчику непрочитанного, странице
@@ -837,18 +764,16 @@ async function initDatabase() {
     // планировщик выбирал обратный проход по первичному ключу с фильтром
     // по room_id — для "тихой" комнаты это просмотр почти всей таблицы.
     // Префикс (room_id)/(chat_id) заодно обслуживает удаление комнаты/чата
-    // и каскады внешних ключей, так что старые одноколоночные индексы не нужны.
+    // и каскады внешних ключей, так что одноколоночные индексы не нужны.
     await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_room_live ON messages(room_id, deleted, id) INCLUDE (user_id, sent, encrypted)');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_chat_live ON messages(chat_id, deleted, id) INCLUDE (user_id, sent, encrypted)');
-    await pool.query('DROP INDEX IF EXISTS idx_messages_room_id');
-    await pool.query('DROP INDEX IF EXISTS idx_messages_chat_id');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id)');
     // Каждая картинка/файл в чате проверяет доступ поиском по file_url —
-    // без индекса это был полный проход по всей таблице messages на КАЖДЫЙ
+    // без индекса это был бы полный проход по всей таблице messages на КАЖДЫЙ
     // запрос /uploads/*.
     await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_file_url ON messages(file_url) WHERE file_url IS NOT NULL');
     // Для ON DELETE SET NULL по reply_to_id: без индекса удаление каждого
-    // сообщения сканировало всю таблицу в поисках ответов на него (снос
+    // сообщения сканировало бы всю таблицу в поисках ответов на него (снос
     // комнаты с N сообщениями — N полных проходов).
     await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_reply_to_id ON messages(reply_to_id) WHERE reply_to_id IS NOT NULL');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_chats_user_id ON chats(user_id)');
@@ -856,64 +781,31 @@ async function initDatabase() {
     // Сумма размеров вложений пользователя (квота) — index-only scan по
     // его файлам, а не проход по всем его сообщениям.
     await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_user_files ON messages(user_id) INCLUDE (file_size) WHERE file_size IS NOT NULL');
-    // Проверка "участник ли комнаты" выполняется на каждый файл, реакцию и
-    // joinChat. Уникальный (room_id, user_id) заодно не даёт одному
-    // пользователю оказаться в комнате дважды (с двумя visible_from_id).
-    await ensureUniqueRoomParticipants();
     await pool.query('CREATE INDEX IF NOT EXISTS idx_room_participants_user ON room_participants(user_id)');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_reactions_msg_user ON reactions(message_id, user_id)');
     // Авто-разархивация получателей идёт на КАЖДОЕ новое сообщение комнаты;
     // по частичному индексу она читает только архивные строки комнаты
     // (обычно ни одной), а не строки всех её участников.
     await pool.query('CREATE INDEX IF NOT EXISTS idx_chats_archived ON chats(room_id) WHERE archived');
-    // Удаление просроченных анонимов (каждые несколько минут) — только по
-    // анонимным строкам, без прохода по всей таблице users.
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_users_anon ON users(created_at) WHERE email IS NULL AND password IS NULL');
 
-    // Разовое заполнение last_read_message_id для существующих чатов (все
-    // старые сообщения считаются прочитанными, чтобы после обновления у
-    // всех не "загорелись" бейджи на всю историю).
-    if (!lastReadColumn || lastReadColumn.is_nullable === 'YES') {
-        await pool.query(`
-            UPDATE chats c SET last_read_message_id = COALESCE(CASE
-                WHEN c.room_id IS NOT NULL THEN (SELECT MAX(m.id) FROM messages m WHERE m.room_id = c.room_id)
-                ELSE (SELECT MAX(m.id) FROM messages m WHERE m.chat_id = c.id)
-            END, 0)
-            WHERE c.last_read_message_id IS NULL
-        `);
-        await pool.query('ALTER TABLE chats ALTER COLUMN last_read_message_id SET DEFAULT 0');
-        await pool.query('ALTER TABLE chats ALTER COLUMN last_read_message_id SET NOT NULL');
-    }
-
-    if (column('users', 'email')?.is_nullable === 'NO') {
-        await pool.query('ALTER TABLE users ALTER COLUMN email DROP NOT NULL');
-    }
-    if (column('users', 'password')?.is_nullable === 'NO') {
-        await pool.query('ALTER TABLE users ALTER COLUMN password DROP NOT NULL');
-    }
-
-    await regenerateLegacyInviteCodes();
-    await anonymizeLegacyFileNames();
+    await setRandomIdDefaults();
 
     console.log('База данных инициализирована');
 }
 
-// ---- Случайные id для users, rooms, chats ----
+// ---- Случайные id для users, rooms, chats, join_requests ----
 //
 // Последовательные id выдавали размер и темп роста сервиса (id свежей
 // регистрации = число пользователей) и порядок событий: по id комнаты или
-// чата было видно, кто и когда создал её раньше. Новые строки получают
-// случайный id из [1 000 000, 2^31 - 1]: 48 бит из gen_random_uuid() (PG 13+,
+// чата было видно, кто и когда создал её раньше. Поэтому id этих таблиц —
+// случайные из [1 000 000, 2^31 - 1]: 48 бит из gen_random_uuid() (PG 13+,
 // внутри pg_strong_random — криптостойкий ГСЧ; первые 12 hex-цифр UUIDv4
 // случайны целиком) по модулю размера диапазона (смещение ~2^-17 — не
-// различимо), с перепроверкой занятости в цикле. Существующие id не
-// меняются. messages.id остаётся последовательным намеренно: на порядке
-// сообщений держатся история, непрочитанное и visible_from_id.
+// различимо), с перепроверкой занятости в цикле. messages.id остаётся
+// последовательным намеренно: на порядке сообщений держатся история,
+// непрочитанное и visible_from_id.
 //
-// Тело функции — константа: по ней же при старте видно, что в БД уже
-// нужная версия, и CREATE OR REPLACE не выполняется лишний раз (два
-// одновременно стартующих экземпляра иначе ловили бы "tuple concurrently
-// updated").
+// Тело функции — константа: database.sql содержит ту же функцию.
 const RANDOM_ID_FUNCTION_BODY = `
 DECLARE
     candidate integer;
@@ -928,68 +820,36 @@ BEGIN
     END LOOP;
 END
 `;
+const RANDOM_ID_TABLES = ['users', 'rooms', 'chats', 'join_requests'];
 
-async function ensureRandomIdDefaults(column) {
-    const existing = await dbGet(
-        `SELECT p.prosrc FROM pg_proc p
-         JOIN pg_namespace n ON n.oid = p.pronamespace
-         WHERE p.proname = 'nyxo_random_id' AND n.nspname = current_schema()`
+// DEFAULT со ссылкой на таблицу (nyxo_random_id('users'::regclass)) можно
+// задать только после CREATE TABLE: внутри него таблицы ещё нет, поэтому
+// отдельным ALTER. ALTER берёт ACCESS EXCLUSIVE блокировку, и повторять его на
+// каждом старте незачем: он выполняется только там, где DEFAULT ещё не задан.
+async function setRandomIdDefaults() {
+    await pool.query(`
+        CREATE OR REPLACE FUNCTION nyxo_random_id(target regclass) RETURNS integer
+        LANGUAGE plpgsql VOLATILE AS $fn$${RANDOM_ID_FUNCTION_BODY}$fn$
+    `);
+    const current = await dbAll(
+        `SELECT table_name, column_default FROM information_schema.columns
+         WHERE table_schema = current_schema() AND column_name = 'id' AND table_name = ANY($1::text[])`,
+        [RANDOM_ID_TABLES]
     );
-    if (!existing || existing.prosrc !== RANDOM_ID_FUNCTION_BODY) {
-        await pool.query(`
-            CREATE OR REPLACE FUNCTION nyxo_random_id(target regclass) RETURNS integer
-            LANGUAGE plpgsql VOLATILE AS $fn$${RANDOM_ID_FUNCTION_BODY}$fn$
-        `);
-    }
-    for (const table of ['users', 'rooms', 'chats']) {
-        const current = String(column(table, 'id')?.column_default || '');
-        if (!current.includes('nyxo_random_id(')) {
+    for (const table of RANDOM_ID_TABLES) {
+        const row = current.find(r => r.table_name === table);
+        if (!String((row && row.column_default) || '').includes('nyxo_random_id(')) {
             await pool.query(`ALTER TABLE ${table} ALTER COLUMN id SET DEFAULT nyxo_random_id('${table}'::regclass)`);
         }
     }
 }
 
-// Уникальный индекс (room_id, user_id) вместо прежнего неуникального.
-// Дубли (гонка двух одновременных "войти по коду" до этой версии) чистятся
-// в той же транзакции, под блокировкой записи в таблицу: иначе между
-// чисткой и CREATE UNIQUE INDEX старый экземпляр сервера (деплой без
-// простоя) мог вставить новый дубль, и старт упал бы.
-async function ensureUniqueRoomParticipants() {
-    const existing = await dbGet("SELECT to_regclass('idx_room_participants_unique') AS idx");
-    if (!existing || !existing.idx) {
-        const client = await pool.connect();
-        try {
-            await client.query('BEGIN');
-            await client.query('LOCK TABLE room_participants IN SHARE ROW EXCLUSIVE MODE');
-            const removed = await client.query(`
-                DELETE FROM room_participants a USING room_participants b
-                WHERE a.room_id = b.room_id AND a.user_id = b.user_id AND a.id > b.id
-            `);
-            await client.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_room_participants_unique ON room_participants(room_id, user_id)');
-            await client.query('COMMIT');
-            if (removed.rowCount > 0) console.log(`[DB] Удалено дублей участников комнат: ${removed.rowCount}`);
-        } catch (err) {
-            await client.query('ROLLBACK');
-            throw err;
-        } finally {
-            client.release();
-        }
-    }
-    await pool.query('DROP INDEX IF EXISTS idx_room_participants_room_user');
-}
-
-// Заявки на вступление (комнаты с одобрением) и журнал безопасности.
-//
-// join_requests.id виден заявителю и участникам комнаты — он случайный
-// (nyxo_random_id), как id пользователей и комнат, чтобы по нему нельзя было
-// судить, сколько заявок подают по всему сервису. DEFAULT выставляется
-// отдельным ALTER: 'join_requests'::regclass внутри CREATE TABLE ещё не на
-// что ссылаться. Внешний ключ на users без каскада — как у остальных таблиц:
-// deleteUserAccount удаляет строки сам.
-//
-// security_events: только тип события, грубое семейство клиента
-// (classifyUserAgent) и время. Ни IP, ни строки User-Agent.
-async function initJoinRequestsAndSecurityEvents() {
+// Заявки на вступление (комнаты с одобрением). join_requests.id виден
+// заявителю и участникам комнаты — он случайный, как id пользователей и
+// комнат (DEFAULT ставит setRandomIdDefaults), чтобы по нему нельзя было
+// судить, сколько заявок подают по всему сервису. Внешний ключ на users без
+// каскада — как у остальных таблиц: deleteUserAccount удаляет строки сам.
+async function initJoinRequests() {
     await pool.query(`
         CREATE TABLE IF NOT EXISTS join_requests (
             id INTEGER PRIMARY KEY,
@@ -999,157 +859,8 @@ async function initJoinRequestsAndSecurityEvents() {
             UNIQUE (room_id, user_id)
         )
     `);
-    const idDefault = await dbGet(
-        `SELECT column_default FROM information_schema.columns
-         WHERE table_schema = current_schema() AND table_name = 'join_requests' AND column_name = 'id'`
-    );
-    if (!String((idDefault && idDefault.column_default) || '').includes('nyxo_random_id(')) {
-        await pool.query(`ALTER TABLE join_requests ALTER COLUMN id SET DEFAULT nyxo_random_id('join_requests'::regclass)`);
-    }
     await pool.query('CREATE INDEX IF NOT EXISTS idx_join_requests_user ON join_requests(user_id)');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_join_requests_created ON join_requests(created_at)');
-
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS security_events (
-            id BIGSERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            type TEXT NOT NULL,
-            client TEXT NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-    `);
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_security_events_user ON security_events(user_id, id)');
-}
-
-// Личные таймеры исчезающих сообщений в комнатах (chat_settings, по строке
-// chats участника) переносятся в общий таймер комнаты (room_settings) и
-// удаляются. Берётся самый короткий из них, приведённый к допустимому
-// варианту не длиннее исходного, — почему именно так, см.
-// pickRoomExpiryFromLegacy в lib/chat-settings.js. Уже заданный общий
-// таймер не перезаписывается. Перенос и удаление — одной транзакцией
-// (DELETE ... RETURNING): строка, дописанная старым экземпляром сервера
-// во время деплоя, не потеряется, а перенесётся при следующем старте.
-// Повторный старт ничего не делает: личных таймеров комнат не остаётся.
-async function migrateLegacyRoomExpiry() {
-    const migrated = await withTransaction(async (client) => {
-        const removed = await client.query(
-            `DELETE FROM chat_settings cs USING chats c
-             WHERE c.id = cs.chat_id AND c.room_id IS NOT NULL
-             RETURNING c.room_id, cs.default_message_expiry`
-        );
-        if (removed.rows.length === 0) return 0;
-        const byRoom = new Map();
-        for (const row of removed.rows) {
-            if (!byRoom.has(row.room_id)) byRoom.set(row.room_id, []);
-            byRoom.get(row.room_id).push(row.default_message_expiry);
-        }
-        const roomIds = [];
-        const seconds = [];
-        for (const [roomId, values] of byRoom) {
-            const value = pickRoomExpiryFromLegacy(values);
-            if (value > 0) {
-                roomIds.push(roomId);
-                seconds.push(value);
-            }
-        }
-        if (roomIds.length > 0) {
-            await client.query(
-                `INSERT INTO room_settings (room_id, default_message_expiry)
-                 SELECT * FROM unnest($1::int[], $2::int[])
-                 ON CONFLICT (room_id) DO NOTHING`,
-                [roomIds, seconds]
-            );
-        }
-        return roomIds.length;
-    });
-    if (migrated > 0) console.log(`[DisappearingMessages] Личные таймеры перенесены в общий таймер комнат: ${migrated}`);
-}
-
-const MIGRATION_BATCH = 500;
-
-// Коды приглашения старого формата (6 символов, ~30 бит, бессрочные)
-// перевыпускаются в новом формате со сроком жизни: старые ссылки перестают
-// работать — это и есть цель. Повторный старт ничего не трогает: коротких
-// кодов и NULL-сроков после первого прохода не остаётся.
-async function regenerateLegacyInviteCodes() {
-    const legacy = await dbAll('SELECT id FROM rooms WHERE length(code) < 20 ORDER BY id');
-    for (let i = 0; i < legacy.length; i += MIGRATION_BATCH) {
-        const ids = legacy.slice(i, i + MIGRATION_BATCH).map(r => r.id);
-        await pool.query(
-            `UPDATE rooms r SET code = v.code, code_expires_at = NOW() + $3::integer * INTERVAL '1 second'
-             FROM unnest($1::int[], $2::text[]) AS v(id, code)
-             WHERE r.id = v.id`,
-            [ids, ids.map(() => generateInviteCode()), INVITE_TTL_SECONDS]
-        );
-    }
-    const withoutExpiry = await pool.query(
-        `UPDATE rooms SET code_expires_at = NOW() + $1::integer * INTERVAL '1 second' WHERE code_expires_at IS NULL`,
-        [INVITE_TTL_SECONDS]
-    );
-    if (legacy.length > 0 || withoutExpiry.rowCount > 0) {
-        console.log(`[Invites] Перевыпущено старых кодов приглашения: ${legacy.length}, выставлен срок: ${withoutExpiry.rowCount}`);
-    }
-}
-
-// Старые вложения хранили исходное имя файла ("IMG_20260914_Ivanov.png"),
-// а у вложений без подписи оно же было и текстом сообщения. Имя заменяется
-// обезличенным по типу (anonymizedFileName), текст — тоже, если он
-// совпадал с именем. Выбираются только строки с ещё не обезличенным
-// именем, так что повторный старт ничего не меняет.
-async function anonymizeLegacyFileNames() {
-    let total = 0;
-    for (;;) {
-        const rows = await dbAll(
-            `SELECT id, room_id, chat_id, user_id, text, file_name, file_type FROM messages
-             WHERE file_url IS NOT NULL AND encrypted = FALSE AND file_name IS NOT NULL
-               AND file_name <> ALL($1::text[])
-             ORDER BY id
-             LIMIT $2`,
-            [ALL_ANONYMIZED_FILE_NAMES, MIGRATION_BATCH]
-        );
-        if (rows.length === 0) break;
-        const names = [];
-        const texts = [];
-        for (const row of rows) {
-            const name = anonymizedFileName(row.file_type);
-            names.push(name);
-            texts.push(readMessageText(row.text, row) === row.file_name ? writeMessageText(name, row) : null);
-        }
-        await pool.query(
-            `UPDATE messages m SET file_name = v.name, text = COALESCE(v.text, m.text)
-             FROM unnest($1::int[], $2::text[], $3::text[]) AS v(id, name, text)
-             WHERE m.id = v.id`,
-            [rows.map(r => r.id), names, texts]
-        );
-        total += rows.length;
-        if (rows.length < MIGRATION_BATCH) break;
-    }
-    if (total > 0) console.log(`[Uploads] Обезличены имена старых вложений: ${total}`);
-}
-
-// Раньше удаление сообщения было soft-delete: строка (автор, время,
-// комната, шифротекст) оставалась в БД навсегда. Теперь удаление
-// физическое, а оставшиеся от старой схемы строки удаляются один раз после
-// старта — в фоне и пачками, чтобы не держать блокировки и не задерживать
-// открытие порта (поиск по deleted <> 0 — проход по всей таблице).
-async function purgeLegacySoftDeletedMessages() {
-    let total = 0;
-    try {
-        for (;;) {
-            const rows = await dbAll(
-                `DELETE FROM messages WHERE id IN (
-                     SELECT id FROM messages WHERE deleted <> 0 LIMIT $1
-                 ) RETURNING file_url`,
-                [MIGRATION_BATCH]
-            );
-            removeUploadedFiles(rows.map(r => r.file_url));
-            total += rows.length;
-            if (rows.length < MIGRATION_BATCH) break;
-        }
-        if (total > 0) console.log(`[DB] Удалено сообщений, помеченных удалёнными в старой схеме: ${total}`);
-    } catch (err) {
-        console.error('[DB] Не удалось удалить старые soft-deleted сообщения:', err.message);
-    }
 }
 
 function getSocketRoomKey(chatId, roomId) {
@@ -1267,7 +978,7 @@ async function loadAnonState(userId, sess) {
         `SELECT anon_lifetime,
                 EXTRACT(EPOCH FROM last_active_at) * 1000 AS last_active_ms,
                 EXTRACT(EPOCH FROM created_at::timestamptz) * 1000 AS created_ms
-         FROM users WHERE id = $1 AND email IS NULL AND password IS NULL`,
+         FROM users WHERE id = $1`,
         [userId]
     );
     if (!row) {
@@ -1306,9 +1017,9 @@ async function isExpiredAnonymousSession(sess) {
 function persistAnonActivity(userIds) {
     if (userIds.length === 0) return;
     dbRun(
-        'UPDATE users SET last_active_at = NOW() WHERE id = ANY($1::int[]) AND email IS NULL AND password IS NULL',
+        'UPDATE users SET last_active_at = NOW() WHERE id = ANY($1::int[])',
         [userIds]
-    ).catch(err => console.error('[Anon] Не удалось записать активность:', err.message));
+    ).catch(err => logError('[Anon] Не удалось записать активность', err));
 }
 
 // Отметить активность анонима: в памяти — всегда, в БД — не чаще раза в
@@ -1570,6 +1281,12 @@ app.use(express.static(path.join(__dirname, 'public'), {
     setHeaders: (res) => setRevalidateCacheHeaders(res, false),
 }));
 
+// Маршруты из lib/routes/ (см. lib/routes/index.js): здесь — те, которым
+// сессия не нужна; ниже, после лимитера /api/, — обычные маршруты API.
+// serverContext — общий контекст маршрутов и задач из lib/ (lib/jobs).
+const serverContext = Object.freeze({ pool, dbGet, dbAll, dbRun, withTransaction, io, logError, isProduction: IS_PRODUCTION });
+registerPreSessionRoutes(app, serverContext);
+
 app.use(sessionMiddleware);
 
 // Анонимная сессия проверяется на КАЖДОМ запросе (раньше — только в
@@ -1603,6 +1320,7 @@ app.use('/api/', apiLimiter);
 registerE2eeKeyRoutes(app, { dbGet, dbAll });
 // Групповой E2EE: список участников чата + key-shares (тоже нужна сессия).
 registerE2eeGroupRoutes(app, { dbGet, dbAll, dbRun, io });
+registerApiRoutes(app, serverContext);
 
 app.get('/uploads/:filename', async (req, res) => {
     if (!req.session.userId) return res.status(401).json({ success: false, message: 'Не авторизован' });
@@ -1618,8 +1336,14 @@ app.get('/uploads/:filename', async (req, res) => {
     res.set('Cache-Control', 'no-store, private');
     res.removeHeader('Pragma');
     res.removeHeader('Expires');
+    // Прямо на странице показываются только фото и видео. PDF, TXT и
+    // шифротекст скачиваются (attachment), а не открываются внутри нашего
+    // origin; неизвестное расширение тоже считается скачиваемым.
+    if (!isInlineUpload(filename)) res.set('Content-Disposition', 'attachment');
     res.sendFile(path.join(UPLOADS_DIR, filename), { lastModified: false, etag: false, cacheControl: false }, (err) => {
         if (err && !res.headersSent) {
+            // JSON с ошибкой не должен уходить как «скачиваемый файл».
+            res.removeHeader('Content-Disposition');
             res.status(err.status === 404 ? 404 : 500).json({ success: false, message: 'Файл не найден' });
         }
     });
@@ -1706,13 +1430,14 @@ app.get('/api/pow/challenge', (req, res) => {
 });
 
 // Новый аккаунт и его чат с ботом с приветствием — внутри транзакции client.
-// anonLifetime — только у анонимного аккаунта (у него же отсчёт активности).
-async function insertUserWithBotChat(client, { uniqueCode, username, email, passwordHash, welcomeText, anonLifetime = null }) {
+// Аккаунты только временные: anonLifetime обязателен (users.anon_lifetime NOT
+// NULL), с него же начинается отсчёт активности.
+async function insertUserWithBotChat(client, { uniqueCode, username, welcomeText, anonLifetime }) {
     const userResult = await client.query(
-        `INSERT INTO users (unique_code, username, email, password, avatar, anon_lifetime, last_active_at)
-         VALUES ($1, $2, $3, $4, $5, $6::text, CASE WHEN $6::text IS NULL THEN NULL ELSE NOW() END)
+        `INSERT INTO users (unique_code, username, avatar, anon_lifetime, last_active_at)
+         VALUES ($1, $2, $3, $4, NOW())
          RETURNING id`,
-        [uniqueCode, username, email, passwordHash, '#667EEA', anonLifetime]
+        [uniqueCode, username, '#667EEA', anonLifetime]
     );
     const userId = userResult.rows[0].id;
     const botResult = await client.query(
@@ -1802,8 +1527,8 @@ app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
         const username = await generateAnonymousUsernameAsync();
 
         const userId = await withTransaction(client => insertUserWithBotChat(client, {
-            uniqueCode, username, email: null, passwordHash: null,
-            welcomeText: anonWelcomeText(lifetime), anonLifetime: lifetime,
+            uniqueCode, username,
+            welcomeText: botGuide.welcomeText(lifetime), anonLifetime: lifetime,
         }));
 
         const createdAtMs = Date.now();
@@ -2119,8 +1844,8 @@ function chatScope(chat) {
 // остаются в списке — клиент показывает их отдельным разделом.
 //
 // member_count и expiry_seconds — в этом же запросе, без запроса на
-// каждый чат: число участников — index-only scan по
-// idx_room_participants_unique (room_id, user_id), таймер — по первичным
+// каждый чат: число участников — index-only scan по уникальному индексу
+// room_participants (room_id, user_id), таймер — по первичным
 // ключам room_settings/chat_settings. expiry_seconds — действующий срок:
 // общий таймер комнаты (для бота — личный), иначе DEFAULT_MESSAGE_EXPIRY_SECONDS
 // ($2), иначе 0. Код выключенного приглашения не отдаётся.
@@ -2332,7 +2057,12 @@ app.get('/api/messages/:chatId', async (req, res) => {
             success: true,
             messages,
             hasMore,
-            chat: { id: chat.id, room_id: chat.room_id, name: chat.name, avatar: chat.avatar, is_bot: chat.is_bot },
+            chat: {
+                id: chat.id, room_id: chat.room_id, name: chat.name, avatar: chat.avatar, is_bot: chat.is_bot,
+                // Подписи кнопок-подсказок — только у чата с ботом. Их отдаёт сервер,
+                // чтобы кнопки и ключевые слова бота не расходились (lib/bot-guide.js).
+                ...(chat.is_bot ? { quickReplies: [...botGuide.QUICK_REPLIES] } : {}),
+            },
         });
     } catch (error) {
         console.error('Get messages error:', error);
@@ -2407,9 +2137,13 @@ function parseRequestedExpiry(value) {
     return DisappearingMessagesManager.normalizeExpirySeconds(value);
 }
 
-const BOT_RESPONSES = ['Интересный вопрос! Расскажите подробнее.', 'Я получил ваше сообщение!', 'Хмм, дайте подумать...', 'Отличное сообщение! Продолжайте.', 'Я бот, но стараюсь быть полезным!', 'Можете уточнить, что именно вас интересует?'];
+// Небольшая пауза перед ответом: он должен выглядеть ответом на сообщение, а
+// не выскакивать одновременно с ним.
+const BOT_REPLY_DELAY_MS = 600;
 
-function scheduleBotReply(chat) {
+// userText — открытый текст сообщения пользователя (чат с ботом не
+// шифруется). Что ответить, решает lib/bot-guide.js по теме запроса.
+function scheduleBotReply(chat, userText) {
     const socketRoomKey = getSocketRoomKey(chat.id, null);
     setTimeout(async () => {
         // Весь колбэк в try: раньше ошибка БД в первом же запросе здесь
@@ -2418,7 +2152,7 @@ function scheduleBotReply(chat) {
             const stillExists = await dbGet('SELECT id FROM chats WHERE id = $1 AND is_bot = 1', [chat.id]);
             if (!stillExists) return;
 
-            const replyText = BOT_RESPONSES[Math.floor(Math.random() * BOT_RESPONSES.length)];
+            const replyText = botGuide.botReply(userText).text;
             // Сообщения бота хранятся от имени владельца чата (sent = 0).
             const botMessage = await dbGet(
                 `INSERT INTO messages (chat_id, room_id, user_id, text, sent, time, status)
@@ -2444,7 +2178,7 @@ function scheduleBotReply(chat) {
         } catch (e) {
             console.error('Bot error:', e);
         }
-    }, 1500);
+    }, BOT_REPLY_DELAY_MS);
 }
 
 app.post('/api/messages', async (req, res) => {
@@ -2522,7 +2256,9 @@ app.post('/api/messages', async (req, res) => {
         res.json({ success: true, message });
 
         if (roomId) unarchiveForRecipients(chat, userId);
-        if (chat.is_bot) scheduleBotReply(chat);
+        // Чат с ботом ходит открытым текстом. Конверт E2EE сюда слать незачем, а
+        // если он всё же пришёл, прочитать его бот не может — ответит подсказкой.
+        if (chat.is_bot) scheduleBotReply(chat, encrypted ? '' : safeText);
     } catch (error) {
         console.error('Send message error:', error);
         res.json({ success: false, message: 'Ошибка отправки' });
@@ -3015,7 +2751,6 @@ app.delete('/api/chats/:chatId', async (req, res) => {
                 await client.query('SELECT id FROM rooms WHERE id = $1 FOR UPDATE', [chat.room_id]);
                 await client.query('DELETE FROM room_participants WHERE room_id = $1 AND user_id = $2', [chat.room_id, userId]);
                 await client.query('DELETE FROM e2ee_key_shares WHERE room_id = $1 AND recipient_id = $2', [chat.room_id, userId]);
-                await client.query('DELETE FROM unread WHERE chat_id = $1', [chat.id]);
                 await client.query('DELETE FROM chats WHERE id = $1 AND user_id = $2', [chat.id, userId]);
                 const remaining = await client.query('SELECT 1 FROM room_participants WHERE room_id = $1 LIMIT 1', [chat.room_id]);
                 if (remaining.rows.length === 0) {
@@ -3036,7 +2771,6 @@ app.delete('/api/chats/:chatId', async (req, res) => {
             } else {
                 const deleted = await client.query('DELETE FROM messages WHERE chat_id = $1 RETURNING file_url', [chat.id]);
                 fileUrls = deleted.rows.map(r => r.file_url);
-                await client.query('DELETE FROM unread WHERE chat_id = $1', [chat.id]);
                 await client.query('DELETE FROM chats WHERE id = $1 AND user_id = $2', [chat.id, userId]);
             }
             await client.query('COMMIT');
@@ -3221,7 +2955,7 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
             if (!checkMagicBytes(head, file.mimetype)) {
                 return rejectUpload(res, file, 400, 'Содержимое файла не соответствует его типу');
             }
-            // Метаданные (EXIF/GPS, автор PDF, теги аудио/видео...) снимаются
+            // Метаданные (EXIF/GPS, автор PDF, теги видео...) снимаются
             // у ВСЕХ типов — раньше только у картинок и PDF.
             await stripMetadataFromFile(uploadedFilePath, file.mimetype);
             fileSize = (await fs.promises.stat(uploadedFilePath)).size;
@@ -3243,8 +2977,8 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
         const fileName = encrypted ? null : anonymizedFileName(fileType);
 
         const messageType = encrypted ? 'file'
-            : fileType.startsWith('image/') ? 'image' : fileType.startsWith('video/') ? 'video' : fileType.startsWith('audio/') ? 'audio' : 'file';
-        const messageText = encrypted ? envelope : (caption || (messageType === 'audio' ? 'Голосовое сообщение' : fileName));
+            : fileType.startsWith('image/') ? 'image' : fileType.startsWith('video/') ? 'video' : 'file';
+        const messageText = encrypted ? envelope : (caption || fileName);
 
         const inserted = await dbGet(
             `INSERT INTO messages (chat_id, room_id, user_id, text, file_url, file_name, file_type, message_type, sent, time, status, encrypted, file_size)
@@ -3643,6 +3377,9 @@ app.post('/api/change-password', passwordLimiter, async (req, res) => {
     }
 });
 
+// После ВСЕХ маршрутов: неизвестный /api/* — JSON-404.
+registerApiNotFound(app);
+
 app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
     if (err instanceof multer.MulterError) {
@@ -3652,7 +3389,7 @@ app.use((err, req, res, next) => {
         return res.status(400).json({ success: false, message: `Ошибка загрузки: ${err.message}` });
     }
     if (err.message === 'Неподдерживаемый тип файла') {
-        return res.status(400).json({ success: false, message: 'Разрешены только фото, видео, аудио, PDF и TXT' });
+        return res.status(400).json({ success: false, message: 'Разрешены только фото, видео, PDF и TXT' });
     }
     if (err.type === 'entity.parse.failed') {
         return res.status(400).json({ success: false, message: 'Некорректный JSON в запросе' });
@@ -3668,7 +3405,7 @@ app.use((err, req, res, next) => {
 // по POST /api/account/delete): его сообщения (и их файлы), реакции, E2EE
 // key-shares, участие в комнатах, его заявки на вступление, журнал
 // безопасности, опустевшие комнаты со всей историей и заявками в них,
-// chats (chat_settings — каскадом), unread, сама строка users;
+// chats (chat_settings — каскадом), сама строка users;
 // message_expiry и реакции на его сообщения уходят каскадом. Одной
 // транзакцией — раньше это была серия отдельных DELETE, и первая же ошибка
 // FK (например, из e2ee_key_shares, который ссылается на users без каскада)
@@ -3700,7 +3437,6 @@ async function deleteUserAccount(userId) {
         await client.query('DELETE FROM reactions WHERE user_id = $1', [userId]);
         await client.query('DELETE FROM e2ee_key_shares WHERE sender_id = $1 OR recipient_id = $1', [userId]);
         await client.query('DELETE FROM room_participants WHERE user_id = $1', [userId]);
-        await client.query('DELETE FROM unread WHERE user_id = $1', [userId]);
         await client.query('DELETE FROM chats WHERE user_id = $1', [userId]);
         const ownRequests = await client.query('DELETE FROM join_requests WHERE user_id = $1 RETURNING room_id', [userId]);
         requestRoomIds = [...new Set(ownRequests.rows.map(r => r.room_id))];
@@ -3767,16 +3503,13 @@ async function purgeExpiredAnonymousUsers() {
         const online = anonSocketCount.keys();
         const rows = await dbAll(`
             SELECT u.id FROM users u
-            WHERE u.email IS NULL AND u.password IS NULL
-              AND (
-                  u.created_at < NOW() - $1::integer * INTERVAL '1 second'
-                  OR (
-                      COALESCE(u.last_active_at, u.created_at) < NOW() - (CASE u.anon_lifetime
-                          WHEN 'day' THEN $2::integer WHEN 'week' THEN $3::integer ELSE $4::integer
-                      END) * INTERVAL '1 second'
-                      AND NOT (u.id = ANY($5::int[]))
-                  )
-              )
+            WHERE u.created_at < NOW() - $1::integer * INTERVAL '1 second'
+               OR (
+                   COALESCE(u.last_active_at, u.created_at) < NOW() - (CASE u.anon_lifetime
+                       WHEN 'day' THEN $2::integer WHEN 'week' THEN $3::integer ELSE $4::integer
+                   END) * INTERVAL '1 second'
+                   AND NOT (u.id = ANY($5::int[]))
+               )
             ORDER BY u.created_at
             LIMIT 200
         `, [ANON_MAX_AGE_SECONDS, ANON_LIFETIMES.day, ANON_LIFETIMES.week, ANON_LIFETIMES.tab, online]);
@@ -3787,12 +3520,12 @@ async function purgeExpiredAnonymousUsers() {
                 await deleteUserAccount(row.id);
             } catch (err) {
                 failed++;
-                console.error('[Anon] Не удалось удалить просроченный аккаунт:', err.message);
+                logError('[Anon] Не удалось удалить просроченный аккаунт', err);
             }
         }
         if (rows.length > 0) console.log(`[Anon] Удалено просроченных анонимных аккаунтов: ${rows.length - failed}`);
     } catch (error) {
-        console.error('[Anon] Purge error:', error.message);
+        logError('[Anon] Purge error', error);
     }
 }
 
@@ -3805,9 +3538,57 @@ async function purgeExpiredJoinRequests() {
         for (const row of rows) notifyJoinRequestDecided(row.user_id, { requestId: row.id, approved: false });
         if (rows.length > 0) console.log(`[Invites] Удалено просроченных заявок на вступление: ${rows.length}`);
     } catch (error) {
-        console.error('[Invites] Purge error:', error.message);
+        logError('[Invites] Purge error', error);
     }
 }
+
+// ---- Фоновые задачи (lib/jobs/index.js) ----
+//
+// По умолчанию задача идёт под runExclusive (lib/advisory-locks.js): в
+// каждый момент её выполняет один экземпляр сервера на базу, у остальных
+// запуск пропускается. Клиенты блокировок — из отдельного маленького пула:
+// блокировка держит соединение всю задачу, а в основном пуле (в тестах
+// PG_POOL_MAX=3) они отнимали бы соединения у самих задач.
+const jobLockPool = new Pool({ ...DB_POOL_CONFIG, max: 4 });
+jobLockPool.on('error', (err) => logError('[DB] Ошибка простаивающего соединения блокировок', err));
+
+// Тестовые ручки сквозных тестов (NYXO_TEST_*, docs/dev/testing.md):
+// действуют ТОЛЬКО при NODE_ENV=test, в production env-check считает их
+// ошибкой. Целое число мс > 0, иначе null.
+function testKnobMs(name) {
+    if (process.env.NODE_ENV !== 'test') return null;
+    const value = Number(process.env[name]);
+    return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+const jobs = createJobScheduler({
+    runExclusive: createRunExclusive(jobLockPool),
+    // Задачи с maintenance: true — каждые N мс вместо минут.
+    maintenanceMs: testKnobMs('NYXO_TEST_MAINTENANCE_MS'),
+});
+// Анонимы проверяются каждые 5 минут: самый короткий срок — 30 минут
+// без активности, и опоздание с удалением не должно быть сравнимо с ним.
+jobs.register({
+    name: 'purgeExpiredAnonymousUsers', run: purgeExpiredAnonymousUsers,
+    firstDelayMs: 60 * 1000, intervalMs: 5 * 60 * 1000, maintenance: true, testTick: true,
+});
+// Продление активности анонимов с открытыми сокетами ЭТОГО процесса: у
+// каждого экземпляра свои сокеты, поэтому без блокировки.
+jobs.register({
+    name: 'touchAnonymousSockets', run: touchAnonymousSockets,
+    intervalMs: ANON_SOCKET_ACTIVITY_INTERVAL_MS, exclusive: false, maintenance: true,
+});
+jobs.register({
+    name: 'purgeExpiredJoinRequests', run: purgeExpiredJoinRequests,
+    firstDelayMs: 90 * 1000, intervalMs: 60 * 60 * 1000, maintenance: true,
+});
+// Брошенные временные файлы обработки вложений — в папке этого процесса.
+jobs.register({
+    name: 'cleanupStaleTempFiles', run: () => cleanupStaleTempFiles(UPLOADS_DIR, 60 * 60 * 1000),
+    intervalMs: 60 * 60 * 1000, exclusive: false,
+});
+// Задачи lib-модулей (JOB_MODULES в lib/jobs/index.js).
+registerJobModules(jobs, serverContext);
 
 // Страховка: ошибка в фоновой задаче (таймеры, сокеты) не должна ронять
 // весь сервер. Маршруты уже защищены wrapAsync.
@@ -3827,18 +3608,8 @@ function onServerListening() {
         console.log('');
     }
 
-    // Фоновые задачи: брошенные временные файлы обработки вложений,
-    // просроченные анонимные аккаунты и (однократно) строки, оставшиеся от
-    // soft-delete старой схемы.
-    // Анонимы проверяются каждые 5 минут: самый короткий срок — 30 минут
-    // без активности, и опоздание с удалением не должно быть сравнимо с ним.
-    setInterval(() => cleanupStaleTempFiles(UPLOADS_DIR, 60 * 60 * 1000), 60 * 60 * 1000);
-    setTimeout(purgeExpiredAnonymousUsers, 60 * 1000);
-    setInterval(purgeExpiredAnonymousUsers, 5 * 60 * 1000);
-    setInterval(touchAnonymousSockets, ANON_SOCKET_ACTIVITY_INTERVAL_MS);
-    setTimeout(purgeExpiredJoinRequests, 90 * 1000);
-    setInterval(purgeExpiredJoinRequests, 60 * 60 * 1000);
-    setImmediate(purgeLegacySoftDeletedMessages);
+    // Фоновые задачи (реестр — выше, у определения jobs).
+    jobs.start();
 
     // Только то, что действительно включено в этом запуске.
     console.log('Функции безопасности:');
@@ -3854,10 +3625,39 @@ function onServerListening() {
     console.log(`\n${'='.repeat(60)}\n`);
 }
 
+// Миграции — под advisory-блокировкой (lib/advisory-locks.js): два
+// одновременно стартующих экземпляра (реплики, деплой без простоя) раньше
+// выполняли DDL наперегонки, и один из них падал. На время миграций у их
+// запросов короткий lock_timeout: DDL, не дождавшийся блокировки таблицы
+// (её держат запросы работающего экземпляра), не стоит в очереди,
+// задерживая за собой все запросы к этой таблице, а падает, и миграции
+// повторяются целиком (они идемпотентны). Не помогли и повторы — сервер
+// выходит с ошибкой, хостинг его перезапускает.
+//
+// Новые изменения схемы — не в initDatabase, а файлами lib/migrations/
+// (см. lib/migrations/index.js): они выполняются после initDatabase, а
+// версия схемы в schema_meta не даёт старому коду стартовать на новой схеме.
+async function initDatabaseExclusive() {
+    // DUMP_CA=true — служебный режим (TLS к базе ещё не настроен): он
+    // завершает процесс в начале initDatabase и не должен ждать соединения.
+    if (process.env.DUMP_CA === 'true') return initDatabase();
+    // Файлы миграций читаются до первого соединения: ошибка в них — сразу.
+    const migrations = loadMigrations();
+    return runMigrationsExclusive(pool, ({ client }) => migrateSchema({
+        pool,
+        client,
+        migrations,
+        initialSteps: initDatabase,
+        config: Object.freeze({ isProduction: IS_PRODUCTION, uploadsDir: UPLOADS_DIR, env: process.env }),
+    }), {
+        createMigrationPool: (options) => new Pool({ ...DB_POOL_CONFIG, ...options }),
+    });
+}
+
 // Порт открывается только ПОСЛЕ миграций. Раньше listen() вызывался сразу,
 // параллельно с initDatabase(): первые запросы попадали на недомигрированную
 // БД и висели на блокировках ALTER TABLE.
-initDatabase()
+initDatabaseExclusive()
     .then(() => {
         server.listen(PORT, HOST, onServerListening);
         // Отдельный внутренний порт для tor-service: соединения с него
@@ -3865,6 +3665,8 @@ initDatabase()
         listenOnionPort(server, HOST, () => console.log(`[Tor] Onion-порт ${ONION_PORT} слушается`));
     })
     .catch((err) => {
-        console.error('Ошибка инициализации БД:', err);
+        logError(err && err.code === LOCK_NOT_AVAILABLE
+            ? 'Ошибка инициализации БД: миграция не дождалась блокировки таблицы (идут долгие запросы), нужен перезапуск'
+            : 'Ошибка инициализации БД', err);
         process.exit(1);
     });

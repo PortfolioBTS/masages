@@ -142,6 +142,7 @@
                     </div>
                     <button id="upload-cancel-btn" class="icon-btn icon-btn-sm" type="button" title="Отменить загрузку" aria-label="Отменить загрузку"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"></use></svg></button>
                 </div>
+                <div id="bot-suggestions" class="suggestions hidden" role="group" aria-label="Темы для бота"></div>
                 <div id="reply-preview" class="reply-preview hidden">
                     <svg class="icon icon-sm" aria-hidden="true"><use href="#i-reply"></use></svg>
                     <span id="reply-preview-text"></span>
@@ -151,9 +152,8 @@
                     <button id="attach-btn" class="icon-btn" title="Прикрепить файлы" aria-label="Прикрепить файлы"><svg class="icon" aria-hidden="true"><use href="#i-paperclip"></use></svg></button>
                     <input type="text" id="message-input" placeholder="Введите сообщение..." maxlength="4000" aria-label="Текст сообщения">
                     <button id="send-btn" class="icon-btn" title="Отправить" aria-label="Отправить"><svg class="icon" aria-hidden="true"><use href="#i-send"></use></svg></button>
-                    <button id="record-btn" class="icon-btn" title="Голосовые сообщения пока не реализованы" aria-label="Голосовые сообщения пока не реализованы" disabled><svg class="icon" aria-hidden="true"><use href="#i-mic"></use></svg></button>
                 </div>
-                <input type="file" id="file-input" class="hidden" multiple accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/quicktime,video/webm,audio/webm,audio/ogg,audio/mpeg,audio/wav,application/pdf,text/plain,.pdf,.txt">
+                <input type="file" id="file-input" class="hidden" multiple accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/quicktime,video/webm,application/pdf,text/plain,.pdf,.txt">
             </div>
             <div id="empty-state" class="empty-state">
                 <div class="empty-icon" aria-hidden="true"><svg class="icon icon-xl" aria-hidden="true"><use href="#i-message-square"></use></svg></div>
@@ -445,7 +445,7 @@
             </div>
             <div class="modal-body">
                 <ul id="send-files-list" class="send-files-list"></ul>
-                <p class="field-hint">Перед отправкой из файлов удаляются метаданные: геометки, EXIF, теги. Имена фото, видео и аудио заменяются обезличенными.</p>
+                <p class="field-hint">Перед отправкой из файлов удаляются метаданные: геометки, EXIF, теги. Имена фото и видео заменяются обезличенными.</p>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-ghost" type="button" data-close-modal>Отмена</button>
@@ -474,6 +474,7 @@
     <script src="/socket.io/socket.io.js"></script>
     <script src="mlkem.js"></script>
     <script src="media-sanitizer.js"></script>
+    <script src="lib/mime-policy.js"></script>
     <script src="e2ee.js"></script>
     <script src="vendor/qrcode.js"></script>
     <script src="lib/invite.js"></script>
