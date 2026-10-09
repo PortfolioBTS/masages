@@ -26,6 +26,16 @@ const POW_TIMEOUT_MS = 60 * 1000;
 const ANON_IDS_KEY = 'nyxo-anon-ids';
 const FLASH_NOTICE_KEY = 'nyxo-notice';
 const NOTIFY_PREF_PREFIX = 'nyxo-notify:';
+const BOT_CHAT_PREFIX = 'nyxo-bot-chat:';
+const E2EE_PREF_PREFIX = 'e2ee-enabled:';
+const E2EE_DB_PREFIX = 'nyxo-e2ee-';
+const SESSION_CHANNEL = 'nyxo-session';
+
+// Keepalive (контракт этапа 1, §5): GET /api/auth раз в 4 минуты, а также
+// при возвращении во вкладку (если запроса не было дольше минуты), при
+// появлении сети и после обрыва сокета.
+const KEEPALIVE_MS = 4 * 60 * 1000;
+const KEEPALIVE_VISIBLE_GAP_MS = 60 * 1000;
 
 // Срок исчезающих сообщений: только эти значения принимает сервер (К2).
 const EXPIRY_OPTIONS = [0, 300, 3600, 86400, 604800];
@@ -56,15 +66,32 @@ const elements = {
     connectionStatusIcon: document.getElementById('connection-status-icon'),
     connectionStatusText: document.getElementById('connection-status-text'),
 
-    // ---- Вход и приватный режим ----
+    // ---- Экран входа ----
     authScreen: document.getElementById('auth-screen'),
-    loginForm: document.getElementById('login-form'),
-    registerForm: document.getElementById('register-form'),
-    loginBtn: document.getElementById('login-btn'),
-    registerBtn: document.getElementById('register-btn'),
-    anonymousLoginBtn: document.getElementById('anonymous-login-btn'),
-    anonModal: document.getElementById('anon-modal'),
-    anonConfirmBtn: document.getElementById('anon-confirm-btn'),
+    authThemeBtn: document.getElementById('auth-theme-btn'),
+    authNotice: document.getElementById('auth-notice'),
+    authInvite: document.getElementById('auth-invite'),
+    authInviteInput: document.getElementById('auth-invite-input'),
+    authInviteError: document.getElementById('auth-invite-error'),
+    authLifetime: document.getElementById('auth-lifetime'),
+    authLifetimeDetail: document.getElementById('auth-lifetime-detail'),
+    authInviteAdvice: document.getElementById('auth-invite-advice'),
+    authProgress: document.getElementById('auth-progress'),
+    anonStartBtn: document.getElementById('anon-start-btn'),
+    inviteToggleBtn: document.getElementById('invite-toggle-btn'),
+    aboutOpenBtn: document.getElementById('about-open-btn'),
+    authLinksSep: document.getElementById('auth-links-sep'),
+    onionOpenBtn: document.getElementById('onion-open-btn'),
+
+    // ---- Окно «Как это работает» ----
+    aboutModal: document.getElementById('about-modal'),
+    aboutTor: document.getElementById('about-tor'),
+    aboutOnion: document.getElementById('about-onion'),
+    aboutOnionAddress: document.getElementById('about-onion-address'),
+    aboutOnionCopyBtn: document.getElementById('about-onion-copy-btn'),
+    aboutOnionLink: document.getElementById('about-onion-link'),
+    aboutOnionMissing: document.getElementById('about-onion-missing'),
+    aboutOnionCurrent: document.getElementById('about-onion-current'),
 
     // ---- Сайдбар ----
     sidebar: document.querySelector('.sidebar'),
@@ -76,11 +103,6 @@ const elements = {
     chatsList: document.getElementById('chats-list'),
     profileBtn: document.getElementById('profile-btn'),
     logoutBtn: document.getElementById('logout-btn'),
-
-    // ---- Выход из аккаунта ----
-    logoutModal: document.getElementById('logout-modal'),
-    logoutKeepBtn: document.getElementById('logout-keep-btn'),
-    logoutWipeBtn: document.getElementById('logout-wipe-btn'),
 
     // ---- Шапка чата ----
     chatHeader: document.getElementById('chat-header'),
@@ -175,6 +197,10 @@ const elements = {
     joinPreviewName: document.getElementById('join-preview-name'),
     joinPreviewMeta: document.getElementById('join-preview-meta'),
     joinPreviewApproval: document.getElementById('join-preview-approval'),
+    newChatTitle: document.getElementById('new-chat-title'),
+    newChatCreate: document.getElementById('new-chat-create'),
+    joinError: document.getElementById('join-error'),
+    joinStatus: document.getElementById('join-status'),
     joinConfirmBtn: document.getElementById('join-confirm-btn'),
     joinCancelBtn: document.getElementById('join-cancel-btn'),
     myRequests: document.getElementById('my-requests'),
@@ -199,26 +225,18 @@ const elements = {
     profileModal: document.getElementById('profile-modal'),
     profileAvatar: document.getElementById('profile-avatar'),
     profileUsername: document.getElementById('profile-username'),
-    profileEmail: document.getElementById('profile-email'),
-    profileCode: document.getElementById('profile-code'),
-    profileAnonBadge: document.getElementById('profile-anon-badge'),
+    profileLifetime: document.getElementById('profile-lifetime'),
+    profileLifetimeStatus: document.getElementById('profile-lifetime-status'),
     profileThemeBtn: document.getElementById('profile-theme-btn'),
     readReceiptsToggle: document.getElementById('read-receipts-toggle'),
     notifyToggle: document.getElementById('notify-toggle'),
-    securitySection: document.getElementById('security-section'),
-    securityList: document.getElementById('security-list'),
+    profileAboutBtn: document.getElementById('profile-about-btn'),
 
-    // ---- Смена пароля ----
-    changePasswordBtn: document.getElementById('change-password-btn'),
-    passwordModal: document.getElementById('password-modal'),
-    savePasswordBtn: document.getElementById('save-password-btn'),
-
-    // ---- Удаление аккаунта ----
+    // ---- «Удалить и выйти» ----
     deleteAccountBtn: document.getElementById('delete-account-btn'),
     deleteAccountModal: document.getElementById('delete-account-modal'),
-    deleteAccountText: document.getElementById('delete-account-text'),
-    deleteAccountPasswordGroup: document.getElementById('delete-account-password-group'),
-    deleteAccountPassword: document.getElementById('delete-account-password'),
+    deleteAccountAlt: document.getElementById('delete-account-alt'),
+    deleteAccountError: document.getElementById('delete-account-error'),
     confirmDeleteAccountBtn: document.getElementById('confirm-delete-account-btn'),
 };
 
@@ -331,12 +349,12 @@ function formatFileSize(bytes) {
 
 // ==================== Следы на устройстве ====================
 // Всё, что клиент хранит локально: ключи E2EE (IndexedDB nyxo-e2ee-<id>,
-// удаляется через E2EE.deleteLocalData) и выбор тумблера шифрования по
-// чатам (localStorage e2ee-enabled:<id>:<chatId>). Для анонимного режима
-// ("данные удалятся при выходе") и после удаления аккаунта это должно
-// исчезать вместе с сессией. Хранилище браузера может быть недоступно
-// (приватный режим, запрет cookies) — отсюда try/catch вокруг каждого
-// обращения: интерфейс должен работать и без него.
+// удаляется через E2EE.deleteLocalData) и флаги пользователя в localStorage.
+// Все аккаунты временные, поэтому при выходе (он же удаление) и после
+// удаления аккаунта по сроку это должно исчезать вместе с сессией.
+// Хранилище браузера может быть недоступно (окно инкогнито, запрет
+// cookies) — отсюда try/catch вокруг каждого обращения: интерфейс должен
+// работать и без него.
 
 function readAnonIds() {
     try {
@@ -356,8 +374,9 @@ function writeAnonIds(ids) {
 }
 
 // Список "чьи локальные данные стереть, как только этот пользователь не
-// текущая сессия". Туда попадают анонимные сессии (вкладку могли просто
-// закрыть, а сервер удалит анонима сам по сроку без активности) и удалённые аккаунты.
+// текущая сессия". Туда попадает каждый аккаунт при входе (вкладку могли
+// просто закрыть, а сервер удалит аккаунт сам по сроку без входа) и
+// удалённые аккаунты, чью базу ключей не удалось стереть сразу.
 function rememberIdForWipe(userId) {
     writeAnonIds([...readAnonIds(), Number(userId)]);
 }
@@ -366,20 +385,28 @@ function forgetIdForWipe(userId) {
     writeAnonIds(readAnonIds().filter(id => id !== Number(userId)));
 }
 
-// Локальные флаги пользователя: тумблеры шифрования по чатам и согласие
-// на уведомления. Тема оформления — настройка устройства, а не аккаунта,
-// её не трогаем.
+// Локальные флаги пользователя: тумблеры шифрования по чатам, согласие на
+// уведомления и id чата с ботом. Тема оформления — настройка устройства, а
+// не аккаунта, её не трогаем.
 function removeLocalUserPrefs(userId) {
     try {
-        const prefix = `e2ee-enabled:${userId}:`;
+        const prefix = `${E2EE_PREF_PREFIX}${userId}:`;
         const doomed = [];
         for (let i = 0; i < localStorage.length; i++) {
             const key = localStorage.key(i);
             if (key && key.startsWith(prefix)) doomed.push(key);
         }
-        doomed.push(NOTIFY_PREF_PREFIX + userId);
+        doomed.push(NOTIFY_PREF_PREFIX + userId, BOT_CHAT_PREFIX + userId);
         doomed.forEach(key => localStorage.removeItem(key));
     } catch { /* хранилище недоступно */ }
+}
+
+// id чата с ботом (приходит в ответе регистрации) нужен клиенту волны 2;
+// хранится на устройстве рядом с остальными локальными данными аккаунта.
+function rememberBotChatId(userId, botChatId) {
+    const id = Number(botChatId);
+    if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(Number(userId))) return;
+    try { localStorage.setItem(BOT_CHAT_PREFIX + userId, String(id)); } catch { /* хранилище недоступно */ }
 }
 
 // Стирает локальные данные пользователя. Резолвится true, если база
@@ -402,16 +429,64 @@ function wipeLocalUserData(userId, timeoutMs = 3000) {
     return withTimeout(deletion, timeoutMs, false);
 }
 
-function purgeStaleLocalData(activeUserId) {
-    readAnonIds()
-        .filter(id => id !== Number(activeUserId))
-        .forEach(id => { wipeLocalUserData(id); });
+// Чьи следы лежат на устройстве: id из списка на стирание, из ключей
+// localStorage (уведомления, чат с ботом, тумблеры шифрования) и из имён баз
+// IndexedDB nyxo-e2ee-<id>. Список баз знает indexedDB.databases(); где его
+// нет (старый Firefox), остаётся список nyxo-anon-ids.
+async function listLocalUserIds() {
+    const ids = new Set(readAnonIds());
+    try {
+        // Ключ вида <префикс><id> или <префикс><id>:<хвост> (тумблеры шифрования).
+        const prefixes = [NOTIFY_PREF_PREFIX, BOT_CHAT_PREFIX, E2EE_PREF_PREFIX];
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            const prefix = key && prefixes.find(p => key.startsWith(p));
+            if (!prefix) continue;
+            const digits = key.slice(prefix.length).split(':')[0];
+            if (/^[0-9]+$/.test(digits)) ids.add(Number(digits));
+        }
+    } catch { /* хранилище недоступно */ }
+    try {
+        if (typeof indexedDB !== 'undefined' && indexedDB && typeof indexedDB.databases === 'function') {
+            const dbs = await withTimeout(indexedDB.databases(), 3000, []);
+            for (const db of dbs || []) {
+                if (!db || typeof db.name !== 'string' || !db.name.startsWith(E2EE_DB_PREFIX)) continue;
+                const digits = db.name.slice(E2EE_DB_PREFIX.length);
+                if (/^[0-9]+$/.test(digits)) ids.add(Number(digits));
+            }
+        }
+    } catch { /* список баз недоступен — остаётся nyxo-anon-ids */ }
+    return Array.from(ids).filter(id => Number.isSafeInteger(id) && id > 0);
 }
 
-// Полная перезагрузка после выхода из приватного режима и удаления
-// аккаунта: закрывает соединения с IndexedDB (иначе удаление базы ключей
-// ждёт их закрытия) и выбрасывает из памяти расшифрованную переписку.
-// Уведомление переживает перезагрузку через sessionStorage.
+// На одном origin живёт один аккаунт (кука сессии общая): всё, что осталось
+// от других, — следы удалённых аккаунтов, их стираем. Порядок важен: СНАЧАЛА
+// список следов, ПОТОМ свежий GET /api/auth. Если наоборот, аккаунт,
+// созданный в соседней вкладке между запросом и чтением списка, попал бы
+// под стирание. Оставляем аккаунт из ответа сервера и текущий. Сервер
+// недоступен — не стираем ничего: сессия могла и не истечь.
+let purgingForeign = null;
+function purgeForeignLocalData() {
+    if (purgingForeign) return purgingForeign;
+    purgingForeign = (async () => {
+        const known = await listLocalUserIds();
+        if (known.length === 0) return;
+        const state = await fetchAuthState();
+        if (!state) return;
+        const keep = new Set();
+        if (state.authenticated && state.user) keep.add(Number(state.user.id));
+        if (currentUser) keep.add(Number(currentUser.id));
+        known.filter(id => !keep.has(id)).forEach((id) => { wipeLocalUserData(id); });
+    })().catch((err) => {
+        console.warn('Не удалось почистить чужие локальные данные:', err);
+    }).finally(() => { purgingForeign = null; });
+    return purgingForeign;
+}
+
+// Полная перезагрузка после выхода и удаления аккаунта: закрывает
+// соединения с IndexedDB (иначе удаление базы ключей ждёт их закрытия) и
+// выбрасывает из памяти расшифрованную переписку. Уведомление переживает
+// перезагрузку через sessionStorage и показывается на экране входа.
 function reloadWithNotice(text) {
     try {
         if (text) sessionStorage.setItem(FLASH_NOTICE_KEY, text);
@@ -419,13 +494,14 @@ function reloadWithNotice(text) {
     location.reload();
 }
 
-function showFlashNotice() {
+// Уведомление, оставленное перед перезагрузкой; читается один раз.
+function takeFlashNotice() {
     let text = null;
     try {
         text = sessionStorage.getItem(FLASH_NOTICE_KEY);
         sessionStorage.removeItem(FLASH_NOTICE_KEY);
     } catch { /* нет sessionStorage */ }
-    if (text) showToast(text, 'info', 5000);
+    return text || '';
 }
 
 // ==================== E2EE (X3DH + Sender Keys) ====================
@@ -465,8 +541,8 @@ function getE2eeClient() {
     return e2eeClient;
 }
 
-// Причина — чтобы было понятно, что делать: обновить браузер, выйти из
-// приватного режима или ждать, пока починят сервер.
+// Причина — чтобы было понятно, что делать: обновить браузер, открыть
+// Nyxo не в окне инкогнито или ждать, пока починят сервер.
 function describeE2eeInitError(err) {
     const name = err && err.name;
     const message = String((err && err.message) || '');
@@ -479,7 +555,7 @@ function describeE2eeInitError(err) {
         return 'Этот браузер не поддерживает нужные алгоритмы шифрования (X25519/Ed25519) — обновите его';
     }
     if (name === 'InvalidStateError' || name === 'QuotaExceededError' || name === 'UnknownError' || /indexedDB/i.test(message)) {
-        return 'Браузер не разрешает сохранить ключи шифрования (приватный режим или запрет хранилища)';
+        return 'Браузер не разрешает сохранить ключи шифрования (окно инкогнито или запрет хранилища)';
     }
     if (err instanceof TypeError && /fetch|network/i.test(message)) {
         return 'Нет связи с сервером ключей шифрования';
@@ -541,7 +617,7 @@ async function getSettledE2eeClient() {
 }
 
 function e2eePrefKey(chatId) {
-    return `e2ee-enabled:${currentUser ? currentUser.id : '0'}:${chatId}`;
+    return `${E2EE_PREF_PREFIX}${currentUser ? currentUser.id : '0'}:${chatId}`;
 }
 
 // Выбор пользователя: отсутствие ключа = "включено".
@@ -556,7 +632,7 @@ function isE2eePreferred(chatId) {
 function setE2eePreferred(chatId, enabled) {
     try {
         localStorage.setItem(e2eePrefKey(chatId), enabled ? '1' : '0');
-    } catch { /* приватный режим браузера без localStorage — выбор не запомнится */ }
+    } catch { /* окно инкогнито без localStorage — выбор не запомнится */ }
 }
 
 // Фактическое состояние: выбрано и доступно на этом устройстве.
@@ -1186,9 +1262,9 @@ function createEncryptedAttachmentElement(message) {
 }
 
 // ==================== Proof-of-work для регистрации ====================
-// Регистрация (обычная и анонимная) требует решения PoW-задачи: это
-// ограничивает массовое создание аккаунтов ботами без капчи и без
-// сторонних сервисов. Считается в Web Worker, чтобы не вешать вкладку.
+// Создание аккаунта требует решения PoW-задачи: это ограничивает массовое
+// создание аккаунтов ботами без капчи и без сторонних сервисов. Считается
+// в Web Worker, чтобы не вешать вкладку.
 
 function runPowWorker(token, difficulty) {
     return new Promise((resolve, reject) => {
@@ -1206,7 +1282,7 @@ function runPowWorker(token, difficulty) {
         };
         timer = setTimeout(() => {
             finish();
-            reject(new Error('Проверка заняла слишком много времени. Попробуйте ещё раз'));
+            reject(new Error('Проверка заняла слишком много времени. Попробуйте ещё раз.'));
         }, POW_TIMEOUT_MS);
         worker.onmessage = (event) => {
             finish();
@@ -1233,7 +1309,9 @@ async function solvePow(purpose) {
 
 // POST с решённой PoW-задачей. Если сервер ответил powRequired (токен
 // истёк, пока пользователь думал), — одна повторная попытка с новой задачей.
-async function postWithPow(url, body, purpose, btn) {
+// isCancelled() проверяется перед отправкой: пока считалась задача, в
+// соседней вкладке мог появиться аккаунт — второй тогда не создаётся.
+async function postWithPow(url, body, purpose, btn, { isCancelled } = {}) {
     // Подпись кнопки — иконка + текст: сохраняем узлы целиком.
     const label = Array.from(btn.childNodes);
     btn.disabled = true;
@@ -1243,6 +1321,7 @@ async function postWithPow(url, body, purpose, btn) {
         let data = null;
         for (let attempt = 0; attempt < 2; attempt++) {
             const pow = await solvePow(purpose);
+            if (typeof isCancelled === 'function' && isCancelled()) return { success: false, cancelled: true };
             data = await api(url, { method: 'POST', body: JSON.stringify({ ...body, pow }) });
             if (!(data && data.success === false && data.powRequired)) break;
         }
@@ -1262,7 +1341,7 @@ function init() {
     // До проверки входа: фрагмент #join=… стирается из адресной строки
     // сразу, даже если пользователь ещё не вошёл (см. consumeJoinFragment).
     consumeJoinFragment();
-    showFlashNotice();
+    openSessionChannel();
     checkAuth();
     try {
         setupEventListeners();
@@ -1272,70 +1351,82 @@ function init() {
     setupThemeControls();
 }
 
-// ---- Ссылка-приглашение: <origin>/#join=<CODE> ----
+// ---- Ссылка-приглашение: <origin>/#join=<КОД>[.<СЕКРЕТ>] ----
 // Код едет во фрагменте: браузер не отправляет фрагмент на сервер, он не
 // попадает в логи прокси и в Referer. Сразу после чтения фрагмент стирается
 // (history.replaceState), чтобы код не остался в истории и закладках, а
-// сам код живёт только в памяти вкладки до входа в аккаунт.
-let pendingJoinCode = null;
+// сам код живёт только в памяти вкладки до входа в аккаунт. Секрет ссылки
+// (подписанный состав группы, этап 5.4) пока не используется, но
+// сохраняется рядом с кодом и на сервер не отправляется.
+let pendingJoin = null;          // { code, secret } — открыть после входа
+let pendingJoinBroken = false;   // ссылка была, но повреждена — сказать после входа
 
-function normalizeJoinCode(value) {
-    const code = String(value || '').replace(/[\s-]+/g, '').toUpperCase();
-    return /^[A-Z0-9]{1,40}$/.test(code) ? code : '';
+const INVITE_BROKEN_LINK = 'Ссылка-приглашение повреждена — попросите новую.';
+
+// Значение для поля приглашения: код группами по 5 и секрет через точку —
+// parseInviteInput разберёт его обратно без потерь.
+function inviteFieldValue(invite) {
+    return NyxoInvite.formatInviteCode(invite.code) + (invite.secret ? `.${invite.secret}` : '');
 }
 
 function consumeJoinFragment() {
     const hash = String(location.hash || '');
-    const match = /^#join=([^&]*)/.exec(hash);
-    if (!match) return;
+    if (!/^#(?:[^&]*&)*join=/i.test(hash)) return;
     try {
         history.replaceState(null, '', location.pathname + location.search);
     } catch { /* без History API фрагмент останется, но код всё равно не уйдёт на сервер */ }
-    let raw = match[1];
-    try { raw = decodeURIComponent(raw); } catch { /* битая %-последовательность — код отбросится ниже */ }
-    const code = normalizeJoinCode(raw);
-    if (!code) return;
-    pendingJoinCode = code;
+    const parsed = NyxoInvite.parseInviteInput(hash);
+    if (!parsed.ok) {
+        pendingJoin = null;
+        if (currentUser) {
+            showToast(INVITE_BROKEN_LINK, 'error', 6000);
+            return;
+        }
+        pendingJoinBroken = true;
+        setInviteMode(true, { value: '', error: INVITE_BROKEN_LINK });
+        return;
+    }
+    pendingJoin = { code: parsed.code, secret: parsed.secret };
+    pendingJoinBroken = false;
     if (currentUser) openPendingJoin();
+    else setInviteMode(true, { value: inviteFieldValue(pendingJoin) });
 }
 
 // Предпросмотр вступления по коду из ссылки — только после входа.
 function openPendingJoin() {
-    const code = pendingJoinCode;
-    pendingJoinCode = null;
-    if (!code || !currentUser) return;
-    openNewChatModal();
-    elements.joinChatCode.value = formatInviteCode(code);
+    const invite = pendingJoin;
+    pendingJoin = null;
+    pendingJoinBroken = false;
+    if (!invite || !currentUser) return;
+    openNewChatModal({ invite: true });
+    elements.joinChatCode.value = inviteFieldValue(invite);
     previewJoin();
 }
 
 async function checkAuth() {
-    let data;
-    try {
-        const res = await fetch('/api/auth');
-        data = await res.json();
-    } catch (e) {
-        // Сервер недоступен — локальные данные не трогаем: сессия могла и не истечь.
-        showAuth();
-        return;
-    }
+    const data = await fetchAuthState();
+    const notice = takeFlashNotice();
     if (data && data.authenticated && data.user) {
         enterApp(data.user);
-    } else {
-        purgeStaleLocalData(null);
-        showAuth();
-        // expired — сессия была, но аккаунт уже удалён (анонимный — по
-        // сроку без активности) или сессия истекла.
-        if (data && data.expired) showToast('Сессия истекла или приватный аккаунт удалён по сроку — войдите снова', 'info', 6000);
+        if (notice) showToast(notice, 'info', 5000);
+        return;
     }
+    showAuth();
+    // expired — сессия была, но аккаунт уже удалён по сроку без входа (или
+    // сессия недействительна).
+    const expired = Boolean(data && (data.expired || data.reason === 'expired'));
+    showAuthNotice(notice || (expired ? AUTH_NOTICES.expired : ''));
+    // Сервер недоступен — локальные данные не трогаем: сессия могла и не истечь.
+    if (data) purgeForeignLocalData();
 }
 
 function enterApp(user) {
     currentUser = user;
-    // До всего остального: если вкладку просто закроют, при следующем
-    // старте данные этой анонимной сессии будут стёрты (см. purgeStaleLocalData).
-    if (user.isAnonymous) rememberIdForWipe(user.id);
-    purgeStaleLocalData(user.id);
+    // До всего остального: если вкладку просто закроют, данные этого
+    // аккаунта будут стёрты, как только он перестанет быть текущим (см.
+    // purgeForeignLocalData) — все аккаунты временные.
+    rememberIdForWipe(user.id);
+    purgeForeignLocalData();
     e2eeUnavailableWarned = false;
     warnedRooms.clear();
     initE2eeForCurrentUser();
@@ -1343,66 +1434,201 @@ function enterApp(user) {
     // Новое соединение = новое рукопожатие с актуальной кукой сессии.
     if (socket.connected) socket.disconnect();
     socket.connect();
+    startKeepalive();
     loadChats();
     updateAnonNote();
-    // Ответы входа/регистрации не несут настроек приватности и срока
-    // жизни анонимного аккаунта — их знает /api/auth.
-    if (typeof user.readReceipts !== 'boolean' || (user.isAnonymous && !user.anonExpiresAt)) refreshAccountFlags();
-    startAnonNoteRefresh();
-    if (pendingJoinCode) openPendingJoin();
+    // Ответ регистрации мог прийти без настроек и срока — их знает /api/auth.
+    if (typeof user.readReceipts !== 'boolean' || !NyxoLifetime.isLifetime(user.anonLifetime)) pingSession();
+    if (pendingJoin) {
+        openPendingJoin();
+    } else if (pendingJoinBroken) {
+        pendingJoinBroken = false;
+        showToast(INVITE_BROKEN_LINK, 'error', 6000);
+    }
 }
 
-// Ответ /api/login и /api/register не содержит настроек приватности —
-// берём их из /api/auth.
-async function refreshAccountFlags() {
-    const userId = currentUser ? currentUser.id : null;
-    try {
-        const res = await fetch('/api/auth');
-        const data = await res.json();
-        if (!currentUser || currentUser.id !== userId) return;
-        if (data && data.authenticated === false) {
-            leaveApp('Сессия истекла, войдите снова');
-            return;
+// ---- Состояние аккаунта с сервера ----
+// GET /api/auth для вошедшего: продлевает сессию (сокет куку продлить не
+// может — её ставит только HTTP-ответ) и приносит свежие срок, дату
+// удаления и настройки. Параллельные вызовы склеиваются. Сетевая ошибка не
+// разлогинивает никогда. authenticated:false без причины перепроверяется
+// через 2 с: разовый сбой сервера не должен стирать ключи живого аккаунта.
+const AUTH_RECHECK_MS = 2000;
+let authPing = null;
+
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isCurrentUser(userId) {
+    return Boolean(currentUser) && currentUser.id === userId;
+}
+
+function pingSession() {
+    if (!currentUser) return Promise.resolve(null);
+    if (authPing) return authPing;
+    const userId = currentUser.id;
+    authPing = (async () => {
+        let data = await fetchAuthState();
+        if (!isCurrentUser(userId)) return null;
+        if (data && !data.authenticated && !data.expired && !data.reason) {
+            await delay(AUTH_RECHECK_MS);
+            if (!isCurrentUser(userId)) return null;
+            data = await fetchAuthState();
+            if (!isCurrentUser(userId)) return null;
         }
-        if (!data.authenticated || !data.user) return;
-        if (typeof data.user.readReceipts === 'boolean') currentUser.readReceipts = data.user.readReceipts;
-        if (typeof data.user.isAnonymous === 'boolean') currentUser.isAnonymous = data.user.isAnonymous;
-        if ('anonLifetime' in data.user) currentUser.anonLifetime = data.user.anonLifetime;
-        if ('anonExpiresAt' in data.user) currentUser.anonExpiresAt = data.user.anonExpiresAt;
-        refreshOwnMessageStatuses();
-        updateAnonNote();
-    } catch { /* останется значение по умолчанию */ }
+        if (!data) return null;
+        if (!data.authenticated) {
+            // Аккаунт удаляем мы сами: сервер сначала закрывает сокет и снимает
+            // сессию, потом отвечает. Выходом и уведомлением займётся
+            // deleteAccountAndLeave, когда придёт ответ.
+            if (deletingAccount) return data;
+            leaveApp(data.expired || data.reason === 'expired' ? AUTH_NOTICES.expired : AUTH_NOTICES.sessionLost);
+            return data;
+        }
+        if (!data.user) return data;
+        // Кука принадлежит уже другому аккаунту (его создали в соседней
+        // вкладке): этот из браузера недоступен, его ключи бесполезны.
+        if (Number(data.user.id) !== Number(userId)) {
+            leaveApp(AUTH_NOTICES.otherAccount);
+            return data;
+        }
+        applyAuthUser(data.user);
+        return data;
+    })().finally(() => { authPing = null; });
+    return authPing;
 }
 
-// ---- Приватный режим: заметка «Аккаунт удалится …» в сайдбаре ----
-// Срок считается от последней активности (открытая вкладка = активность),
-// поэтому оценка сдвигается, пока пользователь здесь: перечитываем её раз в
-// 5 минут — так же часто сервер продлевает last_active_at открытому сокету.
-let anonNoteTimer = null;
+// ---- Keepalive ----
+// Сессия продлевается HTTP-запросом (сокет куку не обновляет), а у вкладки
+// без активности сервер снимает с аккаунта срок. Поэтому пока вкладка
+// открыта, GET /api/auth уходит раз в KEEPALIVE_MS, а ещё когда вкладка
+// снова видна (если запроса не было дольше минуты), при появлении сети и
+// после обрыва сокета (см. обработчики сокета ниже). Фоновая вкладка может
+// получать таймеры реже — для tab-аккаунта (30 минут) этого хватает.
+let lastAuthAt = 0;
+let keepaliveTimer = null;
 
-function anonNoteText(user) {
-    if (user.anonLifetime === 'tab') return 'Аккаунт удалится через 30 минут после закрытия вкладки';
-    const expires = parseDate(user.anonExpiresAt);
-    if (expires) return `Аккаунт удалится ${formatShortDateTime(expires)}, если не заходить`;
-    if (user.anonLifetime === 'day') return 'Аккаунт удалится через сутки без активности';
-    if (user.anonLifetime === 'week') return 'Аккаунт удалится через 7 дней без активности';
-    return 'Аккаунт удалится при выходе';
+function startKeepalive() {
+    stopKeepalive();
+    keepaliveTimer = setInterval(() => { pingSession(); }, KEEPALIVE_MS);
 }
 
+function stopKeepalive() {
+    clearInterval(keepaliveTimer);
+    keepaliveTimer = null;
+}
+
+function keepaliveOnVisible() {
+    if (document.visibilityState !== 'visible' || !currentUser) return;
+    if (Date.now() - lastAuthAt > KEEPALIVE_VISIBLE_GAP_MS) pingSession();
+}
+
+// Сервер сам закрыл сокет ('io server disconnect'): socket.io в этом случае
+// не переподключается. Проверяем вход; если сессия жива — подключаемся
+// заново, но не чаще раза в 5 секунд (иначе сервер, который по какой-то
+// причине закрывает сокет каждый раз, получил бы цикл из запросов).
+// Сервер закрывает сокеты и при удалении аккаунта — раньше, чем соседняя
+// вкладка успеет об этом сообщить (account-deleted), поэтому с проверкой
+// входа секунду ждём: иначе вместо «удалён в другой вкладке» человек
+// увидел бы «потерян вход».
+const SERVER_DISCONNECT_GRACE_MS = 1000;
+let lastServerDisconnectAt = 0;
+async function recoverFromServerDisconnect() {
+    if (!currentUser) return;
+    const userId = currentUser.id;
+    const tooSoon = Date.now() - lastServerDisconnectAt < 5000;
+    lastServerDisconnectAt = Date.now();
+    await delay(SERVER_DISCONNECT_GRACE_MS);
+    if (!isCurrentUser(userId)) return;
+    const data = await pingSession();
+    if (tooSoon || !isCurrentUser(userId) || !data || !data.authenticated) return;
+    if (!socket.connected) socket.connect();
+}
+
+// ---- Несколько вкладок: BroadcastChannel nyxo-session ----
+// Кука сессии общая для всех вкладок origin, поэтому вход, смена срока и
+// удаление аккаунта в одной вкладке касаются всех. События:
+//   session-started  { userId }               — в этом браузере создан/открыт аккаунт;
+//   account-deleted  { userId }               — аккаунт удалён;
+//   lifetime-changed { userId, anonLifetime } — сменился срок (сессия пересоздана).
+// Автор события сам его не получает. Нет BroadcastChannel (старый Safari) —
+// остаётся keepalive: другая вкладка узнает об изменении при ближайшем
+// запросе /api/auth.
+let sessionChannel = null;
+
+function openSessionChannel() {
+    if (typeof BroadcastChannel !== 'function') return;
+    try {
+        sessionChannel = new BroadcastChannel(SESSION_CHANNEL);
+        sessionChannel.onmessage = (e) => onSessionEvent(e.data);
+    } catch {
+        sessionChannel = null;
+    }
+}
+
+function postSessionEvent(event) {
+    try {
+        if (sessionChannel) sessionChannel.postMessage(event);
+    } catch { /* канал закрыт — вкладки узнают через keepalive */ }
+}
+
+// Экран входа в этой вкладке уже не нужен: аккаунт есть, куку сессии видят
+// все вкладки. Идущую здесь регистрацию отменяем — но только убедившись по
+// /api/auth, что сессия действительно есть.
+async function adoptSessionFromOtherTab() {
+    const state = await fetchAuthState();
+    if (currentUser || !state || !state.authenticated || !state.user) return;
+    registrationCancelled = true;
+    enterApp(state.user);
+}
+
+function onSessionEvent(event) {
+    if (!event || typeof event !== 'object' || !Number.isInteger(event.userId)) return;
+    if (event.type === 'session-started') {
+        if (!currentUser) {
+            adoptSessionFromOtherTab();
+        } else if (currentUser.id !== event.userId) {
+            // Кука теперь принадлежит другому аккаунту; pingSession сам
+            // уведёт эту вкладку на экран входа и сотрёт её ключи.
+            pingSession();
+        }
+    } else if (event.type === 'account-deleted') {
+        if (isCurrentUser(event.userId)) leaveApp(AUTH_NOTICES.deletedElsewhere);
+    } else if (event.type === 'lifetime-changed') {
+        if (!isCurrentUser(event.userId)) return;
+        if (NyxoLifetime.isLifetime(event.anonLifetime)) currentUser.anonLifetime = event.anonLifetime;
+        // Сервер пересоздал сессию: старое рукопожатие сокета держится за прежнюю.
+        reconnectSocket();
+        onLifetimeChanged();
+        pingSession();
+    }
+}
+
+// Поля аккаунта из /api/auth; каждое проверяется: сервер другой версии
+// может прислать не всё.
+function applyAuthUser(user) {
+    if (!currentUser || !user) return;
+    const receiptsBefore = readReceiptsEnabled();
+    if (typeof user.username === 'string' && user.username) currentUser.username = user.username;
+    if (typeof user.readReceipts === 'boolean') currentUser.readReceipts = user.readReceipts;
+    if (NyxoLifetime.isLifetime(user.anonLifetime)) currentUser.anonLifetime = user.anonLifetime;
+    if ('anonExpiresAt' in user) currentUser.anonExpiresAt = user.anonExpiresAt;
+    if (typeof user.anonInactivitySeconds === 'number') currentUser.anonInactivitySeconds = user.anonInactivitySeconds;
+    if (readReceiptsEnabled() !== receiptsBefore) refreshOwnMessageStatuses();
+    updateAnonNote();
+    renderProfileLifetime();
+}
+
+// ---- Заметка о сроке хранения в сайдбаре ----
+// Текст статичный («Удалится, если не заходить 1 день»): дата удаления
+// сдвигается при каждом входе, её место — в профиле. Заметка — кнопка,
+// открывающая профиль, где срок можно поменять.
 function updateAnonNote() {
-    const user = currentUser;
-    const show = Boolean(user && user.isAnonymous);
-    elements.anonNote.classList.toggle('hidden', !show);
-    elements.anonNoteText.textContent = show ? anonNoteText(user) : '';
-}
-
-function startAnonNoteRefresh() {
-    clearInterval(anonNoteTimer);
-    anonNoteTimer = null;
-    if (!currentUser || !currentUser.isAnonymous) return;
-    anonNoteTimer = setInterval(() => {
-        if (currentUser && currentUser.isAnonymous && currentUser.anonLifetime !== 'tab') refreshAccountFlags();
-    }, 5 * 60 * 1000);
+    const text = currentUser ? NyxoLifetime.lifetimeNote(currentUser.anonLifetime) : '';
+    elements.anonNote.classList.toggle('hidden', !text);
+    elements.anonNoteText.textContent = text;
+    elements.anonNote.setAttribute('aria-label', text ? `Срок хранения аккаунта: ${text}. Открыть профиль` : 'Открыть профиль');
 }
 
 function resetChatView() {
@@ -1444,20 +1670,26 @@ function releaseChatResources() {
     hideDropZone();
 }
 
-// options.wipe — стереть локальные данные пользователя (ключи E2EE,
-// настройки шифрования). Для анонимного режима — всегда.
-function leaveApp(message, options = {}) {
+// Выход из приложения. Все аккаунты временные: локальные данные аккаунта
+// (ключи E2EE, флаги) стираются всегда, а страница перезагружается — так
+// закрываются соединения с IndexedDB и из памяти уходит расшифрованная
+// переписка. message — уведомление на экране входа после перезагрузки.
+// Повторный вызов (например, ответ «Не авторизован» на несколько запросов
+// сразу) ничего не делает.
+let leavingApp = false;
+function leaveApp(message) {
+    if (leavingApp) return;
+    leavingApp = true;
     const user = currentUser;
+    stopKeepalive();
     socket.disconnect();
     currentUser = null;
-    e2eeClient = null; // ключи обычного аккаунта остаются в IndexedDB под его userId для следующего входа
+    e2eeClient = null;
     e2eeClientUserId = null;
     e2eeInitPromise = null;
     e2eeState = 'off';
     clearTimeout(markReadTimer);
     clearTimeout(loadChatsTimer);
-    clearInterval(anonNoteTimer);
-    anonNoteTimer = null;
     cancelUploadQueue();
     roomParticipants.clear();
     chatListData = [];
@@ -1470,33 +1702,28 @@ function leaveApp(message, options = {}) {
     updateAnonNote();
     setConnectionStatus(null);
     showAuth();
-    if (user && (user.isAnonymous || options.wipe)) {
-        rememberIdForWipe(user.id);
-        wipeLocalUserData(user.id, 1500).finally(() => reloadWithNotice(message));
+    if (!user) {
+        reloadWithNotice(message);
         return;
     }
-    if (message) showToast(message, 'info');
+    rememberIdForWipe(user.id);
+    wipeLocalUserData(user.id, 1500).finally(() => reloadWithNotice(message));
 }
 
-let authRecheckPending = false;
 socket.on('connect_error', (err) => {
-    // Сессия истекла (например, анонимный аккаунт удалён по сроку) — сервер
-    // отклоняет рукопожатие. Перепроверяем вход и показываем экран входа.
-    if (err && err.message === 'Не авторизован' && !authRecheckPending) {
-        authRecheckPending = true;
-        fetch('/api/auth').then(r => r.json()).then((data) => {
-            if (!data.authenticated && currentUser) leaveApp('Сессия истекла, войдите снова');
-        }).catch(() => {}).finally(() => { authRecheckPending = false; });
-    }
+    // Сессия истекла (например, аккаунт удалён по сроку) — сервер отклоняет
+    // рукопожатие. Перепроверяем вход: pingSession сам уведёт на экран входа.
+    if (err && err.message === 'Не авторизован' && currentUser) pingSession();
 });
 
 socket.io.on('reconnect', () => {
-    // После обрыва связи (или рестарта сервера) догружаем пропущенное.
+    // После обрыва связи (или рестарта сервера) догружаем пропущенное и
+    // продлеваем сессию: пока связи не было, HTTP-запросов тоже не было.
     if (!currentUser) return;
     if (chatListMode === 'chats') loadChats();
     if (currentChatId) refreshCurrentChat();
     if (currentChatId && currentRoomId) loadJoinRequestsCount();
-    if (currentUser.isAnonymous) refreshAccountFlags();
+    pingSession();
 });
 
 // ---- Индикатор соединения ----
@@ -1526,6 +1753,7 @@ socket.on('connect', () => setConnectionStatus(null));
 socket.on('disconnect', (reason) => {
     if (reason === 'io client disconnect') return;
     setConnectionStatus('offline');
+    if (reason === 'io server disconnect') recoverFromServerDisconnect();
 });
 socket.io.on('reconnect_attempt', () => {
     setConnectionStatus(navigator.onLine === false ? 'offline' : 'reconnecting');
@@ -1537,7 +1765,9 @@ window.addEventListener('offline', () => {
     if (currentUser) setConnectionStatus('offline');
 });
 window.addEventListener('online', () => {
-    if (currentUser && !socket.connected) setConnectionStatus('reconnecting');
+    if (!currentUser) return;
+    if (!socket.connected) setConnectionStatus('reconnecting');
+    pingSession();
 });
 
 socket.on('e2eeKeyShare', ({ roomId } = {}) => {
@@ -1575,22 +1805,33 @@ function getCsrfToken() {
     return match ? match[1] : '';
 }
 
+// Ответ «Не авторизован» посреди работы: сессии может уже не быть (аккаунт
+// удалён по сроку или в другой вкладке), а может, запрос просто ушёл со
+// старой кукой, пока сервер пересоздавал сессию (смена срока). Решает
+// свежий /api/auth (pingSession): сам ответ ключи не стирает.
+function onUnauthorizedResponse(data) {
+    if (currentUser && data && data.success === false && data.message === 'Не авторизован') pingSession();
+}
+
 // Любой ответ сервера приводится к { success, message, ... }. Раньше
 // ответ не-JSON (502 от прокси, обрыв сети) бросал исключение прямо в
-// обработчике клика, и кнопка просто "ничего не делала".
+// обработчике клика, и кнопка просто "ничего не делала". networkError —
+// запрос не дошёл до сервера (важно для «Удалить и выйти»: тогда аккаунт
+// точно не удалён). skipAuthCheck — вызывающий сам разбирает «Не авторизован».
 async function api(url, options = {}, retried = false) {
+    const { skipAuthCheck = false, ...init } = options;
     let res;
     try {
         res = await fetch(url, {
-            ...options,
+            ...init,
             headers: {
                 'Content-Type': 'application/json',
                 'X-CSRF-Token': getCsrfToken(),
-                ...options.headers,
+                ...init.headers,
             },
         });
     } catch {
-        return { success: false, message: 'Нет соединения с сервером' };
+        return { success: false, networkError: true, message: 'Нет соединения с сервером' };
     }
     let data;
     try {
@@ -1598,14 +1839,13 @@ async function api(url, options = {}, retried = false) {
     } catch {
         return { success: false, message: `Ошибка сервера (HTTP ${res.status})` };
     }
+    if (!data || typeof data !== 'object') return { success: false, message: `Ошибка сервера (HTTP ${res.status})` };
     // Кука csrf_token живёт сутки; если она истекла, любой GET выдаст новую.
     if (res.status === 403 && !retried && /CSRF/i.test(data.message || '')) {
         await fetch('/api/auth').catch(() => {});
         return api(url, options, true);
     }
-    if (currentUser && data && data.success === false && data.message === 'Не авторизован') {
-        leaveApp('Сессия истекла, войдите снова');
-    }
+    if (!skipAuthCheck) onUnauthorizedResponse(data);
     return data;
 }
 
@@ -1627,9 +1867,7 @@ async function postFormData(url, formData, retried = false) {
         await fetch('/api/auth').catch(() => {});
         return postFormData(url, formData, true);
     }
-    if (currentUser && data && data.success === false && data.message === 'Не авторизован') {
-        leaveApp('Сессия истекла, войдите снова');
-    }
+    onUnauthorizedResponse(data);
     return data;
 }
 
@@ -1663,9 +1901,7 @@ function postFormDataWithProgress(url, formData, options = {}, retried = false) 
                 resolve(postFormDataWithProgress(url, formData, options, true));
                 return;
             }
-            if (currentUser && data && data.success === false && data.message === 'Не авторизован') {
-                leaveApp('Сессия истекла, войдите снова');
-            }
+            onUnauthorizedResponse(data);
             resolve(data || { success: false });
         };
         xhr.send(formData);
@@ -1679,7 +1915,7 @@ function postFormDataWithProgress(url, formData, options = {}, retried = false) 
 // document). Новый обработчик добавляйте в функцию своей области; новая
 // область — новая функция и одна строка в этом списке.
 function setupEventListeners() {
-    setupAuthListeners();        // вход, регистрация, приватный режим
+    setupAuthListeners();        // экран входа, «Как это работает»
     setupLogoutListeners();      // выход из аккаунта
     setupSidebarListeners();     // «Новый чат», вступление по коду, «назад»
     setupChatMenuListeners();    // меню чата и личные настройки чатов
@@ -1695,93 +1931,40 @@ function setupEventListeners() {
     setupMenuDismissListeners(); // закрытие всплывающих меню
 }
 
-// Вход: вкладки «Вход» и «Регистрация», обычный вход, регистрация с
-// PoW-проверкой и приватный режим (кнопка и подтверждение срока жизни).
+// Экран входа: выбор срока, «Начать анонимно», поле приглашения, окно
+// «Как это работает» и ссылка на onion-адрес.
 function setupAuthListeners() {
-    document.querySelectorAll('.auth-tab').forEach(tab => {
-        tab.addEventListener('click', () => {
-            document.querySelectorAll('.auth-tab').forEach((t) => {
-                t.classList.remove('active');
-                t.setAttribute('aria-selected', 'false');
-            });
-            tab.classList.add('active');
-            tab.setAttribute('aria-selected', 'true');
-            const target = tab.dataset.tab;
-            if (target === 'login') {
-                elements.loginForm.classList.add('active');
-                elements.registerForm.classList.remove('active');
-            } else {
-                elements.loginForm.classList.remove('active');
-                elements.registerForm.classList.add('active');
-            }
-        });
-    });
-
-    elements.loginBtn.addEventListener('click', async () => {
-        const email = document.getElementById('login-email').value;
-        const password = document.getElementById('login-password').value;
-        const data = await api('/api/login', {
-            method: 'POST',
-            body: JSON.stringify({ email, password }),
-        });
-        if (data.success) {
-            document.getElementById('login-password').value = '';
-            showToast('Вход выполнен', 'success');
-            enterApp(data.user);
-        } else {
-            showToast(data.message, 'error');
+    elements.authLifetime.addEventListener('change', updateAuthLifetimeDetail);
+    elements.anonStartBtn.addEventListener('click', startAccount);
+    elements.inviteToggleBtn.addEventListener('click', () => setInviteMode(!authInviteMode, { focus: true }));
+    elements.authInviteInput.addEventListener('input', clearInviteError);
+    elements.authInviteInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.isComposing) {
+            e.preventDefault();
+            startAccount();
         }
     });
-
-    elements.registerBtn.addEventListener('click', async () => {
-        if (elements.registerBtn.disabled) return;
-        const username = document.getElementById('register-username').value.trim();
-        const email = document.getElementById('register-email').value.trim();
-        const password = document.getElementById('register-password').value;
-        const confirmPassword = document.getElementById('register-confirm-password').value;
-        // Очевидные ошибки ловим до PoW, чтобы не заставлять ждать проверку зря.
-        if (!username || !email || !password || !confirmPassword) return showToast('Заполните все поля', 'error');
-        if (password.length < 8) return showToast('Пароль должен быть не менее 8 символов', 'error');
-        if (password !== confirmPassword) return showToast('Пароли не совпадают', 'error');
-        const data = await postWithPow('/api/register', { username, email, password, confirmPassword }, 'register', elements.registerBtn);
-        if (data && data.success) {
-            document.getElementById('register-password').value = '';
-            document.getElementById('register-confirm-password').value = '';
-            showToast('Регистрация успешна', 'success');
-            enterApp(data.user);
-        } else {
-            showToast((data && data.message) || 'Ошибка регистрации', 'error');
-        }
+    elements.aboutOpenBtn.addEventListener('click', () => openAboutModal());
+    elements.onionOpenBtn.addEventListener('click', () => openAboutModal('tor'));
+    elements.aboutOnionCopyBtn.addEventListener('click', () => {
+        if (onionUrl) copyText(onionUrl, 'Адрес скопирован', 'Не удалось скопировать — выделите адрес вручную');
     });
-
-    // Приватный режим: сначала выбор срока жизни аккаунта, потом PoW.
-    elements.anonymousLoginBtn.addEventListener('click', () => {
-        if (elements.anonymousLoginBtn.disabled) return;
-        openModal(elements.anonModal);
-    });
-    elements.anonConfirmBtn.addEventListener('click', anonymousLogin);
+    updateAuthLifetimeDetail();
+    applyOnionUrl(onionUrl);
 }
 
-// Выход из аккаунта: кнопка в сайдбаре и окно выбора «оставить данные на
-// устройстве или стереть».
+// «Удалить и выйти» в сайдбаре: аккаунт держится только на cookie этого
+// браузера, поэтому выход и есть удаление — то же подтверждение, что и у
+// кнопки в профиле.
 function setupLogoutListeners() {
-    elements.logoutBtn.addEventListener('click', () => {
-        if (!currentUser) return;
-        // Анонимный аккаунт при выходе удаляется всегда — выбирать нечего.
-        if (currentUser.isAnonymous) {
-            logout({ wipe: true });
-            return;
-        }
-        openModal(elements.logoutModal);
-    });
-    elements.logoutKeepBtn.addEventListener('click', () => logout({ wipe: false }));
-    elements.logoutWipeBtn.addEventListener('click', () => logout({ wipe: true }));
+    elements.logoutBtn.addEventListener('click', openDeleteAccountModal);
+    elements.confirmDeleteAccountBtn.addEventListener('click', deleteAccountAndLeave);
 }
 
 // Сайдбар и окно «Новый чат»: создание группы, вступление по коду
 // приглашения; «назад» к списку чатов в мобильной раскладке.
 function setupSidebarListeners() {
-    elements.newChatBtn.addEventListener('click', openNewChatModal);
+    elements.newChatBtn.addEventListener('click', () => openNewChatModal());
     elements.createChatBtn.addEventListener('click', createChat);
     document.getElementById('new-chat-name').addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.isComposing) {
@@ -1796,9 +1979,12 @@ function setupSidebarListeners() {
             previewJoin();
         }
     });
-    elements.joinChatCode.addEventListener('input', hideJoinPreview);
+    elements.joinChatCode.addEventListener('input', () => {
+        hideJoinPreview();
+        clearJoinError();
+    });
     elements.joinConfirmBtn.addEventListener('click', joinChat);
-    elements.joinCancelBtn.addEventListener('click', hideJoinPreview);
+    elements.joinCancelBtn.addEventListener('click', onJoinCancel);
 
     if (elements.backBtn) {
         elements.backBtn.addEventListener('click', () => elements.sidebar.classList.remove('hidden-mobile'));
@@ -1850,44 +2036,17 @@ function setupInviteListeners() {
     elements.requestsBarBtn.addEventListener('click', openRequestsModal);
 }
 
-// Профиль: учётные данные, отметки о прочтении, уведомления, удаление
-// аккаунта.
+// Профиль: срок хранения, отметки о прочтении, уведомления, «Как устроен
+// Nyxo», «Удалить аккаунт и выйти». Заметка о сроке в сайдбаре тоже
+// открывает профиль — там срок и меняется.
 function setupProfileListeners() {
     elements.profileBtn.addEventListener('click', openProfile);
-
-    elements.changePasswordBtn.addEventListener('click', () => {
-        closeModal(elements.profileModal);
-        openModal(elements.passwordModal);
-    });
-
-    elements.savePasswordBtn.addEventListener('click', async () => {
-        const currentPassword = document.getElementById('current-password').value;
-        const newPassword = document.getElementById('new-password').value;
-        const confirmPassword = document.getElementById('confirm-new-password').value;
-        const data = await api('/api/change-password', {
-            method: 'POST',
-            body: JSON.stringify({ currentPassword, newPassword, confirmPassword }),
-        });
-        if (data.success) {
-            showToast(data.message, 'success');
-            closeModal(elements.passwordModal);
-            ['current-password', 'new-password', 'confirm-new-password'].forEach(id => { document.getElementById(id).value = ''; });
-            setTimeout(() => leaveApp(), 1500);
-        } else {
-            showToast(data.message, 'error');
-        }
-    });
-
+    elements.anonNote.addEventListener('click', openProfile);
+    elements.profileLifetime.addEventListener('change', onProfileLifetimeChange);
     elements.readReceiptsToggle.addEventListener('change', onReadReceiptsToggle);
     elements.notifyToggle.addEventListener('change', onNotifyToggle);
+    elements.profileAboutBtn.addEventListener('click', () => openAboutModal());
     elements.deleteAccountBtn.addEventListener('click', openDeleteAccountModal);
-    elements.confirmDeleteAccountBtn.addEventListener('click', deleteAccount);
-    elements.deleteAccountPassword.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.isComposing) {
-            e.preventDefault();
-            deleteAccount();
-        }
-    });
 }
 
 // Поле ввода: отправка по кнопке и Enter, Escape (отмена правки и ответа),
@@ -2012,6 +2171,7 @@ function setupFeedListeners() {
 
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') markVisibleMessagesRead();
+        keepaliveOnVisible();
     });
 
     // Ссылка-приглашение, вставленная в уже открытую вкладку.
@@ -2161,7 +2321,7 @@ function isFocusable(el) {
 
 // Фокус при открытии окна: элемент с data-autofocus, иначе первое видимое
 // текстовое поле, иначе первая кнопка окна, иначе "закрыть" (скрытые
-// элементы, например поле пароля у анонимного аккаунта, пропускаются).
+// элементы пропускаются).
 function initialFocusTarget(modal) {
     const groups = ['[data-autofocus]', '.modal-body input:not([type="checkbox"]):not([type="radio"]):not([type="number"])', '.modal-body button', '.close-modal'];
     for (const selector of groups) {
@@ -2221,9 +2381,7 @@ function onModalKeydown(e) {
     }
 }
 
-// ==================== Профиль, приватность, удаление аккаунта ====================
-
-let profileIsAnonymous = false;
+// ==================== Профиль, срок хранения, удаление аккаунта ====================
 
 // Аватар в монохроме — буква на нейтральном фоне (цвет задаёт тема, не
 // пользователь), у бота — иконка.
@@ -2235,82 +2393,106 @@ function renderAvatar(el, name, isBot) {
     el.textContent = (String(name || '').trim().charAt(0) || '?').toUpperCase();
 }
 
-async function openProfile() {
-    const data = await api('/api/user');
-    if (!data.success) {
-        showToast(data.message || 'Не удалось загрузить профиль', 'error');
-        return;
-    }
-    elements.profileUsername.textContent = data.user.username;
-    elements.profileEmail.textContent = data.user.email || 'Нет email (приватный режим)';
-    elements.profileCode.textContent = `Код: ${data.user.uniqueCode}`;
-    renderAvatar(elements.profileAvatar, data.user.username, false);
-    profileIsAnonymous = data.user.email === null || data.user.email === undefined;
-    elements.profileAnonBadge.classList.toggle('hidden', !profileIsAnonymous);
-    elements.changePasswordBtn.classList.toggle('hidden', profileIsAnonymous);
-    elements.securitySection.classList.toggle('hidden', profileIsAnonymous);
-    if (typeof data.user.readReceipts === 'boolean' && currentUser) currentUser.readReceipts = data.user.readReceipts;
+// Профиль рисуется из currentUser — его держит свежим pingSession (ответ
+// /api/auth), отдельный запрос за профилем не нужен. Открытие профиля —
+// тоже повод сверить срок и дату удаления с сервером.
+function openProfile() {
+    if (!currentUser) return;
+    elements.profileUsername.textContent = currentUser.username || '';
+    renderAvatar(elements.profileAvatar, currentUser.username, false);
+    renderProfileLifetime();
     elements.readReceiptsToggle.checked = readReceiptsEnabled();
     elements.notifyToggle.checked = isNotifyEnabled();
     refreshThemeButtons();
     openModal(elements.profileModal);
-    if (!profileIsAnonymous) loadSecurityEvents();
+    pingSession();
 }
 
-// ---- Журнал безопасности ----
-
-const SECURITY_EVENT_VIEW = {
-    login: { icon: 'log-in', text: 'Вход в аккаунт' },
-    login_failed: { icon: 'alert-triangle', text: 'Неудачная попытка входа' },
-    password_changed: { icon: 'key', text: 'Пароль изменён' },
-    register: { icon: 'user-plus', text: 'Регистрация аккаунта' },
-};
-
-let securitySeq = 0;
-function setSecurityPlaceholder(text) {
-    const li = document.createElement('li');
-    li.className = 'security-item muted';
-    li.textContent = text;
-    elements.securityList.replaceChildren(li);
-}
-
-async function loadSecurityEvents() {
-    const seq = ++securitySeq;
-    setSecurityPlaceholder('Загрузка…');
-    const data = await api('/api/security-events');
-    if (seq !== securitySeq) return;
-    if (!data.success || !Array.isArray(data.events)) {
-        setSecurityPlaceholder(data.message || 'Не удалось загрузить журнал');
-        return;
-    }
-    if (data.events.length === 0) {
-        setSecurityPlaceholder('Событий пока нет');
-        return;
-    }
-    const fragment = document.createDocumentFragment();
-    data.events.forEach((event) => {
-        const view = SECURITY_EVENT_VIEW[event.type] || { icon: 'shield', text: 'Событие безопасности' };
-        const li = document.createElement('li');
-        li.className = 'security-item' + (event.type === 'login_failed' ? ' is-warning' : '');
-        const body = document.createElement('div');
-        const title = document.createElement('div');
-        title.textContent = view.text;
-        const meta = document.createElement('small');
-        meta.className = 'muted';
-        meta.textContent = event.client || 'Неизвестный клиент';
-        body.append(title, meta);
-        const time = document.createElement('time');
-        time.className = 'muted';
-        const date = parseDate(event.createdAt);
-        if (date) {
-            time.dateTime = date.toISOString();
-            time.title = date.toLocaleString('ru-RU');
-        }
-        time.textContent = formatRelativeTime(event.createdAt);
-        li.append(icon(view.icon), body, time);
-        fragment.appendChild(li);
+// «Сколько хранить аккаунт» в профиле: выбранный срок и статус «удалится,
+// если не заходить до …» (для tab — «через 30 минут после закрытия
+// последней вкладки»).
+function renderProfileLifetime() {
+    if (!currentUser) return;
+    const lifetime = lifetimeWanted || currentUser.anonLifetime;
+    elements.profileLifetime.querySelectorAll('input[name="profile-lifetime"]').forEach((radio) => {
+        radio.checked = radio.value === lifetime;
     });
-    elements.securityList.replaceChildren(fragment);
+    elements.profileLifetimeStatus.textContent = NyxoLifetime.lifetimeStatus(currentUser, new Date());
+}
+
+// «Пока открыта вкладка» → «пока открыта вкладка» для середины фразы.
+function lifetimeLabelInline(lifetime) {
+    const label = NyxoLifetime.LIFETIME_LABELS[lifetime] || '';
+    return label.charAt(0).toLowerCase() + label.slice(1);
+}
+
+// Смена срока: POST /api/user/lifetime. Сервер пересоздаёт сессию (новый
+// sid и кука с новым сроком), поэтому после успеха сокет переподключается —
+// старое рукопожатие держится за прежнюю сессию. Без подтверждения, как у
+// отметок о прочтении. Пока запрос в пути, выбор не блокируется (иначе
+// клавиатурный фокус слетел бы с radio): последний выбор запоминается и
+// отправляется следом. Ошибка откатывает выбор к тому, что знает сервер.
+let lifetimeRequest = null;
+let lifetimeWanted = null;
+
+function changeLifetime(lifetime) {
+    if (!currentUser || !NyxoLifetime.isLifetime(lifetime)) return Promise.resolve(false);
+    lifetimeWanted = lifetime;
+    if (lifetimeRequest) return lifetimeRequest;
+    const userId = currentUser.id;
+    elements.profileLifetime.setAttribute('aria-busy', 'true');
+    lifetimeRequest = (async () => {
+        let ok = true;
+        while (isCurrentUser(userId) && lifetimeWanted && lifetimeWanted !== currentUser.anonLifetime) {
+            const target = lifetimeWanted;
+            const data = await api('/api/user/lifetime', { method: 'POST', body: JSON.stringify({ lifetime: target }) });
+            if (!isCurrentUser(userId)) return false;
+            if (!data.success) {
+                ok = false;
+                lifetimeWanted = null;
+                showToast(data.message || 'Не удалось сменить срок хранения', 'error');
+                break;
+            }
+            // Следующий круг — только если за время запроса выбрали другой срок.
+            if (lifetimeWanted === target) lifetimeWanted = null;
+            currentUser.anonLifetime = NyxoLifetime.isLifetime(data.anonLifetime) ? data.anonLifetime : target;
+            if ('anonExpiresAt' in data) currentUser.anonExpiresAt = data.anonExpiresAt;
+            if (typeof data.anonInactivitySeconds === 'number') currentUser.anonInactivitySeconds = data.anonInactivitySeconds;
+            reconnectSocket();
+            onLifetimeChanged();
+            postSessionEvent({ type: 'lifetime-changed', userId, anonLifetime: currentUser.anonLifetime });
+            showToast(`Срок хранения: ${lifetimeLabelInline(currentUser.anonLifetime)}`, 'success');
+        }
+        return ok;
+    })().finally(() => {
+        lifetimeRequest = null;
+        lifetimeWanted = null;
+        elements.profileLifetime.removeAttribute('aria-busy');
+        renderProfileLifetime();
+    });
+    return lifetimeRequest;
+}
+
+// Срок поменялся (здесь или в соседней вкладке): заметка в сайдбаре,
+// статус в профиле.
+function onLifetimeChanged() {
+    updateAnonNote();
+    renderProfileLifetime();
+    // Совет «не закрывайте вкладку» на карточках заявок зависит от срока.
+    if (!elements.newChatModal.classList.contains('hidden')) loadMyRequests();
+}
+
+function onProfileLifetimeChange(e) {
+    const radio = e.target;
+    if (!radio || radio.name !== 'profile-lifetime' || !radio.checked) return;
+    changeLifetime(radio.value);
+}
+
+// Новое рукопожатие сокета с актуальной кукой сессии.
+function reconnectSocket() {
+    if (!currentUser) return;
+    if (socket.connected) socket.disconnect();
+    socket.connect();
 }
 
 // ---- Уведомления ----
@@ -2391,8 +2573,11 @@ function maybeNotify(message) {
     } catch { /* например, мобильный Chrome без service worker — просто без уведомления */ }
 }
 
+// Отметки о прочтении по умолчанию выключены (4.2): включены, только если
+// сервер прямо сказал readReceipts === true. Неизвестное значение (ответ
+// без поля, сервер другой версии) — выключены.
 function readReceiptsEnabled() {
-    return !currentUser || currentUser.readReceipts !== false;
+    return Boolean(currentUser && currentUser.readReceipts === true);
 }
 
 async function onReadReceiptsToggle() {
@@ -2418,83 +2603,297 @@ async function onReadReceiptsToggle() {
         : 'Отметки о прочтении выключены — вы тоже не будете видеть, что ваши сообщения прочитаны', 'success', 5000);
 }
 
+// «Удалить и выйти» — одна кнопка в сайдбаре и «Удалить аккаунт и выйти»
+// в профиле, одно подтверждение (alertdialog, фокус на «Отмена»). Подсказка
+// под предупреждением — как уйти, НЕ удаляя аккаунт (зависит от срока).
 function openDeleteAccountModal() {
-    elements.deleteAccountText.textContent = profileIsAnonymous
-        ? 'Все данные приватного режима — чаты, сообщения, файлы и ключи шифрования на этом устройстве — будут удалены безвозвратно.'
-        : 'Аккаунт, все ваши чаты, сообщения и файлы будут удалены безвозвратно. Ключи шифрования на этом устройстве тоже будут стёрты. Введите пароль для подтверждения.';
-    elements.deleteAccountPasswordGroup.classList.toggle('hidden', profileIsAnonymous);
-    elements.deleteAccountPassword.value = '';
-    closeModal(elements.profileModal);
+    if (!currentUser) return;
+    const alt = NyxoLifetime.leaveAlternative(currentUser.anonLifetime);
+    elements.deleteAccountAlt.textContent = alt;
+    elements.deleteAccountAlt.classList.toggle('hidden', !alt);
+    showDeleteAccountError('');
+    closeAllModals();
     openModal(elements.deleteAccountModal);
 }
 
-async function deleteAccount() {
+function showDeleteAccountError(text) {
+    elements.deleteAccountError.textContent = text;
+    elements.deleteAccountError.classList.toggle('hidden', !text);
+}
+
+// Аккаунт удалён — стираем локальные данные и перезагружаемся с
+// уведомлением. Не удалён (нет сети, ошибка сервера) — локальные ключи НЕ
+// трогаем: иначе живой аккаунт остался бы на сервере без ключей.
+let deletingAccount = false;
+async function deleteAccountAndLeave() {
+    if (deletingAccount || !currentUser) return;
+    deletingAccount = true;
+    const userId = currentUser.id;
     const btn = elements.confirmDeleteAccountBtn;
-    if (btn.disabled || !currentUser) return;
-    const password = elements.deleteAccountPassword.value;
-    if (!profileIsAnonymous && !password) {
-        showToast('Введите пароль', 'error');
-        elements.deleteAccountPassword.focus();
-        return;
-    }
     btn.disabled = true;
-    const data = await api('/api/account/delete', {
-        method: 'POST',
-        body: JSON.stringify(profileIsAnonymous ? {} : { password }),
-    });
+    btn.setAttribute('aria-busy', 'true');
+    showDeleteAccountError('');
+    let gone = false;
+    let failure = '';
+    const data = await api('/api/account/delete', { method: 'POST', body: '{}', skipAuthCheck: true });
+    if (data.success) {
+        gone = true;
+    } else if (data.message === 'Не авторизован' || data.message === 'Пользователь не найден') {
+        // Сессии уже нет — проверяем, что аккаунта действительно нет, а не
+        // запрос ушёл со старой кукой (пока сервер пересоздавал сессию).
+        const state = await fetchAuthState();
+        if (state && !state.authenticated) gone = true;
+        else failure = state ? 'Не удалось удалить аккаунт. Попробуйте ещё раз.' : 'Нет связи с сервером — аккаунт не удалён. Попробуйте ещё раз.';
+    } else if (data.networkError) {
+        failure = 'Нет связи с сервером — аккаунт не удалён. Попробуйте ещё раз.';
+    } else {
+        failure = `${String(data.message || 'Не удалось удалить аккаунт').replace(/[.!]+$/, '')}. Аккаунт не удалён — попробуйте ещё раз.`;
+    }
+    deletingAccount = false;
     btn.disabled = false;
-    elements.deleteAccountPassword.value = '';
-    if (!data.success) {
-        showToast(data.message || 'Не удалось удалить аккаунт', 'error');
+    btn.removeAttribute('aria-busy');
+    if (!isCurrentUser(userId)) return;
+    if (gone) {
+        postSessionEvent({ type: 'account-deleted', userId });
+        leaveApp(AUTH_NOTICES.deleted);
         return;
     }
-    leaveApp(data.message || 'Аккаунт удалён', { wipe: true });
+    showDeleteAccountError(failure);
 }
 
-// ==================== Вход в приватном режиме, выход, тема ====================
+// ==================== Экран входа и тема ====================
+// Аккаунт только временный: без почты и номера телефона, с выбранным
+// сроком хранения. Экран один: выбор срока, «Начать анонимно» и, если есть,
+// приглашение в группу (ссылка или код). Формат приглашения проверяется ДО
+// PoW: битый код не должен стоить человеку проверки и лишнего аккаунта.
+// Ход проверки и ошибки остаются на экране (#auth-progress), а не только в
+// тосте: тост исчезает, пока человек смотрит на кнопку.
 
-async function anonymousLogin() {
-    const btn = elements.anonConfirmBtn;
-    if (btn.disabled) return;
-    const checked = elements.anonModal.querySelector('input[name="anon-lifetime"]:checked');
-    const lifetime = checked && ['tab', 'day', 'week'].includes(checked.value) ? checked.value : 'tab';
-    const data = await postWithPow('/api/register/anonymous', { lifetime }, 'register-anon', btn);
-    if (data && data.success) {
-        closeModal(elements.anonModal);
-        showToast('Приватный режим включён', 'success');
-        enterApp({ anonLifetime: lifetime, ...data.user, isAnonymous: true });
-    } else {
-        showToast((data && data.message) || 'Не удалось войти в приватном режиме', 'error');
+// Почему человек снова видит экран входа (#auth-notice).
+const AUTH_NOTICES = {
+    deleted: 'Аккаунт удалён. Данные на этом устройстве стёрты.',
+    deletedElsewhere: 'Аккаунт удалён в другой вкладке.',
+    expired: 'Прежний аккаунт удалён: вы не заходили дольше выбранного срока.',
+    sessionLost: 'Вход в аккаунт потерян: аккаунт удалён или сессия закончилась. Данные на этом устройстве стёрты.',
+    otherAccount: 'В соседней вкладке открыт другой аккаунт. Данные прежнего на этом устройстве стёрты.',
+    noCookies: 'Браузер не сохранил cookie — без неё аккаунт не работает. Разрешите cookie для этого сайта.',
+};
+
+const AUTH_POW_PROGRESS = 'Создаём аккаунт: проверка, что вы не бот. Обычно несколько секунд, в Tor Browser — дольше.';
+const INVITE_FORMAT_ERROR = 'Не похоже на код приглашения. Нужна ссылка вида …/#join=… или 26 символов (буквы и цифры 2–9).';
+const INVITE_EMPTY_ERROR = 'Вставьте ссылку-приглашение или код.';
+
+let authBusy = false;
+let authInviteMode = false;
+let registrationCancelled = false;   // аккаунт появился в соседней вкладке, пока считался PoW
+
+function selectedAuthLifetime() {
+    const checked = elements.authLifetime.querySelector('input[name="auth-lifetime"]:checked');
+    return checked && NyxoLifetime.isLifetime(checked.value) ? checked.value : NyxoLifetime.DEFAULT_LIFETIME;
+}
+
+function updateAuthLifetimeDetail() {
+    elements.authLifetimeDetail.textContent = NyxoLifetime.lifetimeDetail(selectedAuthLifetime());
+    updateAuthInviteAdvice();
+}
+
+// Совет для срока «Пока открыта вкладка» в режиме приглашения: заявка в
+// группу удаляется вместе с аккаунтом, а одобрения можно ждать долго.
+function updateAuthInviteAdvice() {
+    const text = authInviteMode ? NyxoLifetime.inviteTabWarning(selectedAuthLifetime(), false) : '';
+    elements.authInviteAdvice.textContent = text;
+    elements.authInviteAdvice.classList.toggle('hidden', !text);
+}
+
+// Подпись кнопки — в её <span>: иконки рядом остаются на месте.
+function setButtonText(btn, text) {
+    const span = btn.querySelector('span');
+    if (span) span.textContent = text;
+    else btn.textContent = text;
+}
+
+// Режим «У меня есть приглашение»: поле ссылки или кода над выбором срока.
+// value — подставить в поле (ссылка #join=), error — сразу показать ошибку.
+function setInviteMode(on, { value = null, focus = false, error = null } = {}) {
+    authInviteMode = Boolean(on);
+    elements.authInvite.classList.toggle('hidden', !authInviteMode);
+    elements.inviteToggleBtn.setAttribute('aria-expanded', authInviteMode ? 'true' : 'false');
+    setButtonText(elements.inviteToggleBtn, authInviteMode ? 'Без приглашения' : 'У меня есть приглашение');
+    setButtonText(elements.anonStartBtn, authInviteMode ? 'Создать аккаунт и открыть приглашение' : 'Начать анонимно');
+    if (value !== null) elements.authInviteInput.value = value;
+    if (error) showInviteError(error);
+    else if (!authInviteMode || value !== null) clearInviteError();
+    updateAuthInviteAdvice();
+    if (focus && authInviteMode) elements.authInviteInput.focus();
+}
+
+function showInviteError(text) {
+    elements.authInviteError.textContent = text;
+    elements.authInviteError.classList.remove('hidden');
+    elements.authInviteInput.setAttribute('aria-invalid', 'true');
+}
+
+function clearInviteError() {
+    elements.authInviteError.textContent = '';
+    elements.authInviteError.classList.add('hidden');
+    elements.authInviteInput.removeAttribute('aria-invalid');
+}
+
+function setAuthProgress(text, { error = false } = {}) {
+    const el = elements.authProgress;
+    el.classList.toggle('is-error', Boolean(text) && error);
+    if (!text) {
+        el.replaceChildren();
+        return;
     }
+    const span = document.createElement('span');
+    span.textContent = text;
+    el.replaceChildren(error ? icon('alert-triangle', { size: 'sm' }) : icon('loader', { size: 'sm', className: 'spin' }), span);
 }
 
-// wipe — «Выйти и стереть данные с устройства»: сначала публичные ключи на
-// сервере (иначе собеседники продолжали бы шифровать на ключ, которого
-// больше нет), потом сессия, потом локальные ключи и флаги
-// (leaveApp → wipeLocalUserData → E2EE.deleteLocalData). Анонимный аккаунт
-// сервер удаляет целиком при выходе, ключи — вместе с ним.
-let loggingOut = false;
-async function logout({ wipe }) {
-    if (loggingOut || !currentUser) return;
-    loggingOut = true;
-    const isAnonymous = Boolean(currentUser.isAnonymous);
-    [elements.logoutKeepBtn, elements.logoutWipeBtn].forEach((b) => { b.disabled = true; });
+function showAuthNotice(text) {
+    elements.authNotice.textContent = text || '';
+    elements.authNotice.classList.toggle('hidden', !text);
+}
+
+// Пока создаётся аккаунт, выбор срока и приглашение заблокированы: двойной
+// клик и повторный Enter не запускают вторую проверку.
+function setAuthBusy(busy) {
+    authBusy = busy;
+    elements.authLifetime.disabled = busy;
+    elements.inviteToggleBtn.disabled = busy;
+    elements.authInviteInput.readOnly = busy;
+    elements.anonStartBtn.disabled = busy;
+}
+
+// GET /api/auth — единый источник состояния аккаунта (он же продлевает
+// сессию). null — сервер недоступен или ответил не JSON: тогда ничего не
+// решаем и ничего не стираем.
+async function fetchAuthState() {
+    let data;
     try {
-        let keysNote = '';
-        if (wipe && !isAnonymous) {
-            const res = await api('/api/keys', { method: 'DELETE' });
-            if (!res || res.success === false) {
-                keysNote = '. Ключи на сервере удалить не удалось — они заменятся новыми при следующем входе';
-            }
-        }
-        await api('/api/logout', { method: 'POST' });
-        if (isAnonymous) leaveApp('Данные приватного режима удалены');
-        else if (wipe) leaveApp(`Вы вышли, данные стёрты с этого устройства${keysNote}`, { wipe: true });
-        else leaveApp('Вы вышли из аккаунта');
-    } finally {
-        loggingOut = false;
-        [elements.logoutKeepBtn, elements.logoutWipeBtn].forEach((b) => { b.disabled = false; });
+        const res = await fetch('/api/auth', { cache: 'no-store' });
+        data = await res.json();
+    } catch {
+        return null;
     }
+    if (!data || typeof data !== 'object' || typeof data.authenticated !== 'boolean') return null;
+    lastAuthAt = Date.now();
+    if ('onionUrl' in data) applyOnionUrl(data.onionUrl);
+    return data;
+}
+
+async function startAccount() {
+    if (authBusy || currentUser) return;
+    let invite = null;
+    if (authInviteMode) {
+        const parsed = NyxoInvite.parseInviteInput(elements.authInviteInput.value);
+        if (!parsed.ok) {
+            showInviteError(parsed.reason === 'empty' ? INVITE_EMPTY_ERROR : INVITE_FORMAT_ERROR);
+            elements.authInviteInput.focus();
+            return;
+        }
+        clearInviteError();
+        invite = { code: parsed.code, secret: parsed.secret };
+    }
+    const lifetime = selectedAuthLifetime();
+    const btn = elements.anonStartBtn;
+    registrationCancelled = false;
+    setAuthBusy(true);
+    setAuthProgress('');
+    let entered = false;
+    const enter = (user) => {
+        entered = true;
+        pendingJoin = invite;
+        pendingJoinBroken = false;
+        enterApp(user);
+        // Другие вкладки на экране входа подхватят аккаунт, остальные
+        // сверят, не сменилась ли кука на чужой аккаунт.
+        postSessionEvent({ type: 'session-started', userId: user.id });
+    };
+    try {
+        // Аккаунт уже создан (в соседней вкладке или до перезагрузки) —
+        // входим в него, второй не создаём.
+        const before = await fetchAuthState();
+        if (currentUser) return;
+        if (before && before.authenticated && before.user) {
+            enter(before.user);
+            return;
+        }
+
+        setAuthProgress(AUTH_POW_PROGRESS);
+        const data = await postWithPow('/api/register/anonymous', { lifetime }, 'register-anon', btn, {
+            isCancelled: () => registrationCancelled || Boolean(currentUser),
+        });
+        // postWithPow разблокирует кнопку сам; держим её выключенной до конца.
+        btn.disabled = true;
+        if (registrationCancelled || currentUser || (data && data.cancelled)) return;
+
+        if (data && data.code === 'already-authenticated') {
+            // 409: живая сессия есть (её не было видно при первой проверке) — входим в неё.
+            const state = await fetchAuthState();
+            if (currentUser) return;
+            if (state && state.authenticated && state.user) {
+                enter(state.user);
+                return;
+            }
+            setAuthProgress(data.message || 'Вы уже вошли в аккаунт. Обновите страницу.', { error: true });
+            return;
+        }
+        if (!data || !data.success || !data.user) {
+            setAuthProgress((data && data.message) || 'Не удалось создать аккаунт. Попробуйте ещё раз.', { error: true });
+            return;
+        }
+
+        // Ответ регистрации поставил куку сессии. Если /api/auth её не видит,
+        // браузер cookie не сохранил: аккаунт без неё недоступен, а уход на
+        // экран входа зациклил бы попытки — просто объясняем, что случилось.
+        const state = await fetchAuthState();
+        if (currentUser) return;
+        if (state && !state.authenticated) {
+            setAuthProgress('');
+            showAuthNotice(AUTH_NOTICES.noCookies);
+            return;
+        }
+        const user = state && state.authenticated && state.user ? state.user : { anonLifetime: lifetime, ...data.user };
+        rememberBotChatId(user.id, data.botChatId);
+        enter(user);
+    } finally {
+        setAuthBusy(false);
+        if (entered) setAuthProgress('');
+    }
+}
+
+// Окно «Как это работает»: с экрана входа и из профиля. section 'tor' —
+// сразу к разделу про IP и onion-адрес (ссылка «Открыть через Tor»).
+function openAboutModal(section) {
+    closeAllModals();
+    openModal(elements.aboutModal);
+    if (section === 'tor') {
+        elements.aboutTor.focus({ preventScroll: true });
+        elements.aboutTor.scrollIntoView({ block: 'start', behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
+    }
+}
+
+// Onion-адрес приходит полем onionUrl в /api/auth: заголовок Onion-Location
+// скрипт прочитать не может, а шаблонизировать index.html нельзя. Ссылка
+// «Открыть через Tor» показывается только для проверенного v3-адреса (иначе
+// её нет вовсе) и не ведёт прямо на onion: в обычном браузере такая ссылка
+// не откроется — она открывает раздел про Tor с адресом и «Скопировать».
+let onionUrl = null;
+
+function applyOnionUrl(value) {
+    onionUrl = NyxoInvite.parseOnionUrl(value);
+    const onOnion = /\.onion$/i.test(location.hostname);
+    const show = Boolean(onionUrl) && !onOnion;
+    elements.onionOpenBtn.classList.toggle('hidden', !show);
+    elements.authLinksSep.classList.toggle('hidden', !show);
+    elements.aboutOnion.classList.toggle('hidden', !show);
+    elements.aboutOnionMissing.classList.toggle('hidden', show || onOnion);
+    elements.aboutOnionCurrent.classList.toggle('hidden', !onOnion);
+    elements.aboutOnionAddress.textContent = show ? onionUrl : '';
+    if (show) elements.aboutOnionLink.href = onionUrl;
+    else elements.aboutOnionLink.removeAttribute('href');
 }
 
 // Тема — через window.NyxoTheme (public/theme.js). Кнопка показывает, КУДА
@@ -2511,10 +2910,13 @@ function refreshThemeButtons() {
     const label = dark ? 'Светлая тема' : 'Тёмная тема';
     const iconName = dark ? 'sun' : 'moon';
     const hasApi = Boolean(window.NyxoTheme);
-    elements.themeToggleBtn.replaceChildren(icon(iconName));
-    elements.themeToggleBtn.title = `Включить: ${label.toLowerCase()}`;
-    elements.themeToggleBtn.setAttribute('aria-label', `Включить ${label.toLowerCase()}`);
-    elements.themeToggleBtn.classList.toggle('hidden', !hasApi);
+    // Кнопки-иконки: в сайдбаре и в углу экрана входа.
+    for (const btn of [elements.themeToggleBtn, elements.authThemeBtn]) {
+        btn.replaceChildren(icon(iconName));
+        btn.title = `Включить: ${label.toLowerCase()}`;
+        btn.setAttribute('aria-label', `Включить ${label.toLowerCase()}`);
+        btn.classList.toggle('hidden', !hasApi);
+    }
     setIconLabel(elements.profileThemeBtn, iconName, label);
     elements.profileThemeBtn.classList.toggle('hidden', !hasApi);
 }
@@ -2530,6 +2932,7 @@ function toggleTheme() {
 
 function setupThemeControls() {
     elements.themeToggleBtn.addEventListener('click', toggleTheme);
+    elements.authThemeBtn.addEventListener('click', toggleTheme);
     elements.profileThemeBtn.addEventListener('click', toggleTheme);
     // Тему может сменить и сама система (если выбор не сохранён), и другая
     // вкладка — следим за атрибутом, а не за своими кликами.
@@ -2540,12 +2943,9 @@ function setupThemeControls() {
 }
 
 // ==================== Приглашения ====================
-
-// Код показывается группами по 5 символов — его диктуют и переписывают
-// вручную; сервер при вводе убирает пробелы и дефисы сам.
-function formatInviteCode(code) {
-    return String(code || '').replace(/[\s-]+/g, '').replace(/(.{5})(?=.)/g, '$1 ');
-}
+// Код показывается группами по 5 символов (NyxoInvite.formatInviteCode) —
+// его диктуют и переписывают вручную; сервер при вводе убирает пробелы и
+// дефисы сам.
 
 // Ссылка-приглашение: код во фрагменте — он не уходит на сервер ни при
 // открытии ссылки, ни в Referer (см. consumeJoinFragment).
@@ -2620,7 +3020,7 @@ function renderInvite(state) {
     const expired = !disabled && (state.expired === true || Boolean(expiry && expiry.getTime() <= Date.now()));
     const usable = !disabled && !expired;
 
-    elements.inviteCodeDisplay.textContent = disabled ? 'Приглашение выключено' : formatInviteCode(rawCode);
+    elements.inviteCodeDisplay.textContent = disabled ? 'Приглашение выключено' : NyxoInvite.formatInviteCode(rawCode);
     elements.inviteCodeDisplay.dataset.code = usable ? rawCode : '';
     elements.inviteCodeContainer.classList.toggle('expired', !usable);
     elements.copyInviteBtn.disabled = !usable;
@@ -2727,10 +3127,26 @@ async function disableInviteCode() {
 
 // ==================== Вступление по коду ====================
 
+// Окно «Новый чат» работает в двух режимах: обычном (создать группу или
+// вступить по коду) и приглашения — после входа по ссылке #join= или с
+// экрана входа «У меня есть приглашение»: заголовок «Приглашение в группу»,
+// блока «Создать группу» нет, вместо «Отмена» — «Не сейчас».
 let joinPreviewCode = null;
+let joinPreviewSecret = null;  // секрет ссылки (этап 5.4): хранится, на сервер не уходит
+let joinInviteMode = false;
+let joinBusy = false;
 
-function openNewChatModal() {
+const JOIN_INVALID_TEXT = 'Код недействителен: он истёк, выключен или введён с ошибкой. Попросите новый.';
+const JOIN_KEYS_STATUS = 'Готовим ключи шифрования…';
+const JOIN_KEYS_WAIT_MS = 15000;
+
+function openNewChatModal({ invite = false } = {}) {
+    joinInviteMode = Boolean(invite);
     hideJoinPreview();
+    clearJoinError();
+    elements.newChatTitle.textContent = joinInviteMode ? 'Приглашение в группу' : 'Новый чат';
+    elements.newChatCreate.classList.toggle('hidden', joinInviteMode);
+    elements.joinCancelBtn.textContent = joinInviteMode ? 'Не сейчас' : 'Отмена';
     openModal(elements.newChatModal);
     loadMyRequests();
 }
@@ -2738,27 +3154,72 @@ function openNewChatModal() {
 function hideJoinPreview() {
     joinPreviewCode = null;
     elements.joinPreview.classList.add('hidden');
+    setJoinStatus('');
 }
 
-function readJoinCode() {
-    return elements.joinChatCode.value.replace(/[\s-]+/g, '').toUpperCase();
+function onJoinCancel() {
+    hideJoinPreview();
+    if (joinInviteMode) closeModal(elements.newChatModal);
+}
+
+function showJoinError(text) {
+    elements.joinError.textContent = text;
+    elements.joinError.classList.remove('hidden');
+    elements.joinChatCode.setAttribute('aria-invalid', 'true');
+}
+
+function clearJoinError() {
+    elements.joinError.textContent = '';
+    elements.joinError.classList.add('hidden');
+    elements.joinChatCode.removeAttribute('aria-invalid');
+}
+
+// Ход вступления («Готовим ключи шифрования…») — role="status".
+function setJoinStatus(text) {
+    elements.joinStatus.textContent = text;
+    elements.joinStatus.classList.toggle('hidden', !text);
+}
+
+// Ответ сервера → текст под полем. «Код недействителен» сервер пишет
+// коротко, подробность — на клиенте.
+function joinFailureText(data, fallback) {
+    if (data && data.networkError) return 'Нет связи с сервером. Попробуйте ещё раз.';
+    const message = data && typeof data.message === 'string' ? data.message : '';
+    if (/^Код недействителен/.test(message)) return JOIN_INVALID_TEXT;
+    return message || fallback;
 }
 
 // Шаг 1: предпросмотр — название, число участников, нужно ли одобрение.
+// Формат кода проверяется до запроса: в поле можно вставить и всю ссылку.
 async function previewJoin() {
-    const code = readJoinCode();
-    if (!code) return showToast('Введите код', 'error');
+    const parsed = NyxoInvite.parseInviteInput(elements.joinChatCode.value);
+    if (!parsed.ok) {
+        hideJoinPreview();
+        showJoinError(parsed.reason === 'empty' ? INVITE_EMPTY_ERROR : INVITE_FORMAT_ERROR);
+        elements.joinChatCode.focus();
+        return;
+    }
+    const code = parsed.code;
     const btn = elements.joinChatBtn;
     if (btn.disabled) return;
+    clearJoinError();
     btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    const label = Array.from(btn.childNodes);
+    setIconLabel(btn, 'loader', 'Проверяем…', { className: 'spin' });
     const data = await api('/api/chats/join/preview', { method: 'POST', body: JSON.stringify({ code }) });
     btn.disabled = false;
+    btn.removeAttribute('aria-busy');
+    btn.replaceChildren(...label);
+    if (!currentUser) return;
     if (!data.success) {
         hideJoinPreview();
-        showToast(data.message || 'Код недействителен', 'error');
+        showJoinError(joinFailureText(data, 'Не удалось проверить код. Попробуйте ещё раз.'));
+        elements.joinChatCode.focus();
         return;
     }
     joinPreviewCode = code;
+    joinPreviewSecret = parsed.secret || null;
     elements.joinPreviewName.textContent = data.roomName || 'Группа';
     const count = Number(data.memberCount) || 0;
     elements.joinPreviewMeta.textContent = count > 0 ? `${count} ${plural(count, ['участник', 'участника', 'участников'])}` : '';
@@ -2768,23 +3229,48 @@ async function previewJoin() {
     elements.joinConfirmBtn.focus({ preventScroll: true });
 }
 
+// Перед вступлением без одобрения ключи устройства должны быть на сервере:
+// иначе участники получат roomMembersChanged, пока identity новичка ещё
+// не опубликована, запишут «у собеседника не настроен E2EE» и не отправят
+// ему Sender Key. Ждём не дольше JOIN_KEYS_WAIT_MS: недоступное шифрование
+// (e2eeInitPromise → false) вступление не блокирует — как и отправка
+// сообщений, оно работает без него.
+async function waitForE2eeKeysBeforeJoin() {
+    if (e2eeState !== 'pending' || !e2eeInitPromise) return;
+    setJoinStatus(JOIN_KEYS_STATUS);
+    await withTimeout(e2eeInitPromise, JOIN_KEYS_WAIT_MS, false);
+    setJoinStatus('');
+}
+
 // Шаг 2: вступление (или заявка, если группе нужно одобрение).
 async function joinChat() {
-    const code = joinPreviewCode || readJoinCode();
-    if (!code) return showToast('Введите код', 'error');
+    const code = joinPreviewCode;
+    if (!code || joinBusy) return;
+    joinBusy = true;
     const btn = elements.joinConfirmBtn;
-    if (btn.disabled) return;
     btn.disabled = true;
-    const data = await api('/api/chats/join', {
-        method: 'POST',
-        body: JSON.stringify({ code }),
-    });
-    btn.disabled = false;
+    btn.setAttribute('aria-busy', 'true');
+    clearJoinError();
+    let data;
+    try {
+        await waitForE2eeKeysBeforeJoin();
+        data = await api('/api/chats/join', {
+            method: 'POST',
+            body: JSON.stringify({ code }),
+        });
+    } finally {
+        joinBusy = false;
+        btn.disabled = false;
+        btn.removeAttribute('aria-busy');
+        setJoinStatus('');
+    }
+    if (!currentUser) return;
     if (!data.success) {
-        showToast(data.message || 'Не удалось вступить', 'error');
+        showJoinError(joinFailureText(data, 'Не удалось вступить. Попробуйте ещё раз.'));
         return;
     }
     elements.joinChatCode.value = '';
+    joinPreviewSecret = null;
     hideJoinPreview();
     if (data.pending) {
         if (data.requestId != null && data.roomName) myRequestNames.set(String(data.requestId), data.roomName);
@@ -2828,7 +3314,30 @@ function createPendingCard(req, fresh) {
     cancel.type = 'button';
     setIconLabel(cancel, 'x', 'Отменить');
     cancel.addEventListener('click', () => cancelMyRequest(req.id, cancel));
-    card.append(icon('hourglass'), body, cancel);
+    // Аккаунт «Пока открыта вкладка» удалится через 30 минут после закрытия
+    // вкладки — вместе с заявкой, а одобрения можно ждать долго.
+    const warning = currentUser ? NyxoLifetime.inviteTabWarning(currentUser.anonLifetime, true) : '';
+    if (!warning) {
+        card.append(icon('hourglass'), body, cancel);
+        return card;
+    }
+    const hint = document.createElement('p');
+    hint.className = 'field-hint';
+    hint.textContent = warning;
+    body.append(hint);
+    const keep = document.createElement('button');
+    keep.className = 'btn btn-secondary btn-sm';
+    keep.type = 'button';
+    keep.textContent = 'Хранить 1 день';
+    keep.addEventListener('click', async () => {
+        keep.disabled = true;
+        const ok = await changeLifetime('day');
+        if (!ok && keep.isConnected) keep.disabled = false;
+    });
+    const actions = document.createElement('div');
+    actions.className = 'invite-actions';
+    actions.append(keep, cancel);
+    card.append(icon('hourglass'), body, actions);
     return card;
 }
 
