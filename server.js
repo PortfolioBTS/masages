@@ -99,6 +99,8 @@ const { ONION_ADDRESS, ONION_PORT, onionMiddleware, onionUrlFor, isOnionHost, is
 const { createChallenge, consumeSolution, setSecret: setPowSecret } = require('./lib/pow');
 // Точные лимиты и одноразовость PoW в Postgres (UNLOGGED-таблицы, ключи — HMAC).
 const { createPgLimits, initPgLimitsSchema, respondBusy, LimitStoreError } = require('./lib/pg-limits');
+// Метрики Prometheus без id и IP; отдаёт их GET /metrics по токену (lib/routes/health.js).
+const { createMetrics } = require('./lib/metrics');
 
 // Несколько экземпляров сервера на одной базе (миграции и фоновые задачи
 // под advisory-блокировками) и запись ошибок в лог без id из detail.
@@ -267,6 +269,12 @@ function resolveRealIp(headers, connectingIp) {
     return connectingIp;
 }
 
+// Метрики процесса: счётчики событий и HTTP по шаблону маршрута (lib/metrics.js).
+const metrics = createMetrics();
+// Готовность для GET /readyz: порт открывается только после миграций, но флаг
+// явный — проба не должна зависеть от порядка запуска.
+const readiness = { migrated: false };
+
 const app = express();
 app.set('trust proxy', 1);
 
@@ -299,6 +307,8 @@ const toPositiveInt = (value) => {
 // Самым первым: признак onion-запроса (req.isOnion) нужен лимитерам и
 // заголовкам ниже, а у onion-запроса onionMiddleware ещё и вычищает
 // присланные клиентом X-Forwarded-* — прокси перед приложением там нет.
+// Метрики HTTP — самым первым, чтобы считать и отказы всех проверок ниже.
+app.use(metrics.httpMiddleware());
 app.use(onionMiddleware);
 
 app.use((req, res, next) => {
@@ -484,6 +494,7 @@ const DB_POOL_CONFIG = {
     connectionTimeoutMillis: 10000,
 };
 const pool = new Pool(DB_POOL_CONFIG);
+metrics.attachRuntime({ pool, io });
 // Без обработчика 'error' обрыв простаивающего соединения (рестарт или
 // failover Postgres, сетевой сбой) — необработанное событие 'error',
 // которое завершает весь процесс.
@@ -861,7 +872,11 @@ if (!sessionSecret) throw new Error('SESSION_SECRET не задан в пере�
 // 503 {success:false, code:'busy'}. Ключ PoW тоже выводится из SESSION_SECRET,
 // чтобы выданные задачи действовали и после рестарта.
 setPowSecret(sessionSecret);
-const pgLimits = createPgLimits({ pool, secret: sessionSecret });
+const pgLimits = createPgLimits({
+    pool,
+    secret: sessionSecret,
+    hooks: { limited: metrics.rateLimited, storeError: metrics.limitStoreError },
+});
 const powUsedStore = pgLimits.powUsedStore();
 const bundleLimiter = pgLimits.slidingLimiter('bundle');
 
@@ -1090,6 +1105,7 @@ app.use((req, res, next) => {
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 app.use((req, res, next) => {
     if (SAFE_METHODS.has(req.method) || isTrustedOrigin(req.headers)) return next();
+    metrics.originRejected();
     res.status(403).json({ success: false, message: 'Запрещено: запрос с чужого сайта' });
 });
 
@@ -1166,7 +1182,11 @@ app.use(express.static(path.join(__dirname, 'public'), {
 // Маршруты из lib/routes/ (см. lib/routes/index.js): здесь — те, которым
 // сессия не нужна; ниже, после лимитера /api/, — обычные маршруты API.
 // serverContext — общий контекст маршрутов и задач из lib/ (lib/jobs).
-const serverContext = Object.freeze({ pool, dbGet, dbAll, dbRun, withTransaction, io, logError, isProduction: IS_PRODUCTION });
+const serverContext = Object.freeze({
+    pool, dbGet, dbAll, dbRun, withTransaction, io, logError, isProduction: IS_PRODUCTION,
+    // Мониторинг и security.txt (lib/routes/health.js, lib/routes/well-known.js).
+    metrics, readiness, env: process.env,
+});
 registerPreSessionRoutes(app, serverContext);
 
 app.use(sessionMiddleware);
@@ -1318,6 +1338,7 @@ async function checkPow(req, purpose) {
 }
 
 function respondPowFailure(res, verdict) {
+    metrics.powRejected(verdict);
     if (verdict === 'busy') return respondBusy(res);
     return res.json(POW_FAILED_RESPONSE);
 }
@@ -1413,6 +1434,7 @@ app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
         // Имя и id анонимного пользователя в лог не пишутся: связка "время
         // создания — id — имя" в логах хостинга как раз и деанонимизирует.
 
+        metrics.registered();
         res.json({
             success: true,
             user: {
@@ -1459,6 +1481,7 @@ async function deleteOwnAccount(req, res) {
         logError('[Account] Не удалось удалить аккаунт', error);
         return res.json({ success: false, message: 'Ошибка удаления аккаунта' });
     }
+    metrics.accountsDeleted('user');
     endSession(req, res, 'Аккаунт и все данные удалены');
 }
 app.post('/api/account/delete', deleteOwnAccount);
@@ -3288,6 +3311,7 @@ async function purgeExpiredAnonymousUsers() {
             logError('[Anon] Не удалось удалить просроченный аккаунт', err);
         }
     }
+    metrics.accountsDeleted('expired', rows.length - failed);
     if (rows.length > 0) console.log(`[Anon] Удалено просроченных анонимных аккаунтов: ${rows.length - failed}`);
 }
 
@@ -3327,6 +3351,7 @@ const jobs = createJobScheduler({
     runExclusive: createRunExclusive(jobLockPool),
     // Задачи с maintenance: true — каждые N мс вместо минут.
     maintenanceMs: testKnobMs('NYXO_TEST_MAINTENANCE_MS'),
+    onRun: metrics.jobRan,
 });
 // Анонимы проверяются каждые 5 минут: самый короткий срок — 30 минут
 // без активности, и опоздание с удалением не должно быть сравнимо с ним.
@@ -3427,6 +3452,7 @@ async function initDatabaseExclusive() {
 // БД и висели на блокировках ALTER TABLE.
 initDatabaseExclusive()
     .then(() => {
+        readiness.migrated = true;
         server.listen(PORT, HOST, onServerListening);
         // Отдельный внутренний порт для tor-service: соединения с него
         // помечаются как onion (lib/tor-support.js). Наружу его не публиковать.
