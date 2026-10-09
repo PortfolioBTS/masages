@@ -197,6 +197,10 @@ const elements = {
     joinPreviewName: document.getElementById('join-preview-name'),
     joinPreviewMeta: document.getElementById('join-preview-meta'),
     joinPreviewApproval: document.getElementById('join-preview-approval'),
+    newChatTitle: document.getElementById('new-chat-title'),
+    newChatCreate: document.getElementById('new-chat-create'),
+    joinError: document.getElementById('join-error'),
+    joinStatus: document.getElementById('join-status'),
     joinConfirmBtn: document.getElementById('join-confirm-btn'),
     joinCancelBtn: document.getElementById('join-cancel-btn'),
     myRequests: document.getElementById('my-requests'),
@@ -1394,8 +1398,8 @@ function openPendingJoin() {
     pendingJoin = null;
     pendingJoinBroken = false;
     if (!invite || !currentUser) return;
-    openNewChatModal();
-    elements.joinChatCode.value = NyxoInvite.formatInviteCode(invite.code);
+    openNewChatModal({ invite: true });
+    elements.joinChatCode.value = inviteFieldValue(invite);
     previewJoin();
 }
 
@@ -1949,7 +1953,7 @@ function setupLogoutListeners() {
 // Сайдбар и окно «Новый чат»: создание группы, вступление по коду
 // приглашения; «назад» к списку чатов в мобильной раскладке.
 function setupSidebarListeners() {
-    elements.newChatBtn.addEventListener('click', openNewChatModal);
+    elements.newChatBtn.addEventListener('click', () => openNewChatModal());
     elements.createChatBtn.addEventListener('click', createChat);
     document.getElementById('new-chat-name').addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.isComposing) {
@@ -1964,9 +1968,12 @@ function setupSidebarListeners() {
             previewJoin();
         }
     });
-    elements.joinChatCode.addEventListener('input', hideJoinPreview);
+    elements.joinChatCode.addEventListener('input', () => {
+        hideJoinPreview();
+        clearJoinError();
+    });
     elements.joinConfirmBtn.addEventListener('click', joinChat);
-    elements.joinCancelBtn.addEventListener('click', hideJoinPreview);
+    elements.joinCancelBtn.addEventListener('click', onJoinCancel);
 
     if (elements.backBtn) {
         elements.backBtn.addEventListener('click', () => elements.sidebar.classList.remove('hidden-mobile'));
@@ -2460,6 +2467,8 @@ function changeLifetime(lifetime) {
 function onLifetimeChanged() {
     updateAnonNote();
     renderProfileLifetime();
+    // Совет «не закрывайте вкладку» на карточках заявок зависит от срока.
+    if (!elements.newChatModal.classList.contains('hidden')) loadMyRequests();
 }
 
 function onProfileLifetimeChange(e) {
@@ -3107,10 +3116,26 @@ async function disableInviteCode() {
 
 // ==================== Вступление по коду ====================
 
+// Окно «Новый чат» работает в двух режимах: обычном (создать группу или
+// вступить по коду) и приглашения — после входа по ссылке #join= или с
+// экрана входа «У меня есть приглашение»: заголовок «Приглашение в группу»,
+// блока «Создать группу» нет, вместо «Отмена» — «Не сейчас».
 let joinPreviewCode = null;
+let joinPreviewSecret = null;  // секрет ссылки (этап 5.4): хранится, на сервер не уходит
+let joinInviteMode = false;
+let joinBusy = false;
 
-function openNewChatModal() {
+const JOIN_INVALID_TEXT = 'Код недействителен: он истёк, выключен или введён с ошибкой. Попросите новый.';
+const JOIN_KEYS_STATUS = 'Готовим ключи шифрования…';
+const JOIN_KEYS_WAIT_MS = 15000;
+
+function openNewChatModal({ invite = false } = {}) {
+    joinInviteMode = Boolean(invite);
     hideJoinPreview();
+    clearJoinError();
+    elements.newChatTitle.textContent = joinInviteMode ? 'Приглашение в группу' : 'Новый чат';
+    elements.newChatCreate.classList.toggle('hidden', joinInviteMode);
+    elements.joinCancelBtn.textContent = joinInviteMode ? 'Не сейчас' : 'Отмена';
     openModal(elements.newChatModal);
     loadMyRequests();
 }
@@ -3118,27 +3143,72 @@ function openNewChatModal() {
 function hideJoinPreview() {
     joinPreviewCode = null;
     elements.joinPreview.classList.add('hidden');
+    setJoinStatus('');
 }
 
-function readJoinCode() {
-    return elements.joinChatCode.value.replace(/[\s-]+/g, '').toUpperCase();
+function onJoinCancel() {
+    hideJoinPreview();
+    if (joinInviteMode) closeModal(elements.newChatModal);
+}
+
+function showJoinError(text) {
+    elements.joinError.textContent = text;
+    elements.joinError.classList.remove('hidden');
+    elements.joinChatCode.setAttribute('aria-invalid', 'true');
+}
+
+function clearJoinError() {
+    elements.joinError.textContent = '';
+    elements.joinError.classList.add('hidden');
+    elements.joinChatCode.removeAttribute('aria-invalid');
+}
+
+// Ход вступления («Готовим ключи шифрования…») — role="status".
+function setJoinStatus(text) {
+    elements.joinStatus.textContent = text;
+    elements.joinStatus.classList.toggle('hidden', !text);
+}
+
+// Ответ сервера → текст под полем. «Код недействителен» сервер пишет
+// коротко, подробность — на клиенте.
+function joinFailureText(data, fallback) {
+    if (data && data.networkError) return 'Нет связи с сервером. Попробуйте ещё раз.';
+    const message = data && typeof data.message === 'string' ? data.message : '';
+    if (/^Код недействителен/.test(message)) return JOIN_INVALID_TEXT;
+    return message || fallback;
 }
 
 // Шаг 1: предпросмотр — название, число участников, нужно ли одобрение.
+// Формат кода проверяется до запроса: в поле можно вставить и всю ссылку.
 async function previewJoin() {
-    const code = readJoinCode();
-    if (!code) return showToast('Введите код', 'error');
+    const parsed = NyxoInvite.parseInviteInput(elements.joinChatCode.value);
+    if (!parsed.ok) {
+        hideJoinPreview();
+        showJoinError(parsed.reason === 'empty' ? INVITE_EMPTY_ERROR : INVITE_FORMAT_ERROR);
+        elements.joinChatCode.focus();
+        return;
+    }
+    const code = parsed.code;
     const btn = elements.joinChatBtn;
     if (btn.disabled) return;
+    clearJoinError();
     btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    const label = Array.from(btn.childNodes);
+    setIconLabel(btn, 'loader', 'Проверяем…', { className: 'spin' });
     const data = await api('/api/chats/join/preview', { method: 'POST', body: JSON.stringify({ code }) });
     btn.disabled = false;
+    btn.removeAttribute('aria-busy');
+    btn.replaceChildren(...label);
+    if (!currentUser) return;
     if (!data.success) {
         hideJoinPreview();
-        showToast(data.message || 'Код недействителен', 'error');
+        showJoinError(joinFailureText(data, 'Не удалось проверить код. Попробуйте ещё раз.'));
+        elements.joinChatCode.focus();
         return;
     }
     joinPreviewCode = code;
+    joinPreviewSecret = parsed.secret || null;
     elements.joinPreviewName.textContent = data.roomName || 'Группа';
     const count = Number(data.memberCount) || 0;
     elements.joinPreviewMeta.textContent = count > 0 ? `${count} ${plural(count, ['участник', 'участника', 'участников'])}` : '';
@@ -3148,23 +3218,48 @@ async function previewJoin() {
     elements.joinConfirmBtn.focus({ preventScroll: true });
 }
 
+// Перед вступлением без одобрения ключи устройства должны быть на сервере:
+// иначе участники получат roomMembersChanged, пока identity новичка ещё
+// не опубликована, запишут «у собеседника не настроен E2EE» и не отправят
+// ему Sender Key. Ждём не дольше JOIN_KEYS_WAIT_MS: недоступное шифрование
+// (e2eeInitPromise → false) вступление не блокирует — как и отправка
+// сообщений, оно работает без него.
+async function waitForE2eeKeysBeforeJoin() {
+    if (e2eeState !== 'pending' || !e2eeInitPromise) return;
+    setJoinStatus(JOIN_KEYS_STATUS);
+    await withTimeout(e2eeInitPromise, JOIN_KEYS_WAIT_MS, false);
+    setJoinStatus('');
+}
+
 // Шаг 2: вступление (или заявка, если группе нужно одобрение).
 async function joinChat() {
-    const code = joinPreviewCode || readJoinCode();
-    if (!code) return showToast('Введите код', 'error');
+    const code = joinPreviewCode;
+    if (!code || joinBusy) return;
+    joinBusy = true;
     const btn = elements.joinConfirmBtn;
-    if (btn.disabled) return;
     btn.disabled = true;
-    const data = await api('/api/chats/join', {
-        method: 'POST',
-        body: JSON.stringify({ code }),
-    });
-    btn.disabled = false;
+    btn.setAttribute('aria-busy', 'true');
+    clearJoinError();
+    let data;
+    try {
+        await waitForE2eeKeysBeforeJoin();
+        data = await api('/api/chats/join', {
+            method: 'POST',
+            body: JSON.stringify({ code }),
+        });
+    } finally {
+        joinBusy = false;
+        btn.disabled = false;
+        btn.removeAttribute('aria-busy');
+        setJoinStatus('');
+    }
+    if (!currentUser) return;
     if (!data.success) {
-        showToast(data.message || 'Не удалось вступить', 'error');
+        showJoinError(joinFailureText(data, 'Не удалось вступить. Попробуйте ещё раз.'));
         return;
     }
     elements.joinChatCode.value = '';
+    joinPreviewSecret = null;
     hideJoinPreview();
     if (data.pending) {
         if (data.requestId != null && data.roomName) myRequestNames.set(String(data.requestId), data.roomName);
@@ -3208,7 +3303,30 @@ function createPendingCard(req, fresh) {
     cancel.type = 'button';
     setIconLabel(cancel, 'x', 'Отменить');
     cancel.addEventListener('click', () => cancelMyRequest(req.id, cancel));
-    card.append(icon('hourglass'), body, cancel);
+    // Аккаунт «Пока открыта вкладка» удалится через 30 минут после закрытия
+    // вкладки — вместе с заявкой, а одобрения можно ждать долго.
+    const warning = currentUser ? NyxoLifetime.inviteTabWarning(currentUser.anonLifetime, true) : '';
+    if (!warning) {
+        card.append(icon('hourglass'), body, cancel);
+        return card;
+    }
+    const hint = document.createElement('p');
+    hint.className = 'field-hint';
+    hint.textContent = warning;
+    body.append(hint);
+    const keep = document.createElement('button');
+    keep.className = 'btn btn-secondary btn-sm';
+    keep.type = 'button';
+    keep.textContent = 'Хранить 1 день';
+    keep.addEventListener('click', async () => {
+        keep.disabled = true;
+        const ok = await changeLifetime('day');
+        if (!ok && keep.isConnected) keep.disabled = false;
+    });
+    const actions = document.createElement('div');
+    actions.className = 'invite-actions';
+    actions.append(keep, cancel);
+    card.append(icon('hourglass'), body, actions);
     return card;
 }
 

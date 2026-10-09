@@ -175,15 +175,18 @@
                 <button class="close-modal icon-btn" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
             </div>
             <div class="modal-body">
-                <div class="form-group field">
-                    <label for="new-chat-name" class="field-label">Название группы</label>
-                    <input type="text" id="new-chat-name" placeholder="Введите название" maxlength="64">
+                <div id="new-chat-create">
+                    <div class="form-group field">
+                        <label for="new-chat-name" class="field-label">Название группы</label>
+                        <input type="text" id="new-chat-name" placeholder="Введите название" maxlength="64">
+                    </div>
+                    <button id="create-chat-btn" class="btn btn-primary btn-block"><svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg><span>Создать группу</span></button>
+                    <div class="auth-divider"><span>или</span></div>
                 </div>
-                <button id="create-chat-btn" class="btn btn-primary btn-block"><svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg><span>Создать группу</span></button>
-                <div class="auth-divider"><span>или</span></div>
                 <div class="form-group field">
-                    <label for="join-chat-code" class="field-label">Код приглашения</label>
-                    <input type="text" id="join-chat-code" placeholder="Например: ABCDE FGHIJ …" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="40">
+                    <label for="join-chat-code" class="field-label">Ссылка или код приглашения</label>
+                    <input type="text" id="join-chat-code" placeholder="Например: ABCDE FGHIJ …" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="300" aria-describedby="join-error">
+                    <p id="join-error" class="field-error hidden" role="alert"></p>
                 </div>
                 <button id="join-chat-btn" class="btn btn-secondary btn-block"><svg class="icon" aria-hidden="true"><use href="#i-log-in"></use></svg><span>Продолжить</span></button>
                 <div id="join-preview" class="pending-card join-preview hidden" aria-live="polite">
@@ -192,6 +195,7 @@
                         <h4 id="join-preview-name"></h4>
                         <p id="join-preview-meta" class="muted"></p>
                         <p id="join-preview-approval" class="field-hint hidden">Вы вступите после того, как кто-то из участников одобрит заявку.</p>
+                        <p id="join-status" class="field-hint hidden" role="status"></p>
                     </div>
                     <div class="invite-actions">
                         <button id="join-confirm-btn" class="btn btn-primary btn-sm">Вступить</button>
