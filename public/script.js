@@ -26,6 +26,16 @@ const POW_TIMEOUT_MS = 60 * 1000;
 const ANON_IDS_KEY = 'nyxo-anon-ids';
 const FLASH_NOTICE_KEY = 'nyxo-notice';
 const NOTIFY_PREF_PREFIX = 'nyxo-notify:';
+const BOT_CHAT_PREFIX = 'nyxo-bot-chat:';
+const E2EE_PREF_PREFIX = 'e2ee-enabled:';
+const E2EE_DB_PREFIX = 'nyxo-e2ee-';
+const SESSION_CHANNEL = 'nyxo-session';
+
+// Keepalive (контракт этапа 1, §5): GET /api/auth раз в 4 минуты, а также
+// при возвращении во вкладку (если запроса не было дольше минуты), при
+// появлении сети и после обрыва сокета.
+const KEEPALIVE_MS = 4 * 60 * 1000;
+const KEEPALIVE_VISIBLE_GAP_MS = 60 * 1000;
 
 // Срок исчезающих сообщений: только эти значения принимает сервер (К2).
 const EXPIRY_OPTIONS = [0, 300, 3600, 86400, 604800];
@@ -369,20 +379,28 @@ function forgetIdForWipe(userId) {
     writeAnonIds(readAnonIds().filter(id => id !== Number(userId)));
 }
 
-// Локальные флаги пользователя: тумблеры шифрования по чатам и согласие
-// на уведомления. Тема оформления — настройка устройства, а не аккаунта,
-// её не трогаем.
+// Локальные флаги пользователя: тумблеры шифрования по чатам, согласие на
+// уведомления и id чата с ботом. Тема оформления — настройка устройства, а
+// не аккаунта, её не трогаем.
 function removeLocalUserPrefs(userId) {
     try {
-        const prefix = `e2ee-enabled:${userId}:`;
+        const prefix = `${E2EE_PREF_PREFIX}${userId}:`;
         const doomed = [];
         for (let i = 0; i < localStorage.length; i++) {
             const key = localStorage.key(i);
             if (key && key.startsWith(prefix)) doomed.push(key);
         }
-        doomed.push(NOTIFY_PREF_PREFIX + userId);
+        doomed.push(NOTIFY_PREF_PREFIX + userId, BOT_CHAT_PREFIX + userId);
         doomed.forEach(key => localStorage.removeItem(key));
     } catch { /* хранилище недоступно */ }
+}
+
+// id чата с ботом (приходит в ответе регистрации) нужен клиенту волны 2;
+// хранится на устройстве рядом с остальными локальными данными аккаунта.
+function rememberBotChatId(userId, botChatId) {
+    const id = Number(botChatId);
+    if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(Number(userId))) return;
+    try { localStorage.setItem(BOT_CHAT_PREFIX + userId, String(id)); } catch { /* хранилище недоступно */ }
 }
 
 // Стирает локальные данные пользователя. Резолвится true, если база
@@ -405,10 +423,58 @@ function wipeLocalUserData(userId, timeoutMs = 3000) {
     return withTimeout(deletion, timeoutMs, false);
 }
 
-function purgeStaleLocalData(activeUserId) {
-    readAnonIds()
-        .filter(id => id !== Number(activeUserId))
-        .forEach(id => { wipeLocalUserData(id); });
+// Чьи следы лежат на устройстве: id из списка на стирание, из ключей
+// localStorage (уведомления, чат с ботом, тумблеры шифрования) и из имён баз
+// IndexedDB nyxo-e2ee-<id>. Список баз знает indexedDB.databases(); где его
+// нет (старый Firefox), остаётся список nyxo-anon-ids.
+async function listLocalUserIds() {
+    const ids = new Set(readAnonIds());
+    try {
+        // Ключ вида <префикс><id> или <префикс><id>:<хвост> (тумблеры шифрования).
+        const prefixes = [NOTIFY_PREF_PREFIX, BOT_CHAT_PREFIX, E2EE_PREF_PREFIX];
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            const prefix = key && prefixes.find(p => key.startsWith(p));
+            if (!prefix) continue;
+            const digits = key.slice(prefix.length).split(':')[0];
+            if (/^[0-9]+$/.test(digits)) ids.add(Number(digits));
+        }
+    } catch { /* хранилище недоступно */ }
+    try {
+        if (typeof indexedDB !== 'undefined' && indexedDB && typeof indexedDB.databases === 'function') {
+            const dbs = await withTimeout(indexedDB.databases(), 3000, []);
+            for (const db of dbs || []) {
+                if (!db || typeof db.name !== 'string' || !db.name.startsWith(E2EE_DB_PREFIX)) continue;
+                const digits = db.name.slice(E2EE_DB_PREFIX.length);
+                if (/^[0-9]+$/.test(digits)) ids.add(Number(digits));
+            }
+        }
+    } catch { /* список баз недоступен — остаётся nyxo-anon-ids */ }
+    return Array.from(ids).filter(id => Number.isSafeInteger(id) && id > 0);
+}
+
+// На одном origin живёт один аккаунт (кука сессии общая): всё, что осталось
+// от других, — следы удалённых аккаунтов, их стираем. Порядок важен: СНАЧАЛА
+// список следов, ПОТОМ свежий GET /api/auth. Если наоборот, аккаунт,
+// созданный в соседней вкладке между запросом и чтением списка, попал бы
+// под стирание. Оставляем аккаунт из ответа сервера и текущий. Сервер
+// недоступен — не стираем ничего: сессия могла и не истечь.
+let purgingForeign = null;
+function purgeForeignLocalData() {
+    if (purgingForeign) return purgingForeign;
+    purgingForeign = (async () => {
+        const known = await listLocalUserIds();
+        if (known.length === 0) return;
+        const state = await fetchAuthState();
+        if (!state) return;
+        const keep = new Set();
+        if (state.authenticated && state.user) keep.add(Number(state.user.id));
+        if (currentUser) keep.add(Number(currentUser.id));
+        known.filter(id => !keep.has(id)).forEach((id) => { wipeLocalUserData(id); });
+    })().catch((err) => {
+        console.warn('Не удалось почистить чужие локальные данные:', err);
+    }).finally(() => { purgingForeign = null; });
+    return purgingForeign;
 }
 
 // Полная перезагрузка после выхода и удаления аккаунта: закрывает
@@ -545,7 +611,7 @@ async function getSettledE2eeClient() {
 }
 
 function e2eePrefKey(chatId) {
-    return `e2ee-enabled:${currentUser ? currentUser.id : '0'}:${chatId}`;
+    return `${E2EE_PREF_PREFIX}${currentUser ? currentUser.id : '0'}:${chatId}`;
 }
 
 // Выбор пользователя: отсутствие ключа = "включено".
@@ -1330,6 +1396,7 @@ function init() {
     // До проверки входа: фрагмент #join=… стирается из адресной строки
     // сразу, даже если пользователь ещё не вошёл (см. consumeJoinFragment).
     consumeJoinFragment();
+    openSessionChannel();
     checkAuth();
     try {
         setupEventListeners();
@@ -1405,16 +1472,16 @@ async function checkAuth() {
     const expired = Boolean(data && (data.expired || data.reason === 'expired'));
     showAuthNotice(notice || (expired ? AUTH_NOTICES.expired : ''));
     // Сервер недоступен — локальные данные не трогаем: сессия могла и не истечь.
-    if (data) purgeStaleLocalData(null);
+    if (data) purgeForeignLocalData();
 }
 
 function enterApp(user) {
     currentUser = user;
     // До всего остального: если вкладку просто закроют, данные этого
     // аккаунта будут стёрты, как только он перестанет быть текущим (см.
-    // purgeStaleLocalData) — все аккаунты временные.
+    // purgeForeignLocalData) — все аккаунты временные.
     rememberIdForWipe(user.id);
-    purgeStaleLocalData(user.id);
+    purgeForeignLocalData();
     e2eeUnavailableWarned = false;
     warnedRooms.clear();
     initE2eeForCurrentUser();
@@ -1422,6 +1489,7 @@ function enterApp(user) {
     // Новое соединение = новое рукопожатие с актуальной кукой сессии.
     if (socket.connected) socket.disconnect();
     socket.connect();
+    startKeepalive();
     loadChats();
     updateAnonNote();
     // Ответ регистрации мог прийти без настроек и срока — их знает /api/auth.
@@ -1480,6 +1548,105 @@ function pingSession() {
         return data;
     })().finally(() => { authPing = null; });
     return authPing;
+}
+
+// ---- Keepalive ----
+// Сессия продлевается HTTP-запросом (сокет куку не обновляет), а у вкладки
+// без активности сервер снимает с аккаунта срок. Поэтому пока вкладка
+// открыта, GET /api/auth уходит раз в KEEPALIVE_MS, а ещё когда вкладка
+// снова видна (если запроса не было дольше минуты), при появлении сети и
+// после обрыва сокета (см. обработчики сокета ниже). Фоновая вкладка может
+// получать таймеры реже — для tab-аккаунта (30 минут) этого хватает.
+let lastAuthAt = 0;
+let keepaliveTimer = null;
+
+function startKeepalive() {
+    stopKeepalive();
+    keepaliveTimer = setInterval(() => { pingSession(); }, KEEPALIVE_MS);
+}
+
+function stopKeepalive() {
+    clearInterval(keepaliveTimer);
+    keepaliveTimer = null;
+}
+
+function keepaliveOnVisible() {
+    if (document.visibilityState !== 'visible' || !currentUser) return;
+    if (Date.now() - lastAuthAt > KEEPALIVE_VISIBLE_GAP_MS) pingSession();
+}
+
+// Сервер сам закрыл сокет ('io server disconnect'): socket.io в этом случае
+// не переподключается. Проверяем вход; если сессия жива — подключаемся
+// заново, но не чаще раза в 5 секунд (иначе сервер, который по какой-то
+// причине закрывает сокет каждый раз, получил бы цикл из запросов).
+let lastServerDisconnectAt = 0;
+async function recoverFromServerDisconnect() {
+    if (!currentUser) return;
+    const userId = currentUser.id;
+    const tooSoon = Date.now() - lastServerDisconnectAt < 5000;
+    lastServerDisconnectAt = Date.now();
+    const data = await pingSession();
+    if (tooSoon || !isCurrentUser(userId) || !data || !data.authenticated) return;
+    if (!socket.connected) socket.connect();
+}
+
+// ---- Несколько вкладок: BroadcastChannel nyxo-session ----
+// Кука сессии общая для всех вкладок origin, поэтому вход, смена срока и
+// удаление аккаунта в одной вкладке касаются всех. События:
+//   session-started  { userId }               — в этом браузере создан/открыт аккаунт;
+//   account-deleted  { userId }               — аккаунт удалён;
+//   lifetime-changed { userId, anonLifetime } — сменился срок (сессия пересоздана).
+// Автор события сам его не получает. Нет BroadcastChannel (старый Safari) —
+// остаётся keepalive: другая вкладка узнает об изменении при ближайшем
+// запросе /api/auth.
+let sessionChannel = null;
+
+function openSessionChannel() {
+    if (typeof BroadcastChannel !== 'function') return;
+    try {
+        sessionChannel = new BroadcastChannel(SESSION_CHANNEL);
+        sessionChannel.onmessage = (e) => onSessionEvent(e.data);
+    } catch {
+        sessionChannel = null;
+    }
+}
+
+function postSessionEvent(event) {
+    try {
+        if (sessionChannel) sessionChannel.postMessage(event);
+    } catch { /* канал закрыт — вкладки узнают через keepalive */ }
+}
+
+// Экран входа в этой вкладке уже не нужен: аккаунт есть, куку сессии видят
+// все вкладки. Идущую здесь регистрацию отменяем — но только убедившись по
+// /api/auth, что сессия действительно есть.
+async function adoptSessionFromOtherTab() {
+    const state = await fetchAuthState();
+    if (currentUser || !state || !state.authenticated || !state.user) return;
+    registrationCancelled = true;
+    enterApp(state.user);
+}
+
+function onSessionEvent(event) {
+    if (!event || typeof event !== 'object' || !Number.isInteger(event.userId)) return;
+    if (event.type === 'session-started') {
+        if (!currentUser) {
+            adoptSessionFromOtherTab();
+        } else if (currentUser.id !== event.userId) {
+            // Кука теперь принадлежит другому аккаунту; pingSession сам
+            // уведёт эту вкладку на экран входа и сотрёт её ключи.
+            pingSession();
+        }
+    } else if (event.type === 'account-deleted') {
+        if (isCurrentUser(event.userId)) leaveApp(AUTH_NOTICES.deletedElsewhere);
+    } else if (event.type === 'lifetime-changed') {
+        if (!isCurrentUser(event.userId)) return;
+        if (NyxoLifetime.isLifetime(event.anonLifetime)) currentUser.anonLifetime = event.anonLifetime;
+        // Сервер пересоздал сессию: старое рукопожатие сокета держится за прежнюю.
+        reconnectSocket();
+        onLifetimeChanged();
+        pingSession();
+    }
 }
 
 // Поля аккаунта из /api/auth; каждое проверяется: сервер другой версии
@@ -1556,6 +1723,7 @@ function leaveApp(message) {
     if (leavingApp) return;
     leavingApp = true;
     const user = currentUser;
+    stopKeepalive();
     socket.disconnect();
     currentUser = null;
     e2eeClient = null;
@@ -1627,6 +1795,7 @@ socket.on('connect', () => setConnectionStatus(null));
 socket.on('disconnect', (reason) => {
     if (reason === 'io client disconnect') return;
     setConnectionStatus('offline');
+    if (reason === 'io server disconnect') recoverFromServerDisconnect();
 });
 socket.io.on('reconnect_attempt', () => {
     setConnectionStatus(navigator.onLine === false ? 'offline' : 'reconnecting');
@@ -1638,7 +1807,9 @@ window.addEventListener('offline', () => {
     if (currentUser) setConnectionStatus('offline');
 });
 window.addEventListener('online', () => {
-    if (currentUser && !socket.connected) setConnectionStatus('reconnecting');
+    if (!currentUser) return;
+    if (!socket.connected) setConnectionStatus('reconnecting');
+    pingSession();
 });
 
 socket.on('e2eeKeyShare', ({ roomId } = {}) => {
@@ -2038,6 +2209,7 @@ function setupFeedListeners() {
 
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') markVisibleMessagesRead();
+        keepaliveOnVisible();
     });
 
     // Ссылка-приглашение, вставленная в уже открытую вкладку.
@@ -2326,6 +2498,7 @@ function changeLifetime(lifetime) {
             if (typeof data.anonInactivitySeconds === 'number') currentUser.anonInactivitySeconds = data.anonInactivitySeconds;
             reconnectSocket();
             onLifetimeChanged();
+            postSessionEvent({ type: 'lifetime-changed', userId, anonLifetime: currentUser.anonLifetime });
             showToast(`Срок хранения: ${lifetimeLabelInline(currentUser.anonLifetime)}`, 'success');
         }
         return ok;
@@ -2517,6 +2690,7 @@ async function deleteAccountAndLeave() {
     btn.removeAttribute('aria-busy');
     if (!isCurrentUser(userId)) return;
     if (gone) {
+        postSessionEvent({ type: 'account-deleted', userId });
         leaveApp(AUTH_NOTICES.deleted);
         return;
     }
@@ -2640,6 +2814,7 @@ async function fetchAuthState() {
         return null;
     }
     if (!data || typeof data !== 'object' || typeof data.authenticated !== 'boolean') return null;
+    lastAuthAt = Date.now();
     if ('onionUrl' in data) applyOnionUrl(data.onionUrl);
     return data;
 }
@@ -2668,6 +2843,9 @@ async function startAccount() {
         pendingJoin = invite;
         pendingJoinBroken = false;
         enterApp(user);
+        // Другие вкладки на экране входа подхватят аккаунт, остальные
+        // сверят, не сменилась ли кука на чужой аккаунт.
+        postSessionEvent({ type: 'session-started', userId: user.id });
     };
     try {
         // Аккаунт уже создан (в соседней вкладке или до перезагрузки) —
@@ -2714,6 +2892,7 @@ async function startAccount() {
             return;
         }
         const user = state && state.authenticated && state.user ? state.user : { anonLifetime: lifetime, ...data.user };
+        rememberBotChatId(user.id, data.botChatId);
         enter(user);
     } finally {
         setAuthBusy(false);
