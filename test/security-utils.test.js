@@ -104,22 +104,140 @@ async function main() {
         for (const mime of utils.ALLOWED_MIME_TYPES) {
             assert.match(utils.MIME_EXTENSIONS[mime], /^\.[a-z0-9]+$/, mime);
             const name = utils.anonymizedFileName(mime);
-            assert.match(name, /^(photo|video|audio|document|text)\.[a-z0-9]+$/, mime);
+            assert.match(name, /^(photo|video|document|text)\.[a-z0-9]+$/, mime);
             assert.ok(utils.ALL_ANONYMIZED_FILE_NAMES.includes(name));
         }
         assert.ok(!utils.ALLOWED_MIME_TYPES.includes(utils.ENCRYPTED_FILE_MIME), 'ciphertext is not a regular upload type');
     });
 
+    await test('the upload white list is exactly photos, video, PDF and TXT (no audio types)', () => {
+        // Точный состав — защита от случайного расширения списка: добавить
+        // тип можно только осознанно, поправив и этот тест.
+        const photoVideoDocs = [
+            'application/pdf', 'image/gif', 'image/jpeg', 'image/png', 'image/webp',
+            'text/plain', 'video/mp4', 'video/quicktime', 'video/webm',
+        ];
+        assert.deepStrictEqual([...utils.ALLOWED_MIME_TYPES].sort(), photoVideoDocs);
+        assert.deepStrictEqual(Object.keys(utils.MIME_EXTENSIONS).sort(), photoVideoDocs);
+        assert.deepStrictEqual(Object.keys(utils.ANONYMIZED_FILE_NAMES).sort(), photoVideoDocs);
+        const everything = JSON.stringify([
+            utils.ALLOWED_MIME_TYPES, utils.MIME_EXTENSIONS, utils.ANONYMIZED_FILE_NAMES, utils.ALL_ANONYMIZED_FILE_NAMES,
+        ]);
+        assert.ok(!/audio/i.test(everything), 'no audio type, extension or name anywhere');
+    });
+
     await test('anonymizedFileName: fixed names, never derived from the original name', () => {
         assert.strictEqual(utils.anonymizedFileName('image/jpeg'), 'photo.jpg');
         assert.strictEqual(utils.anonymizedFileName('video/mp4'), 'video.mp4');
-        assert.strictEqual(utils.anonymizedFileName('audio/mpeg'), 'audio.mp3');
         assert.strictEqual(utils.anonymizedFileName('application/pdf'), 'document.pdf');
         assert.strictEqual(utils.anonymizedFileName('text/plain'), 'text.txt');
         assert.strictEqual(utils.anonymizedFileName('application/x-evil'), 'file');
         assert.strictEqual(utils.anonymizedFileName('__proto__'), 'file');
         assert.strictEqual(utils.anonymizedFileName(undefined), 'file');
         assert.ok(utils.ALL_ANONYMIZED_FILE_NAMES.includes('file'));
+    });
+
+    await test('anonymizedFileName: an audio type gets the neutral name, not a type-specific one', () => {
+        for (const mime of ['audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/webm']) {
+            assert.strictEqual(utils.anonymizedFileName(mime), 'file', mime);
+        }
+    });
+
+    // Начало файла: сигнатуры форматов (первые 12 байт, как читает сервер).
+    const head = (...bytes) => Buffer.concat([Buffer.from(bytes), Buffer.alloc(12)]).subarray(0, 12);
+    const ascii = (offset, text) => {
+        const buf = Buffer.alloc(12);
+        buf.write(text, offset, 'latin1');
+        return buf;
+    };
+    const EBML = head(0x1A, 0x45, 0xDF, 0xA3);
+    const OGG = ascii(0, 'OggS');
+    const RIFF_WAVE = Buffer.concat([ascii(0, 'RIFF').subarray(0, 8), Buffer.from('WAVE', 'latin1')]);
+    const RIFF_WEBP = Buffer.concat([ascii(0, 'RIFF').subarray(0, 8), Buffer.from('WEBP', 'latin1')]);
+    const ID3 = ascii(0, 'ID3\x03');
+    const MPEG_FRAME = head(0xFF, 0xFB, 0x90, 0x00);
+    const FTYP = ascii(4, 'ftyp');
+
+    await test('checkMagicBytes: each allowed type accepts its own signature', () => {
+        assert.strictEqual(utils.checkMagicBytes(head(0xFF, 0xD8, 0xFF, 0xE0), 'image/jpeg'), true);
+        assert.strictEqual(utils.checkMagicBytes(head(0x89, 0x50, 0x4E, 0x47), 'image/png'), true);
+        assert.strictEqual(utils.checkMagicBytes(ascii(0, 'GIF89a'), 'image/gif'), true);
+        assert.strictEqual(utils.checkMagicBytes(RIFF_WEBP, 'image/webp'), true);
+        assert.strictEqual(utils.checkMagicBytes(ascii(0, '%PDF-1.7'), 'application/pdf'), true);
+        assert.strictEqual(utils.checkMagicBytes(FTYP, 'video/mp4'), true);
+        assert.strictEqual(utils.checkMagicBytes(FTYP, 'video/quicktime'), true);
+        assert.strictEqual(utils.checkMagicBytes(EBML, 'video/webm'), true);
+        assert.strictEqual(utils.checkMagicBytes(Buffer.from('plain text'), 'text/plain'), true);
+    });
+
+    await test('checkMagicBytes: video/webm is accepted only by the EBML signature (not OggS)', () => {
+        assert.strictEqual(utils.checkMagicBytes(OGG, 'video/webm'), false, 'an Ogg container posing as WebM');
+        assert.strictEqual(utils.checkMagicBytes(RIFF_WAVE, 'video/webm'), false);
+        assert.strictEqual(utils.checkMagicBytes(ID3, 'video/webm'), false);
+        assert.strictEqual(utils.checkMagicBytes(FTYP, 'video/webm'), false);
+        assert.strictEqual(utils.checkMagicBytes(head(0x1A, 0x45, 0xDF, 0xA2), 'video/webm'), false, 'one byte off');
+        // И наоборот: EBML не выдаётся ни за что другое.
+        for (const mime of ['image/png', 'image/jpeg', 'video/mp4', 'application/pdf']) {
+            assert.strictEqual(utils.checkMagicBytes(EBML, mime), false, mime);
+        }
+    });
+
+    await test('checkMagicBytes: audio types are never accepted, even with a matching signature (fail closed)', () => {
+        const withSignature = {
+            'audio/mpeg': [ID3, MPEG_FRAME],
+            'audio/ogg': [OGG],
+            'audio/wav': [RIFF_WAVE],
+            'audio/webm': [EBML, OGG],
+            'audio/x-wav': [RIFF_WAVE],
+            'audio/webm;codecs=opus': [EBML],
+        };
+        for (const [mime, samples] of Object.entries(withSignature)) {
+            for (const sample of samples) assert.strictEqual(utils.checkMagicBytes(sample, mime), false, mime);
+        }
+    });
+
+    await test('checkMagicBytes: image/webp needs WEBP after RIFF (WAV and bare RIFF are rejected)', () => {
+        assert.strictEqual(utils.checkMagicBytes(RIFF_WAVE, 'image/webp'), false, 'WAV posing as WebP');
+        assert.strictEqual(utils.checkMagicBytes(ascii(0, 'RIFF'), 'image/webp'), false, 'RIFF without a form type');
+        assert.strictEqual(utils.checkMagicBytes(RIFF_WEBP.subarray(0, 11), 'image/webp'), false, 'shorter than 12 bytes');
+    });
+
+    await test('checkMagicBytes: signature of another type, unknown type and short input are rejected', () => {
+        assert.strictEqual(utils.checkMagicBytes(head(0x89, 0x50, 0x4E, 0x47), 'image/jpeg'), false);
+        assert.strictEqual(utils.checkMagicBytes(ascii(0, '%PDF-1.7'), 'image/png'), false);
+        assert.strictEqual(utils.checkMagicBytes(ascii(0, 'RIFF'), 'application/x-evil'), false);
+        assert.strictEqual(utils.checkMagicBytes(ascii(0, 'RIFF'), utils.ENCRYPTED_FILE_MIME), false);
+        assert.strictEqual(utils.checkMagicBytes(ascii(0, 'RIFF'), undefined), false);
+        assert.strictEqual(utils.checkMagicBytes(Buffer.from([0x1A, 0x45, 0xDF]), 'video/webm'), false, 'shorter than 4 bytes');
+        assert.strictEqual(utils.checkMagicBytes(Buffer.alloc(0), 'text/plain'), false);
+        assert.strictEqual(utils.checkMagicBytes(null, 'image/png'), false);
+    });
+
+    await test('isInlineUpload: only photos and video are shown inline, everything else downloads', () => {
+        const stored = (ext) => `1759000000000-0123456789abcdef01234567${ext}`;
+        // Расширения всех разрешённых типов: inline — только image/* и video/*.
+        for (const mime of utils.ALLOWED_MIME_TYPES) {
+            const inline = /^(image|video)\//.test(mime);
+            assert.strictEqual(utils.isInlineUpload(stored(utils.MIME_EXTENSIONS[mime])), inline, mime);
+        }
+        assert.strictEqual(utils.isInlineUpload(stored('.png')), true);
+        assert.strictEqual(utils.isInlineUpload(stored('.mp4')), true);
+        assert.strictEqual(utils.isInlineUpload(stored('.pdf')), false);
+        assert.strictEqual(utils.isInlineUpload(stored('.txt')), false);
+        // Шифротекст E2EE-вложения: тип известен только клиенту.
+        assert.strictEqual(utils.isInlineUpload(stored(utils.ENCRYPTED_FILE_EXTENSION)), false);
+    });
+
+    await test('isInlineUpload: unknown, missing and tricky extensions fall back to download', () => {
+        const stored = (ext) => `1759000000000-0123456789abcdef01234567${ext}`;
+        for (const ext of ['', '.', '.html', '.htm', '.svg', '.js', '.mp3', '.ogg', '.wav', '.weba', '.png.html', '.PDF']) {
+            assert.strictEqual(utils.isInlineUpload(stored(ext)), false, JSON.stringify(ext));
+        }
+        // Регистр расширения не влияет на решение для известных типов.
+        assert.strictEqual(utils.isInlineUpload(stored('.PNG')), true);
+        for (const bad of [undefined, null, 42, {}, ['a.png']]) {
+            assert.strictEqual(utils.isInlineUpload(bad), false, String(bad));
+        }
     });
 
     // ---- проверка источника ----

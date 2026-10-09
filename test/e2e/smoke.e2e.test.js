@@ -95,7 +95,9 @@ test('чат с ботом: есть сразу после регистраци�
     const { messages } = await a.messages(bot.id);
     assert.strictEqual(messages.length, 1);
     assert.strictEqual(messages[0].sent, 0);
-    assert.match(messages[0].text, /Приватный режим/);
+    // Приветствие бот-гида (lib/bot-guide.js): последняя строка — подсказка про гайд.
+    assert.match(messages[0].text, /^Добро пожаловать в Nyxo./);
+    assert.match(messages[0].text, /Напишите „гайд“, чтобы узнать, как всё устроено$/);
     assert.notStrictEqual(messages[0].text, UNREADABLE);
 });
 

@@ -69,25 +69,6 @@ function makeMp4() {
     ]);
 }
 
-// WAV с LIST/INFO (название, автор).
-function makeWav() {
-    const chunk = (id, data) => {
-        const head = Buffer.alloc(8);
-        head.write(id, 0, 'latin1');
-        head.writeUInt32LE(data.length, 4);
-        return Buffer.concat([head, data, Buffer.alloc(data.length & 1)]);
-    };
-    const fmt = Buffer.alloc(16);
-    fmt.writeUInt16LE(1, 0); fmt.writeUInt16LE(1, 2); fmt.writeUInt32LE(8000, 4);
-    fmt.writeUInt32LE(16000, 8); fmt.writeUInt16LE(2, 12); fmt.writeUInt16LE(16, 14);
-    const info = Buffer.concat([Buffer.from('INFO'), chunk('IART', Buffer.from('Ivan Petrov\0'))]);
-    const body = Buffer.concat([Buffer.from('WAVE'), chunk('fmt ', fmt), chunk('LIST', info), chunk('data', Buffer.alloc(8, 0x22))]);
-    const head = Buffer.alloc(8);
-    head.write('RIFF', 0, 'latin1');
-    head.writeUInt32LE(body.length, 4);
-    return Buffer.concat([head, body]);
-}
-
 const tempFilesLeft = () => fs.readdirSync(tmpDir).filter(f => f.includes('-cleaned-'));
 
 async function main() {
@@ -172,25 +153,24 @@ async function main() {
         assert.deepStrictEqual(tempFilesLeft(), []);
     });
 
-    await test('audio/wav: LIST/INFO (author) removed on disk', async () => {
-        const input = path.join(tmpDir, 'voice.wav');
-        const wav = makeWav();
-        fs.writeFileSync(input, wav);
-        await stripMetadataFromFile(input, 'audio/wav');
-        const out = fs.readFileSync(input);
-        assert.strictEqual(out.length, wav.length);
-        assert.ok(!out.toString('latin1').includes('Ivan'));
-        assert.ok(out.toString('latin1').includes('JUNK'));
-        assert.deepStrictEqual(tempFilesLeft(), []);
-    });
-
-    await test('audio/mpeg: file without MPEG frames is rejected, original untouched, no temp files', async () => {
-        const input = path.join(tmpDir, 'fake.mp3');
-        const fake = Buffer.concat([Buffer.from('ID3\x03\x00\x00\x00\x00\x00\x05', 'latin1'), Buffer.from('Ivan!not audio at all')]);
-        fs.writeFileSync(input, fake);
-        await assert.rejects(() => stripMetadataFromFile(input, 'audio/mpeg'));
-        assert.ok(fs.readFileSync(input).equals(fake), 'caller decides what to do with the rejected original');
-        assert.deepStrictEqual(tempFilesLeft(), []);
+    await test('audio/*: rejected as unsupported (fail closed), original untouched, no temp files', async () => {
+        // Звук сервер не принимает вовсе: даже файл с настоящей сигнатурой
+        // WAV/MP3/Ogg/WebM не очищается, а отклоняется по типу.
+        const samples = {
+            'audio/wav': Buffer.concat([Buffer.from('RIFF', 'latin1'), Buffer.alloc(4), Buffer.from('WAVE', 'latin1'), Buffer.from('Ivan Petrov')]),
+            'audio/x-wav': Buffer.concat([Buffer.from('RIFF', 'latin1'), Buffer.alloc(4), Buffer.from('WAVE', 'latin1')]),
+            'audio/mpeg': Buffer.concat([Buffer.from('ID3\x03\x00\x00\x00\x00\x00\x05', 'latin1'), Buffer.from('Ivan Petrov')]),
+            'audio/ogg': Buffer.concat([Buffer.from('OggS\x00\x02', 'latin1'), Buffer.from('Ivan Petrov')]),
+            'audio/webm': Buffer.concat([Buffer.from('1A45DFA3', 'hex'), Buffer.from('Ivan Petrov')]),
+            'audio/webm;codecs=opus': Buffer.from('1A45DFA3', 'hex'),
+        };
+        for (const [mime, bytes] of Object.entries(samples)) {
+            const input = path.join(tmpDir, 'sound.dat');
+            fs.writeFileSync(input, bytes);
+            await assert.rejects(() => stripMetadataFromFile(input, mime), /Неподдерживаемый тип/, mime);
+            assert.ok(fs.readFileSync(input).equals(bytes), `${mime}: caller decides what to do with the rejected original`);
+            assert.deepStrictEqual(tempFilesLeft(), [], mime);
+        }
     });
 
     await test('text/plain is left as is; unsupported MIME is rejected (fail closed)', async () => {
@@ -387,21 +367,6 @@ async function main() {
         }
     });
 
-    await test('chat settings: legacy personal timers → the shortest one, never longer than asked', () => {
-        const { snapLegacyExpirySeconds, pickRoomExpiryFromLegacy } = chatSettings;
-        assert.strictEqual(snapLegacyExpirySeconds(3600), 3600);
-        assert.strictEqual(snapLegacyExpirySeconds(7200), 3600, '2 h → 1 h, not 1 day');
-        assert.strictEqual(snapLegacyExpirySeconds(90000), 86400);
-        assert.strictEqual(snapLegacyExpirySeconds(365 * 86400), 604800);
-        assert.strictEqual(snapLegacyExpirySeconds(60), 300, 'shorter than every option → the shortest option');
-        assert.strictEqual(snapLegacyExpirySeconds(0), 0);
-        assert.strictEqual(snapLegacyExpirySeconds(null), 0);
-        assert.strictEqual(pickRoomExpiryFromLegacy([86400, 3600, 604800]), 3600);
-        assert.strictEqual(pickRoomExpiryFromLegacy([null, 0, 7200]), 3600);
-        assert.strictEqual(pickRoomExpiryFromLegacy([null, 0]), 0);
-        assert.strictEqual(pickRoomExpiryFromLegacy([]), 0);
-    });
-
     await test('chat settings: a personal expiry cannot outlive the chat timer', () => {
         const { effectiveMessageExpiry } = chatSettings;
         assert.strictEqual(effectiveMessageExpiry(null, null), null);
@@ -529,16 +494,6 @@ async function main() {
             { anonLifetime: 'week', anonInactivitySeconds: 604800, anonExpiresAt: '2026-10-10T12:00:00.000Z' });
         assert.strictEqual(anon.describeAnonLifetime({ lifetime: 'week', lastActiveMs: null }).anonExpiresAt, null);
         assert.strictEqual(anon.describeAnonLifetime({ lifetime: 'bogus', lastActiveMs: t0 }).anonLifetime, 'tab');
-    });
-
-    await test('anon lifetime: welcome text names the chosen rule and has no emoji', () => {
-        const emoji = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}️•]/u;
-        for (const [lifetime, phrase] of [['tab', '30 минут'], ['day', 'сутки'], ['week', '7 дней без активности'], [null, '30 минут']]) {
-            const text = anon.anonWelcomeText(lifetime);
-            assert.ok(text.includes(phrase), `${lifetime}: ${text}`);
-            assert.ok(text.includes('не позже чем через 7 дней'), 'hard cap is mentioned');
-            assert.doesNotMatch(text, emoji);
-        }
     });
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
