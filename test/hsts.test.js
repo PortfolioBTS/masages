@@ -4,7 +4,7 @@
 
 const assert = require('assert');
 const crypto = require('crypto');
-const { getHstsHeader } = require('../lib/privacy');
+const { getHstsHeader, createHstsMiddleware } = require('../lib/privacy');
 const { checkEnv } = require('../lib/env-check');
 
 let passed = 0, failed = 0;
@@ -60,6 +60,22 @@ test('preload — требования hstspreload.org: год и больше, 
     const maxAge = Number(/max-age=(\d+)/.exec(value)[1]);
     assert.ok(maxAge >= 31536000);
     assert.ok(/;\s*includeSubDomains/.test(value) && /;\s*preload$/.test(value));
+});
+
+test('middleware: заголовок по req.secure и req.isOnion, next() вызывается всегда', () => {
+    const run = (options, req) => {
+        const headers = {};
+        let called = 0;
+        createHstsMiddleware(options)(req, { set: (name, value) => { headers[name] = value; } }, () => { called++; });
+        assert.strictEqual(called, 1);
+        return headers['Strict-Transport-Security'];
+    };
+    const prod = { production: true, preload: false };
+    assert.strictEqual(run(prod, { secure: true, isOnion: false }), BASE);
+    assert.strictEqual(run({ production: true, preload: true }, { secure: true }), PRELOAD);
+    assert.strictEqual(run(prod, { secure: false }), undefined);
+    assert.strictEqual(run(prod, { secure: true, isOnion: true }), undefined);
+    assert.strictEqual(run({ production: false, preload: true }, { secure: true }), undefined);
 });
 
 test('env-check: HSTS_PRELOAD=yes в production — предупреждение о рисках, не ошибка', () => {

@@ -202,7 +202,7 @@ async function main() {
     await test('privacy: only the used helpers remain exported', async () => {
         const privacy = require('../lib/privacy.js');
         // addRandomDelay выравнивал время ответа при входе — входа больше нет.
-        assert.deepStrictEqual(Object.keys(privacy).sort(), ['getHstsHeader', 'getPrivacyHeaders', 'sanitizeText']);
+        assert.deepStrictEqual(Object.keys(privacy).sort(), ['createHstsMiddleware', 'getHstsHeader', 'getPrivacyHeaders', 'sanitizeText']);
     });
 
     await test('privacy: headers — X-XSS-Protection 0, Referrer-Policy no-referrer, rest unchanged', async () => {

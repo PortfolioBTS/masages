@@ -30,7 +30,7 @@ const { ipKeyGenerator } = rateLimit;
 const { stripMetadataFromFile, cleanupStaleTempFiles } = require('./lib/metadata-stripper');
 const DisappearingMessagesManager = require('./lib/disappearing-messages');
 const { encryptText, decryptText, messageAad } = require('./lib/message-crypto');
-const { sanitizeText, getPrivacyHeaders, getHstsHeader } = require('./lib/privacy');
+const { sanitizeText, getPrivacyHeaders, createHstsMiddleware } = require('./lib/privacy');
 const {
     ALLOWED_MIME_TYPES,
     MIME_EXTENSIONS,
@@ -1098,12 +1098,11 @@ app.use((req, res, next) => {
         host: req.headers.host,
         secure: req.secure && !req.isOnion,
     }));
-    // HSTS — только для настоящего https в production и не для onion
-    // (getHstsHeader); preload — по HSTS_PRELOAD=yes (риски — в env-check).
-    const hsts = getHstsHeader({ production: IS_PRODUCTION, secure: req.secure, onion: req.isOnion, preload: HSTS_PRELOAD });
-    if (hsts) res.set('Strict-Transport-Security', hsts);
     next();
 });
+// HSTS — только для настоящего https в production и не для onion; preload — по
+// HSTS_PRELOAD=yes (риски — в env-check). См. getHstsHeader в lib/privacy.js.
+app.use(createHstsMiddleware({ production: IS_PRODUCTION, preload: HSTS_PRELOAD }));
 
 // Небезопасные методы — только со своих страниц (см. isTrustedOrigin).
 // Второй рубеж к CSRF-токену ниже: SameSite=Lax и токен защищают от
