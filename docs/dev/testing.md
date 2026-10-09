@@ -18,6 +18,11 @@
 внедряемыми `pool`, часами и логом и проверяется фейками (пример —
 `test/advisory-locks.test.js`).
 
+`test/forbidden-terms.test.js` — поисковые критерии этапов как тест (правила,
+разрешения и их обоснования — `docs/dev/forbidden-terms.md`). На ветке, куда ещё не
+влита реализация этапов 1–2, его можно временно пропустить:
+`NYXO_SKIP_FORBIDDEN=1 npm test`; в CI пропуск не действует.
+
 ## Сквозные тесты: запуск
 
 Нужен Postgres 16 и админ-URL с правом `CREATE DATABASE`:
@@ -78,7 +83,10 @@ worktree, на одном контейнере) друг другу не меш�
     чистки заявок и продления активности сокетов становятся N мс; после каждого
     выполненного прохода чистки анонимов сервер пишет
     `[Test] maintenance tick <n>` (`server.waitForTick()`).
-  - `NYXO_TEST_RENEW_INTERVAL_MS` — имя занято задачей T1.1 (продление сессий).
+  - `NYXO_TEST_RENEW_INTERVAL_MS=N` — интервал продления сессии (по умолчанию 5 минут)
+    становится N мс: сессия продлевается, когда `sess.renewBucket` отличается от
+    `floor(now / N)`. Наборы, которым нужно «та же корзина» без случайностей, ставят
+    огромное N и сбрасывают маркер вручную (`forceRenewal` в `helpers/anon.js`).
 - **Сокеты** — свой минимальный клиент Engine.IO v4 / Socket.IO v5 на
   глобальном `WebSocket` Node 24 (`helpers/socket.js`), без пакета
   `socket.io-client`: заголовки `Cookie`, `Origin`, `X-Forwarded-For` под полным
@@ -234,6 +242,19 @@ await server.logs.waitFor(/\[Legacy\] …/, { from: mark });
 
 **`env.js`** — пути, `serverEnv(...)`, `randomSecrets()`,
 `testOnionAddress(seed)` — валидный тестовый v3-адрес `.onion`.
+
+**`anon.js`** — для наборов про срок жизни и сессии: числа контракта §4 (`LIFETIME_MS`,
+`BUCKET_MS`, `COOKIE_EXTRA_MS`, `bucketCeil`) — копия контракта, а не импорт из
+`lib/`, чтобы тест сверял сервер с контрактом; `registerRaw(client, lifetime)` —
+сырой ответ регистрации; `setCookies(res, name)` — разобранные `Set-Cookie`;
+`sessionCookie(client)`, `signSessionCookie(sid, secret)`; `userRow`, `sessionRow`
+(`expire` читается средствами базы: колонка без часового пояса), `count`;
+`setLastActive(suite, id, lifetime, { pastMs })` — `last_active_at` на границе
+корзины «сейчас − срок − запас»; `forceRenewal(suite, sid, { rewindExpireMs })` —
+сбросить маркер продления сессии.
+
+**`samples.js`** — минимальные настоящие PDF, MP4, WebM с метаданными (сервер их
+вычищает) и «головы» звуковых файлов для проверок отказа по типу.
 
 ## Ручная проверка интерфейса
 
