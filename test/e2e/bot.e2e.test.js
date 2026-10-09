@@ -63,7 +63,7 @@ async function botSession(t, { lifetime = 'tab' } = {}) {
 // Сообщение пользователю -> ответ бота, пришедший по сокету.
 async function ask({ client, bot, sock }, text) {
     const sent = await client.send(bot.id, text);
-    const reply = await sock.waitFor('newMessage', m => m.chat_id === bot.id && m.sent === 0 && m.id > sent.id);
+    const reply = await sock.waitFor('newMessage', m => m.chat_id === bot.id && m.sent === 0 && m.seq > sent.seq);
     return reply;
 }
 
@@ -217,7 +217,7 @@ test('ответы бота сохраняются в истории и дохо
     const a = await botSession(t);
     const b = await botSession(t);
     const sent = await a.client.send(a.bot.id, 'гайд');
-    const reply = await a.sock.waitFor('newMessage', m => m.chat_id === a.bot.id && m.sent === 0 && m.id > sent.id);
+    const reply = await a.sock.waitFor('newMessage', m => m.chat_id === a.bot.id && m.sent === 0 && m.seq > sent.seq);
     const { messages } = await a.client.messages(a.bot.id);
     const stored = messages.find(m => m.id === reply.id);
     assert.ok(stored, 'ответ бота есть в истории');

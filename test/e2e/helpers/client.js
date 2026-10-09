@@ -13,6 +13,7 @@
 //   для негативных проверок — сырые get/post/put/del.
 
 const path = require('path');
+const crypto = require('crypto');
 const { CookieJar } = require('./cookies');
 const { connectSocket } = require('./socket');
 const { REPO_ROOT } = require('./env');
@@ -20,6 +21,14 @@ const { solve } = require(path.join(REPO_ROOT, 'public', 'pow-worker.js'));
 
 const UNSAFE = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 let clientCounter = 0;
+
+// Случайный id сообщения в допустимом формате (31 бит, не меньше 1 000 000).
+function newClientMessageId() {
+    for (;;) {
+        const value = crypto.randomInt(0, 0x80000000);
+        if (value >= 1000000) return String(value);
+    }
+}
 
 // 10.<процесс>.<n>.<n>: уникально в пределах файла-набора (у каждого файла
 // свой сервер, лимиты в памяти его процесса).
@@ -166,8 +175,21 @@ class TestClient {
 
     // ---- Сообщения и файлы ----
 
+    // Id сообщения комнаты выбирает клиент (message-ordering.md, раздел 6): helper
+    // подставляет случайный clientMessageId, если тест не задал свой (в том числе
+    // `clientMessageId: undefined` — «поле не присылать»). Для чата с ботом поле
+    // сервер игнорирует.
     async send(chatId, text, extra = {}) {
-        return (await this.ok(this.post('/api/messages', { chatId, text, ...extra }), 'отправка сообщения')).message;
+        const body = { chatId, text, clientMessageId: newClientMessageId(), ...extra };
+        if (body.clientMessageId === undefined) delete body.clientMessageId;
+        return (await this.ok(this.post('/api/messages', body), 'отправка сообщения')).message;
+    }
+
+    // Сырой ответ: негативные проверки кодов 400/409.
+    sendRaw(chatId, text, extra = {}) {
+        const body = { chatId, text, clientMessageId: newClientMessageId(), ...extra };
+        if (body.clientMessageId === undefined) delete body.clientMessageId;
+        return this.post('/api/messages', body);
     }
 
     async messages(chatId, query = '') {
@@ -175,11 +197,15 @@ class TestClient {
     }
 
     // Сырой ответ: квота и отказы проверяются по статусу.
-    async uploadRaw(chatId, bytes, mime, { filename = 'file.bin', text, encrypted, envelope } = {}) {
+    // Порядок полей FormData важен (раздел 6.3 контракта): chatId, encrypted,
+    // clientMessageId, envelope — ДО файла, иначе fileFilter сервера их не увидит.
+    // clientMessageId: undefined — не присылать поле; по умолчанию случайный id.
+    async uploadRaw(chatId, bytes, mime, { filename = 'file.bin', text, encrypted, envelope, clientMessageId = newClientMessageId() } = {}) {
         const form = new FormData();
         form.append('chatId', String(chatId));
         if (text !== undefined) form.append('text', text);
         if (encrypted !== undefined) form.append('encrypted', String(encrypted));
+        if (clientMessageId !== undefined) form.append('clientMessageId', String(clientMessageId));
         if (envelope !== undefined) form.append('envelope', envelope);
         form.append('file', new Blob([bytes], { type: mime }), filename);
         return this.request('POST', '/api/messages/file', { body: form });
@@ -204,4 +230,4 @@ class TestClient {
     }
 }
 
-module.exports = { TestClient, ApiError, nextXff };
+module.exports = { TestClient, ApiError, nextXff, newClientMessageId };
