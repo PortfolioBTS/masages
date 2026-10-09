@@ -86,6 +86,18 @@ async function forceRenewal(suite, sid, { rewindExpireMs = 0 } = {}) {
     if (rowCount === 0) throw new Error(`forceRenewal: нет сессии ${sid}`);
 }
 
+// last_active_at ровно «сейчас − срок − запас»: срок вышел запас назад. Сдвиг
+// от текущего значения (rewindUser) здесь не годится: оно лежит в корзине, то
+// есть до 5 минут в будущем, и «срок + минута» от него мог бы ещё не выйти.
+// Отрицательный запас — до конца срока остаётся столько же.
+async function setLastActive(suite, id, lifetime, { pastMs = 60 * 1000 } = {}) {
+    const { rowCount } = await suite.query(
+        `UPDATE users SET last_active_at = NOW() - make_interval(secs => $2::float8 / 1000) WHERE id = $1`,
+        [id, LIFETIME_MS[lifetime] + pastMs]
+    );
+    if (rowCount === 0) throw new Error(`setLastActive: нет пользователя ${id}`);
+}
+
 module.exports = {
     MINUTE_MS,
     HOUR_MS,
@@ -104,4 +116,5 @@ module.exports = {
     sessionRow,
     count,
     forceRenewal,
+    setLastActive,
 };
