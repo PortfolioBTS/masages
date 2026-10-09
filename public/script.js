@@ -1479,6 +1479,10 @@ function pingSession() {
         }
         if (!data) return null;
         if (!data.authenticated) {
+            // Аккаунт удаляем мы сами: сервер сначала закрывает сокет и снимает
+            // сессию, потом отвечает. Выходом и уведомлением займётся
+            // deleteAccountAndLeave, когда придёт ответ.
+            if (deletingAccount) return data;
             leaveApp(data.expired || data.reason === 'expired' ? AUTH_NOTICES.expired : AUTH_NOTICES.sessionLost);
             return data;
         }
@@ -1524,12 +1528,19 @@ function keepaliveOnVisible() {
 // не переподключается. Проверяем вход; если сессия жива — подключаемся
 // заново, но не чаще раза в 5 секунд (иначе сервер, который по какой-то
 // причине закрывает сокет каждый раз, получил бы цикл из запросов).
+// Сервер закрывает сокеты и при удалении аккаунта — раньше, чем соседняя
+// вкладка успеет об этом сообщить (account-deleted), поэтому с проверкой
+// входа секунду ждём: иначе вместо «удалён в другой вкладке» человек
+// увидел бы «потерян вход».
+const SERVER_DISCONNECT_GRACE_MS = 1000;
 let lastServerDisconnectAt = 0;
 async function recoverFromServerDisconnect() {
     if (!currentUser) return;
     const userId = currentUser.id;
     const tooSoon = Date.now() - lastServerDisconnectAt < 5000;
     lastServerDisconnectAt = Date.now();
+    await delay(SERVER_DISCONNECT_GRACE_MS);
+    if (!isCurrentUser(userId)) return;
     const data = await pingSession();
     if (tooSoon || !isCurrentUser(userId) || !data || !data.authenticated) return;
     if (!socket.connected) socket.connect();
