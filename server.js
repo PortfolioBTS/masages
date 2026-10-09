@@ -30,7 +30,7 @@ const { ipKeyGenerator } = rateLimit;
 const { stripMetadataFromFile, cleanupStaleTempFiles } = require('./lib/metadata-stripper');
 const DisappearingMessagesManager = require('./lib/disappearing-messages');
 const { encryptText, decryptText, messageAad } = require('./lib/message-crypto');
-const { sanitizeText, getPrivacyHeaders } = require('./lib/privacy');
+const { sanitizeText, getPrivacyHeaders, getHstsHeader } = require('./lib/privacy');
 const {
     ALLOWED_MIME_TYPES,
     MIME_EXTENSIONS,
@@ -117,6 +117,8 @@ const { registerPreSessionRoutes, registerApiRoutes, registerApiNotFound } = req
 const { createJobScheduler, registerJobModules } = require('./lib/jobs');
 
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+// HSTS preload включает только владелец домена: HSTS_PRELOAD=yes (см. lib/privacy.js).
+const HSTS_PRELOAD = process.env.HSTS_PRELOAD === 'yes';
 
 // ALLOWED_MIME_TYPES и MIME_EXTENSIONS (жёсткий маппинг mimetype ->
 // расширение на диске, расширение никогда не берётся из имени файла) —
@@ -1096,11 +1098,10 @@ app.use((req, res, next) => {
         host: req.headers.host,
         secure: req.secure && !req.isOnion,
     }));
-    // HSTS — только для настоящего https в production: по http браузер его
-    // всё равно игнорирует, а в разработке он "залипал" бы на localhost.
-    if (IS_PRODUCTION && req.secure && !req.isOnion) {
-        res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
-    }
+    // HSTS — только для настоящего https в production и не для onion
+    // (getHstsHeader); preload — по HSTS_PRELOAD=yes (риски — в env-check).
+    const hsts = getHstsHeader({ production: IS_PRODUCTION, secure: req.secure, onion: req.isOnion, preload: HSTS_PRELOAD });
+    if (hsts) res.set('Strict-Transport-Security', hsts);
     next();
 });
 
