@@ -1,8 +1,9 @@
 'use strict';
 // Тесты public/media-sanitizer.js: синтетические файлы каждого формата с
 // метаданными собираются прямо здесь, результат проверяется НЕЗАВИСИМЫМИ
-// разборщиками (свои парсеры боксов/EBML/страниц OGG/RIFF, побитовый CRC)
-// и, для изображений, декодированием через sharp.
+// разборщиками (свои парсеры боксов, EBML и чанков) и, для изображений,
+// декодированием через sharp. Звуковых форматов санитайзер не поддерживает:
+// для них проверяется только отказ (fail closed).
 // Запуск: node test/media-sanitizer.test.js
 
 const assert = require('assert');
@@ -37,7 +38,6 @@ function bytes(...parts) {
 const u16 = (n) => { const b = Buffer.alloc(2); b.writeUInt16BE(n); return b; };
 const u32 = (n) => { const b = Buffer.alloc(4); b.writeUInt32BE(n >>> 0); return b; };
 const u64 = (n) => { const b = Buffer.alloc(8); b.writeBigUInt64BE(BigInt(n)); return b; };
-const u16le = (n) => { const b = Buffer.alloc(2); b.writeUInt16LE(n); return b; };
 const u32le = (n) => { const b = Buffer.alloc(4); b.writeUInt32LE(n >>> 0); return b; };
 const zeros = (n) => Buffer.alloc(n);
 
@@ -225,8 +225,8 @@ function makeWebmKnown() {
         el(MKV.CLUSTER, euint(0xE7, 0), mkvBlock(0x5A), mkvBlock(0x5B)),
         mkvTags(), mkvAttachments(), mkvChapters()));
 }
-// Вариант B (как пишет MediaRecorder): Segment и Cluster неизвестного размера,
-// Tags после кластеров.
+// Вариант B (как пишут потоковые энкодеры): Segment и Cluster неизвестного
+// размера, Tags после кластеров.
 function makeWebmUnknown() {
     return bytes(mkvHeader(), elUnknown(MKV.SEGMENT,
         mkvInfo(), mkvTracks(),
@@ -289,191 +289,9 @@ function parseWebm(buf) {
     return kids;
 }
 
-// ===================== MP3 =====================
-
-function synchsafe(n) { return Buffer.from([(n >> 21) & 0x7F, (n >> 14) & 0x7F, (n >> 7) & 0x7F, n & 0x7F]); }
-function id3v23(...frames) {
-    const body = bytes(...frames, zeros(20)); // + паддинг внутри тега
-    return bytes('ID3', Buffer.from([3, 0, 0]), synchsafe(body.length), body);
-}
-const id3Frame = (id, payload) => { const p = bytes(payload); return bytes(id, u32(p.length), u16(0), p); };
-function id3v24WithFooter(...frames) {
-    const body = bytes(...frames);
-    return bytes('ID3', Buffer.from([4, 0, 0x10]), synchsafe(body.length), body, '3DI', Buffer.from([4, 0, 0x10]), synchsafe(body.length));
-}
-function mpegFrames(count) {
-    const frames = [];
-    for (let i = 0; i < count; i++) frames.push(bytes(Buffer.from([0xFF, 0xFB, 0x90, 0x64]), Buffer.alloc(413, 0x55 + i)));
-    return bytes(...frames);
-}
-function apeTag() {
-    const items = bytes(u32le(4), u32le(0), 'Artist\0', 'Ivan');
-    const size = items.length + 32;
-    const hdr = (flags) => bytes('APETAGEX', u32le(2000), u32le(size), u32le(1), u32le(flags), zeros(8));
-    return bytes(hdr(0xA0000000), items, hdr(0x80000000));
-}
-function lyrics3v2() {
-    const content = bytes('LYRICSBEGIN', 'IND00002', '10', 'LYR00012', 'Secret lyric');
-    return bytes(content, String(content.length).padStart(6, '0'), 'LYRICS200');
-}
-function id3v1() {
-    const pad = (s, n) => Buffer.from(s.padEnd(n, '\0'), 'latin1');
-    return bytes('TAG', pad('Secret Moscow', 30), pad('Ivan Petrov', 30), pad('Album', 30), '2024', pad('comment', 30), Buffer.from([12]));
-}
-const id3v1Plus = () => bytes('TAG+', Buffer.from('Secret extended title'.padEnd(223, '\0'), 'latin1'));
-
-// ===================== OGG =====================
-
-// Побитовый CRC — нарочно не табличный, чтобы не повторять реализацию модуля.
-function oggCrcBitwise(buf) {
-    let crc = 0;
-    for (const byte of buf) {
-        crc = (crc ^ (byte << 24)) >>> 0;
-        for (let k = 0; k < 8; k++) crc = crc & 0x80000000 ? ((crc << 1) ^ 0x04C11DB7) >>> 0 : (crc << 1) >>> 0;
-    }
-    return crc >>> 0;
-}
-
-// Раскладывает группы пакетов по страницам (каждая группа — с новой
-// страницы), не больше 255 сегментов на страницу, продолжение пакета — флаг 0x01.
-function oggStream(serial, groups) {
-    const pages = [];
-    let continued = false;
-    for (const group of groups) {
-        let segs = [];
-        let data = [];
-        const flush = () => {
-            pages.push({ segs, data: bytes(...data), continued });
-            continued = segs[segs.length - 1] === 255;
-            segs = [];
-            data = [];
-        };
-        for (const packet of group) {
-            let off = 0;
-            for (;;) {
-                const lace = Math.min(255, packet.length - off);
-                segs.push(lace);
-                data.push(packet.subarray(off, off + lace));
-                off += lace;
-                if (segs.length === 255) flush();
-                if (lace < 255) break;
-            }
-        }
-        if (segs.length) flush();
-    }
-    return bytes(...pages.map((p, i) => {
-        const flags = (p.continued ? 1 : 0) | (i === 0 ? 2 : 0) | (i === pages.length - 1 ? 4 : 0);
-        const header = Buffer.alloc(27);
-        header.write('OggS', 0, 'latin1');
-        header[5] = flags;
-        header.writeBigUInt64LE(BigInt(i < 2 ? 0 : i * 960), 6);
-        header.writeUInt32LE(serial, 14);
-        header.writeUInt32LE(i, 18);
-        header[26] = p.segs.length;
-        const page = bytes(header, Buffer.from(p.segs), p.data);
-        page.writeUInt32LE(oggCrcBitwise(page), 22);
-        return page;
-    }));
-}
-
-function vorbisComments(vendor, comments) {
-    return bytes(u32le(vendor.length), vendor, u32le(comments.length), ...comments.map((c) => bytes(u32le(c.length), c)));
-}
-const OGG_PICTURE = 'METADATA_BLOCK_PICTURE=' + 'SXZhbiBQZXRyb3YgcGhvdG8g'.repeat(3400); // ~80 КБ, 2+ страницы
-function makeOpus(serial = 0x1234) {
-    const head = bytes('OpusHead', Buffer.from([1, 1]), u16le(312), u32le(48000), u16le(0), Buffer.from([0]));
-    const tags = bytes('OpusTags', vorbisComments('libopus 1.4 SecretVendor',
-        ['TITLE=Secret Title', 'LOCATION=+55.7558+037.6173', OGG_PICTURE]), Buffer.from([0x01]), 'IVAN-BINARY');
-    const audio = [0, 1, 2].map((i) => Buffer.alloc(60, 0xA0 + i));
-    return { file: oggStream(serial, [[head], [tags], audio]), head, audio };
-}
-function makeVorbis(serial = 0x5678) {
-    const ident = bytes('\x01vorbis', u32le(0), Buffer.from([1]), u32le(44100), u32le(0), u32le(128000), u32le(0), Buffer.from([0xB8, 1]));
-    const comment = bytes('\x03vorbis', vorbisComments('Xiph.Org libVorbis SecretVendor',
-        ['ARTIST=Ivan Petrov', 'GPS=+55.7558+037.6173', 'LYRICS=' + 'Secret words '.repeat(6000)]), Buffer.from([1]));
-    const setup = bytes('\x05vorbis', Buffer.alloc(300, 0x42));
-    const audio = [0, 1].map((i) => Buffer.alloc(80, 0xB0 + i));
-    return { file: oggStream(serial, [[ident], [comment, setup], audio]), ident, setup, audio };
-}
-
-// Независимый разбор: страницы (CRC побитово) и пакеты по serial.
-function parseOgg(buf) {
-    const pages = [];
-    const packets = new Map();
-    const partial = new Map();
-    let pos = 0;
-    while (pos < buf.length) {
-        assert.strictEqual(buf.toString('latin1', pos, pos + 4), 'OggS');
-        const nseg = buf[pos + 26];
-        const lacing = [...buf.subarray(pos + 27, pos + 27 + nseg)];
-        const end = pos + 27 + nseg + lacing.reduce((a, b) => a + b, 0);
-        assert.ok(end <= buf.length, 'page fits the file');
-        const page = Buffer.from(buf.subarray(pos, end));
-        const stored = page.readUInt32LE(22);
-        page.writeUInt32LE(0, 22);
-        assert.strictEqual(oggCrcBitwise(page), stored, `page ${pages.length} CRC must be valid`);
-        const serial = buf.readUInt32LE(pos + 14);
-        pages.push({ start: pos, end, header: Buffer.from(buf.subarray(pos, pos + 27 + nseg)) });
-        if (!packets.has(serial)) { packets.set(serial, []); partial.set(serial, []); }
-        let off = pos + 27 + nseg;
-        for (const lace of lacing) {
-            partial.get(serial).push(buf.subarray(off, off + lace));
-            off += lace;
-            if (lace < 255) { packets.get(serial).push(Buffer.concat(partial.get(serial))); partial.set(serial, []); }
-        }
-        pos = end;
-    }
-    return { pages, packets };
-}
-function checkBlankedComments(p, off, original) {
-    const vendorLen = p.readUInt32LE(off);
-    assert.strictEqual(vendorLen, original.readUInt32LE(off), 'vendor length kept');
-    assert.ok(p.subarray(off + 4, off + 4 + vendorLen).every((x) => x === 0x20), 'vendor blanked with spaces');
-    off += 4 + vendorLen;
-    const count = p.readUInt32LE(off);
-    assert.strictEqual(count, original.readUInt32LE(off), 'comment count kept');
-    off += 4;
-    for (let i = 0; i < count; i++) {
-        const len = p.readUInt32LE(off);
-        assert.strictEqual(len, original.readUInt32LE(off), 'comment length kept');
-        const c = p.toString('latin1', off + 4, off + 4 + len);
-        assert.strictEqual(c, 'X=' + ' '.repeat(len - 2));
-        off += 4 + len;
-    }
-    return off;
-}
-
-// ===================== RIFF / WAV =====================
+// ===================== RIFF (чанки WebP) =====================
 
 const riffChunk = (id, data) => { const d = bytes(data); return bytes(id, u32le(d.length), d, d.length & 1 ? zeros(1) : zeros(0)); };
-function makeWav() {
-    const fmt = riffChunk('fmt ', bytes(u16le(1), u16le(1), u32le(8000), u32le(16000), u16le(2), u16le(16)));
-    const list = riffChunk('LIST', bytes('INFO', riffChunk('INAM', 'Secret Title\0'), riffChunk('IART', 'Ivan Petrov\0')));
-    const bextBody = Buffer.alloc(602);
-    bextBody.write('Recorded near Moscow', 0, 'latin1');
-    bextBody.write('Ivan Petrov', 256, 'latin1');
-    bextBody.write('2024-05-01', 320, 'latin1');
-    bextBody.write('12:34:56', 330, 'latin1');
-    const bext = riffChunk('bext', bextBody);
-    const data = riffChunk('data', Buffer.from([0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16])); // нечётный размер + pad
-    const ixml = riffChunk('iXML', '<BWFXML><PROJECT>Ivan</PROJECT></BWFXML>');
-    const body = bytes('WAVE', fmt, list, bext, data, ixml);
-    return { file: bytes('RIFF', u32le(body.length), body), fmt, data };
-}
-function parseRiff(buf) {
-    assert.strictEqual(buf.readUInt32LE(4) + 8, buf.length, 'RIFF size matches the file');
-    const chunks = [];
-    let pos = 12;
-    while (pos < buf.length) {
-        const id = buf.toString('latin1', pos, pos + 4);
-        const size = buf.readUInt32LE(pos + 4);
-        assert.ok(pos + 8 + size <= buf.length, `chunk ${id} fits`);
-        chunks.push({ id, start: pos, data: buf.subarray(pos + 8, pos + 8 + size), end: Math.min(pos + 8 + size + (size & 1), buf.length) });
-        pos = chunks[chunks.length - 1].end;
-    }
-    assert.strictEqual(pos, buf.length);
-    return chunks;
-}
 
 // ===================== Изображения =====================
 
@@ -618,17 +436,38 @@ async function main() {
 
     await test('api: SUPPORTED_TYPES / isSupported / MIME parameters and aliases', async () => {
         assert.deepStrictEqual([...MediaSanitizer.SUPPORTED_TYPES].sort(), [
-            'application/pdf', 'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/webm', 'image/gif', 'image/jpeg',
-            'image/png', 'image/webp', 'text/plain', 'video/mp4', 'video/quicktime', 'video/webm',
+            'application/pdf', 'image/gif', 'image/jpeg', 'image/png', 'image/webp', 'text/plain',
+            'video/mp4', 'video/quicktime', 'video/webm',
         ]);
         for (const t of MediaSanitizer.SUPPORTED_TYPES) assert.ok(MediaSanitizer.isSupported(t), t);
-        assert.ok(MediaSanitizer.isSupported('audio/webm;codecs=opus'));
-        assert.ok(MediaSanitizer.isSupported('Audio/X-WAV'));
+        assert.ok(MediaSanitizer.isSupported('video/webm;codecs=vp9'), 'MIME parameters are ignored');
+        assert.ok(MediaSanitizer.isSupported('Video/WebM'), 'case is ignored');
+        assert.ok(MediaSanitizer.isSupported('image/pjpeg'), 'alias');
         for (const t of ['image/svg+xml', 'text/html', 'application/octet-stream', '', null, undefined, 42]) {
             assert.strictEqual(MediaSanitizer.isSupported(t), false, String(t));
         }
         assert.throws(() => MediaSanitizer.sanitize(new Uint8Array(4), 'image/svg+xml'), /Неподдерживаемый тип/);
         assert.throws(() => MediaSanitizer.sanitize('not bytes', 'text/plain'), (e) => e instanceof MediaSanitizeError);
+    });
+
+    await test('audio/*: not supported at all (isSupported false, sanitize throws), even for a real container', async () => {
+        const containers = {
+            webm: makeWebmKnown(),
+            wav: bytes('RIFF', u32le(4 + 24), 'WAVE', riffChunk('fmt ', zeros(16))),
+            mp3: bytes('ID3', Buffer.from([3, 0, 0]), Buffer.alloc(8), Buffer.from([0xFF, 0xFB, 0x90, 0x64]), zeros(64)),
+            ogg: bytes('OggS', zeros(40)),
+        };
+        const types = [
+            'audio/webm', 'audio/webm;codecs=opus', 'audio/ogg', 'audio/ogg; codecs=opus', 'audio/mpeg', 'audio/mp3',
+            'audio/wav', 'Audio/X-WAV', 'audio/wave', 'audio/vnd.wave', 'audio/x-pn-wav', 'audio/aac', 'audio/flac', 'audio/',
+        ];
+        for (const type of types) {
+            assert.strictEqual(MediaSanitizer.isSupported(type), false, type);
+            assert.ok(!MediaSanitizer.SUPPORTED_TYPES.includes(MediaSanitizer._internal.normalizeMimeType(type)), type);
+            for (const [name, file] of Object.entries(containers)) {
+                assert.throws(() => MediaSanitizer.sanitize(file, type), (e) => e instanceof MediaSanitizeError && /Неподдерживаемый тип/.test(e.message), `${type} / ${name}`);
+            }
+        }
     });
 
     await test('text/plain: bytes unchanged, result is a new array', async () => {
@@ -767,9 +606,9 @@ async function main() {
         assertAbsent(out, ['55.7558', 'LOCATION', 'Secret', 'Lavf', 'Ivan', 'IVANPHOTO', 'cover.jpg', 'Moscow']);
     });
 
-    await test('webm (MediaRecorder style): unknown-size Segment/Clusters, Tags after clusters', async () => {
+    await test('webm (streaming style): unknown-size Segment/Clusters, Tags after clusters', async () => {
         const file = makeWebmUnknown();
-        const out = run(file, 'audio/webm;codecs=opus');
+        const out = run(file, 'video/webm;codecs=vp9');
         assert.strictEqual(out.length, file.length);
         const kids = parseWebm(out);
         assert.deepStrictEqual(kids.map((k) => k.id), [
@@ -788,113 +627,6 @@ async function main() {
         assertRejects(mkvHeader(), 'video/webm'); // нет Segment
         // Tags неизвестного размера — не бывает в корректном файле.
         assertRejects(bytes(mkvHeader(), elUnknown(MKV.SEGMENT, elUnknown(MKV.TAGS, zeros(10)))), 'video/webm');
-    });
-
-    // ---- MP3 ----
-
-    await test('mp3: ID3v2 (x2, footer), APEv2, Lyrics3v2, ID3v1 and TAG+ removed, audio frames intact', async () => {
-        const frames = mpegFrames(3);
-        const file = bytes(
-            id3v23(id3Frame('TXXX', bytes(Buffer.from([0]), 'GPS\0+55.7558,37.6173')), id3Frame('TPE1', bytes(Buffer.from([0]), 'Ivan Petrov'))),
-            id3v24WithFooter(id3Frame('TIT2', bytes(Buffer.from([0]), 'Secret Title'))),
-            frames, lyrics3v2(), apeTag(), id3v1Plus(), id3v1());
-        const out = run(file, 'audio/mpeg');
-        assert.ok(out.equals(frames), 'only MPEG frames remain');
-        assert.ok(run(bytes(frames, id3v24WithFooter(id3Frame('TPE1', 'Ivan'))), 'audio/mpeg').equals(frames), 'appended ID3v2.4 removed');
-        assertAbsent(out, ['ID3', 'TAG', 'APETAGEX', 'LYRICS', 'Ivan']);
-    });
-
-    await test('mp3: broken inputs are rejected', async () => {
-        const frames = mpegFrames(2);
-        assertRejects(bytes(id3v23(id3Frame('TPE1', 'Ivan')), 'garbage garbage garbage'), 'audio/mpeg');
-        const hugeTag = bytes('ID3', Buffer.from([3, 0, 0]), synchsafe(100000), zeros(10), frames);
-        assertRejects(hugeTag, 'audio/mpeg');
-        assertRejects(bytes(frames.subarray(0, 100), 'LYRICS200'), 'audio/mpeg'); // Lyrics3 без размера
-        assertRejects(Buffer.alloc(3), 'audio/mpeg');
-    });
-
-    // ---- OGG ----
-
-    await test('ogg/opus: vendor + comments (spanning 2+ pages) blanked, binary tail zeroed, all CRC valid', async () => {
-        const { file, head, audio } = makeOpus();
-        const before = parseOgg(file);
-        assert.ok(before.pages.filter((p) => p.header[5] & 1).length >= 1, 'comment packet continues onto another page');
-        const out = run(file, 'audio/ogg');
-        assert.strictEqual(out.length, file.length);
-        const after = parseOgg(out); // проверяет CRC каждой страницы побитово
-        assert.strictEqual(after.pages.length, before.pages.length);
-        for (let i = 0; i < after.pages.length; i++) {
-            const a = after.pages[i].header;
-            const b = before.pages[i].header;
-            assert.ok(a.subarray(0, 22).equals(b.subarray(0, 22)) && a.subarray(26).equals(b.subarray(26)), 'page headers unchanged');
-        }
-        const packets = [...after.packets.values()][0];
-        const original = [...before.packets.values()][0];
-        assert.ok(packets[0].equals(head), 'OpusHead intact');
-        const end = checkBlankedComments(packets[1], 8, original[1]);
-        assert.ok(packets[1].subarray(end).every((x) => x === 0), 'binary tail zeroed');
-        audio.forEach((a, i) => assert.ok(packets[2 + i].equals(a), 'audio packets intact'));
-        assertAbsent(out, ['Secret', '55.7558', 'SXZhbiBQZXRyb3Y', 'IVAN', 'libopus', 'METADATA_BLOCK']);
-    });
-
-    await test('ogg/vorbis: comment packet sharing pages with setup header, chained with an Opus stream', async () => {
-        const vorbis = makeVorbis();
-        const opus = makeOpus(0x9999);
-        const file = bytes(vorbis.file, opus.file);
-        const out = run(file, 'audio/ogg');
-        assert.strictEqual(out.length, file.length);
-        const before = parseOgg(file);
-        const after = parseOgg(out);
-        const v = after.packets.get(0x5678);
-        const vOrig = before.packets.get(0x5678);
-        assert.ok(v[0].equals(vorbis.ident), 'identification header intact');
-        const end = checkBlankedComments(v[1], 7, vOrig[1]);
-        assert.strictEqual(v[1][end], 1, 'framing bit kept');
-        assert.ok(v[2].equals(vorbis.setup), 'setup header intact');
-        vorbis.audio.forEach((a, i) => assert.ok(v[3 + i].equals(a)));
-        checkBlankedComments(after.packets.get(0x9999)[1], 8, before.packets.get(0x9999)[1]);
-        assertAbsent(out, ['Secret', '55.7558', 'Ivan', 'IVAN', 'Xiph', 'libopus']);
-    });
-
-    await test('ogg: broken inputs are rejected', async () => {
-        const { file } = makeOpus();
-        const badCrc = Buffer.from(file);
-        badCrc[30] ^= 0xFF;
-        assertRejects(badCrc, 'audio/ogg');
-        assertRejects(file.subarray(0, file.length - 7), 'audio/ogg');
-        const flac = oggStream(1, [[bytes('\x7FFLAC', zeros(20))], [bytes('comment')]]);
-        assertRejects(flac, 'audio/ogg');
-        const noComments = oggStream(1, [[bytes('OpusHead', zeros(11))]]);
-        assertRejects(noComments, 'audio/ogg');
-        const liar = oggStream(1, [[bytes('OpusHead', zeros(11))], [bytes('OpusTags', u32le(1000), 'x')]]);
-        assertRejects(liar, 'audio/ogg');
-    });
-
-    // ---- WAV ----
-
-    await test('wav: LIST/INFO, bext, iXML become zeroed JUNK, sizes and audio unchanged', async () => {
-        const { file, fmt, data } = makeWav();
-        const out = run(file, 'audio/wav');
-        assert.strictEqual(out.length, file.length);
-        const chunks = parseRiff(out);
-        assert.deepStrictEqual(chunks.map((c) => c.id), ['fmt ', 'JUNK', 'JUNK', 'data', 'JUNK']);
-        for (const c of chunks.filter((x) => x.id === 'JUNK')) {
-            assert.ok(out.subarray(c.start + 8, c.end).every((x) => x === 0), 'JUNK zeroed (with pad byte)');
-        }
-        assert.ok(out.subarray(chunks[0].start, chunks[0].end).equals(fmt));
-        assert.ok(out.subarray(chunks[3].start, chunks[3].end).equals(data));
-        assertAbsent(out, ['INFO', 'Secret', 'Ivan', 'Moscow', '2024-05-01', 'BWFXML']);
-        // Хвост за пределами RIFF (например, ID3, дописанный тегером) отбрасывается.
-        const tailed = run(bytes(file, 'ID3 Ivan tail'), 'audio/wav');
-        assert.ok(tailed.equals(out));
-    });
-
-    await test('wav: broken inputs are rejected', async () => {
-        const { file } = makeWav();
-        assertRejects(file.subarray(0, file.length - 3), 'audio/wav');
-        assertRejects(bytes('RF64', u32le(0xFFFFFFFF), 'WAVE'), 'audio/wav');
-        const noData = bytes('RIFF', u32le(4 + 24), 'WAVE', riffChunk('fmt ', zeros(16)));
-        assertRejects(noData, 'audio/wav');
     });
 
     // ---- JPEG ----
@@ -1106,8 +838,7 @@ async function main() {
             ['image/jpeg', jpeg], ['image/png', png], ['image/gif', gif], ['image/webp', webp],
             ['video/mp4', makeMp4().file], ['video/mp4', makeMp4('large').file],
             ['video/webm', makeWebmKnown()], ['video/webm', makeWebmUnknown()],
-            ['audio/mpeg', bytes(id3v23(id3Frame('TPE1', 'Ivan')), mpegFrames(2), apeTag(), id3v1())],
-            ['audio/ogg', makeVorbis().file], ['audio/wav', makeWav().file], ['application/pdf', makePdf()],
+            ['application/pdf', makePdf()],
         ];
         let rejected = 0, accepted = 0;
         const started = Date.now();

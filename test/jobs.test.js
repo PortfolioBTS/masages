@@ -136,7 +136,7 @@ async function main() {
         assert.throws(() => createJobScheduler({ maintenanceMs: 0 }), RangeError);
     });
 
-    await test('задачи lib-модулей регистрируются из JOB_MODULES (пока пустого)', () => {
+    await test('задачи lib-модулей регистрируются из JOB_MODULES', () => {
         assert.ok(Array.isArray(JOB_MODULES));
         const jobs = createJobScheduler({ runExclusive: async () => true, timers: fakeTimers().timers, log: () => {} });
         const ctx = { pool: 'pool' };

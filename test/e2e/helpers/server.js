@@ -31,6 +31,38 @@ const READY_TIMEOUT_MS = 30000;
 const READY_POLL_MS = 100;
 const STOP_TIMEOUT_MS = 5000;
 const TICK_RE = /\[Test\] maintenance tick (\d+)/;
+const DB_BUSY_RE = /too many clients already|remaining connection slots are reserved/i;
+
+// Тишина перед выходом процесса набора.
+//
+// Если процесс набора завершается сразу после остановки серверов, а runner
+// делает это без паузы после последнего хука (--test-force-exit), на Windows
+// libuv падает: «Assertion failed: !(handle->flags & UV_HANDLE_CLOSING),
+// src\win\async.c». Файл-набор тогда помечается упавшим при ВСЕХ зелёных
+// тестах («tests N+1, fail 1», в выводе одна строка 'test failed', логов
+// нет). Воспроизводится стабильно: любой fetch к серверу, затем kill сервера и
+// немедленный выход (с keep-alive-соединениями, которые убитый сервер рвёт);
+// пауза в 50 мс после kill — и падения нет. Обычно спасало удаление базы после
+// остановки серверов (десятки мс), но не всегда.
+//
+// Поэтому в конце хука ждём: дескрипторов дочерних процессов (ProcessWrap) в
+// процессе больше нет и с момента завершения последнего сервера прошло
+// quietMs. Время здесь неизбежно — закрытие сокетов libuv снаружи не
+// наблюдается (getActiveResourcesInfo их уже не показывает) — но ждём только
+// остаток: обычно удаление базы после остановки серверов съедает его почти
+// целиком.
+let lastServerExitAt = 0;
+
+async function settleBeforeExit({ quietMs = 150, timeoutMs = 3000 } = {}) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+        const hasChildHandles = typeof process.getActiveResourcesInfo === 'function'
+            && process.getActiveResourcesInfo().includes('ProcessWrap');
+        const quiet = Date.now() - lastServerExitAt >= quietMs;
+        if ((!hasChildHandles && quiet) || Date.now() >= deadline) return;
+        await delay(5);
+    }
+}
 
 function freePort() {
     return new Promise((resolve, reject) => {
@@ -87,6 +119,7 @@ class ServerHandle {
         child.on('error', (err) => this.logs.note(`ошибка процесса: ${err.message}`));
         this.exitPromise = new Promise((resolve) => {
             child.once('close', (code, signal) => {
+                lastServerExitAt = Date.now();
                 this.exitInfo = { code, signal };
                 this.logs.processExited(this.exitInfo);
                 resolve(this.exitInfo);
@@ -126,6 +159,14 @@ class ServerHandle {
                 await this.stop();
                 if (attempt < 3 && this.logs.find('EADDRINUSE', { from: mark })) {
                     this.port = null;
+                    continue;
+                }
+                // Общий контейнер Postgres делят несколько прогонов: на пике
+                // кончаются слоты соединений, и сервер падает при старте. Это
+                // сбой окружения, а не кода — повтор с паузой.
+                if (attempt < 3 && this.logs.find(DB_BUSY_RE, { from: mark })) {
+                    this.logs.note(`Postgres перегружен (нет слотов соединений), повтор старта ${this.name}`);
+                    await delay(500 * attempt);
                     continue;
                 }
                 throw err;
@@ -201,4 +242,4 @@ async function spawnServer(opts) {
     return handle;
 }
 
-module.exports = { ServerHandle, startServer, spawnServer, freePort, TICK_RE };
+module.exports = { ServerHandle, startServer, spawnServer, freePort, settleBeforeExit, TICK_RE };

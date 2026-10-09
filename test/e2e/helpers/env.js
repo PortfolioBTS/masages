@@ -12,7 +12,13 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const SERVER_ENTRY = path.join(REPO_ROOT, 'server.js');
 const E2E_DIR = path.resolve(__dirname, '..');
 const FIXTURES_DIR = path.join(E2E_DIR, 'fixtures');
-const LOGS_DIR = path.join(E2E_DIR, '.logs');
+// Куда сохраняются логи и причины сбоев упавших наборов. Переменная
+// NYXO_E2E_LOGS_DIR — для проверки самого харнесса (harness-failures): набор
+// запускает вложенные прогоны и смотрит, что они оставили, не засоряя
+// настоящую папку.
+const LOGS_DIR = process.env.NYXO_E2E_LOGS_DIR
+    ? path.resolve(process.env.NYXO_E2E_LOGS_DIR)
+    : path.join(E2E_DIR, '.logs');
 
 // Админ-URL тестового Postgres (с правом CREATE DATABASE). Пароль — только
 // в переменной окружения, в коде и файлах его нет.

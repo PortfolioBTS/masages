@@ -11,24 +11,72 @@
 //
 // createSuite регистрирует хуки node:test: before — своя база
 // (nyxo_e2e_<время>_<rand>), по желанию легаси-фикстура, сервер; after —
-// остановка серверов, удаление базы. Если хоть один тест набора упал, логи
-// всех его серверов сохраняются в test/e2e/.logs/.
+// остановка серверов, удаление базы.
+//
+// Падение набора не должно оставаться без следов. Если упал тест, хук или
+// процесс (необработанное исключение, в том числе из таймера после конца
+// теста), в test/e2e/.logs/ сохраняются логи всех серверов набора и файл
+// «…-suite.log» с причинами (helpers/failure-log.js). Уборка (остановка
+// серверов, удаление базы) не бросает исключений: её сбой при зелёных тестах
+// — предупреждение в выводе и в suite.log, а не «fail 1» без объяснений.
 
-const fs = require('fs');
-const path = require('path');
 const { before, after, afterEach } = require('node:test');
 const { createDatabase, dropDatabase, connectPool } = require('./pg');
-const { ServerHandle } = require('./server');
+const { ServerHandle, settleBeforeExit } = require('./server');
 const { createTimeHelpers } = require('./time');
 const { loadLegacyFixture, legacyServerSecrets } = require('./legacy');
-const { randomSecrets, LOGS_DIR } = require('./env');
+const { randomSecrets } = require('./env');
+const { SuiteDiagnostics } = require('./failure-log');
 
 const HOOK_TIMEOUT_MS = 120000;
+
+// Наборы этого процесса, у которых after-хук ещё не закончил уборку: на них
+// смотрят обработчики process (installProcessGuards).
+const liveSuites = new Set();
+let guardsInstalled = false;
+
+function saveSuite(suite) {
+    try {
+        suite.diagnostics.save({ dbName: suite.dbName, servers: suite.servers });
+    } catch (err) {
+        // Диагностика не должна ронять процесс сама.
+        console.error(`# не удалось сохранить логи набора ${suite.name}: ${err.message}`);
+    }
+}
+
+// Обработчики уровня процесса, одни на файл-набор (процесс). Runner сам
+// ловит необработанные исключения и ошибки промисов и записывает их как
+// падение файла — но не знает про серверы набора. Эти обработчики ничего не
+// гасят: они только сохраняют причину и логи, пока процесс жив.
+function installProcessGuards() {
+    if (guardsInstalled) return;
+    guardsInstalled = true;
+    const fatal = (kind) => (reason) => {
+        for (const suite of liveSuites) {
+            suite.diagnostics.fail(kind, reason);
+            saveSuite(suite);   // сразу: процесс могут добить раньше after-хука
+        }
+    };
+    process.on('uncaughtException', fatal('uncaughtException'));
+    process.on('unhandledRejection', fatal('unhandledRejection'));
+    // Процесс завершается, а after-хук набора не закончился (тайм-аут хука,
+    // принудительный выход, process.exit из чужого кода): файловый ввод-вывод
+    // в 'exit' синхронный, успеваем.
+    process.on('exit', (code) => {
+        for (const suite of liveSuites) {
+            if (code === 0 && !suite.diagnostics.needsSave) continue;
+            if (code !== 0) suite.diagnostics.fail('exit', `процесс набора завершился с кодом ${code}, не дойдя до конца after-хука`);
+            saveSuite(suite);
+        }
+    });
+}
 
 // options: env — окружение всех серверов набора; legacy — загрузить
 // легаси-фикстуру (и взять её секреты); startServer: false — сервер набор
 // запускает сам (suite.startServer()).
 function createSuite(name, { env = {}, legacy = false, startServer: autoStart = true } = {}) {
+    const diagnostics = new SuiteDiagnostics(name);
+    let ready = false;   // before-хук дошёл до конца
     const suite = {
         name,
         dbName: null,
@@ -39,8 +87,11 @@ function createSuite(name, { env = {}, legacy = false, startServer: autoStart = 
         server: null,      // первый сервер набора
         servers: [],
         secrets: legacy ? legacyServerSecrets() : randomSecrets(),
-        failed: false,
+        diagnostics,       // причины сбоев набора (helpers/failure-log.js)
+        get failed() { return diagnostics.failed; },
     };
+    liveSuites.add(suite);
+    installProcessGuards();
 
     // Ещё сервер на ту же базу (реплика) или первый, если startServer: false.
     // Секреты общие для всех серверов набора: куки и шифрование сообщений
@@ -72,35 +123,47 @@ function createSuite(name, { env = {}, legacy = false, startServer: autoStart = 
             suite.time = createTimeHelpers(suite.db);
             if (legacy) suite.legacy = await loadLegacyFixture(created.url);
             if (autoStart) await suite.startServer();
+            ready = true;
         } catch (err) {
-            suite.failed = true;
+            diagnostics.fail('before: подготовка набора (база, фикстура, сервер)', err);
             throw err;
         }
     }, { timeout: HOOK_TIMEOUT_MS });
 
     afterEach((t) => {
-        if (!t.passed) suite.failed = true;
+        if (!t.passed) diagnostics.fail(`тест «${t.name}»`, t.error);
     });
 
     after(async () => {
-        for (const server of suite.servers) await server.stop().catch(() => {});
-        if (suite.failed) saveLogs(suite);
-        for (const server of suite.servers) await server.dispose().catch(() => {});
-        if (suite.db) await suite.db.end().catch(() => {});
-        if (suite.dbName) await dropDatabase(suite.dbName);
+        // before мог не дойти до конца без своего исключения: тайм-аут хука.
+        if (!ready && !diagnostics.failed) {
+            diagnostics.fail('before', 'хук before не завершился успешно (тайм-аут хука или ошибка до его выполнения)');
+        }
+        // Каждый шаг уборки — отдельно и без исключения наружу: остановка
+        // сервера не должна мешать удалению базы, а сбой удаления — менять
+        // результат набора.
+        const step = async (what, fn) => {
+            try {
+                await fn();
+            } catch (err) {
+                diagnostics.warn(what, err);
+            }
+        };
+        for (const server of suite.servers) await step(`остановка сервера ${server.name}`, () => server.stop());
+        await step('тишина перед выходом процесса', () => settleBeforeExit());
+        // Логи — до уборки: после остановки в них уже строка о завершении.
+        if (diagnostics.needsSave) saveSuite(suite);
+        for (const server of suite.servers) await step(`уборка сервера ${server.name}`, () => server.dispose());
+        if (suite.db) await step('закрытие пула теста', () => suite.db.end());
+        if (suite.dbName) await step(`удаление базы ${suite.dbName}`, () => dropDatabase(suite.dbName));
+        // Ещё раз: к причинам могли добавиться сбои уборки (метка файлов та же).
+        if (diagnostics.needsSave) saveSuite(suite);
+        // Хук последний: после него runner завершает процесс (см. settleBeforeExit в server.js).
+        await step('тишина перед выходом процесса', () => settleBeforeExit());
+        liveSuites.delete(suite);
     }, { timeout: HOOK_TIMEOUT_MS });
 
     return suite;
-}
-
-function saveLogs(suite) {
-    fs.mkdirSync(LOGS_DIR, { recursive: true });
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    for (const server of suite.servers) {
-        const file = path.join(LOGS_DIR, `${stamp}-${suite.name}-${server.name}.log`);
-        fs.writeFileSync(file, `${server.logs.text()}\n`);
-        console.log(`# лог сервера ${server.name}: ${path.relative(process.cwd(), file)}`);
-    }
 }
 
 // Ожидание условия, которое не сообщает о себе событием (файл удалён с

@@ -434,7 +434,6 @@ svg.icon.icon-xl {
 /* Второстепенная — поверхность с рамкой. */
 .btn-secondary,
 .auth-btn.secondary,
-.anonymous-btn,
 .member-code-btn {
     background: var(--surface-2);
     color: var(--text);
@@ -443,7 +442,6 @@ svg.icon.icon-xl {
 
 .btn-secondary:hover,
 .auth-btn.secondary:hover,
-.anonymous-btn:hover,
 .member-code-btn:hover {
     background: var(--surface-3);
     border-color: var(--text-3);
@@ -451,7 +449,6 @@ svg.icon.icon-xl {
 
 .btn-secondary:active,
 .auth-btn.secondary:active,
-.anonymous-btn:active,
 .member-code-btn:active {
     background: var(--surface-3);
     border-color: var(--text-2);
@@ -555,6 +552,26 @@ svg.icon.icon-xl {
 .btn[aria-busy="true"],
 .auth-btn[aria-busy="true"] {
     cursor: progress;
+}
+
+/* Кнопка, которая выглядит как ссылка: открывает окно, а не переходит
+   по адресу. Высота 44 px — палец попадает и в короткую подпись. */
+.link-btn {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 0 2px;
+    color: var(--text);
+    font-size: 13px;
+    line-height: 20px;
+    font-weight: 500;
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
+}
+
+.link-btn:hover {
+    text-decoration-thickness: 2px;
 }
 
 /* Квадратная кнопка-иконка. Эмодзи-содержимое старой разметки тоже
@@ -676,6 +693,29 @@ svg.icon.icon-xl {
     color: var(--text-3);
 }
 
+/* Ошибка поля: текст полужирный, со знаком предупреждения — в монохроме её
+   отличает форма, а не красный цвет. Поле при этом — aria-invalid (пунктир). */
+.field-error {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.field-error::before {
+    content: "";
+    flex: none;
+    width: 14px;
+    height: 14px;
+    margin-top: 1px;
+    background-color: currentColor;
+    -webkit-mask: var(--mask-alert) center / contain no-repeat;
+    mask: var(--mask-alert) center / contain no-repeat;
+}
+
 legend.field-label {
     display: flex;
     align-items: center;
@@ -720,8 +760,6 @@ h4.field-label {
 
 .input,
 input[type="text"],
-input[type="email"],
-input[type="password"],
 input[type="number"],
 input[type="search"],
 input[type="url"],
@@ -755,8 +793,6 @@ textarea.input {
 
 .input:hover,
 input[type="text"]:hover,
-input[type="email"]:hover,
-input[type="password"]:hover,
 input[type="number"]:hover,
 input[type="search"]:hover,
 input[type="url"]:hover,
@@ -770,8 +806,6 @@ textarea:hover,
    те же 2 px, что и у остального фокуса, но без зазора. */
 .input:focus-visible,
 input[type="text"]:focus-visible,
-input[type="email"]:focus-visible,
-input[type="password"]:focus-visible,
 input[type="number"]:focus-visible,
 input[type="search"]:focus-visible,
 input[type="url"]:focus-visible,
@@ -993,6 +1027,81 @@ select option {
 
 .radio-group > .radio-row + .radio-row {
     margin-top: 0;
+}
+
+/* Сегментированный выбор (срок хранения аккаунта) на настоящих radio в
+   fieldset: Tab попадает в группу на выбранный вариант, стрелки переключают
+   выбор, скринридер объявляет «1 из 3» — без ARIA-имитации. Сам input
+   растянут на весь вариант и прозрачен (не display:none — иначе пропадёт
+   клавиатура). */
+.segmented {
+    display: grid;
+    grid-template-columns: 1.5fr 1fr 1fr;
+    gap: 4px;
+    padding: 4px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--surface-2);
+}
+
+.segmented-option {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+    padding: 6px 8px;
+    border-radius: var(--radius-sm);
+    color: var(--text-2);
+    font-size: 13px;
+    line-height: 16px;
+    font-weight: 500;
+    text-align: center;
+    text-wrap: balance;
+    cursor: pointer;
+    user-select: none;
+    transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.segmented-option > input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: inherit;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.segmented-option:hover {
+    background: var(--hover);
+    color: var(--text);
+}
+
+/* Выбранный вариант — инверсией и жирностью, а не цветом: работает в обеих темах. */
+.segmented-option:has(> input:checked) {
+    background: var(--accent);
+    color: var(--accent-fg);
+    font-weight: 600;
+}
+
+.segmented-option:has(> input:focus-visible) {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+}
+
+.segmented-option:has(> input:disabled) {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Узкий экран (320 px): варианты в столбик — WCAG 1.4.10, без обрезки текста. */
+@media (max-width: 359px) {
+    .segmented {
+        grid-template-columns: 1fr;
+    }
 }
 
 /* Старый переключатель профиля (label.switch-row > .switch-text + input + .switch). */
@@ -1292,7 +1401,10 @@ hr.divider {
    7. Экран входа.
    -------------------------------------------------------------------------- */
 
+/* Порядок блоков: заголовок, (приглашение), срок, предупреждение, кнопки,
+   три пункта, ссылки. Главная кнопка на 375×667 — в пределах первого экрана. */
 .auth-screen {
+    position: relative;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1304,9 +1416,18 @@ hr.divider {
     background: var(--bg);
 }
 
+/* Тема — в углу экрана, а не в карточке: не спорит с заголовком. */
+.auth-theme-toggle {
+    position: absolute;
+    top: max(12px, env(safe-area-inset-top));
+    right: max(12px, env(safe-area-inset-right));
+    width: 44px;
+    height: 44px;
+}
+
 .auth-container {
     width: 100%;
-    max-width: 400px;
+    max-width: 440px;
     margin: auto;
     padding: 40px 32px 32px;
     background: var(--surface);
@@ -1315,11 +1436,23 @@ hr.divider {
     animation: rise-in var(--dur-slow) var(--ease);
 }
 
-.auth-logo {
+.auth-noscript,
+.auth-notice {
+    margin-bottom: 24px;
+    padding: 12px 16px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    color: var(--text);
+    font-size: 13px;
+    line-height: 20px;
+}
+
+.auth-hero {
     display: grid;
     justify-items: start;
-    gap: 4px;
-    margin-bottom: 32px;
+    gap: 8px;
+    margin-bottom: 28px;
 }
 
 .logo-icon {
@@ -1328,98 +1461,147 @@ hr.divider {
     justify-content: center;
     width: 48px;
     height: 48px;
-    margin-bottom: 12px;
+    margin-bottom: 8px;
     color: var(--text);
     font-size: 36px;
     line-height: 1;
 }
 
-.logo-icon .icon,
-.auth-logo .logo-icon svg.icon {
+/* Специфичнее svg.icon.icon-xl (32 px): знак на экране входа крупнее. */
+.auth-hero .logo-icon svg.icon {
     width: 48px;
     height: 48px;
 }
 
-.auth-logo h1 {
-    font-size: 32px;
-    line-height: 40px;
+.auth-hero h1 {
+    font-size: 28px;
+    line-height: 36px;
     font-weight: 700;
     letter-spacing: -0.03em;
+    text-wrap: balance;
 }
 
-.auth-logo p {
-    font-size: 14px;
-    line-height: 20px;
+.auth-tagline {
+    font-size: 15px;
+    line-height: 22px;
     color: var(--text-2);
 }
 
-/* Вкладки «Вход / Регистрация» — подчёркнутые, как в редакционной вёрстке. */
-.auth-tabs {
-    display: grid;
-    grid-auto-flow: column;
-    grid-auto-columns: 1fr;
+.auth-invite {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
     margin-bottom: 24px;
-    border-bottom: 1px solid var(--border);
-}
-
-.auth-tab {
-    position: relative;
-    height: 40px;
-    padding: 0 8px;
-    background: none;
-    border: 0;
-    color: var(--text-3);
-    font-size: 14px;
-    line-height: 20px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: color var(--dur) var(--ease);
-}
-
-.auth-tab::after {
-    content: "";
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: -1px;
-    height: 2px;
-    background: transparent;
-    transition: background-color var(--dur) var(--ease);
-}
-
-.auth-tab:hover {
-    color: var(--text);
-}
-
-.auth-tab.active,
-.auth-tab[aria-selected="true"] {
-    color: var(--text);
-}
-
-.auth-tab.active::after,
-.auth-tab[aria-selected="true"]::after {
-    background: var(--text);
-}
-
-.auth-tab:focus-visible {
-    outline-offset: -2px;
-}
-
-.auth-form {
-    display: none;
-}
-
-.auth-form.active {
-    display: block;
     animation: fade-in var(--dur) var(--ease);
 }
 
-.anonymous-hint {
-    margin-top: 8px;
-    font-size: 12px;
-    line-height: 16px;
+.auth-invite input[type="text"] {
+    height: 44px;
+}
+
+.lifetime-picker {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.auth-invite-advice {
+    color: var(--text-2);
+}
+
+/* Предупреждение про очистку браузера — --text-2, а не --text-3: его
+   обязательно нужно прочитать до кнопки. */
+.auth-warning {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 20px;
+    color: var(--text-2);
+    font-size: 13px;
+    line-height: 20px;
+}
+
+.auth-warning > .icon {
+    margin-top: 2px;
+    color: var(--text);
+}
+
+.auth-progress {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 12px;
+    color: var(--text-2);
+    font-size: 13px;
+    line-height: 20px;
+}
+
+.auth-progress:empty {
+    display: none;
+}
+
+.auth-progress > .icon {
+    margin-top: 2px;
+    color: var(--text);
+}
+
+.auth-progress.is-error {
+    color: var(--text);
+    font-weight: 600;
+}
+
+.auth-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+/* Шеврон «У меня есть приглашение» стоит после текста, а не перед ним. */
+.auth-btn > .auth-invite-chevron {
+    width: 16px;
+    height: 16px;
+    margin: 0 -2px 0 0;
+    transition: transform var(--dur) var(--ease);
+}
+
+.auth-invite-toggle[aria-expanded="true"] > .auth-invite-chevron {
+    transform: rotate(180deg);
+}
+
+.auth-points {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 28px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+    list-style: none;
+}
+
+.auth-points li {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    color: var(--text-2);
+    font-size: 13px;
+    line-height: 20px;
+}
+
+.auth-points .icon {
+    color: var(--text);
+}
+
+.auth-links {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0 8px;
+    margin-top: 16px;
+}
+
+.auth-links-sep {
     color: var(--text-3);
-    text-align: center;
 }
 
 
@@ -1747,18 +1929,31 @@ hr.divider {
     font-size: 13px;
 }
 
-/* Заметка о сроке жизни анонимного аккаунта. */
+/* Заметка о сроке хранения аккаунта — кнопка, открывающая профиль. */
 .anon-note {
     display: flex;
     align-items: flex-start;
     gap: 8px;
     flex: none;
+    width: 100%;
     padding: 12px 16px;
     border-bottom: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text-2);
     font-size: 12px;
     line-height: 16px;
+    text-align: left;
+    transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+button.anon-note:hover {
+    background: var(--surface-3);
+    color: var(--text);
+}
+
+/* Обводка фокуса — внутрь: снаружи её срезал бы край сайдбара. */
+button.anon-note:focus-visible {
+    outline-offset: -2px;
 }
 
 /* Внизу сайдбара (над кнопками) — линия сверху, а не снизу. */
@@ -2444,17 +2639,11 @@ button.reply-to:hover {
     opacity: 0.9;
 }
 
-.message-video,
-.message-audio {
+.message-video {
     display: block;
     max-width: min(320px, 100%);
     margin-bottom: 4px;
     border-radius: var(--radius-sm);
-}
-
-.message-audio {
-    width: 280px;
-    height: 40px;
 }
 
 .file-attachment {
@@ -2898,6 +3087,72 @@ a.file-attachment:hover {
     font-size: 14px;
 }
 
+/* Подсказки в чате с ботом: ряд кнопок-тем над полем ввода. Каждая — обычный
+   .chip (button.chip), только крупнее; цвета берутся из токенов, поэтому
+   обе темы работают без отдельных правил. */
+.suggestions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.suggestion {
+    height: 32px;
+    padding: 0 12px;
+    font-size: 13px;
+}
+
+/* Кольцо фокуса — внутри кнопки: у прокручиваемого ряда (телефон, ниже)
+   внешнее кольцо обрезалось бы краем контейнера. */
+.suggestion:focus-visible {
+    outline-offset: -2px;
+}
+
+/* Идёт отправка: кнопка остаётся в порядке фокуса (aria-disabled, не
+   disabled), но выглядит неактивной и не подсвечивается при наведении. */
+.suggestion[aria-disabled="true"] {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.suggestion[aria-disabled="true"]:hover {
+    border-color: var(--border);
+    color: var(--text-2);
+}
+
+/* Телефон и планшет: одна строка с горизонтальной прокруткой без полосы.
+   Затухание у правого края подсказывает, что ряд прокручивается; отступ
+   справа на ту же ширину оставляет последней кнопке место вне затухания. */
+@media (max-width: 768px) {
+    .suggestions {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        padding-right: 24px;
+        scroll-snap-type: x proximity;
+        scrollbar-width: none;
+        overscroll-behavior-x: contain;
+        -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+        mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+    }
+
+    .suggestions::-webkit-scrollbar {
+        display: none;
+    }
+
+    .suggestion {
+        flex: none;
+        scroll-snap-align: start;
+    }
+}
+
+/* Сенсорный экран: цель нажатия не ниже 40 px. */
+@media (pointer: coarse) {
+    .suggestion {
+        height: 40px;
+    }
+}
+
 .input-wrapper {
     display: flex;
     align-items: flex-end;
@@ -2940,18 +3195,6 @@ a.file-attachment:hover {
     border-color: var(--surface-3);
     color: var(--text-3);
     opacity: 1;
-}
-
-/* Запись голосового (зарезервировано): мигающая обводка вместо красной точки. */
-.recording {
-    background: var(--text) !important;
-    color: var(--bg) !important;
-    animation: rec-blink 1.2s steps(2, jump-none) infinite;
-}
-
-@keyframes rec-blink {
-    from { outline: 2px solid var(--text); outline-offset: 2px; }
-    to { outline: 2px solid transparent; outline-offset: 2px; }
 }
 
 /* Статус загрузки: подпись + полоса прогресса (ширина — el.style.width). */
@@ -3046,6 +3289,9 @@ a.file-attachment:hover {
 
 .send-file-row {
     display: flex;
+    /* Строки не сжимаются: при многих файлах (или длинном пояснении об отказе
+       на узком экране) список прокручивается, а не накладывает строки друг на друга. */
+    flex: none;
     align-items: center;
     gap: 12px;
     min-height: 48px;
@@ -3370,50 +3616,20 @@ a.file-attachment:hover {
     display: none;
 }
 
-.profile-code {
-    display: inline-block;
-    margin-top: 8px;
-    padding: 2px 8px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--surface-2);
-    font-family: var(--font-mono);
-    font-size: 12px;
-    line-height: 20px;
-    color: var(--text);
-    font-variant-numeric: tabular-nums;
-}
-
-.profile-details .profile-code {
-    color: var(--text);
-}
-
-.anon-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: 24px;
-    margin-top: 8px;
-    padding: 0 8px;
-    border-radius: 4px;
-    background: var(--text);
-    color: var(--bg);
-    font-size: 12px;
-    line-height: 16px;
-    font-weight: 600;
-}
-
-.anon-badge .icon {
-    width: 14px;
-    height: 14px;
-    stroke-width: 2;
-}
-
 .profile-actions {
     display: flex;
     flex-direction: column;
     gap: 8px;
     margin-top: 24px;
+}
+
+.profile-lifetime {
+    margin-bottom: 24px;
+}
+
+/* Когда аккаунт удалится — главное в этом блоке, поэтому ярче подсказки. */
+.profile-lifetime-status {
+    color: var(--text-2);
 }
 
 .profile-section + .profile-section {
@@ -3422,143 +3638,78 @@ a.file-attachment:hover {
     border-top: 1px solid var(--border);
 }
 
-/* Выбор тона аватара: круги-образцы оттенков серого. */
-.color-picker {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 12px;
-}
-
-.color-option {
-    position: relative;
-    width: 32px;
-    height: 32px;
-    border-radius: 50%;
-    border: 1px solid var(--border-strong);
-    background: var(--surface-3);
-    cursor: pointer;
-    transition: transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
-}
-
-.color-option:hover {
-    transform: scale(1.08);
-}
-
-.color-option.active,
-.color-option[aria-pressed="true"],
-.color-option[aria-checked="true"] {
-    box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--text);
-}
-
-/* Образцы тонов (если выбор тона вернётся в профиль): data-tone = N из .avatar-tone-N. */
-.color-option[data-tone="0"] { background: var(--surface-3); }
-.color-option[data-tone="1"] { background: #f5f5f5; }
-.color-option[data-tone="2"] { background: #bdbdbd; }
-.color-option[data-tone="3"] { background: #8a8a8a; }
-.color-option[data-tone="4"] { background: #4a4a4a; }
-.color-option[data-tone="5"] { background: #0a0a0a; border-color: #474747; }
-
-/* Журнал безопасности. */
-.security-section {
-    margin: 24px 0;
-}
-
-.security-section > .field-hint {
-    margin-bottom: 12px;
-}
-
-.security-list {
-    margin: 0;
-    padding: 0;
-    list-style: none;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    overflow: hidden;
-}
-
-.security-item {
-    display: grid;
-    grid-template-columns: 20px minmax(0, 1fr) auto;
-    align-items: center;
-    column-gap: 12px;
-    min-height: 56px;
-    padding: 8px 16px;
-    font-size: 13px;
-    line-height: 20px;
-}
-
-.security-item + .security-item {
+/* Окно «Как это работает»: разделы с заголовками обычным регистром —
+   это текст для чтения, а не подписи групп настроек. */
+.about-section + .about-section {
+    margin-top: 20px;
+    padding-top: 20px;
     border-top: 1px solid var(--border);
 }
 
-.security-item > .icon {
-    width: 20px;
-    height: 20px;
-    color: var(--text-2);
-}
-
-.security-item.is-warning > .icon,
-.security-item[data-type="login_failed"] > .icon {
-    color: var(--text);
-}
-
-.security-item.is-warning .security-text,
-.security-item[data-type="login_failed"] .security-text {
+.modal-body .about-section h4 {
+    margin: 0 0 8px;
+    font-size: 14px;
+    line-height: 20px;
     font-weight: 600;
-}
-
-.security-text,
-.security-item > div:not([class]) {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
+    text-transform: none;
+    letter-spacing: -0.01em;
     color: var(--text);
-    font-weight: 500;
 }
 
-.security-item small {
+.about-section p,
+.about-list {
+    color: var(--text-2);
+    font-size: 14px;
+    line-height: 20px;
+}
+
+.about-section p.field-hint {
     font-size: 12px;
     line-height: 16px;
-    font-weight: 400;
     color: var(--text-3);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
 }
 
-/* Заглушка «Загрузка…» / «Событий пока нет» — одна строка по центру. */
-.security-item.muted {
+.about-section > * + * {
+    margin-top: 8px;
+}
+
+.about-section > h4 + * {
+    margin-top: 0;
+}
+
+.about-list {
+    display: grid;
+    gap: 6px;
+    padding-left: 20px;
+}
+
+/* Раздел про Tor получает фокус по ссылке «Открыть через Tor». */
+.about-section:focus-visible {
+    outline-offset: 4px;
+}
+
+.about-onion {
+    display: grid;
+    gap: 8px;
+}
+
+.about-onion code {
     display: block;
-    min-height: 0;
-    padding: 16px;
-    text-align: center;
-}
-
-.security-client {
-    font-size: 12px;
-    line-height: 16px;
-    font-weight: 400;
-    color: var(--text-3);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.security-time,
-.security-item time {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    line-height: 16px;
-    color: var(--text-3);
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-}
-
-.security-empty {
-    padding: 16px;
-    color: var(--text-3);
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    color: var(--text);
     font-size: 13px;
-    text-align: center;
+    line-height: 20px;
+    overflow-wrap: anywhere;
+    user-select: all;
+}
+
+.about-onion-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
 }
 
 /* Приглашения (старые классы окна + новые из К1). */
@@ -4441,8 +4592,27 @@ a.file-attachment:hover {
         padding: 24px 20px;
     }
 
-    .auth-logo {
+    .auth-hero {
         margin-bottom: 24px;
+    }
+
+    .auth-hero h1 {
+        font-size: 24px;
+        line-height: 32px;
+    }
+
+    /* На телефоне — крупнее: варианты срока и кнопки по 48 px. */
+    .segmented-option {
+        min-height: 48px;
+    }
+
+    .auth-actions .auth-btn {
+        height: 48px;
+    }
+
+    .auth-points {
+        margin-top: 24px;
+        padding-top: 20px;
     }
 
     .invite-code-container code,
@@ -4459,10 +4629,6 @@ a.file-attachment:hover {
         padding: 0 8px;
     }
 
-    .input-wrapper #record-btn:disabled {
-        display: none;
-    }
-
     .request-row {
         flex-wrap: wrap;
     }
@@ -4473,15 +4639,6 @@ a.file-attachment:hover {
 
     .request-actions > * {
         flex: 1;
-    }
-
-    .security-item {
-        grid-template-columns: 20px minmax(0, 1fr);
-    }
-
-    .security-item .security-time,
-    .security-item time {
-        grid-column: 2;
     }
 }
 
@@ -4534,6 +4691,13 @@ a.file-attachment:hover {
 @media (forced-colors: active) {
     .icon {
         forced-color-adjust: auto;
+    }
+
+    /* Выбранный срок в режиме высокой контрастности — системной подсветкой. */
+    .segmented-option:has(> input:checked) {
+        forced-color-adjust: none;
+        background: Highlight;
+        color: HighlightText;
     }
 
     .toggle-row input[type="checkbox"],

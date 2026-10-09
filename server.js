@@ -22,7 +22,6 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const { Server } = require('socket.io');
-const pgSession = require('connect-pg-simple')(session);
 const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
 const { ipKeyGenerator } = rateLimit;
@@ -31,21 +30,15 @@ const { ipKeyGenerator } = rateLimit;
 const { stripMetadataFromFile, cleanupStaleTempFiles } = require('./lib/metadata-stripper');
 const DisappearingMessagesManager = require('./lib/disappearing-messages');
 const { encryptText, decryptText, messageAad } = require('./lib/message-crypto');
-const { addRandomDelay, sanitizeText, getPrivacyHeaders } = require('./lib/privacy');
-const {
-    hashPassword,
-    verifyPassword,
-    needsRehash,
-    checkPasswordPolicy,
-    DUMMY_PASSWORD_HASH
-} = require('./lib/passwords');
+const { sanitizeText, getPrivacyHeaders, createHstsMiddleware } = require('./lib/privacy');
 const {
     ALLOWED_MIME_TYPES,
     MIME_EXTENSIONS,
     ENCRYPTED_FILE_MIME,
     ENCRYPTED_FILE_EXTENSION,
-    ALL_ANONYMIZED_FILE_NAMES,
     anonymizedFileName,
+    checkMagicBytes,
+    isInlineUpload,
     randomString,
     generateUniqueCode,
     generateInviteCode,
@@ -56,9 +49,7 @@ const {
     buildContentSecurityPolicy,
     resolveDbTlsConfig,
     createCounter,
-    normalizeEmail,
     positiveNumberOr,
-    classifyUserAgent
 } = require('./lib/security-utils');
 const {
     JOIN_REQUEST_TTL_SECONDS,
@@ -72,23 +63,24 @@ const {
 } = require('./lib/invites');
 const {
     parseChatExpirySeconds,
-    pickRoomExpiryFromLegacy,
     effectiveMessageExpiry,
     parseChatPrefs
 } = require('./lib/chat-settings');
 const {
     ANON_LIFETIMES,
-    ANON_MAX_AGE_SECONDS,
     ANON_SOCKET_ACTIVITY_INTERVAL_MS,
+    SESSION_RENEW_INTERVAL_MS,
     parseAnonLifetime,
-    storedAnonLifetime,
-    anonLifetimeSeconds,
-    anonExpiresAtMs,
-    isAnonExpired,
-    anonCookieMaxAgeMs,
-    shouldPersistActivity,
-    anonWelcomeText
+    parseAnonLifetimeStrict,
+    activityBucketMs,
+    sessionRenewIntervalMs,
+    renewBucket,
+    describeAnonLifetime
 } = require('./lib/anon-lifetime');
+// Сессии в Postgres с огрублением времени, их продление и активность
+// анонимов (контракт этапа 1, §4).
+const { createNyxoPgStore, setSessionCookieLifetime, renewSession, extendTabSessions } = require('./lib/session-store');
+const { createAnonActivity } = require('./lib/anon-activity');
 
 // Маршруты /api/keys/* (регистрируются после sessionMiddleware — см. вызов
 // registerE2eeKeyRoutes ниже) и встроенное хранилище публичных E2EE-ключей
@@ -98,14 +90,26 @@ const { initKeyStoreSchema } = require('./lib/key-store');
 // (key-shares). Тоже регистрируется после sessionMiddleware.
 const { initE2eeGroupsSchema, registerE2eeGroupRoutes } = require('./lib/e2ee-groups');
 
+// Бот-помощник: ответ по теме запроса, приветствие нового аккаунта и подписи
+// кнопок-подсказок — чистые функции без БД (lib/bot-guide.js).
+const botGuide = require('./lib/bot-guide');
+
 // Onion-сервис (контейнер tor-service/) и proof-of-work для регистрации
-const { ONION_ADDRESS, ONION_PORT, onionMiddleware, isOnionHost, isOnionSocket, listenOnionPort } = require('./lib/tor-support');
-const { createChallenge, verifySolution } = require('./lib/pow');
+const { ONION_ADDRESS, ONION_PORT, onionMiddleware, onionUrlFor, isOnionHost, isOnionSocket, listenOnionPort } = require('./lib/tor-support');
+const { createChallenge, consumeSolution, setSecret: setPowSecret } = require('./lib/pow');
+// Точные лимиты и одноразовость PoW в Postgres (UNLOGGED-таблицы, ключи — HMAC).
+const { createPgLimits, initPgLimitsSchema, respondBusy, LimitStoreError } = require('./lib/pg-limits');
+// Метрики Prometheus без id и IP; отдаёт их GET /metrics по токену (lib/routes/health.js).
+const { createMetrics } = require('./lib/metrics');
+// CSRF-токен, привязанный к сессии (кука csrf_token + заголовок X-CSRF-Token).
+const { createCsrf } = require('./lib/csrf');
 
 // Несколько экземпляров сервера на одной базе (миграции и фоновые задачи
 // под advisory-блокировками) и запись ошибок в лог без id из detail.
 const { runMigrationsExclusive, createRunExclusive, LOCK_NOT_AVAILABLE } = require('./lib/advisory-locks');
 const { loadMigrations, migrateSchema } = require('./lib/migrations');
+// Сброс схемы версии 2.0.0 при первом старте (вызывается из initDatabase).
+const { resetLegacyDatabase } = require('./lib/legacy-reset');
 const { logError } = require('./lib/log-error');
 // Точки регистрации маршрутов вне server.js и JSON-404 для /api.
 const { registerPreSessionRoutes, registerApiRoutes, registerApiNotFound } = require('./lib/routes');
@@ -113,6 +117,8 @@ const { registerPreSessionRoutes, registerApiRoutes, registerApiNotFound } = req
 const { createJobScheduler, registerJobModules } = require('./lib/jobs');
 
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+// HSTS preload включает только владелец домена: HSTS_PRELOAD=yes (см. lib/privacy.js).
+const HSTS_PRELOAD = process.env.HSTS_PRELOAD === 'yes';
 
 // ALLOWED_MIME_TYPES и MIME_EXTENSIONS (жёсткий маппинг mimetype ->
 // расширение на диске, расширение никогда не берётся из имени файла) —
@@ -136,34 +142,8 @@ const BLOCKED_EXTENSIONS = new Set(['.html', '.htm', '.php', '.exe', '.js', '.sh
 // итоговое имя файла регуляркой").
 const SAFE_FILENAME_RE = /^[\w.-]+$/;
 
-function checkMagicBytes(buffer, mimetype) {
-    if (!buffer || buffer.length < 4) return false;
-    const b = buffer;
-    if (mimetype === 'image/jpeg') return b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF;
-    if (mimetype === 'image/png')  return b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47;
-    if (mimetype === 'image/gif')  return b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46;
-    if (mimetype === 'image/webp') return b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46;
-    if (mimetype === 'application/pdf') return b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46;
-    // Единственная надёжная сигнатура MP4/ISO-BMFF — 'ftyp' на смещении 4-7.
-    // Раньше был ещё fallback b[0]===0 && b[1]===0 — под него подходит куча
-    // произвольных бинарных форматов, так что от него больше вреда, чем пользы.
-    if (mimetype === 'video/mp4')  return b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70;
-    if (mimetype === 'audio/mpeg') return (b[0] === 0xFF && (b[1] & 0xE0) === 0xE0) || (b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33);
-    if (mimetype === 'audio/ogg' || mimetype === 'video/webm' || mimetype === 'audio/webm') {
-        return (b[0] === 0x4F && b[1] === 0x67 && b[2] === 0x67) || (b[0] === 0x1A && b[1] === 0x45 && b[2] === 0xDF && b[3] === 0xA3);
-    }
-    // WAV — RIFF-контейнер: контейнер сам по себе (байты 0-3 'RIFF') общий с
-    // любым другим RIFF-форматом (в т.ч. WebP/AVI), поэтому дополнительно
-    // проверяем 'WAVE' на смещении 8-11, как и положено для формата WAVE.
-    if (mimetype === 'audio/wav') {
-        return buffer.length >= 12
-            && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46
-            && b[8] === 0x57 && b[9] === 0x41 && b[10] === 0x56 && b[11] === 0x45;
-    }
-    if (mimetype === 'text/plain') return true;
-    if (mimetype === 'video/quicktime') return b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70;
-    return false;
-}
+// checkMagicBytes (сигнатура файла против заявленного типа) — в
+// lib/security-utils.js: чистая функция, её проверяют юнит-тесты.
 
 // Вложения должны лежать на постоянном диске: файловая система контейнера
 // (Railway и т.п.) очищается при каждом деплое. UPLOADS_DIR — явный путь;
@@ -241,7 +221,7 @@ const upload = multer({
 // который любой клиент может подставить сам. Доверять ему можно только если сам
 // запрос физически пришёл с IP-адреса Cloudflare — иначе, обращаясь напрямую на
 // публичный *.up.railway.app домен, атакующий получает "новый IP" на каждый
-// запрос и обнуляет все rate-limit'ы (login/register/change-password).
+// запрос и обнуляет все rate-limit'ы по IP (регистрация, вход в комнаты, API).
 // Список можно переопределить через переменную окружения CF_IP_RANGES
 // (через запятую), если Cloudflare обновит диапазоны.
 const DEFAULT_CLOUDFLARE_IP_RANGES = [
@@ -293,6 +273,12 @@ function resolveRealIp(headers, connectingIp) {
     return connectingIp;
 }
 
+// Метрики процесса: счётчики событий и HTTP по шаблону маршрута (lib/metrics.js).
+const metrics = createMetrics();
+// Готовность для GET /readyz: порт открывается только после миграций, но флаг
+// явный — проба не должна зависеть от порядка запуска.
+const readiness = { migrated: false };
+
 const app = express();
 app.set('trust proxy', 1);
 
@@ -325,6 +311,8 @@ const toPositiveInt = (value) => {
 // Самым первым: признак onion-запроса (req.isOnion) нужен лимитерам и
 // заголовкам ниже, а у onion-запроса onionMiddleware ещё и вычищает
 // присланные клиентом X-Forwarded-* — прокси перед приложением там нет.
+// Метрики HTTP — самым первым, чтобы считать и отказы всех проверок ниже.
+app.use(metrics.httpMiddleware());
 app.use(onionMiddleware);
 
 app.use((req, res, next) => {
@@ -341,68 +329,9 @@ const rateLimitKeyGenerator = (req) => ipKeyGenerator(req.realIp || req.ip);
 const sessionUserId = (req) => (req.session && req.session.userId) || null;
 const RATE_LIMIT_DEFAULTS = { standardHeaders: true, legacyHeaders: false };
 
-// Вход: для clearnet — по IP; для onion IP общий у всех, поэтому ключ —
-// email (перебор паролей одного аккаунта через Tor всё равно упирается
-// в loginAccountLimiter ниже).
-const loginLimiter = rateLimit({
-    ...RATE_LIMIT_DEFAULTS,
-    windowMs: 15 * 60 * 1000,
-    max: 5,
-    keyGenerator: (req) => (req.isOnion ? `onion:${normalizeEmail(req.body && req.body.email)}` : rateLimitKeyGenerator(req)),
-    message: { success: false, message: 'Слишком много попыток входа. Попробуйте позже.' }
-});
-
-// Лимит на аккаунт для всех: смена IP (ботнет, новые цепочки Tor) не даёт
-// перебирать пароль одного пользователя быстрее 10 попыток в час.
-const loginAccountLimiter = rateLimit({
-    ...RATE_LIMIT_DEFAULTS,
-    windowMs: 60 * 60 * 1000,
-    max: 10,
-    keyGenerator: (req) => `account:${normalizeEmail(req.body && req.body.email)}`,
-    message: { success: false, message: 'Слишком много попыток входа в этот аккаунт. Попробуйте позже.' }
-});
-
-// Массовую регистрацию теперь сдерживает proof-of-work (lib/pow.js). IP-лимит
-// остался мягким и только для clearnet: для onion он запер бы регистрацию
-// всем сразу (общий IP контейнера tor).
-const registerLimiter = rateLimit({
-    ...RATE_LIMIT_DEFAULTS,
-    windowMs: 60 * 60 * 1000,
-    max: 10,
-    skip: (req) => req.isOnion,
-    keyGenerator: rateLimitKeyGenerator,
-    message: { success: false, message: 'Слишком много регистраций. Попробуйте позже.' }
-});
-
-// Смена пароля и удаление аккаунта (оба — только для залогиненных). Ключ —
-// пользователь: угадывать пароль по украденной сессии можно только в
-// рамках её аккаунта, а onion-пользователи не делят один счётчик на всех.
-const passwordLimiter = rateLimit({
-    ...RATE_LIMIT_DEFAULTS,
-    windowMs: 15 * 60 * 1000,
-    max: 3,
-    keyGenerator: (req) => (sessionUserId(req) ? `user:${sessionUserId(req)}` : rateLimitKeyGenerator(req)),
-    message: { success: false, message: 'Слишком много попыток ввода пароля. Попробуйте позже.' }
-});
-
-// Вход в комнату по коду: даже 130-битный код не должен перебираться
-// с бесконечной скоростью, и утёкший список кодов — массово проверяться.
-const joinUserLimiter = rateLimit({
-    ...RATE_LIMIT_DEFAULTS,
-    windowMs: 15 * 60 * 1000,
-    max: 20,
-    skip: (req) => !sessionUserId(req),
-    keyGenerator: (req) => `user:${sessionUserId(req)}`,
-    message: { success: false, message: 'Слишком много попыток входа в чат. Попробуйте позже.' }
-});
-const joinIpLimiter = rateLimit({
-    ...RATE_LIMIT_DEFAULTS,
-    windowMs: 15 * 60 * 1000,
-    max: 60,
-    skip: (req) => req.isOnion,
-    keyGenerator: rateLimitKeyGenerator,
-    message: { success: false, message: 'Слишком много попыток входа в чат. Попробуйте позже.' }
-});
+// Точные лимиты (регистрация, вход по коду, выдача ключей) и одноразовость PoW
+// живут в Postgres и создаются ниже, рядом с пулом и SESSION_SECRET
+// (lib/pg-limits.js). Здесь — общий лимит /api, он только в памяти.
 
 // 300 запросов за 15 минут (~1 в 3 секунды) активный пользователь чата
 // выбирал за несколько минут — особенно когда клиент перезапрашивал
@@ -410,9 +339,9 @@ const joinIpLimiter = rateLimit({
 // "висло" с ошибкой на 15 минут. Залогиненных считаем по аккаунту (за
 // одним NAT или onion-адресом их много), остальных — по IP. Неавторизованные
 // onion-запросы не считаются: у них один IP на всех, и любой исчерпал бы
-// общую квоту за всех onion-посетителей. Их открытые маршруты (вход,
-// регистрация) защищены лимитом на аккаунт и proof-of-work, а от флуда —
-// защита самого onion-сервиса (см. tor-service/README.md).
+// общую квоту за всех onion-посетителей. Их открытый маршрут (регистрация)
+// защищён proof-of-work, а от флуда — защита самого onion-сервиса (см.
+// tor-service/README.md).
 const apiLimiter = rateLimit({
     ...RATE_LIMIT_DEFAULTS,
     windowMs: 15 * 60 * 1000,
@@ -569,6 +498,7 @@ const DB_POOL_CONFIG = {
     connectionTimeoutMillis: 10000,
 };
 const pool = new Pool(DB_POOL_CONFIG);
+metrics.attachRuntime({ pool, io });
 // Без обработчика 'error' обрыв простаивающего соединения (рестарт или
 // failover Postgres, сетевой сбой) — необработанное событие 'error',
 // которое завершает весь процесс.
@@ -606,63 +536,102 @@ const disappearingMessagesManager = new DisappearingMessagesManager(pool, {
 });
 const GLOBAL_DEFAULT_EXPIRY_SECONDS = Math.max(0, Number(process.env.DEFAULT_MESSAGE_EXPIRY_SECONDS) || 0);
 
-// Пересоздаёт внешний ключ, только если его нет или у него другое
-// ON DELETE-поведение. Раньше КАЖДЫЙ старт делал DROP + ADD CONSTRAINT для
-// восьми FK: ADD CONSTRAINT перепроверяет всю таблицу под ACCESS EXCLUSIVE
-// блокировкой — на большой БД запуск шёл минутами, и всё это время любые
-// запросы к messages/chats висели.
-const FK_DELETE_ACTIONS = { 'NO ACTION': 'a', 'RESTRICT': 'r', 'CASCADE': 'c', 'SET NULL': 'n' };
-async function ensureForeignKey(table, constraint, column, refTable, onDelete) {
-    const existing = await dbGet(
-        'SELECT confdeltype FROM pg_constraint WHERE conname = $1 AND conrelid = $2::regclass',
-        [constraint, table]
-    );
-    if (existing && existing.confdeltype === FK_DELETE_ACTIONS[onDelete]) return;
-    await pool.query(`ALTER TABLE ${table} DROP CONSTRAINT IF EXISTS ${constraint}`);
-    await pool.query(`ALTER TABLE ${table} ADD CONSTRAINT ${constraint} FOREIGN KEY (${column}) REFERENCES ${refTable}(id) ON DELETE ${onDelete}`);
-}
-
+// ---- Итоговая схема базы (roadmap R0) ----
+//
+// Пока новая версия не выкачена, схема описана прямо в DDL initDatabase: все
+// изменения волн вносятся в эти CREATE TABLE, без ALTER-миграций, а после
+// выката схему меняют только файлы lib/migrations/ (docs/dev/migrations.md).
+// Шагов совместимости со старыми схемами здесь нет: схема версии 2.0.0 при
+// первом старте сбрасывается целиком (lib/legacy-reset.js), а локальные и
+// тестовые базы создаются заново.
+//
+// initDatabase идемпотентна и идёт под блокировкой миграций на каждом старте:
+// CREATE ... IF NOT EXISTS по готовой схеме ничего не меняет. Внешние ключи и
+// их ON DELETE заданы прямо в CREATE TABLE. Ключи на users — без каскада:
+// deleteUserAccount удаляет строки пользователя сам, в нужном порядке, одной
+// транзакцией. Таблицы со своими init*Schema (ключи E2EE, key-share, таймеры
+// исчезающих сообщений) создаются в lib/ рядом с кодом, который ими владеет.
 async function initDatabase() {
     await maybeDumpCa().catch(err => { console.error('[DUMP_CA] Ошибка:', err.message); process.exit(1); });
 
+    // Схема версии 2.0.0 (аккаунты с email и паролем) — сбросить до создания
+    // таблиц: реальных пользователей нет, а переносить тестовые данные незачем.
+    await resetLegacyDatabase({ pool, uploadsDir: UPLOADS_DIR });
+
+    // Аккаунты только временные (roadmap R2): срок жизни и последняя активность
+    // обязательны, по ним чистка удаляет неактивных. created_at — до минуты:
+    // точное время регистрации никому не нужно и лишь помогает сопоставить
+    // аккаунт с логами. Отметки прочтения выключены, пока пользователь их не
+    // включит (POST /api/user/privacy).
     await pool.query(`
         CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
+            id INTEGER PRIMARY KEY,
             unique_code TEXT UNIQUE NOT NULL,
             username TEXT UNIQUE NOT NULL,
-            email TEXT,
-            password TEXT,
             avatar TEXT DEFAULT '',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMPTZ NOT NULL DEFAULT date_trunc('minute', now()),
+            read_receipts BOOLEAN NOT NULL DEFAULT FALSE,
+            anon_lifetime TEXT NOT NULL CHECK (anon_lifetime IN ('tab', 'day', 'week')),
+            last_active_at TIMESTAMPTZ NOT NULL
         )
     `);
+    // Чистка неактивных аккаунтов (раз в несколько минут) идёт по сроку жизни и
+    // последней активности, без прохода по всей таблице users.
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_users_lifetime ON users(anon_lifetime, last_active_at)');
 
     await pool.query(`
         CREATE TABLE IF NOT EXISTS rooms (
-            id SERIAL PRIMARY KEY,
+            id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
             code TEXT UNIQUE NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            -- срок жизни кода приглашения (INVITE_TTL_HOURS)
+            code_expires_at TIMESTAMPTZ,
+            -- параметры кода (POST /api/chats/:chatId/invite/rotate): лимит
+            -- участников (NULL — без лимита), вступление только с одобрения
+            -- участника, выключенный код
+            invite_max_members INTEGER,
+            invite_require_approval BOOLEAN NOT NULL DEFAULT TRUE,
+            invite_disabled BOOLEAN NOT NULL DEFAULT FALSE
         )
     `);
 
+    // chats.id у каждого участника своя (личная строка), общий для всех —
+    // room_id. Комната удаляется целиком — строки chats уходят вместе с ней.
     await pool.query(`
         CREATE TABLE IF NOT EXISTS chats (
-            id SERIAL PRIMARY KEY,
+            id INTEGER PRIMARY KEY,
             user_id INTEGER NOT NULL REFERENCES users(id),
-            room_id INTEGER REFERENCES rooms(id),
+            room_id INTEGER REFERENCES rooms(id) ON DELETE CASCADE,
             name TEXT NOT NULL,
             avatar TEXT NOT NULL,
             online INTEGER DEFAULT 0,
-            is_bot INTEGER DEFAULT 0
+            is_bot INTEGER DEFAULT 0,
+            -- непрочитанные: id последнего прочитанного сообщения в личной строке
+            -- chats каждого участника
+            last_read_message_id INTEGER NOT NULL DEFAULT 0,
+            -- порядок чатов без сообщений: id случайные и порядка не несут
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            -- личные флаги чата (POST /api/chats/:chatId/prefs): собеседники их
+            -- не видят
+            pinned BOOLEAN NOT NULL DEFAULT FALSE,
+            muted BOOLEAN NOT NULL DEFAULT FALSE,
+            archived BOOLEAN NOT NULL DEFAULT FALSE
         )
     `);
 
+    // chat_id может стать NULL (ON DELETE SET NULL): когда участник выходит из
+    // комнаты, его строка chats удаляется, а история остаётся видна остальным
+    // по room_id. Комната удаляется — сообщения уходят каскадом; ответ на
+    // удалённое сообщение теряет связь с оригиналом (SET NULL), а не блокирует
+    // удаление. Приложение и так удаляет в правильном порядке (DELETE
+    // /api/chats/:chatId, deleteUserAccount), каскады — страховка на случай,
+    // если порядок там по ошибке изменят.
     await pool.query(`
         CREATE TABLE IF NOT EXISTS messages (
             id SERIAL PRIMARY KEY,
-            chat_id INTEGER NOT NULL REFERENCES chats(id),
-            room_id INTEGER REFERENCES rooms(id),
+            chat_id INTEGER REFERENCES chats(id) ON DELETE SET NULL,
+            room_id INTEGER REFERENCES rooms(id) ON DELETE CASCADE,
             user_id INTEGER NOT NULL REFERENCES users(id),
             text TEXT NOT NULL,
             file_url TEXT,
@@ -674,175 +643,72 @@ async function initDatabase() {
             status TEXT DEFAULT 'sent',
             edited_at TEXT,
             deleted INTEGER DEFAULT 0,
-            reply_to_id INTEGER REFERENCES messages(id)
+            reply_to_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+            -- E2EE: text хранит клиентский шифроконверт вместо обычного текста
+            -- (public/e2ee.js). Серверное шифрование "at rest" (lib/message-crypto.js)
+            -- применяется поверх в обоих случаях — флаг только про то, что лежит
+            -- ВНУТРИ после его снятия.
+            encrypted BOOLEAN NOT NULL DEFAULT FALSE,
+            -- точное время отправки: поле time ('HH:MM') считается в часовом поясе
+            -- СЕРВЕРА, и пользователи из других поясов видели бы сдвиг — клиент
+            -- форматирует created_at сам
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            -- размер вложения — для квоты UPLOAD_QUOTA_MB
+            file_size BIGINT
         )
     `);
 
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS unread (
-            id SERIAL PRIMARY KEY,
-            chat_id INTEGER NOT NULL REFERENCES chats(id),
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            count INTEGER DEFAULT 0
-        )
-    `);
-
+    // Новичок видит только сообщения комнаты, отправленные ПОСЛЕ его вступления
+    // (visible_from_id — id последнего сообщения на тот момент). Уникальный
+    // (room_id, user_id): проверка "участник ли комнаты" идёт на каждый файл,
+    // реакцию и joinChat, и один пользователь не может оказаться в комнате
+    // дважды (с двумя visible_from_id).
     await pool.query(`
         CREATE TABLE IF NOT EXISTS room_participants (
             id SERIAL PRIMARY KEY,
-            room_id INTEGER NOT NULL REFERENCES rooms(id),
-            user_id INTEGER NOT NULL REFERENCES users(id)
+            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            visible_from_id INTEGER NOT NULL DEFAULT 0,
+            UNIQUE (room_id, user_id)
         )
     `);
 
+    // Реакции исчезают вместе со своим сообщением: иначе снос всех сообщений
+    // комнаты падал бы на внешнем ключе, как только у любого есть реакция.
     await pool.query(`
         CREATE TABLE IF NOT EXISTS reactions (
             id SERIAL PRIMARY KEY,
-            message_id INTEGER NOT NULL REFERENCES messages(id),
+            message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
             user_id INTEGER NOT NULL REFERENCES users(id),
             emoji TEXT NOT NULL,
-            UNIQUE(message_id, user_id, emoji)
+            UNIQUE (message_id, user_id, emoji)
         )
     `);
+    await initJoinRequests();
 
-    // Текущее состояние колонок — одним запросом. ALTER TABLE ... IF NOT
-    // EXISTS всё равно берёт ACCESS EXCLUSIVE блокировку таблицы, поэтому
-    // миграции ниже выполняются только если они действительно нужны.
-    const columns = await dbAll(`
-        SELECT table_name, column_name, is_nullable, column_default
-        FROM information_schema.columns
-        WHERE table_schema = current_schema()
-          AND table_name IN ('users', 'chats', 'messages', 'rooms', 'room_participants')
+    // Сессии: тот же DDL, что у connect-pg-simple (его table.sql). Стор создал
+    // бы таблицу сам при первом запросе, но индекс по пользователю нужен сразу:
+    // выход и удаление аккаунта сбрасывают все его сессии (sess->>'userId'), и
+    // без индекса это проход по всей таблице.
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS session (
+            sid VARCHAR NOT NULL COLLATE "default",
+            sess JSON NOT NULL,
+            expire TIMESTAMP(6) NOT NULL,
+            CONSTRAINT session_pkey PRIMARY KEY (sid)
+        )
     `);
-    const column = (table, name) => columns.find(c => c.table_name === table && c.column_name === name);
-
-    // Миграция: если таблицы chats/messages были созданы ДО появления комнат,
-    // CREATE TABLE IF NOT EXISTS их не тронет и колонки room_id не будет.
-    if (!column('chats', 'room_id')) await pool.query('ALTER TABLE chats ADD COLUMN room_id INTEGER REFERENCES rooms(id)');
-    if (!column('messages', 'room_id')) await pool.query('ALTER TABLE messages ADD COLUMN room_id INTEGER REFERENCES rooms(id)');
-    // E2EE: сообщение хранит клиентский шифроконверт вместо обычного
-    // текста (см. public/e2ee.js). Серверное шифрование "at rest" из
-    // lib/message-crypto.js применяется поверх в обоих случаях —
-    // этот флаг только про то, что лежит ВНУТРИ, после его снятия.
-    if (!column('messages', 'encrypted')) await pool.query('ALTER TABLE messages ADD COLUMN encrypted BOOLEAN NOT NULL DEFAULT FALSE');
-    // Точное время отправки. Поле time ('HH:MM') формируется в часовом
-    // поясе СЕРВЕРА (на хостинге это UTC), и пользователи из других поясов
-    // видели время со сдвигом. Клиент теперь форматирует created_at сам.
-    // Колонка добавляется без DEFAULT, чтобы у старых сообщений было NULL
-    // (клиент покажет их time), а не момент миграции.
-    if (!column('messages', 'created_at')) {
-        await pool.query('ALTER TABLE messages ADD COLUMN created_at TIMESTAMPTZ');
-        await pool.query('ALTER TABLE messages ALTER COLUMN created_at SET DEFAULT NOW()');
-    }
-    // Непрочитанные: id последнего прочитанного сообщения в личной строке
-    // chats каждого участника. Раньше счётчик считал только сообщения с
-    // sent = 0 (их пишет лишь бот, и сразу со статусом 'read'), т.е. всегда 0.
-    const lastReadColumn = column('chats', 'last_read_message_id');
-    if (!lastReadColumn) await pool.query('ALTER TABLE chats ADD COLUMN last_read_message_id INTEGER');
-
-    // Все ADD COLUMN ниже — с NULL или константой по умолчанию: в PG 11+
-    // это правка только метаданных, без перезаписи таблицы.
-    //
-    // Отметки прочтения можно выключить (POST /api/user/privacy).
-    if (!column('users', 'read_receipts')) {
-        await pool.query('ALTER TABLE users ADD COLUMN read_receipts BOOLEAN NOT NULL DEFAULT TRUE');
-    }
-    // Срок жизни инвайт-кода; коды старых комнат перевыпускаются ниже
-    // (regenerateLegacyInviteCodes).
-    if (!column('rooms', 'code_expires_at')) {
-        await pool.query('ALTER TABLE rooms ADD COLUMN code_expires_at TIMESTAMPTZ');
-    }
-    // С какого сообщения участник видит историю комнаты: новичок видит
-    // только то, что отправлено ПОСЛЕ его вступления (раньше код приглашения
-    // открывал всю переписку с самого начала). Уже состоящие участники — 0,
-    // то есть всё, как и раньше.
-    if (!column('room_participants', 'visible_from_id')) {
-        await pool.query('ALTER TABLE room_participants ADD COLUMN visible_from_id INTEGER NOT NULL DEFAULT 0');
-    }
-    // Размер вложения — для квоты UPLOAD_QUOTA_MB. У старых вложений NULL
-    // (в квоту не засчитываются).
-    if (!column('messages', 'file_size')) {
-        await pool.query('ALTER TABLE messages ADD COLUMN file_size BIGINT');
-    }
-    // Порядок чатов без сообщений раньше давал chats.id DESC — с случайными
-    // id (ensureRandomIdDefaults) он больше ничего не значит. У старых
-    // строк NULL: между собой они по-прежнему упорядочены по id.
-    if (!column('chats', 'created_at')) {
-        await pool.query('ALTER TABLE chats ADD COLUMN created_at TIMESTAMPTZ');
-        await pool.query('ALTER TABLE chats ALTER COLUMN created_at SET DEFAULT NOW()');
-    }
-    // Параметры кода приглашения (POST /api/chats/:chatId/invite/rotate):
-    // лимит участников (NULL — без лимита), вступление только с одобрения
-    // участника и выключенный код. Одобрение включено и у УЖЕ существующих
-    // комнат (DEFAULT TRUE применяется к старым строкам): их коды
-    // разосланы в старом режиме, где код сразу открывал переписку, и
-    // проверить, кому они успели уйти, уже нельзя.
-    if (!column('rooms', 'invite_max_members')) {
-        await pool.query('ALTER TABLE rooms ADD COLUMN invite_max_members INTEGER');
-    }
-    if (!column('rooms', 'invite_require_approval')) {
-        await pool.query('ALTER TABLE rooms ADD COLUMN invite_require_approval BOOLEAN NOT NULL DEFAULT TRUE');
-    }
-    if (!column('rooms', 'invite_disabled')) {
-        await pool.query('ALTER TABLE rooms ADD COLUMN invite_disabled BOOLEAN NOT NULL DEFAULT FALSE');
-    }
-    // Личные флаги чата (POST /api/chats/:chatId/prefs) — в строке chats
-    // самого пользователя, собеседники их не видят.
-    for (const flag of ['pinned', 'muted', 'archived']) {
-        if (!column('chats', flag)) await pool.query(`ALTER TABLE chats ADD COLUMN ${flag} BOOLEAN NOT NULL DEFAULT FALSE`);
-    }
-    // Срок жизни анонимного аккаунта (lib/anon-lifetime.js): выбранный
-    // вариант и последняя активность. У обычных аккаунтов обе колонки
-    // NULL — их активность не записывается вовсе (лишние метаданные).
-    // Анонимам, созданным до этой версии (срок NULL = 'tab'), отсчёт
-    // неактивности начинается с момента обновления, а не с создания —
-    // иначе обновление сервера выкинуло бы всех, кто сейчас в сети.
-    if (!column('users', 'anon_lifetime')) {
-        await pool.query('ALTER TABLE users ADD COLUMN anon_lifetime TEXT');
-    }
-    if (!column('users', 'last_active_at')) {
-        await pool.query('ALTER TABLE users ADD COLUMN last_active_at TIMESTAMPTZ');
-        await pool.query('UPDATE users SET last_active_at = NOW() WHERE email IS NULL AND password IS NULL');
-    }
-
-    await ensureRandomIdDefaults(column);
-    await initJoinRequestsAndSecurityEvents();
-
-    // Миграция: удаление чата/выход из комнаты падало с нарушением FK —
-    // messages.chat_id (NOT NULL, без ON DELETE) не давал снести свою же
-    // запись в chats, если пользователь уже что-то написал, а chats.room_id
-    // не давал снести саму комнату, пока на неё ссылалась хоть одна запись в
-    // chats. Разрешаем chat_id уходить в NULL (история комнаты остаётся
-    // видна остальным по room_id) и каскадно чистим осиротевшие chats при
-    // удалении room.
-    if (column('messages', 'chat_id')?.is_nullable === 'NO') {
-        await pool.query('ALTER TABLE messages ALTER COLUMN chat_id DROP NOT NULL');
-    }
-    await ensureForeignKey('messages', 'messages_chat_id_fkey', 'chat_id', 'chats', 'SET NULL');
-    await ensureForeignKey('chats', 'chats_room_id_fkey', 'room_id', 'rooms', 'CASCADE');
-    // Реакции должны исчезать вместе со своим сообщением (иначе снос всех
-    // сообщений комнаты падает с reactions_message_id_fkey, как только у
-    // любого из них есть хоть одна реакция).
-    await ensureForeignKey('reactions', 'reactions_message_id_fkey', 'message_id', 'messages', 'CASCADE');
-    // Ответ на удалённое сообщение просто теряет связь с оригиналом, а не
-    // блокирует его удаление и не удаляется сам.
-    await ensureForeignKey('messages', 'messages_reply_to_id_fkey', 'reply_to_id', 'messages', 'SET NULL');
-    // Остальное уже удаляется в правильном порядке на уровне приложения
-    // (см. DELETE /api/chats/:chatId), но каскад добавлен как страховка на
-    // случай, если порядок операций там в будущем изменят по ошибке.
-    await ensureForeignKey('messages', 'messages_room_id_fkey', 'room_id', 'rooms', 'CASCADE');
-    await ensureForeignKey('unread', 'unread_chat_id_fkey', 'chat_id', 'chats', 'CASCADE');
-    await ensureForeignKey('room_participants', 'room_participants_room_id_fkey', 'room_id', 'rooms', 'CASCADE');
+    await pool.query('CREATE INDEX IF NOT EXISTS "IDX_session_expire" ON session(expire)');
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_session_user ON session((sess->>'userId'))`);
 
     await initE2eeGroupsSchema(pool);
+    // Лимиты и использованные решения PoW (UNLOGGED, lib/pg-limits.js).
+    await initPgLimitsSchema(pool);
     // Публичные E2EE-ключи хранятся в этой же базе (lib/key-store.js).
     await initKeyStoreSchema(pool);
-    // Таблицы message_expiry/chat_settings ссылаются на messages/chats,
-    // поэтому создаются только после них. Раньше initialize() вызывался в
-    // самом начале — на пустой БД сервер падал с "relation messages does
-    // not exist" и не запускался вообще.
+    // Таблицы message_expiry/chat_settings/room_settings ссылаются на
+    // messages/chats/rooms, поэтому создаются только после них.
     await disappearingMessagesManager.initialize();
-    await migrateLegacyRoomExpiry();
 
     // Индексы для выборок "сообщения чата по id". Включённые колонки
     // позволяют последнему сообщению, счётчику непрочитанного, странице
@@ -850,18 +716,16 @@ async function initDatabase() {
     // планировщик выбирал обратный проход по первичному ключу с фильтром
     // по room_id — для "тихой" комнаты это просмотр почти всей таблицы.
     // Префикс (room_id)/(chat_id) заодно обслуживает удаление комнаты/чата
-    // и каскады внешних ключей, так что старые одноколоночные индексы не нужны.
+    // и каскады внешних ключей, так что одноколоночные индексы не нужны.
     await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_room_live ON messages(room_id, deleted, id) INCLUDE (user_id, sent, encrypted)');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_chat_live ON messages(chat_id, deleted, id) INCLUDE (user_id, sent, encrypted)');
-    await pool.query('DROP INDEX IF EXISTS idx_messages_room_id');
-    await pool.query('DROP INDEX IF EXISTS idx_messages_chat_id');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id)');
     // Каждая картинка/файл в чате проверяет доступ поиском по file_url —
-    // без индекса это был полный проход по всей таблице messages на КАЖДЫЙ
+    // без индекса это был бы полный проход по всей таблице messages на КАЖДЫЙ
     // запрос /uploads/*.
     await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_file_url ON messages(file_url) WHERE file_url IS NOT NULL');
     // Для ON DELETE SET NULL по reply_to_id: без индекса удаление каждого
-    // сообщения сканировало всю таблицу в поисках ответов на него (снос
+    // сообщения сканировало бы всю таблицу в поисках ответов на него (снос
     // комнаты с N сообщениями — N полных проходов).
     await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_reply_to_id ON messages(reply_to_id) WHERE reply_to_id IS NOT NULL');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_chats_user_id ON chats(user_id)');
@@ -869,64 +733,31 @@ async function initDatabase() {
     // Сумма размеров вложений пользователя (квота) — index-only scan по
     // его файлам, а не проход по всем его сообщениям.
     await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_user_files ON messages(user_id) INCLUDE (file_size) WHERE file_size IS NOT NULL');
-    // Проверка "участник ли комнаты" выполняется на каждый файл, реакцию и
-    // joinChat. Уникальный (room_id, user_id) заодно не даёт одному
-    // пользователю оказаться в комнате дважды (с двумя visible_from_id).
-    await ensureUniqueRoomParticipants();
     await pool.query('CREATE INDEX IF NOT EXISTS idx_room_participants_user ON room_participants(user_id)');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_reactions_msg_user ON reactions(message_id, user_id)');
     // Авто-разархивация получателей идёт на КАЖДОЕ новое сообщение комнаты;
     // по частичному индексу она читает только архивные строки комнаты
     // (обычно ни одной), а не строки всех её участников.
     await pool.query('CREATE INDEX IF NOT EXISTS idx_chats_archived ON chats(room_id) WHERE archived');
-    // Удаление просроченных анонимов (каждые несколько минут) — только по
-    // анонимным строкам, без прохода по всей таблице users.
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_users_anon ON users(created_at) WHERE email IS NULL AND password IS NULL');
 
-    // Разовое заполнение last_read_message_id для существующих чатов (все
-    // старые сообщения считаются прочитанными, чтобы после обновления у
-    // всех не "загорелись" бейджи на всю историю).
-    if (!lastReadColumn || lastReadColumn.is_nullable === 'YES') {
-        await pool.query(`
-            UPDATE chats c SET last_read_message_id = COALESCE(CASE
-                WHEN c.room_id IS NOT NULL THEN (SELECT MAX(m.id) FROM messages m WHERE m.room_id = c.room_id)
-                ELSE (SELECT MAX(m.id) FROM messages m WHERE m.chat_id = c.id)
-            END, 0)
-            WHERE c.last_read_message_id IS NULL
-        `);
-        await pool.query('ALTER TABLE chats ALTER COLUMN last_read_message_id SET DEFAULT 0');
-        await pool.query('ALTER TABLE chats ALTER COLUMN last_read_message_id SET NOT NULL');
-    }
-
-    if (column('users', 'email')?.is_nullable === 'NO') {
-        await pool.query('ALTER TABLE users ALTER COLUMN email DROP NOT NULL');
-    }
-    if (column('users', 'password')?.is_nullable === 'NO') {
-        await pool.query('ALTER TABLE users ALTER COLUMN password DROP NOT NULL');
-    }
-
-    await regenerateLegacyInviteCodes();
-    await anonymizeLegacyFileNames();
+    await setRandomIdDefaults();
 
     console.log('База данных инициализирована');
 }
 
-// ---- Случайные id для users, rooms, chats ----
+// ---- Случайные id для users, rooms, chats, join_requests ----
 //
 // Последовательные id выдавали размер и темп роста сервиса (id свежей
 // регистрации = число пользователей) и порядок событий: по id комнаты или
-// чата было видно, кто и когда создал её раньше. Новые строки получают
-// случайный id из [1 000 000, 2^31 - 1]: 48 бит из gen_random_uuid() (PG 13+,
+// чата было видно, кто и когда создал её раньше. Поэтому id этих таблиц —
+// случайные из [1 000 000, 2^31 - 1]: 48 бит из gen_random_uuid() (PG 13+,
 // внутри pg_strong_random — криптостойкий ГСЧ; первые 12 hex-цифр UUIDv4
 // случайны целиком) по модулю размера диапазона (смещение ~2^-17 — не
-// различимо), с перепроверкой занятости в цикле. Существующие id не
-// меняются. messages.id остаётся последовательным намеренно: на порядке
-// сообщений держатся история, непрочитанное и visible_from_id.
+// различимо), с перепроверкой занятости в цикле. messages.id остаётся
+// последовательным намеренно: на порядке сообщений держатся история,
+// непрочитанное и visible_from_id.
 //
-// Тело функции — константа: по ней же при старте видно, что в БД уже
-// нужная версия, и CREATE OR REPLACE не выполняется лишний раз (два
-// одновременно стартующих экземпляра иначе ловили бы "tuple concurrently
-// updated").
+// Тело функции — константа: database.sql содержит ту же функцию.
 const RANDOM_ID_FUNCTION_BODY = `
 DECLARE
     candidate integer;
@@ -941,68 +772,36 @@ BEGIN
     END LOOP;
 END
 `;
+const RANDOM_ID_TABLES = ['users', 'rooms', 'chats', 'join_requests'];
 
-async function ensureRandomIdDefaults(column) {
-    const existing = await dbGet(
-        `SELECT p.prosrc FROM pg_proc p
-         JOIN pg_namespace n ON n.oid = p.pronamespace
-         WHERE p.proname = 'nyxo_random_id' AND n.nspname = current_schema()`
+// DEFAULT со ссылкой на таблицу (nyxo_random_id('users'::regclass)) можно
+// задать только после CREATE TABLE: внутри него таблицы ещё нет, поэтому
+// отдельным ALTER. ALTER берёт ACCESS EXCLUSIVE блокировку, и повторять его на
+// каждом старте незачем: он выполняется только там, где DEFAULT ещё не задан.
+async function setRandomIdDefaults() {
+    await pool.query(`
+        CREATE OR REPLACE FUNCTION nyxo_random_id(target regclass) RETURNS integer
+        LANGUAGE plpgsql VOLATILE AS $fn$${RANDOM_ID_FUNCTION_BODY}$fn$
+    `);
+    const current = await dbAll(
+        `SELECT table_name, column_default FROM information_schema.columns
+         WHERE table_schema = current_schema() AND column_name = 'id' AND table_name = ANY($1::text[])`,
+        [RANDOM_ID_TABLES]
     );
-    if (!existing || existing.prosrc !== RANDOM_ID_FUNCTION_BODY) {
-        await pool.query(`
-            CREATE OR REPLACE FUNCTION nyxo_random_id(target regclass) RETURNS integer
-            LANGUAGE plpgsql VOLATILE AS $fn$${RANDOM_ID_FUNCTION_BODY}$fn$
-        `);
-    }
-    for (const table of ['users', 'rooms', 'chats']) {
-        const current = String(column(table, 'id')?.column_default || '');
-        if (!current.includes('nyxo_random_id(')) {
+    for (const table of RANDOM_ID_TABLES) {
+        const row = current.find(r => r.table_name === table);
+        if (!String((row && row.column_default) || '').includes('nyxo_random_id(')) {
             await pool.query(`ALTER TABLE ${table} ALTER COLUMN id SET DEFAULT nyxo_random_id('${table}'::regclass)`);
         }
     }
 }
 
-// Уникальный индекс (room_id, user_id) вместо прежнего неуникального.
-// Дубли (гонка двух одновременных "войти по коду" до этой версии) чистятся
-// в той же транзакции, под блокировкой записи в таблицу: иначе между
-// чисткой и CREATE UNIQUE INDEX старый экземпляр сервера (деплой без
-// простоя) мог вставить новый дубль, и старт упал бы.
-async function ensureUniqueRoomParticipants() {
-    const existing = await dbGet("SELECT to_regclass('idx_room_participants_unique') AS idx");
-    if (!existing || !existing.idx) {
-        const client = await pool.connect();
-        try {
-            await client.query('BEGIN');
-            await client.query('LOCK TABLE room_participants IN SHARE ROW EXCLUSIVE MODE');
-            const removed = await client.query(`
-                DELETE FROM room_participants a USING room_participants b
-                WHERE a.room_id = b.room_id AND a.user_id = b.user_id AND a.id > b.id
-            `);
-            await client.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_room_participants_unique ON room_participants(room_id, user_id)');
-            await client.query('COMMIT');
-            if (removed.rowCount > 0) console.log(`[DB] Удалено дублей участников комнат: ${removed.rowCount}`);
-        } catch (err) {
-            await client.query('ROLLBACK');
-            throw err;
-        } finally {
-            client.release();
-        }
-    }
-    await pool.query('DROP INDEX IF EXISTS idx_room_participants_room_user');
-}
-
-// Заявки на вступление (комнаты с одобрением) и журнал безопасности.
-//
-// join_requests.id виден заявителю и участникам комнаты — он случайный
-// (nyxo_random_id), как id пользователей и комнат, чтобы по нему нельзя было
-// судить, сколько заявок подают по всему сервису. DEFAULT выставляется
-// отдельным ALTER: 'join_requests'::regclass внутри CREATE TABLE ещё не на
-// что ссылаться. Внешний ключ на users без каскада — как у остальных таблиц:
-// deleteUserAccount удаляет строки сам.
-//
-// security_events: только тип события, грубое семейство клиента
-// (classifyUserAgent) и время. Ни IP, ни строки User-Agent.
-async function initJoinRequestsAndSecurityEvents() {
+// Заявки на вступление (комнаты с одобрением). join_requests.id виден
+// заявителю и участникам комнаты — он случайный, как id пользователей и
+// комнат (DEFAULT ставит setRandomIdDefaults), чтобы по нему нельзя было
+// судить, сколько заявок подают по всему сервису. Внешний ключ на users без
+// каскада — как у остальных таблиц: deleteUserAccount удаляет строки сам.
+async function initJoinRequests() {
     await pool.query(`
         CREATE TABLE IF NOT EXISTS join_requests (
             id INTEGER PRIMARY KEY,
@@ -1012,157 +811,8 @@ async function initJoinRequestsAndSecurityEvents() {
             UNIQUE (room_id, user_id)
         )
     `);
-    const idDefault = await dbGet(
-        `SELECT column_default FROM information_schema.columns
-         WHERE table_schema = current_schema() AND table_name = 'join_requests' AND column_name = 'id'`
-    );
-    if (!String((idDefault && idDefault.column_default) || '').includes('nyxo_random_id(')) {
-        await pool.query(`ALTER TABLE join_requests ALTER COLUMN id SET DEFAULT nyxo_random_id('join_requests'::regclass)`);
-    }
     await pool.query('CREATE INDEX IF NOT EXISTS idx_join_requests_user ON join_requests(user_id)');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_join_requests_created ON join_requests(created_at)');
-
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS security_events (
-            id BIGSERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            type TEXT NOT NULL,
-            client TEXT NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-    `);
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_security_events_user ON security_events(user_id, id)');
-}
-
-// Личные таймеры исчезающих сообщений в комнатах (chat_settings, по строке
-// chats участника) переносятся в общий таймер комнаты (room_settings) и
-// удаляются. Берётся самый короткий из них, приведённый к допустимому
-// варианту не длиннее исходного, — почему именно так, см.
-// pickRoomExpiryFromLegacy в lib/chat-settings.js. Уже заданный общий
-// таймер не перезаписывается. Перенос и удаление — одной транзакцией
-// (DELETE ... RETURNING): строка, дописанная старым экземпляром сервера
-// во время деплоя, не потеряется, а перенесётся при следующем старте.
-// Повторный старт ничего не делает: личных таймеров комнат не остаётся.
-async function migrateLegacyRoomExpiry() {
-    const migrated = await withTransaction(async (client) => {
-        const removed = await client.query(
-            `DELETE FROM chat_settings cs USING chats c
-             WHERE c.id = cs.chat_id AND c.room_id IS NOT NULL
-             RETURNING c.room_id, cs.default_message_expiry`
-        );
-        if (removed.rows.length === 0) return 0;
-        const byRoom = new Map();
-        for (const row of removed.rows) {
-            if (!byRoom.has(row.room_id)) byRoom.set(row.room_id, []);
-            byRoom.get(row.room_id).push(row.default_message_expiry);
-        }
-        const roomIds = [];
-        const seconds = [];
-        for (const [roomId, values] of byRoom) {
-            const value = pickRoomExpiryFromLegacy(values);
-            if (value > 0) {
-                roomIds.push(roomId);
-                seconds.push(value);
-            }
-        }
-        if (roomIds.length > 0) {
-            await client.query(
-                `INSERT INTO room_settings (room_id, default_message_expiry)
-                 SELECT * FROM unnest($1::int[], $2::int[])
-                 ON CONFLICT (room_id) DO NOTHING`,
-                [roomIds, seconds]
-            );
-        }
-        return roomIds.length;
-    });
-    if (migrated > 0) console.log(`[DisappearingMessages] Личные таймеры перенесены в общий таймер комнат: ${migrated}`);
-}
-
-const MIGRATION_BATCH = 500;
-
-// Коды приглашения старого формата (6 символов, ~30 бит, бессрочные)
-// перевыпускаются в новом формате со сроком жизни: старые ссылки перестают
-// работать — это и есть цель. Повторный старт ничего не трогает: коротких
-// кодов и NULL-сроков после первого прохода не остаётся.
-async function regenerateLegacyInviteCodes() {
-    const legacy = await dbAll('SELECT id FROM rooms WHERE length(code) < 20 ORDER BY id');
-    for (let i = 0; i < legacy.length; i += MIGRATION_BATCH) {
-        const ids = legacy.slice(i, i + MIGRATION_BATCH).map(r => r.id);
-        await pool.query(
-            `UPDATE rooms r SET code = v.code, code_expires_at = NOW() + $3::integer * INTERVAL '1 second'
-             FROM unnest($1::int[], $2::text[]) AS v(id, code)
-             WHERE r.id = v.id`,
-            [ids, ids.map(() => generateInviteCode()), INVITE_TTL_SECONDS]
-        );
-    }
-    const withoutExpiry = await pool.query(
-        `UPDATE rooms SET code_expires_at = NOW() + $1::integer * INTERVAL '1 second' WHERE code_expires_at IS NULL`,
-        [INVITE_TTL_SECONDS]
-    );
-    if (legacy.length > 0 || withoutExpiry.rowCount > 0) {
-        console.log(`[Invites] Перевыпущено старых кодов приглашения: ${legacy.length}, выставлен срок: ${withoutExpiry.rowCount}`);
-    }
-}
-
-// Старые вложения хранили исходное имя файла ("IMG_20260914_Ivanov.png"),
-// а у вложений без подписи оно же было и текстом сообщения. Имя заменяется
-// обезличенным по типу (anonymizedFileName), текст — тоже, если он
-// совпадал с именем. Выбираются только строки с ещё не обезличенным
-// именем, так что повторный старт ничего не меняет.
-async function anonymizeLegacyFileNames() {
-    let total = 0;
-    for (;;) {
-        const rows = await dbAll(
-            `SELECT id, room_id, chat_id, user_id, text, file_name, file_type FROM messages
-             WHERE file_url IS NOT NULL AND encrypted = FALSE AND file_name IS NOT NULL
-               AND file_name <> ALL($1::text[])
-             ORDER BY id
-             LIMIT $2`,
-            [ALL_ANONYMIZED_FILE_NAMES, MIGRATION_BATCH]
-        );
-        if (rows.length === 0) break;
-        const names = [];
-        const texts = [];
-        for (const row of rows) {
-            const name = anonymizedFileName(row.file_type);
-            names.push(name);
-            texts.push(readMessageText(row.text, row) === row.file_name ? writeMessageText(name, row) : null);
-        }
-        await pool.query(
-            `UPDATE messages m SET file_name = v.name, text = COALESCE(v.text, m.text)
-             FROM unnest($1::int[], $2::text[], $3::text[]) AS v(id, name, text)
-             WHERE m.id = v.id`,
-            [rows.map(r => r.id), names, texts]
-        );
-        total += rows.length;
-        if (rows.length < MIGRATION_BATCH) break;
-    }
-    if (total > 0) console.log(`[Uploads] Обезличены имена старых вложений: ${total}`);
-}
-
-// Раньше удаление сообщения было soft-delete: строка (автор, время,
-// комната, шифротекст) оставалась в БД навсегда. Теперь удаление
-// физическое, а оставшиеся от старой схемы строки удаляются один раз после
-// старта — в фоне и пачками, чтобы не держать блокировки и не задерживать
-// открытие порта (поиск по deleted <> 0 — проход по всей таблице).
-async function purgeLegacySoftDeletedMessages() {
-    let total = 0;
-    try {
-        for (;;) {
-            const rows = await dbAll(
-                `DELETE FROM messages WHERE id IN (
-                     SELECT id FROM messages WHERE deleted <> 0 LIMIT $1
-                 ) RETURNING file_url`,
-                [MIGRATION_BATCH]
-            );
-            removeUploadedFiles(rows.map(r => r.file_url));
-            total += rows.length;
-            if (rows.length < MIGRATION_BATCH) break;
-        }
-        if (total > 0) console.log(`[DB] Удалено сообщений, помеченных удалёнными в старой схеме: ${total}`);
-    } catch (err) {
-        logError('[DB] Не удалось удалить старые soft-deleted сообщения', err);
-    }
 }
 
 function getSocketRoomKey(chatId, roomId) {
@@ -1180,11 +830,6 @@ function getLocalAddresses() {
         }
     }
     return addresses;
-}
-
-function normalizeAvatarColor(value) {
-    const color = String(value || '').trim();
-    return /^#[0-9a-fA-F]{6}$/.test(color) ? color.toUpperCase() : '#667EEA';
 }
 
 function getCurrentTime() {
@@ -1220,25 +865,75 @@ const INVITE_TTL_SECONDS = Math.min(
     10 * 365 * 24 * 3600
 );
 
-// Длина пароля: при регистрации и смене — не больше 256 символов (политика
-// в lib/passwords.js); при входе — лишь анти-DoS порог, чтобы мегабайтная
-// строка не уходила в HMAC/bcrypt, но и пароль, заданный по старым
-// правилам, не отвергался заранее.
-const MAX_PASSWORD_LENGTH = 256;
-const MAX_LOGIN_PASSWORD_LENGTH = 1024;
-
 const sessionSecret = process.env.SESSION_SECRET;
 if (!sessionSecret) throw new Error('SESSION_SECRET не задан в переменных окружения');
 
+// ---- Точные лимиты в Postgres (lib/pg-limits.js, roadmap R11) ----
+//
+// Регистрация, вход по коду, выдача bundle ключей и одноразовость решений PoW
+// переживают рестарт: счётчики лежат в UNLOGGED-таблицах, ключи клиентов (IP,
+// id) — только как HMAC от SESSION_SECRET. Ошибка хранилища закрывает лимит:
+// 503 {success:false, code:'busy'}. Ключ PoW тоже выводится из SESSION_SECRET,
+// чтобы выданные задачи действовали и после рестарта.
+setPowSecret(sessionSecret);
+const pgLimits = createPgLimits({
+    pool,
+    secret: sessionSecret,
+    hooks: { limited: metrics.rateLimited, storeError: metrics.limitStoreError },
+});
+const powUsedStore = pgLimits.powUsedStore();
+const bundleLimiter = pgLimits.slidingLimiter('bundle');
+
+// CSRF-токен привязан к сессии: ключ выводится из SESSION_SECRET (HKDF), так что
+// смена секрета заодно сбрасывает все выданные токены.
+const csrf = createCsrf({ secret: sessionSecret, onRejected: metrics.csrfRejected });
+
+// Массовую регистрацию сдерживает proof-of-work (lib/pow.js). IP-лимит остался
+// мягким и только для clearnet: для onion он запер бы регистрацию всем сразу
+// (общий IP контейнера tor).
+const registerLimiter = pgLimits.rateLimiter('register', {
+    windowMs: 60 * 60 * 1000,
+    max: 10,
+    skip: (req) => req.isOnion,
+    keyGenerator: rateLimitKeyGenerator,
+    message: { success: false, message: 'Слишком много регистраций. Попробуйте позже.' }
+});
+
+// Вход в комнату по коду: даже 130-битный код не должен перебираться
+// с бесконечной скоростью, и утёкший список кодов — массово проверяться.
+const joinUserLimiter = pgLimits.rateLimiter('join-user', {
+    windowMs: 15 * 60 * 1000,
+    max: 20,
+    skip: (req) => !sessionUserId(req),
+    keyGenerator: (req) => `user:${sessionUserId(req)}`,
+    message: { success: false, message: 'Слишком много попыток входа в чат. Попробуйте позже.' }
+});
+const joinIpLimiter = pgLimits.rateLimiter('join-ip', {
+    windowMs: 15 * 60 * 1000,
+    max: 60,
+    skip: (req) => req.isOnion,
+    keyGenerator: rateLimitKeyGenerator,
+    message: { success: false, message: 'Слишком много попыток входа в чат. Попробуйте позже.' }
+});
+
+// Интервал продления сессии: 5 минут; в сквозных тестах —
+// NYXO_TEST_RENEW_INTERVAL_MS (только при NODE_ENV=test).
+const SESSION_RENEW_MS = sessionRenewIntervalMs(process.env);
+if (SESSION_RENEW_MS !== SESSION_RENEW_INTERVAL_MS) {
+    console.log(`[Test] NYXO_TEST_RENEW_INTERVAL_MS=${SESSION_RENEW_MS}: сессии продлеваются каждые ${SESSION_RENEW_MS} мс`);
+}
+
+// NyxoPgStore (lib/session-store.js) — стор connect-pg-simple, который пишет
+// время в таблицу session огрублённым до 5 минут и без createdAt.
+const NyxoPgStore = createNyxoPgStore(session);
 const sessionMiddleware = session({
-    store: new pgSession({
+    store: new NyxoPgStore({
         pool: pool,
         tableName: 'session',
         createTableIfMissing: true,
-        // Без rolling кука сессии перевыставляется браузеру только при
-        // изменении сессии, так что продлевать expire строки в БД на каждом
-        // запросе бессмысленно — а это был лишний UPDATE session на КАЖДЫЙ
-        // HTTP-запрос (включая, раньше, каждый CSS/JS-файл).
+        // touch стора писал бы строку session на КАЖДЫЙ запрос. Сессия
+        // продлевается явно: маркером renewSession не чаще раза в интервал
+        // (middleware после sessionMiddleware) и touch открытых сокетов.
         disableTouch: true
     }),
     secret: sessionSecret,
@@ -1260,104 +955,16 @@ const sessionMiddleware = session({
     }
 });
 
-// ---- Срок жизни анонимного аккаунта (lib/anon-lifetime.js) ----
+// ---- Срок жизни анонимного аккаунта (lib/anon-lifetime.js, lib/anon-activity.js) ----
 //
-// Аноним удаляется после выбранного срока БЕЗ АКТИВНОСТИ (30 минут / сутки /
-// неделя), но не позже 7 дней с создания; сессия живёт по тем же правилам.
-// Активность — открытый сокет (продлевается при подключении, при отключении
-// последнего сокета и раз в 5 минут, пока сокет открыт) и запросы к API.
-//
-// Источник истины — users.last_active_at: по нему удаляет
-// purgeExpiredAnonymousUsers и его же видят другие экземпляры сервера.
-// anonStates — кэш процесса, чтобы каждый запрос не делал SELECT, а
-// активность по API писалась в БД не чаще раза в минуту на пользователя.
-// Активность обычных аккаунтов не отслеживается и не хранится вовсе.
-const anonStates = new Map(); // userId -> { lifetime, createdAtMs, lastActiveMs, persistedMs }
-const anonSocketCount = createCounter();
-
-async function loadAnonState(userId, sess) {
-    const row = await dbGet(
-        `SELECT anon_lifetime,
-                EXTRACT(EPOCH FROM last_active_at) * 1000 AS last_active_ms,
-                EXTRACT(EPOCH FROM created_at::timestamptz) * 1000 AS created_ms
-         FROM users WHERE id = $1 AND email IS NULL AND password IS NULL`,
-        [userId]
-    );
-    if (!row) {
-        anonStates.delete(userId);
-        return null;
-    }
-    // Время создания — из сессии (его ставит сам сервер, Date.now()), из
-    // БД — только если в сессии его нет.
-    const createdAtMs = Number(sess && sess.createdAt) || Number(row.created_ms);
-    const lastActiveMs = row.last_active_ms === null ? createdAtMs : Number(row.last_active_ms);
-    const state = {
-        lifetime: storedAnonLifetime(row.anon_lifetime),
-        createdAtMs,
-        lastActiveMs,
-        persistedMs: lastActiveMs,
-    };
-    anonStates.set(userId, state);
-    return state;
-}
-
-// Истекла ли анонимная сессия. Жёсткий потолок проверяется без БД; "истекла
-// по неактивности" из кэша перепроверяется по БД — активность могла прийти
-// на другой экземпляр сервера. Аккаунт уже удалён — тоже истекла.
-async function isExpiredAnonymousSession(sess) {
-    if (!sess || !sess.isAnonymous) return false;
-    const createdAtMs = Number(sess.createdAt);
-    if (!sess.userId || !Number.isFinite(createdAtMs)) return true;
-    const now = Date.now();
-    if (now - createdAtMs >= ANON_MAX_AGE_SECONDS * 1000) return true;
-    const cached = anonStates.get(sess.userId);
-    if (cached && !isAnonExpired({ ...cached, now })) return false;
-    const state = await loadAnonState(sess.userId, sess);
-    return !state || isAnonExpired({ ...state, now });
-}
-
-function persistAnonActivity(userIds) {
-    if (userIds.length === 0) return;
-    dbRun(
-        'UPDATE users SET last_active_at = NOW() WHERE id = ANY($1::int[]) AND email IS NULL AND password IS NULL',
-        [userIds]
-    ).catch(err => logError('[Anon] Не удалось записать активность', err));
-}
-
-// Отметить активность анонима: в памяти — всегда, в БД — не чаще раза в
-// минуту (force — сразу, например при отключении последнего сокета).
-function noteAnonActivity(userId, { force = false } = {}) {
-    const state = anonStates.get(userId);
-    if (!state) return;
-    const now = Date.now();
-    state.lastActiveMs = now;
-    if (!force && !shouldPersistActivity(state.persistedMs, now)) return;
-    state.persistedMs = now;
-    persistAnonActivity([userId]);
-}
-
-// Раз в 5 минут — продление всем анонимам с открытым сокетом, одним UPDATE.
-function touchAnonymousSockets() {
-    const ids = anonSocketCount.keys();
-    const now = Date.now();
-    for (const id of ids) {
-        const state = anonStates.get(id);
-        if (state) {
-            state.lastActiveMs = now;
-            state.persistedMs = now;
-        }
-    }
-    persistAnonActivity(ids);
-}
-
-// Для /api/auth: когда аккаунт удалится, если больше не будет активности.
-function describeAnonLifetime(state) {
-    if (!state) return { anonLifetime: null, anonExpiresAt: null };
-    return {
-        anonLifetime: state.lifetime,
-        anonExpiresAt: new Date(anonExpiresAtMs(state)).toISOString(),
-    };
-}
+// Аккаунт удаляется после выбранного срока БЕЗ АКТИВНОСТИ (30 минут /
+// сутки / неделя); потолка от создания нет. Активность — HTTP-запрос
+// (middleware после sessionMiddleware) и открытый сокет: подключение,
+// отключение последнего и touch раз в 2,5 минуты (задача touchOnlineSockets).
+// Источник истины — users.last_active_at (корзина 5 минут, округление
+// вверх): по нему удаляет purgeExpiredAnonymousUsers, его же видят другие
+// экземпляры сервера; anonActivity — кэш процесса поверх него.
+const anonActivity = createAnonActivity({ dbGet, dbRun });
 
 // Socket.io: источник (allowRequest выше) -> сессия -> авторизация ->
 // лимит подключений на аккаунт и (для clearnet) на IP.
@@ -1370,8 +977,10 @@ io.use((socket, next) => {
     // 'connection' — клиент после этого сам не переподключался, и после
     // входа в аккаунт realtime не работал до перезагрузки страницы.
     if (!sess || !sess.userId) return next(new Error('Не авторизован'));
-    isExpiredAnonymousSession(sess).then((expired) => {
-        if (expired) return next(new Error('Не авторизован'));
+    // Та же проверка, что у HTTP-запросов. Продлить куку сокет не может —
+    // её ставит только HTTP-ответ (клиент для этого вызывает /api/auth).
+    anonActivity.validateSession(sess).then((verdict) => {
+        if (verdict !== 'ok') return next(new Error('Не авторизован'));
         if (userSocketCount.get(sess.userId) >= MAX_SOCKETS_PER_USER) {
             return next(new Error('Слишком много подключений'));
         }
@@ -1385,36 +994,30 @@ io.use((socket, next) => {
         socket.data.clientIp = ip;
         next();
     }, (err) => {
-        console.error('[Socket] Ошибка проверки сессии:', err.message);
+        logError('[Socket] Ошибка проверки сессии', err);
         next(new Error('Ошибка сервера'));
     });
 });
 
 io.on('connection', async (socket) => {
     const userId = socket.request.session.userId;
-    const isAnonymous = Boolean(socket.request.session.isAnonymous);
 
     // Счётчики растут только для реально установленных соединений. Раньше
     // счётчик IP увеличивался ещё в middleware, а единственное место
     // уменьшения — 'disconnect' — для отклонённого рукопожатия не наступает:
-    // IP мог навсегда упереться в лимит.
+    // IP мог навсегда упереться в лимит. userSocketCount заодно — признак
+    // «в сети на этом экземпляре» для touch и чистки неактивных.
     const ip = socket.data.clientIp;
     userSocketCount.increment(userId);
     if (ip) ipSocketCount.increment(ip);
-    if (isAnonymous) {
-        anonSocketCount.increment(userId);
-        // Первый сокет — сразу в БД; остальные вкладки — не чаще раза в минуту.
-        noteAnonActivity(userId, { force: anonSocketCount.get(userId) === 1 });
-    }
+    // Подключение — активность (в БД — не чаще раза за корзину).
+    anonActivity.noteActivity(userId);
     socket.on('disconnect', () => {
         userSocketCount.decrement(userId);
         if (ip) ipSocketCount.decrement(ip);
-        if (isAnonymous) {
-            anonSocketCount.decrement(userId);
-            // Закрылся последний сокет — отсчёт неактивности начинается
-            // отсюда, поэтому момент пишется в БД сразу.
-            if (anonSocketCount.get(userId) === 0) noteAnonActivity(userId, { force: true });
-        }
+        // Закрылся последний сокет — отсчёт неактивности начинается отсюда:
+        // корзина этого момента попадает в БД.
+        if (userSocketCount.get(userId) === 0) anonActivity.noteActivity(userId);
     });
 
     // Личная комната пользователя (на всех его вкладках/устройствах) —
@@ -1495,13 +1098,11 @@ app.use((req, res, next) => {
         host: req.headers.host,
         secure: req.secure && !req.isOnion,
     }));
-    // HSTS — только для настоящего https в production: по http браузер его
-    // всё равно игнорирует, а в разработке он "залипал" бы на localhost.
-    if (IS_PRODUCTION && req.secure && !req.isOnion) {
-        res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
-    }
     next();
 });
+// HSTS — только для настоящего https в production и не для onion; preload — по
+// HSTS_PRELOAD=yes (риски — в env-check). См. getHstsHeader в lib/privacy.js.
+app.use(createHstsMiddleware({ production: IS_PRODUCTION, preload: HSTS_PRELOAD }));
 
 // Небезопасные методы — только со своих страниц (см. isTrustedOrigin).
 // Второй рубеж к CSRF-токену ниже: SameSite=Lax и токен защищают от
@@ -1510,61 +1111,15 @@ app.use((req, res, next) => {
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 app.use((req, res, next) => {
     if (SAFE_METHODS.has(req.method) || isTrustedOrigin(req.headers)) return next();
+    metrics.originRejected();
     res.status(403).json({ success: false, message: 'Запрещено: запрос с чужого сайта' });
 });
 
 app.use(cookieParser());
 
-function issueCsrfCookie(req, res) {
-    const token = crypto.randomBytes(32).toString('hex');
-    res.cookie('csrf_token', token, {
-        httpOnly: false,
-        // Раньше в production — 'none' (кука уходила и на межсайтовые
-        // запросы). Secure — по фактическому протоколу: .onion и локальная
-        // разработка по http иначе не получили бы куку вовсе.
-        sameSite: 'lax',
-        secure: Boolean(req.secure),
-        maxAge: 24 * 60 * 60 * 1000
-    });
-    return token;
-}
-
-app.use((req, res, next) => {
-    if (req.path.startsWith('/socket.io')) return next();
-
-    // Раньше кука csrf_token выставлялась только на небезопасных методах, а
-    // безопасные (GET) сразу пропускались без неё — значит самая первая
-    // загрузка страницы (GET /) никогда не сеяла куку, и когда фронт слал
-    // первый POST (обычно /api/login или /api/register), проверка ниже
-    // видела отсутствие куки и просто выставляла её "на лету", пропуская
-    // САМ этот запрос без проверки (см. п.11 аудита). Теперь кука сеется на
-    // любом запросе, включая GET — к моменту первого POST от SPA (после
-    // того как браузер уже загрузил index.html/script.js через GET) она уже
-    // гарантированно на месте.
-    const cookieToken = req.cookies['csrf_token'];
-    const cookieWasMissing = !cookieToken;
-    const issuedToken = cookieWasMissing ? issueCsrfCookie(req, res) : cookieToken;
-
-    if (SAFE_METHODS.has(req.method)) return next();
-
-    // Небезопасный метод: токен обязателен и должен совпадать с уже
-    // существовавшей (не только что выставленной в этом же запросе) кукой —
-    // иначе это тот самый bootstrap-обход, который раньше пропускал первый
-    // POST без проверки.
-    const headerToken = req.headers['x-csrf-token'];
-    if (cookieWasMissing || !headerToken || issuedToken !== headerToken) {
-        return res.status(403).json({ success: false, message: 'Запрещено: неверный CSRF-токен' });
-    }
-    next();
-});
-
-// Тело парсится только после проверок источника и CSRF. Глобальный лимит
-// остаётся маленьким (100 КБ по умолчанию); key-shares — исключение: до 200
-// получателей по 8 КБ (x3dh-init с постквантовой частью весит 2.4–4 КБ).
-// Специальный парсер стоит раньше: общий видит уже разобранное тело и
-// пропускает запрос.
-app.use('/api/keys/key-shares', express.json({ limit: '2mb' }));
-app.use(express.json());
+// CSRF-токен (lib/csrf.js) проверяется ниже, после sessionMiddleware: токен
+// привязан к сессии, и ему нужен её id. Статике (CSS, JS, иконки) токен не
+// нужен, поэтому она раздаётся раньше и кук не получает.
 
 // Разрешает браузеру хранить ответ, но перед каждым использованием
 // сверяться с сервером (If-None-Match/If-Modified-Since -> 304 без тела).
@@ -1586,30 +1141,56 @@ app.use(express.static(path.join(__dirname, 'public'), {
 // Маршруты из lib/routes/ (см. lib/routes/index.js): здесь — те, которым
 // сессия не нужна; ниже, после лимитера /api/, — обычные маршруты API.
 // serverContext — общий контекст маршрутов и задач из lib/ (lib/jobs).
-const serverContext = Object.freeze({ pool, dbGet, dbAll, dbRun, withTransaction, io, logError, isProduction: IS_PRODUCTION });
+const serverContext = Object.freeze({
+    pool, dbGet, dbAll, dbRun, withTransaction, io, logError, isProduction: IS_PRODUCTION,
+    // Мониторинг и security.txt (lib/routes/health.js, lib/routes/well-known.js).
+    metrics, readiness, env: process.env,
+});
 registerPreSessionRoutes(app, serverContext);
 
 app.use(sessionMiddleware);
 
-// Анонимная сессия проверяется на КАЖДОМ запросе (раньше — только в
-// /api/auth, остальные маршруты принимали её дальше): истёкшая
-// заменяется пустой, живая — продлевает активность аккаунта (в БД — не
-// чаще раза в минуту, см. noteAnonActivity). app.use не оборачивается
-// wrapAsync, поэтому ошибки — вручную в next.
+// Сессия проверяется на КАЖДОМ запросе (validateSession). Недействительная
+// (без isAnonymous — от прежней версии с постоянными аккаунтами) или истёкшая
+// заменяется пустой, а /api/auth сообщит клиенту, что сессия закончилась
+// (req.authEnded). Живая — это активность: корзина в БД пишется раз в
+// корзину, и запись ждётся, потому что ответы ниже читают last_active_at.
+// И продление сессии раз в интервал (renewSession): строка session
+// пересохраняется, кука day/week уходит заново с новым Expires. app.use не
+// оборачивается wrapAsync, поэтому ошибки — вручную в next.
 app.use((req, res, next) => {
     const sess = req.session;
-    if (!sess || !sess.userId || !sess.isAnonymous) return next();
-    isExpiredAnonymousSession(sess).then((expired) => {
-        if (!expired) {
-            noteAnonActivity(sess.userId);
-            return next();
+    if (!sess || !sess.userId) return next();
+    const userId = sess.userId;
+    anonActivity.validateSession(sess).then(async (verdict) => {
+        if (verdict !== 'ok') {
+            return req.session.regenerate((err) => {
+                req.authEnded = verdict;
+                next(err);
+            });
         }
-        req.session.regenerate((err) => {
-            req.anonSessionExpired = true;
-            next(err);
+        await anonActivity.noteActivity(userId);
+        renewSession(sess, {
+            lifetime: anonActivity.lifetimeOf(userId) || sess.anonLifetime,
+            now: Date.now(),
+            intervalMs: SESSION_RENEW_MS,
         });
-    }, next);
+        next();
+    }).catch(next);
 });
+
+// CSRF: после sessionMiddleware и проверки сессии (привязка — id сессии, а у
+// запроса без входа, например регистрации, — кука nyxo_pre) и до разбора тела.
+// Источник небезопасного запроса проверен ещё раньше (isTrustedOrigin).
+app.use(csrf.middleware);
+
+// Тело парсится только после проверок источника и CSRF. Глобальный лимит
+// остаётся маленьким (100 КБ по умолчанию); key-shares — исключение: до 200
+// получателей по 8 КБ (x3dh-init с постквантовой частью весит 2.4–4 КБ).
+// Специальный парсер стоит раньше: общий видит уже разобранное тело и
+// пропускает запрос.
+app.use('/api/keys/key-shares', express.json({ limit: '2mb' }));
+app.use(express.json());
 
 // Лимит на /api/ — ДО регистрации маршрутов из lib/: Express применяет
 // middleware в порядке регистрации, и раньше /api/keys/* и
@@ -1619,7 +1200,7 @@ app.use('/api/', apiLimiter);
 // Публичные E2EE-ключи: /api/keys/* → встроенное хранилище (lib/key-store.js).
 // Регистрируется строго ПОСЛЕ sessionMiddleware — маршрутам нужна сессия.
 // Чужие ключи отдаются только при общей комнате — модулю нужна БД.
-registerE2eeKeyRoutes(app, { dbGet, dbAll });
+registerE2eeKeyRoutes(app, { dbGet, dbAll, bundleLimiter });
 // Групповой E2EE: список участников чата + key-shares (тоже нужна сессия).
 registerE2eeGroupRoutes(app, { dbGet, dbAll, dbRun, io });
 registerApiRoutes(app, serverContext);
@@ -1638,8 +1219,14 @@ app.get('/uploads/:filename', async (req, res) => {
     res.set('Cache-Control', 'no-store, private');
     res.removeHeader('Pragma');
     res.removeHeader('Expires');
+    // Прямо на странице показываются только фото и видео. PDF, TXT и
+    // шифротекст скачиваются (attachment), а не открываются внутри нашего
+    // origin; неизвестное расширение тоже считается скачиваемым.
+    if (!isInlineUpload(filename)) res.set('Content-Disposition', 'attachment');
     res.sendFile(path.join(UPLOADS_DIR, filename), { lastModified: false, etag: false, cacheControl: false }, (err) => {
         if (err && !res.headersSent) {
+            // JSON с ошибкой не должен уходить как «скачиваемый файл».
+            res.removeHeader('Content-Disposition');
             res.status(err.status === 404 ? 404 : 500).json({ success: false, message: 'Файл не найден' });
         }
     });
@@ -1688,32 +1275,47 @@ function readMessageText(stored, row) {
     }
 }
 
-// Новая сессия с защитой от фиксации (regenerate) — и при входе, и при
-// регистрации (раньше при регистрации id сессии не менялся).
+// Новая сессия с защитой от фиксации (regenerate): id сессии, который был
+// у браузера до регистрации, к аккаунту не привязывается.
 function startUserSession(req, fields) {
     return new Promise((resolve, reject) => {
         req.session.regenerate((err) => {
             if (err) return reject(err);
             Object.assign(req.session, fields);
+            // Новая сессия — новая привязка CSRF-токена: токен «до входа» или от
+            // прежней сессии больше не подходит, клиент получает новый в этом же ответе.
+            csrf.issue(req, req.res);
             resolve();
         });
     });
 }
 
-// Proof-of-work (lib/pow.js): решение одноразовое и привязано к цели
-// (register / register-anon).
-const POW_PURPOSES = new Set(['register', 'register-anon']);
+// Proof-of-work (lib/pow.js): решение одноразовое и привязано к цели.
+// Цель одна — регистрация временного аккаунта; ?purpose=register — 400.
+const POW_PURPOSES = new Set(['register-anon']);
 const POW_FAILED_RESPONSE = { success: false, message: 'Не пройдена проверка proof-of-work', powRequired: true };
 
-function checkPow(req, purpose) {
+// 'ok' | 'invalid' | 'replayed' | 'busy'. Задача сжигается в Postgres
+// (pow_used) только у решения, прошедшего проверку, — неверный nonce её не
+// тратит. Хранилище не отвечает — 'busy': регистрацию без проверки
+// одноразовости не пропускаем (лимит закрывается), а решение остаётся
+// несожжённым — клиент повторит его позже.
+async function checkPow(req, purpose) {
     const solution = req.body && req.body.pow;
-    if (!solution || typeof solution !== 'object') return false;
+    if (!solution || typeof solution !== 'object') return 'invalid';
     try {
-        return verifySolution(solution, purpose) === true;
+        return await consumeSolution(solution, purpose, powUsedStore);
     } catch (err) {
-        console.error('[PoW] Ошибка проверки решения:', err.message);
-        return false;
+        // Сбой хранилища уже записан в лог самим хранилищем.
+        if (!(err instanceof LimitStoreError)) logError('[PoW] Ошибка проверки решения', err);
+        return 'busy';
     }
+}
+
+function respondPowFailure(res, verdict) {
+    metrics.powRejected(verdict);
+    if (verdict === 'busy') return respondBusy(res);
+    return res.json(POW_FAILED_RESPONSE);
 }
 
 app.get('/api/pow/challenge', (req, res) => {
@@ -1726,13 +1328,17 @@ app.get('/api/pow/challenge', (req, res) => {
 });
 
 // Новый аккаунт и его чат с ботом с приветствием — внутри транзакции client.
-// anonLifetime — только у анонимного аккаунта (у него же отсчёт активности).
-async function insertUserWithBotChat(client, { uniqueCode, username, email, passwordHash, welcomeText, anonLifetime = null }) {
+// lastActiveAt — корзина активности момента регистрации (lib/anon-lifetime.js).
+// Отметки о прочтении у нового аккаунта выключены явно, а не через DEFAULT
+// колонки: ответ регистрации обещает readReceipts: false. Текст приветствия
+// выбирает вызывающий. Возвращает { userId, botChatId } — id чата с ботом
+// уходит клиенту.
+async function insertUserWithBotChat(client, { uniqueCode, username, anonLifetime, lastActiveAt, welcomeText }) {
     const userResult = await client.query(
-        `INSERT INTO users (unique_code, username, email, password, avatar, anon_lifetime, last_active_at)
-         VALUES ($1, $2, $3, $4, $5, $6::text, CASE WHEN $6::text IS NULL THEN NULL ELSE NOW() END)
+        `INSERT INTO users (unique_code, username, avatar, anon_lifetime, last_active_at, read_receipts)
+         VALUES ($1, $2, $3, $4, $5, FALSE)
          RETURNING id`,
-        [uniqueCode, username, email, passwordHash, '#667EEA', anonLifetime]
+        [uniqueCode, username, '#667EEA', anonLifetime, lastActiveAt]
     );
     const userId = userResult.rows[0].id;
     const botResult = await client.query(
@@ -1744,7 +1350,7 @@ async function insertUserWithBotChat(client, { uniqueCode, username, email, pass
         'INSERT INTO messages (chat_id, user_id, text, sent, time, status) VALUES ($1, $2, $3, $4, $5, $6)',
         [botChatId, userId, writeMessageText(welcomeText, { room_id: null, chat_id: botChatId, user_id: userId }), 0, getCurrentTime(), 'read']
     );
-    return userId;
+    return { userId, botChatId };
 }
 
 async function withTransaction(work) {
@@ -1762,294 +1368,165 @@ async function withTransaction(work) {
     }
 }
 
-app.post('/api/register', registerLimiter, async (req, res) => {
-    const { email, password, confirmPassword } = req.body || {};
-    const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
-    if (!username || !isNonEmptyString(email) || !isNonEmptyString(password) || typeof confirmPassword !== 'string')
-        return res.json({ success: false, message: 'Заполните все поля' });
-    if (username.length > 32)
-        return res.json({ success: false, message: 'Имя не может быть длиннее 32 символов' });
-    if (email.length > 254)
-        return res.json({ success: false, message: 'Email слишком длинный' });
-    if (password.length > MAX_PASSWORD_LENGTH)
-        return res.json({ success: false, message: `Пароль не может быть длиннее ${MAX_PASSWORD_LENGTH} символов` });
-    if (password !== confirmPassword)
-        return res.json({ success: false, message: 'Пароли не совпадают' });
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
-        return res.json({ success: false, message: 'Введите корректный email' });
-
-    try {
-        // Политика — до PoW: решение одноразовое, и отказ из-за слабого
-        // пароля не должен заставлять решать задачу заново.
-        const policyError = await checkPasswordPolicy(password, { username, email });
-        if (policyError) return res.json({ success: false, message: policyError });
-        // PoW — до любых обращений к users: иначе ответ "такие данные уже
-        // заняты" можно было бы получать бесплатно, перебирая email.
-        if (!checkPow(req, 'register')) return res.json(POW_FAILED_RESPONSE);
-
-        const existing = await dbGet('SELECT id FROM users WHERE email = $1 OR username = $2', [email, username]);
-        if (existing) return res.json({ success: false, message: 'Ошибка регистрации. Проверьте введённые данные.' });
-
-        const uniqueCode = await generateUniqueCodeAsync();
-        const passwordHash = await hashPassword(password);
-        const userId = await withTransaction(client => insertUserWithBotChat(client, {
-            uniqueCode, username, email, passwordHash,
-            welcomeText: 'Привет! Я бот-помощник. Чем могу помочь?',
-        }));
-
-        await startUserSession(req, { userId, username, uniqueCode, avatar: '#667EEA' });
-        recordSecurityEvent(userId, 'register', req);
-        res.json({ success: true, message: 'Регистрация успешна!', user: { id: userId, username, uniqueCode, avatar: '#667EEA', readReceipts: true } });
-    } catch (error) {
-        console.error('Register error:', error);
-        res.json({ success: false, message: 'Ошибка сервера' });
-    }
-});
-
 // lifetime: 'tab' | 'day' | 'week' (по умолчанию 'tab') — см.
-// lib/anon-lifetime.js. Проверяется до PoW: решение одноразовое, и отказ
-// из-за опечатки в параметре не должен заставлять решать задачу заново.
+// lib/anon-lifetime.js. Живая сессия — 409 ещё до PoW: второй аккаунт в
+// том же браузере не нужен (клиент в этом случае входит через /api/auth), а
+// решение одноразовое. lifetime тоже проверяется до PoW: отказ из-за
+// опечатки в параметре не должен заставлять решать задачу заново.
 app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
+    if (req.session.userId) {
+        return res.status(409).json({ success: false, code: 'already-authenticated', message: 'Вы уже вошли в аккаунт' });
+    }
     let lifetime;
     try {
         lifetime = parseAnonLifetime(req.body?.lifetime);
     } catch (err) {
         return res.json({ success: false, message: err.message });
     }
-    if (!checkPow(req, 'register-anon')) return res.json(POW_FAILED_RESPONSE);
+    const powVerdict = await checkPow(req, 'register-anon');
+    if (powVerdict !== 'ok') return respondPowFailure(res, powVerdict);
     try {
         const uniqueCode = await generateUniqueCodeAsync();
         const username = await generateAnonymousUsernameAsync();
+        // Регистрация — первая активность; в БД — её корзина.
+        const now = Date.now();
+        const lastActiveMs = activityBucketMs(now);
 
-        const userId = await withTransaction(client => insertUserWithBotChat(client, {
-            uniqueCode, username, email: null, passwordHash: null,
-            welcomeText: anonWelcomeText(lifetime), anonLifetime: lifetime,
+        const { userId, botChatId } = await withTransaction(client => insertUserWithBotChat(client, {
+            uniqueCode, username, anonLifetime: lifetime, lastActiveAt: new Date(lastActiveMs),
+            welcomeText: botGuide.welcomeText(lifetime),
         }));
 
-        const createdAtMs = Date.now();
         await startUserSession(req, {
             userId, username, uniqueCode, avatar: '#667EEA',
-            isAnonymous: true, createdAt: createdAtMs, anonLifetime: lifetime,
+            isAnonymous: true, anonLifetime: lifetime, renewBucket: renewBucket(now, SESSION_RENEW_MS),
         });
-        // 'tab' — кука без срока (до закрытия браузера), 'day'/'week' — до
-        // жёсткого потолка; неактивность сервер проверяет сам на каждом
-        // запросе (isExpiredAnonymousSession).
-        req.session.cookie.maxAge = anonCookieMaxAgeMs({ lifetime, createdAtMs, now: createdAtMs });
-        const state = { lifetime, createdAtMs, lastActiveMs: createdAtMs, persistedMs: createdAtMs };
-        anonStates.set(userId, state);
+        // 'tab' — кука без срока (до закрытия браузера), 'day'/'week' — срок
+        // + 15 минут; она продлевается вместе с сессией.
+        setSessionCookieLifetime(req.session.cookie, lifetime);
+        anonActivity.remember(userId, { lifetime, lastActiveMs: now, persistedBucketMs: lastActiveMs });
 
         // Имя и id анонимного пользователя в лог не пишутся: связка "время
         // создания — id — имя" в логах хостинга как раз и деанонимизирует.
 
+        metrics.registered();
         res.json({
             success: true,
-            message: 'Приватный режим активирован!',
             user: {
                 id: userId,
                 username,
                 uniqueCode,
-                avatar: '#667EEA',
                 isAnonymous: true,
-                readReceipts: true,
-                ...describeAnonLifetime(state),
-                // Срок без активности, секунды (поле старых клиентов).
-                sessionExpiresIn: anonLifetimeSeconds(lifetime)
-            }
+                readReceipts: false,
+                ...describeAnonLifetime({ lifetime, lastActiveMs }),
+            },
+            botChatId,
         });
     } catch (error) {
-        console.error('Anonymous register error:', error);
+        logError('[Anon] Не удалось зарегистрировать аккаунт', error);
         res.json({ success: false, message: 'Ошибка сервера' });
     }
 });
 
-app.post('/api/login', loginLimiter, loginAccountLimiter, async (req, res) => {
-    const { email, password } = req.body || {};
-    if (!isNonEmptyString(email) || !isNonEmptyString(password)) return res.json({ success: false, message: 'Введите email и пароль' });
-    if (email.length > 254 || password.length > MAX_LOGIN_PASSWORD_LENGTH) return res.json({ success: false, message: 'Неверный email или пароль' });
-
-    try {
-        // Добавляем случайную задержку для защиты от timing attacks
-        await addRandomDelay(50, 150);
-
-        const user = await dbGet('SELECT id, username, unique_code, avatar, password, read_receipts FROM users WHERE email = $1', [email]);
-        // Проверка пароля выполняется независимо от того, найден ли юзер —
-        // это убирает разницу во времени ответа между "нет такого email"
-        // и "неверный пароль" (см. п.4 аудита).
-        const hashToCheck = (user && user.password) ? user.password : DUMMY_PASSWORD_HASH;
-        const validPassword = await verifyPassword(password, hashToCheck);
-
-        // Дополнительная случайная задержка
-        await addRandomDelay(20, 80);
-
-        if (!user || !user.password || !validPassword) {
-            // Неудачный вход в СУЩЕСТВУЮЩИЙ аккаунт — в его журнал. Запись не
-            // ожидается: иначе ответ для существующего email приходил бы
-            // заметно позже, чем для несуществующего (оракул по времени).
-            if (user && user.password) recordSecurityEvent(user.id, 'login_failed', req);
-            return res.json({ success: false, message: 'Неверный email или пароль' });
-        }
-
-        // Хэш старого формата (bcrypt без предхэша обрезал пароль на 72
-        // байтах) или с устаревшей стоимостью — перехэшируем, пока пароль
-        // известен. Условие на старый хэш: параллельная смена пароля важнее.
-        if (needsRehash(user.password)) {
-            try {
-                await dbRun('UPDATE users SET password = $1 WHERE id = $2 AND password = $3', [await hashPassword(password), user.id, user.password]);
-            } catch (rehashError) {
-                console.error('[Auth] Не удалось обновить хэш пароля:', rehashError.message);
-            }
-        }
-
-        await startUserSession(req, {
-            userId: user.id, username: user.username, uniqueCode: user.unique_code, avatar: user.avatar || '',
-        });
-        recordSecurityEvent(user.id, 'login', req);
-        res.json({
-            success: true, message: 'Вход выполнен!',
-            user: { id: user.id, username: user.username, uniqueCode: user.unique_code, avatar: user.avatar || '', readReceipts: user.read_receipts },
-        });
-    } catch (error) {
-        console.error('Login error:', error);
-        res.json({ success: false, message: 'Ошибка базы данных' });
-    }
-});
-
-// Завершает сессию после выхода/удаления аккаунта. clearSiteCache —
-// Clear-Site-Data: "cache": браузер выбрасывает кэш сайта (страницы,
-// вложения), чтобы на общем устройстве не оставалось следов переписки.
-function endSession(req, res, { clearSiteCache, message }) {
+// Завершает сессию после удаления аккаунта. Clear-Site-Data: "cache" —
+// браузер выбрасывает кэш сайта (страницы, вложения), чтобы на общем
+// устройстве не оставалось следов переписки.
+function endSession(req, res, message) {
     req.session.destroy((err) => {
+        if (err) logError('[Account] Не удалось удалить сессию', err);
         res.clearCookie('connect.sid');
-        // CSRF-куку НЕ удаляем, а выдаём новую: после выхода страница не
-        // перезагружается, и следующий POST /api/login без куки получал
-        // 403 "неверный CSRF-токен" — войти снова можно было только после F5.
-        issueCsrfCookie(req, res);
-        if (clearSiteCache) res.set('Clear-Site-Data', '"cache"');
-        if (err) console.error('Session destroy error:', err);
+        // CSRF-куку не удаляем, а выдаём новую (под привязку «до входа», с новым
+        // nyxo_pre): страница после удаления не перезагружается, и следующая
+        // регистрация без куки получила бы 403 «неверный CSRF-токен».
+        csrf.issue(req, res, { freshPre: true });
+        res.set('Clear-Site-Data', '"cache"');
         res.json({ success: true, message });
     });
 }
 
-app.post('/api/logout', async (req, res) => {
-    const isAnonymous = Boolean(req.session?.isAnonymous);
-    const userId = req.session?.userId;
-
-    // Для анонимных пользователей удаляем все данные
-    if (isAnonymous && userId) {
-        try {
-            await deleteUserAccount(userId);
-        } catch (error) {
-            console.error('[Anon] Ошибка удаления данных при выходе:', error.message);
-        }
-    }
-
-    endSession(req, res, { clearSiteCache: isAnonymous, message: isAnonymous ? 'Данные удалены' : 'Выход выполнен' });
-});
-
-// Удаление аккаунта со всеми данными (см. deleteUserAccount). Обычному
-// аккаунту нужен пароль — украденной сессии (или забытой открытой вкладки)
-// недостаточно; анонимный аккаунт пароля не имеет и удаляется сразу.
-app.post('/api/account/delete', passwordLimiter, async (req, res) => {
+// Удаление аккаунта со всеми данными (см. deleteUserAccount). Подтверждения
+// не нужно: аккаунт временный, и войти в него иначе, чем этой сессией, нельзя.
+// POST /api/logout — псевдоним: выйти из такого аккаунта и значит удалить его.
+async function deleteOwnAccount(req, res) {
     const userId = req.session.userId;
     if (!userId) return res.json({ success: false, message: 'Не авторизован' });
     try {
-        const user = await dbGet('SELECT password FROM users WHERE id = $1', [userId]);
-        if (!user) return res.json({ success: false, message: 'Пользователь не найден' });
-        if (user.password) {
-            const password = req.body?.password;
-            if (!isNonEmptyString(password) || password.length > MAX_LOGIN_PASSWORD_LENGTH) {
-                return res.json({ success: false, message: 'Введите пароль' });
-            }
-            if (!(await verifyPassword(password, user.password))) {
-                return res.json({ success: false, message: 'Неверный пароль' });
-            }
-        }
         await deleteUserAccount(userId);
-        endSession(req, res, { clearSiteCache: true, message: 'Аккаунт и все данные удалены' });
     } catch (error) {
-        console.error('Delete account error:', error);
-        res.json({ success: false, message: 'Ошибка удаления аккаунта' });
+        logError('[Account] Не удалось удалить аккаунт', error);
+        return res.json({ success: false, message: 'Ошибка удаления аккаунта' });
     }
-});
+    metrics.accountsDeleted('user');
+    endSession(req, res, 'Аккаунт и все данные удалены');
+}
+app.post('/api/account/delete', deleteOwnAccount);
+app.post('/api/logout', deleteOwnAccount);
 
-app.get('/api/auth', async (req, res) => {
-    // Анонимная сессия только что истекла (см. middleware выше) — клиент
-    // покажет "данные удалены по сроку", а не просто форму входа.
-    if (!req.session.userId) return res.json(req.anonSessionExpired ? { authenticated: false, expired: true } : { authenticated: false });
-    try {
-        const row = await dbGet('SELECT avatar, read_receipts FROM users WHERE id = $1', [req.session.userId]);
-        if (!row) {
-            // Пользователь удалён (например, анонимный после выхода) — сессия больше не нужна
-            req.session.destroy(() => {});
-            return res.json({ authenticated: false, expired: true });
-        }
-
-        const avatar = row.avatar || '';
-        req.session.avatar = avatar;
-        const isAnonymous = Boolean(req.session.isAnonymous);
-        // Срок анонима — оценка "если с этого момента больше не будет
-        // активности" (этот запрос сам — активность, см. noteAnonActivity).
-        const lifetime = describeAnonLifetime(isAnonymous ? anonStates.get(req.session.userId) : null);
-
-        res.json({
-            authenticated: true,
-            user: {
-                id: req.session.userId,
-                username: req.session.username,
-                uniqueCode: req.session.uniqueCode,
-                avatar,
-                isAnonymous,
-                readReceipts: row.read_receipts,
-                ...lifetime
-            }
-        });
-    } catch (error) {
-        res.json({ authenticated: false });
-    }
-});
-
-// ---- Журнал безопасности ----
-//
-// Последние SECURITY_EVENTS_PER_USER событий входа и смены пароля — чтобы
-// пользователь заметил чужой вход. Хранится только тип, грубое семейство
-// клиента (classifyUserAgent: «Firefox · Android») и время; ни IP, ни
-// полной строки User-Agent. Для анонимов не ведётся. Запись — в фоне: её
-// сбой не должен ломать вход, а ожидание — выдавать по времени ответа,
-// существует ли аккаунт (см. login_failed в /api/login).
-const SECURITY_EVENT_TYPES = new Set(['login', 'login_failed', 'password_changed', 'register']);
-const SECURITY_EVENTS_PER_USER = 50;
-
-function recordSecurityEvent(userId, type, req) {
-    if (!SECURITY_EVENT_TYPES.has(type)) return;
-    const client = classifyUserAgent(req && req.headers && req.headers['user-agent']);
-    (async () => {
-        await dbRun('INSERT INTO security_events (user_id, type, client) VALUES ($1, $2, $3)', [userId, type, client]);
-        await dbRun(
-            `DELETE FROM security_events WHERE user_id = $1 AND id <= (
-                 SELECT id FROM security_events WHERE user_id = $1 ORDER BY id DESC OFFSET $2 LIMIT 1
-             )`,
-            [userId, SECURITY_EVENTS_PER_USER]
-        );
-    })().catch((err) => {
-        // 23503 — аккаунт удалён в этот же момент: писать уже некуда.
-        if (err.code !== '23503') console.error('[Security] Не удалось записать событие:', err.message);
-    });
+// Поля аккаунта для ответов API — из строки users: срок и корзина последней
+// активности (её только что записал middleware после sessionMiddleware,
+// если корзина сменилась). anonExpiresAt — «когда удалится, если больше не
+// будет активности».
+async function loadAccount(userId) {
+    const row = await dbGet(
+        `SELECT username, unique_code, read_receipts, anon_lifetime,
+                EXTRACT(EPOCH FROM last_active_at) * 1000 AS last_active_ms
+         FROM users WHERE id = $1`,
+        [userId]
+    );
+    if (!row) return null;
+    return {
+        id: userId,
+        username: row.username,
+        uniqueCode: row.unique_code,
+        readReceipts: row.read_receipts,
+        ...describeAnonLifetime({
+            lifetime: row.anon_lifetime,
+            lastActiveMs: row.last_active_ms === null ? null : Number(row.last_active_ms),
+        }),
+    };
 }
 
-app.get('/api/security-events', async (req, res) => {
-    const userId = req.session.userId;
-    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
-    if (req.session.isAnonymous) return res.json({ success: true, events: [] });
-    try {
-        const rows = await dbAll(
-            'SELECT type, client, created_at FROM security_events WHERE user_id = $1 ORDER BY id DESC LIMIT $2',
-            [userId, SECURITY_EVENTS_PER_USER]
-        );
-        res.json({ success: true, events: rows.map(r => ({ type: r.type, client: r.client, createdAt: r.created_at })) });
-    } catch (error) {
-        console.error('Security events error:', error);
-        res.json({ success: false, message: 'Ошибка загрузки журнала' });
+// «Не вошёл» (контракт этапа 1, §3): reason/expired — только если сессия
+// была, но аккаунт удалён по сроку или сессия недействительна. Клиент
+// покажет «данные удалены по сроку», а не просто экран входа.
+function signedOutResponse(req) {
+    const body = { authenticated: false };
+    if (req.authEnded) {
+        body.reason = 'expired';
+        body.expired = true;
     }
+    body.onionUrl = onionUrlFor(req);
+    return body;
+}
+
+// Состояние входа. Сам запрос — активность и продление сессии (middleware
+// после sessionMiddleware); CSRF-куку, если её нет, выдаёт middleware CSRF.
+// onionUrl — адрес onion-зеркала при тех же условиях, что заголовок
+// Onion-Location (lib/tor-support.js), иначе null.
+app.get('/api/auth', async (req, res) => {
+    const userId = req.session.userId;
+    if (!userId) return res.json(signedOutResponse(req));
+    const account = await loadAccount(userId);
+    if (!account) {
+        // Аккаунт удалён между проверкой сессии и этим запросом.
+        anonActivity.forget(userId);
+        req.authEnded = 'expired';
+        return req.session.destroy(() => res.json(signedOutResponse(req)));
+    }
+    res.json({
+        authenticated: true,
+        user: {
+            id: account.id,
+            username: account.username,
+            uniqueCode: account.uniqueCode,
+            isAnonymous: true,
+            readReceipts: account.readReceipts,
+            anonLifetime: account.anonLifetime,
+            anonInactivitySeconds: account.anonInactivitySeconds,
+            anonExpiresAt: account.anonExpiresAt,
+        },
+        onionUrl: onionUrlFor(req),
+    });
 });
 
 // Отметки прочтения: выключенные — собеседники не видят ✓✓ и не получают
@@ -2070,26 +1547,57 @@ app.post('/api/user/privacy', async (req, res) => {
 });
 
 app.get('/api/user', async (req, res) => {
-    if (!req.session.userId) return res.json({ success: false });
-    try {
-        const user = await dbGet('SELECT id, unique_code, username, email, avatar, created_at FROM users WHERE id = $1', [req.session.userId]);
-        if (!user) return res.json({ success: false });
-        res.json({ success: true, user: { id: user.id, uniqueCode: user.unique_code, username: user.username, avatar: user.avatar || '', email: user.email, createdAt: user.created_at } });
-    } catch (error) {
-        res.json({ success: false });
-    }
+    const userId = req.session.userId;
+    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    const account = await loadAccount(userId);
+    if (!account) return res.json({ success: false, message: 'Пользователь не найден' });
+    res.json({ success: true, user: account });
 });
 
-app.post('/api/user/avatar-color', async (req, res) => {
-    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
-    const avatarColor = normalizeAvatarColor(req.body && req.body.avatarColor);
+// Смена срока жизни аккаунта (контракт этапа 1, §3). Срок обязателен и без
+// значения по умолчанию (parseAnonLifetimeStrict): пустой или кривой запрос
+// не должен молча превращать неделю в 30 минут. Новый срок отсчитывается от
+// момента смены: last_active_at — текущая корзина (только вверх, как и любая
+// запись активности). Сессия пересоздаётся с новым sid: у новой куки другой
+// срок (tab — без Expires, day/week — с Expires), а копия прежней куки,
+// которая жила бы по старому сроку, больше ничего не открывает. Сокет
+// держится на прежней сессии — клиент после ответа переподключает его.
+app.post('/api/user/lifetime', async (req, res) => {
+    const sess = req.session;
+    const userId = sess.userId;
+    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    let lifetime;
     try {
-        await dbRun('UPDATE users SET avatar = $1 WHERE id = $2', [avatarColor, req.session.userId]);
-        req.session.avatar = avatarColor;
-        res.json({ success: true, avatar: avatarColor });
-    } catch (error) {
-        res.json({ success: false, message: 'Ошибка обновления цвета аватара' });
+        lifetime = parseAnonLifetimeStrict(req.body?.lifetime);
+    } catch (err) {
+        return res.json({ success: false, message: err.message });
     }
+    const now = Date.now();
+    const row = await dbGet(
+        `UPDATE users SET anon_lifetime = $2, last_active_at = GREATEST(last_active_at, $3)
+         WHERE id = $1
+         RETURNING EXTRACT(EPOCH FROM last_active_at) * 1000 AS last_active_ms`,
+        [userId, lifetime, new Date(activityBucketMs(now))]
+    );
+    if (!row) {
+        // Аккаунт удалён между проверкой сессии и этим запросом: следующая
+        // проверка перечитает БД и закончит сессию.
+        anonActivity.forget(userId);
+        return res.json({ success: false, message: 'Пользователь не найден' });
+    }
+    const lastActiveMs = Number(row.last_active_ms);
+    // Кэш — сразу после записи в БД: даже если пересоздать сессию не выйдет,
+    // срок аккаунта уже новый, и прежнюю сессию middleware приведёт к нему
+    // при следующем продлении (renewSession).
+    anonActivity.remember(userId, { lifetime, lastActiveMs: now, persistedBucketMs: lastActiveMs });
+    await startUserSession(req, {
+        userId, username: sess.username, uniqueCode: sess.uniqueCode, avatar: sess.avatar,
+        isAnonymous: true, anonLifetime: lifetime, renewBucket: renewBucket(now, SESSION_RENEW_MS),
+    });
+    setSessionCookieLifetime(req.session.cookie, lifetime);
+    // Новый CSRF-токен для новой сессии уже выдан в startUserSession: токен,
+    // который видели вместе с прежней кукой, дальше не действует.
+    res.json({ success: true, ...describeAnonLifetime({ lifetime, lastActiveMs }) });
 });
 
 // Личная строка chats вызывающего (chats.id — у каждого участника своя) и
@@ -2139,8 +1647,8 @@ function chatScope(chat) {
 // остаются в списке — клиент показывает их отдельным разделом.
 //
 // member_count и expiry_seconds — в этом же запросе, без запроса на
-// каждый чат: число участников — index-only scan по
-// idx_room_participants_unique (room_id, user_id), таймер — по первичным
+// каждый чат: число участников — index-only scan по уникальному индексу
+// room_participants (room_id, user_id), таймер — по первичным
 // ключам room_settings/chat_settings. expiry_seconds — действующий срок:
 // общий таймер комнаты (для бота — личный), иначе DEFAULT_MESSAGE_EXPIRY_SECONDS
 // ($2), иначе 0. Код выключенного приглашения не отдаётся.
@@ -2352,7 +1860,12 @@ app.get('/api/messages/:chatId', async (req, res) => {
             success: true,
             messages,
             hasMore,
-            chat: { id: chat.id, room_id: chat.room_id, name: chat.name, avatar: chat.avatar, is_bot: chat.is_bot },
+            chat: {
+                id: chat.id, room_id: chat.room_id, name: chat.name, avatar: chat.avatar, is_bot: chat.is_bot,
+                // Подписи кнопок-подсказок — только у чата с ботом. Их отдаёт сервер,
+                // чтобы кнопки и ключевые слова бота не расходились (lib/bot-guide.js).
+                ...(chat.is_bot ? { quickReplies: [...botGuide.QUICK_REPLIES] } : {}),
+            },
         });
     } catch (error) {
         console.error('Get messages error:', error);
@@ -2427,25 +1940,41 @@ function parseRequestedExpiry(value) {
     return DisappearingMessagesManager.normalizeExpirySeconds(value);
 }
 
-const BOT_RESPONSES = ['Интересный вопрос! Расскажите подробнее.', 'Я получил ваше сообщение!', 'Хмм, дайте подумать...', 'Отличное сообщение! Продолжайте.', 'Я бот, но стараюсь быть полезным!', 'Можете уточнить, что именно вас интересует?'];
+// Небольшая пауза перед ответом: он должен выглядеть ответом на сообщение, а
+// не выскакивать одновременно с ним.
+const BOT_REPLY_DELAY_MS = 600;
 
-function scheduleBotReply(chat) {
+// userText — открытый текст сообщения пользователя (чат с ботом не
+// шифруется). Что ответить, решает lib/bot-guide.js по теме запроса.
+function scheduleBotReply(chat, userText) {
     const socketRoomKey = getSocketRoomKey(chat.id, null);
     setTimeout(async () => {
         // Весь колбэк в try: раньше ошибка БД в первом же запросе здесь
         // была необработанным reject'ом и роняла процесс.
         try {
-            const stillExists = await dbGet('SELECT id FROM chats WHERE id = $1 AND is_bot = 1', [chat.id]);
-            if (!stillExists) return;
-
-            const replyText = BOT_RESPONSES[Math.floor(Math.random() * BOT_RESPONSES.length)];
-            // Сообщения бота хранятся от имени владельца чата (sent = 0).
-            const botMessage = await dbGet(
-                `INSERT INTO messages (chat_id, room_id, user_id, text, sent, time, status)
-                 VALUES ($1, NULL, $2, $3, 0, $4, 'read')
-                 RETURNING id, chat_id, room_id, user_id, sent, time, status, created_at, message_type, encrypted`,
-                [chat.id, chat.user_id, writeMessageText(replyText, { room_id: null, chat_id: chat.id, user_id: chat.user_id }), getCurrentTime()]
-            );
+            const replyText = botGuide.botReply(userText).text;
+            // Порядок блокировок users → chats → messages
+            // (docs/security/message-ordering.md, §8): строку владельца
+            // берём явно и первой. Иначе INSERT сам проверял бы внешние
+            // ключи — сначала chats, потом users — и сходился во взаимной
+            // блокировке с удалением аккаунта (users FOR UPDATE, затем
+            // DELETE FROM chats), если пользователь удаляет аккаунт, пока
+            // бот готовит ответ. Аккаунта или чата уже нет — отвечать некому.
+            const botMessage = await withTransaction(async (client) => {
+                const owner = await client.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE', [chat.user_id]);
+                if (owner.rows.length === 0) return null;
+                const alive = await client.query('SELECT id FROM chats WHERE id = $1 AND is_bot = 1 FOR KEY SHARE', [chat.id]);
+                if (alive.rows.length === 0) return null;
+                // Сообщения бота хранятся от имени владельца чата (sent = 0).
+                const inserted = await client.query(
+                    `INSERT INTO messages (chat_id, room_id, user_id, text, sent, time, status)
+                     VALUES ($1, NULL, $2, $3, 0, $4, 'read')
+                     RETURNING id, chat_id, room_id, user_id, sent, time, status, created_at, message_type, encrypted`,
+                    [chat.id, chat.user_id, writeMessageText(replyText, { room_id: null, chat_id: chat.id, user_id: chat.user_id }), getCurrentTime()]
+                );
+                return inserted.rows[0];
+            });
+            if (!botMessage) return;
             // Личный таймер чата с ботом действует и на ответы бота.
             await applyNewMessageExpiry(chat, botMessage.id);
             // Бот "прочитал" сообщения пользователя.
@@ -2464,7 +1993,7 @@ function scheduleBotReply(chat) {
         } catch (e) {
             console.error('Bot error:', e);
         }
-    }, 1500);
+    }, BOT_REPLY_DELAY_MS);
 }
 
 app.post('/api/messages', async (req, res) => {
@@ -2542,7 +2071,9 @@ app.post('/api/messages', async (req, res) => {
         res.json({ success: true, message });
 
         if (roomId) unarchiveForRecipients(chat, userId);
-        if (chat.is_bot) scheduleBotReply(chat);
+        // Чат с ботом ходит открытым текстом. Конверт E2EE сюда слать незачем, а
+        // если он всё же пришёл, прочитать его бот не может — ответит подсказкой.
+        if (chat.is_bot) scheduleBotReply(chat, encrypted ? '' : safeText);
     } catch (error) {
         console.error('Send message error:', error);
         res.json({ success: false, message: 'Ошибка отправки' });
@@ -2688,12 +2219,10 @@ async function addRoomMember(roomId, userId, check) {
         const members = await client.query('SELECT COUNT(*)::int AS n FROM room_participants WHERE room_id = $1', [roomId]);
         if (isRoomFull(members.rows[0].n, room.invite_max_members)) return { error: 'full' };
 
-        const other = await client.query(
-            `SELECT u.username FROM room_participants rp JOIN users u ON u.id = rp.user_id
-             WHERE rp.room_id = $1 AND rp.user_id <> $2 ORDER BY rp.id LIMIT 1`,
-            [roomId, userId]
-        );
-        const name = other.rows[0] ? `Чат с ${other.rows[0].username}` : room.name;
+        // Новичок видит группу под её названием — тем же, что в предпросмотре
+        // приглашения. Раньше строка называлась «Чат с <имя первого
+        // участника>»: в группе это неверно и лишний раз показывает имя.
+        const name = room.name;
         const avatar = name.charAt(0).toUpperCase();
         await client.query(
             `INSERT INTO room_participants (room_id, user_id, visible_from_id)
@@ -3035,7 +2564,6 @@ app.delete('/api/chats/:chatId', async (req, res) => {
                 await client.query('SELECT id FROM rooms WHERE id = $1 FOR UPDATE', [chat.room_id]);
                 await client.query('DELETE FROM room_participants WHERE room_id = $1 AND user_id = $2', [chat.room_id, userId]);
                 await client.query('DELETE FROM e2ee_key_shares WHERE room_id = $1 AND recipient_id = $2', [chat.room_id, userId]);
-                await client.query('DELETE FROM unread WHERE chat_id = $1', [chat.id]);
                 await client.query('DELETE FROM chats WHERE id = $1 AND user_id = $2', [chat.id, userId]);
                 const remaining = await client.query('SELECT 1 FROM room_participants WHERE room_id = $1 LIMIT 1', [chat.room_id]);
                 if (remaining.rows.length === 0) {
@@ -3056,7 +2584,6 @@ app.delete('/api/chats/:chatId', async (req, res) => {
             } else {
                 const deleted = await client.query('DELETE FROM messages WHERE chat_id = $1 RETURNING file_url', [chat.id]);
                 fileUrls = deleted.rows.map(r => r.file_url);
-                await client.query('DELETE FROM unread WHERE chat_id = $1', [chat.id]);
                 await client.query('DELETE FROM chats WHERE id = $1 AND user_id = $2', [chat.id, userId]);
             }
             await client.query('COMMIT');
@@ -3241,7 +2768,7 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
             if (!checkMagicBytes(head, file.mimetype)) {
                 return rejectUpload(res, file, 400, 'Содержимое файла не соответствует его типу');
             }
-            // Метаданные (EXIF/GPS, автор PDF, теги аудио/видео...) снимаются
+            // Метаданные (EXIF/GPS, автор PDF, теги видео...) снимаются
             // у ВСЕХ типов — раньше только у картинок и PDF.
             await stripMetadataFromFile(uploadedFilePath, file.mimetype);
             fileSize = (await fs.promises.stat(uploadedFilePath)).size;
@@ -3263,8 +2790,8 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
         const fileName = encrypted ? null : anonymizedFileName(fileType);
 
         const messageType = encrypted ? 'file'
-            : fileType.startsWith('image/') ? 'image' : fileType.startsWith('video/') ? 'video' : fileType.startsWith('audio/') ? 'audio' : 'file';
-        const messageText = encrypted ? envelope : (caption || (messageType === 'audio' ? 'Голосовое сообщение' : fileName));
+            : fileType.startsWith('image/') ? 'image' : fileType.startsWith('video/') ? 'video' : 'file';
+        const messageText = encrypted ? envelope : (caption || fileName);
 
         const inserted = await dbGet(
             `INSERT INTO messages (chat_id, room_id, user_id, text, file_url, file_name, file_type, message_type, sent, time, status, encrypted, file_size)
@@ -3624,45 +3151,6 @@ app.post('/api/chats/:chatId/prefs', async (req, res) => {
     }
 });
 
-app.post('/api/change-password', passwordLimiter, async (req, res) => {
-    const userId = req.session.userId;
-    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
-    const { currentPassword, newPassword, confirmPassword } = req.body || {};
-    if (!isNonEmptyString(currentPassword) || !isNonEmptyString(newPassword) || typeof confirmPassword !== 'string') return res.json({ success: false, message: 'Заполните все поля' });
-    if (newPassword !== confirmPassword) return res.json({ success: false, message: 'Новые пароли не совпадают' });
-    if (newPassword.length > MAX_PASSWORD_LENGTH) return res.json({ success: false, message: `Пароль не может быть длиннее ${MAX_PASSWORD_LENGTH} символов` });
-    if (currentPassword.length > MAX_LOGIN_PASSWORD_LENGTH) return res.json({ success: false, message: 'Неверный текущий пароль' });
-
-    try {
-        const user = await dbGet('SELECT username, email, password FROM users WHERE id = $1', [userId]);
-        if (!user) return res.json({ success: false, message: 'Пользователь не найден' });
-        if (!user.password) return res.json({ success: false, message: 'У этого аккаунта нет пароля (приватный режим)' });
-        const validPassword = await verifyPassword(currentPassword, user.password);
-        if (!validPassword) return res.json({ success: false, message: 'Неверный текущий пароль' });
-        // Та же политика, что и при регистрации (длина, блок-лист, не
-        // содержит имя/почту — поэтому они и выбираются выше).
-        const policyError = await checkPasswordPolicy(newPassword, { username: user.username, email: user.email });
-        if (policyError) return res.json({ success: false, message: policyError });
-        const hashedPassword = await hashPassword(newPassword);
-
-        await dbRun('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, userId]);
-        recordSecurityEvent(userId, 'password_changed', req);
-        // Смена пароля завершает ВСЕ сессии пользователя (другие устройства,
-        // в т.ч. того, кто мог узнать старый пароль), а не только текущую.
-        await dbRun(`DELETE FROM session WHERE sess->>'userId' = $1`, [String(userId)]);
-        io.in('user:' + userId).disconnectSockets(true);
-
-        req.session.destroy((err) => {
-            res.clearCookie('connect.sid');
-            if (err) console.error('Session destroy error on password change:', err);
-            res.json({ success: true, message: 'Пароль успешно изменён. Войдите заново.' });
-        });
-    } catch (error) {
-        console.error('Change password error:', error);
-        res.json({ success: false, message: 'Ошибка изменения пароля' });
-    }
-});
-
 // После ВСЕХ маршрутов: неизвестный /api/* — JSON-404.
 registerApiNotFound(app);
 
@@ -3675,7 +3163,7 @@ app.use((err, req, res, next) => {
         return res.status(400).json({ success: false, message: `Ошибка загрузки: ${err.message}` });
     }
     if (err.message === 'Неподдерживаемый тип файла') {
-        return res.status(400).json({ success: false, message: 'Разрешены только фото, видео, аудио, PDF и TXT' });
+        return res.status(400).json({ success: false, message: 'Разрешены только фото, видео, PDF и TXT' });
     }
     if (err.type === 'entity.parse.failed') {
         return res.status(400).json({ success: false, message: 'Некорректный JSON в запросе' });
@@ -3687,10 +3175,10 @@ app.use((err, req, res, next) => {
     res.status(500).json({ success: false, message: 'Внутренняя ошибка сервера' });
 });
 
-// Полное удаление пользователя (анонимного при выходе/по сроку или любого
-// по POST /api/account/delete): его сообщения (и их файлы), реакции, E2EE
-// key-shares, участие в комнатах, его заявки на вступление, журнал
-// безопасности, опустевшие комнаты со всей историей и заявками в них,
+// Полное удаление пользователя (POST /api/account/delete и его псевдоним
+// /api/logout, чистка по сроку): его сообщения (и их файлы), реакции, E2EE
+// key-shares, участие в комнатах, его заявки на вступление, опустевшие
+// комнаты со всей историей и заявками в них,
 // chats (chat_settings — каскадом), unread, сама строка users;
 // message_expiry и реакции на его сообщения уходят каскадом. Одной
 // транзакцией — раньше это была серия отдельных DELETE, и первая же ошибка
@@ -3723,11 +3211,9 @@ async function deleteUserAccount(userId) {
         await client.query('DELETE FROM reactions WHERE user_id = $1', [userId]);
         await client.query('DELETE FROM e2ee_key_shares WHERE sender_id = $1 OR recipient_id = $1', [userId]);
         await client.query('DELETE FROM room_participants WHERE user_id = $1', [userId]);
-        await client.query('DELETE FROM unread WHERE user_id = $1', [userId]);
         await client.query('DELETE FROM chats WHERE user_id = $1', [userId]);
         const ownRequests = await client.query('DELETE FROM join_requests WHERE user_id = $1 RETURNING room_id', [userId]);
         requestRoomIds = [...new Set(ownRequests.rows.map(r => r.room_id))];
-        await client.query('DELETE FROM security_events WHERE user_id = $1', [userId]);
 
         if (roomIds.length > 0) {
             const orphaned = await client.query(
@@ -3761,7 +3247,7 @@ async function deleteUserAccount(userId) {
     if (!deleted) return false;
 
     removeUploadedFiles(fileUrls);
-    anonStates.delete(userId);
+    anonActivity.forget(userId);
     io.in('user:' + userId).disconnectSockets(true);
     for (const roomId of survivingRoomIds) notifyRoomMembersChanged(roomId);
     for (const roomId of requestRoomIds) notifyJoinRequestsChanged(roomId);
@@ -3778,45 +3264,39 @@ async function deleteUserAccount(userId) {
 }
 
 // Анонимные аккаунты, срок которых вышел (lib/anon-lifetime.js): выбранный
-// срок без активности (users.last_active_at, у совсем старых строк — время
-// создания) или 7 дней с создания. Раньше удаление шло только через 5 часов
-// после создания и откладывалось, пока жива строка в таблице session, —
-// даже если вкладку давно закрыли. Анонимы с открытым сокетом в этом
-// процессе не трогаются (кроме жёсткого потолка): их активность и так
-// продлевается каждые 5 минут, а сокеты других экземпляров сервера
-// продлевают users.last_active_at в БД.
+// срок без активности по users.last_active_at (корзина, округлённая вверх,
+// — граница та же, что у isAnonExpired). Потолка от создания нет. Раньше
+// удаление шло только через 5 часов после создания и откладывалось, пока
+// жива строка в таблице session, — даже если вкладку давно закрыли.
+// Пользователи с открытым сокетом на этом экземпляре не трогаются: их
+// активность продлевает touch, а сокеты других экземпляров продлевают
+// last_active_at в БД сами. Время — часы сервера, как у записи корзин.
+// Ошибка выборки — наверх, в runExclusive (lib/jobs): такой проход не
+// засчитывается.
 async function purgeExpiredAnonymousUsers() {
-    try {
-        const online = anonSocketCount.keys();
-        const rows = await dbAll(`
-            SELECT u.id FROM users u
-            WHERE u.email IS NULL AND u.password IS NULL
-              AND (
-                  u.created_at < NOW() - $1::integer * INTERVAL '1 second'
-                  OR (
-                      COALESCE(u.last_active_at, u.created_at) < NOW() - (CASE u.anon_lifetime
-                          WHEN 'day' THEN $2::integer WHEN 'week' THEN $3::integer ELSE $4::integer
-                      END) * INTERVAL '1 second'
-                      AND NOT (u.id = ANY($5::int[]))
-                  )
-              )
-            ORDER BY u.created_at
-            LIMIT 200
-        `, [ANON_MAX_AGE_SECONDS, ANON_LIFETIMES.day, ANON_LIFETIMES.week, ANON_LIFETIMES.tab, online]);
-        // В лог — только счётчики, без id анонимных аккаунтов.
-        let failed = 0;
-        for (const row of rows) {
-            try {
-                await deleteUserAccount(row.id);
-            } catch (err) {
-                failed++;
-                logError('[Anon] Не удалось удалить просроченный аккаунт', err);
-            }
+    const now = Date.now();
+    const deadline = (lifetime) => new Date(now - ANON_LIFETIMES[lifetime] * 1000);
+    const rows = await dbAll(`
+        SELECT id FROM users
+        WHERE ((anon_lifetime = 'tab' AND last_active_at <= $1)
+            OR (anon_lifetime = 'day' AND last_active_at <= $2)
+            OR (anon_lifetime = 'week' AND last_active_at <= $3))
+          AND NOT (id = ANY($4::int[]))
+        ORDER BY last_active_at
+        LIMIT 200
+    `, [deadline('tab'), deadline('day'), deadline('week'), userSocketCount.keys()]);
+    // В лог — только счётчики, без id анонимных аккаунтов.
+    let failed = 0;
+    for (const row of rows) {
+        try {
+            await deleteUserAccount(row.id);
+        } catch (err) {
+            failed++;
+            logError('[Anon] Не удалось удалить просроченный аккаунт', err);
         }
-        if (rows.length > 0) console.log(`[Anon] Удалено просроченных анонимных аккаунтов: ${rows.length - failed}`);
-    } catch (error) {
-        logError('[Anon] Purge error', error);
     }
+    metrics.accountsDeleted('expired', rows.length - failed);
+    if (rows.length > 0) console.log(`[Anon] Удалено просроченных анонимных аккаунтов: ${rows.length - failed}`);
 }
 
 // Заявки на вступление старше недели: заявителю — "отклонена", участникам
@@ -3855,6 +3335,7 @@ const jobs = createJobScheduler({
     runExclusive: createRunExclusive(jobLockPool),
     // Задачи с maintenance: true — каждые N мс вместо минут.
     maintenanceMs: testKnobMs('NYXO_TEST_MAINTENANCE_MS'),
+    onRun: metrics.jobRan,
 });
 // Анонимы проверяются каждые 5 минут: самый короткий срок — 30 минут
 // без активности, и опоздание с удалением не должно быть сравнимо с ним.
@@ -3862,18 +3343,23 @@ jobs.register({
     name: 'purgeExpiredAnonymousUsers', run: purgeExpiredAnonymousUsers,
     firstDelayMs: 60 * 1000, intervalMs: 5 * 60 * 1000, maintenance: true, testTick: true,
 });
-// Продление активности анонимов с открытыми сокетами ЭТОГО процесса: у
-// каждого экземпляра свои сокеты, поэтому без блокировки.
+// Открытые сокеты ЭТОГО процесса (у каждого экземпляра свои, поэтому без
+// блокировки), раз в 2,5 минуты: активность их пользователей одним UPDATE и
+// строки tab-сессий (кука без срока) — ещё 24 часа: HTTP-ответа, который
+// пересохранил бы строку, может не быть часами, пока вкладка открыта.
 jobs.register({
-    name: 'touchAnonymousSockets', run: touchAnonymousSockets,
+    name: 'touchOnlineSockets',
+    run: async () => {
+        const online = userSocketCount.keys();
+        await anonActivity.touch(online);
+        await extendTabSessions(dbRun, online);
+    },
     intervalMs: ANON_SOCKET_ACTIVITY_INTERVAL_MS, exclusive: false, maintenance: true,
 });
 jobs.register({
     name: 'purgeExpiredJoinRequests', run: purgeExpiredJoinRequests,
     firstDelayMs: 90 * 1000, intervalMs: 60 * 60 * 1000, maintenance: true,
 });
-// Однократно после старта: строки, оставшиеся от soft-delete старой схемы.
-jobs.register({ name: 'purgeLegacySoftDeletedMessages', run: purgeLegacySoftDeletedMessages, firstDelayMs: 0 });
 // Брошенные временные файлы обработки вложений — в папке этого процесса.
 jobs.register({
     name: 'cleanupStaleTempFiles', run: () => cleanupStaleTempFiles(UPLOADS_DIR, 60 * 60 * 1000),
@@ -3911,7 +3397,6 @@ function onServerListening() {
     console.log('  + Исчезающие сообщения, физическое удаление');
     console.log('  + Шифрование текста сообщений в БД (AES-256-GCM с привязкой к комнате)');
     console.log('  + CSP с nonce, заголовки приватности' + (IS_PRODUCTION ? ', HSTS по https' : ''));
-    console.log('  + Выравнивание времени ответа при входе');
     console.log('  + E2EE: ключи во встроенном хранилище (эта же база)');
     if (ONION_ADDRESS && ONION_PORT) console.log(`  + Onion-сервис: http://${ONION_ADDRESS} (внутренний порт ${ONION_PORT})`);
     console.log(`\n${'='.repeat(60)}\n`);
@@ -3951,6 +3436,7 @@ async function initDatabaseExclusive() {
 // БД и висели на блокировках ALTER TABLE.
 initDatabaseExclusive()
     .then(() => {
+        readiness.migrated = true;
         server.listen(PORT, HOST, onServerListening);
         // Отдельный внутренний порт для tor-service: соединения с него
         // помечаются как onion (lib/tor-support.js). Наружу его не публиковать.
