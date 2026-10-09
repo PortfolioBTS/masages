@@ -27,7 +27,7 @@ const INDEX_HTML = path.join(PUBLIC_DIR, 'index.html');
 
 // Файлы клиента, чьи ссылки на id проверяются. Появился новый файл, который
 // обращается к элементам страницы, — допишите его сюда.
-const CLIENT_SCRIPTS = ['script.js', 'lib/invite.js', 'lib/lifetime.js', 'lib/mime-policy.js'];
+const CLIENT_SCRIPTS = ['script.js', 'lib/invite.js', 'lib/lifetime.js', 'lib/mime-policy.js', 'lib/message-order.js'];
 
 // Подключается не из public/, а самим сервером (socket.io).
 const SERVED_BY_SERVER = new Set(['/socket.io/socket.io.js']);

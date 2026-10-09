@@ -12,11 +12,11 @@ let editingMessageEncrypted = false; // флаг ИСХОДНОГО сообще
 let menuMessage = null;              // сообщение, для которого открыто контекстное меню
 
 // Состояние открытого чата: история грузится страницами с конца.
-let openChatSeq = 0;          // защита от гонок при быстром переключении чатов
-let oldestMessageId = null;   // самый старый загруженный — курсор для ?before=
+let openChatSeq = 0;          // защита от гонок при быстром переключении чатов (счётчик открытий чата, а не seq сообщений)
+let oldestSeq = null;         // seq самого старого загруженного сообщения — курсор для ?beforeSeq=
 let hasMoreHistory = false;
 let loadingHistory = false;
-let lastSeenMessageId = 0;    // до какого id пользователь уже видел открытый чат
+let lastSeenSeq = 0;          // до какого seq пользователь уже видел открытый чат (seq сравнивается только внутри чата)
 let chatListMode = 'chats';   // 'chats' | 'search' — что сейчас показано в сайдбаре
 let membersChangedTimer = null; // debounce событий roomMembersChanged
 
@@ -794,8 +794,8 @@ function handleRoomSessionResult(roomId, result) {
 
     // Участники со сменившимся ключом тоже попадают в warnings, но о них
     // говорит баннер — здесь они не "без шифрования".
-    const delivered = newMembers.filter(m => !failedIds.has(Number(m.id)) && !changedIds.has(Number(m.id)));
-    const undelivered = newMembers.filter(m => failedIds.has(Number(m.id)) && !changedIds.has(Number(m.id)));
+    const delivered = newMembers.filter(member => !failedIds.has(Number(member.id)) && !changedIds.has(Number(member.id)));
+    const undelivered = newMembers.filter(member => failedIds.has(Number(member.id)) && !changedIds.has(Number(member.id)));
     if (delivered.length > 0) {
         const text = `В чат вошли: ${joinNames(delivered)}, им передан ключ шифрования`;
         appendSystemNotice(roomId, text, 'key');
@@ -811,7 +811,7 @@ function handleRoomSessionResult(roomId, result) {
         showToast(text, 'info');
     }
 
-    const newIds = new Set(newMembers.map(m => Number(m.id)));
+    const newIds = new Set(newMembers.map(member => Number(member.id)));
     const failedExisting = Array.from(failedIds).filter(id => !newIds.has(id) && !changedIds.has(id));
     const general = warnings.find(w => w && w.userId == null);
     if (general) {
@@ -1634,9 +1634,9 @@ function updateAnonNote() {
 function resetChatView() {
     currentChatId = null;
     currentRoomId = null;
-    oldestMessageId = null;
+    oldestSeq = null;
     hasMoreHistory = false;
-    lastSeenMessageId = 0;
+    lastSeenSeq = 0;
     openChatSeq++;
     releaseChatResources();
     elements.chatHeader.classList.add('hidden');
@@ -1837,9 +1837,12 @@ async function api(url, options = {}, retried = false) {
     try {
         data = await res.json();
     } catch {
-        return { success: false, message: `Ошибка сервера (HTTP ${res.status})` };
+        return { success: false, httpStatus: res.status, message: `Ошибка сервера (HTTP ${res.status})` };
     }
-    if (!data || typeof data !== 'object') return { success: false, message: `Ошибка сервера (HTTP ${res.status})` };
+    if (!data || typeof data !== 'object') return { success: false, httpStatus: res.status, message: `Ошибка сервера (HTTP ${res.status})` };
+    // Статус нужен тем, кто различает исходы (повтор отправки после 5xx и 409,
+    // sendText); тело при этом остаётся прежним.
+    data.httpStatus = res.status;
     // Кука csrf_token живёт сутки; если она истекла, любой GET выдаст новую.
     if (res.status === 403 && !retried && /CSRF/i.test(data.message || '')) {
         await fetch('/api/auth').catch(() => {});
@@ -2229,12 +2232,12 @@ function setupSocketListeners() {
     // до какого сообщения; самому читателю событие не шлётся. Раньше
     // проверка reader_id !== currentUser.id отсекала своё же чтение — теперь
     // это делает сервер.
-    socket.on('messagesRead', ({ chat_id, room_id, up_to_id } = {}) => {
+    socket.on('messagesRead', ({ chat_id, room_id, up_to_seq } = {}) => {
         if (!belongsToCurrentChat(chat_id, room_id)) return;
-        const upTo = Number(up_to_id);
+        const upTo = Number(up_to_seq);
         if (!upTo) return;
         elements.chatMessages.querySelectorAll('.message.sent').forEach((el) => {
-            if (Number(el.dataset.messageId) <= upTo) {
+            if (el.dataset.seq !== undefined && Number(el.dataset.seq) <= upTo) {
                 if (el._message) el._message.status = 'read';
                 renderMessageStatus(el);
             }
@@ -4179,10 +4182,10 @@ async function openChat(chatId, roomId, name, avatar, online, isBot) {
     currentChatId = chatId;
     currentRoomId = roomId || null;
     const room = currentRoomId;
-    oldestMessageId = null;
+    oldestSeq = null;
     hasMoreHistory = false;
     loadingHistory = false;
-    lastSeenMessageId = 0;
+    lastSeenSeq = 0;
     cancelEditing();
     clearReply();
     const bot = Boolean(Number(isBot));
@@ -4228,7 +4231,7 @@ async function openChat(chatId, roomId, name, avatar, online, isBot) {
     // и лента ужмётся.
     if (bot) renderBotSuggestions(chatId, data.chat && data.chat.quickReplies);
     hasMoreHistory = Boolean(data.hasMore);
-    lastSeenMessageId = data.messages.length ? data.messages[data.messages.length - 1].id : 0;
+    lastSeenSeq = data.messages.length ? Number(data.messages[data.messages.length - 1].seq) : 0;
     flushSystemNotices();
     scrollToBottom();
 
@@ -4238,12 +4241,12 @@ async function openChat(chatId, roomId, name, avatar, online, isBot) {
 }
 
 async function loadOlderMessages() {
-    if (!hasMoreHistory || loadingHistory || !currentChatId || !oldestMessageId) return;
+    if (!hasMoreHistory || loadingHistory || !currentChatId || oldestSeq === null) return;
     loadingHistory = true;
     const seq = openChatSeq;
     const roomId = currentRoomId;
     try {
-        const data = await api(`/api/messages/${currentChatId}?before=${oldestMessageId}`);
+        const data = await api(`/api/messages/${currentChatId}?beforeSeq=${oldestSeq}`);
         if (seq !== openChatSeq || !data.success) return;
         await decryptMessagesInPlace(data.messages, roomId);
         if (seq !== openChatSeq) return;
@@ -4268,17 +4271,29 @@ async function refreshCurrentChat() {
     if (seq !== openChatSeq || !data.success) return;
     if (roomId) ensureE2eeRoomSession(chatId, roomId);
 
+    // Убираем то, что за время обрыва удалили: на экране сообщение, чей seq
+    // лежит внутри диапазона свежей страницы, а самого id в странице нет.
+    // Сравнение seq — только внутри этого чата; id — строки.
     if (data.messages.length > 0) {
-        const pageIds = new Set(data.messages.map(m => Number(m.id)));
-        const minId = data.hasMore ? Number(data.messages[0].id) : 0;
-        const maxId = Number(data.messages[data.messages.length - 1].id);
-        elements.chatMessages.querySelectorAll('.message[data-message-id]').forEach((el) => {
-            const id = Number(el.dataset.messageId);
-            if (id >= minId && id <= maxId && !pageIds.has(id)) removeMessageElement(id);
+        const pageIds = new Set(data.messages.map(m => String(m.id)));
+        const minSeq = data.hasMore ? Number(data.messages[0].seq) : 0;
+        const maxSeq = Number(data.messages[data.messages.length - 1].seq);
+        elements.chatMessages.querySelectorAll('.message[data-message-id][data-seq]').forEach((el) => {
+            const elSeq = Number(el.dataset.seq);
+            if (elSeq >= minSeq && elSeq <= maxSeq && !pageIds.has(el.dataset.messageId)) removeMessageElement(el.dataset.messageId);
         });
     }
 
-    const fresh = data.messages.filter(m => !elements.chatMessages.querySelector(`[data-message-id="${m.id}"]`));
+    // Новые для ленты — по id; расхождение seq у уже показанного id
+    // игнорируется (раздел 12, строка 18 контракта), в консоль — для отладки.
+    const shown = new Set([...elements.chatMessages.querySelectorAll('.message[data-message-id]')].map(el => el.dataset.messageId));
+    const fresh = NyxoMessageOrder.dedupById(data.messages, shown);
+    for (const m of data.messages) {
+        const el = findMessageEl(m.id);
+        if (el && el.dataset.seq !== undefined && Number(el.dataset.seq) !== Number(m.seq)) {
+            console.warn('Порядок сообщений: seq известного сообщения изменился, игнорируем');
+        }
+    }
     if (fresh.length === 0) return;
     await decryptMessagesInPlace(fresh, roomId);
     if (seq !== openChatSeq) return;
@@ -4286,7 +4301,7 @@ async function refreshCurrentChat() {
     fresh.forEach(m => appendMessage(m, false));
     if (stick) scrollToBottom();
     else fresh.forEach((m) => { if (!isOwnMessage(m)) bumpJumpDown(); });
-    lastSeenMessageId = Math.max(lastSeenMessageId, ...fresh.map(m => m.id));
+    lastSeenSeq = Math.max(lastSeenSeq, ...fresh.map(m => Number(m.seq)));
 }
 
 function renderMessages(messages, mode) {
@@ -4294,18 +4309,38 @@ function renderMessages(messages, mode) {
     messages.forEach(msg => fragment.appendChild(createMessageElement(msg, false)));
     if (mode === 'prepend') elements.chatMessages.prepend(fragment);
     else elements.chatMessages.replaceChildren(fragment);
-    if (messages.length > 0 && (mode !== 'prepend' || oldestMessageId === null || messages[0].id < oldestMessageId)) {
-        oldestMessageId = messages[0].id;
+    if (messages.length > 0 && (mode !== 'prepend' || oldestSeq === null || Number(messages[0].seq) < oldestSeq)) {
+        oldestSeq = Number(messages[0].seq);
     }
 }
 
 // Возвращает false, если сообщение уже на экране (например, пришло и в
 // ответе POST, и по сокету).
+// Лента упорядочена по seq, а не по порядку прихода: сообщение по сокету
+// может прийти переставленным, и placeMessageElement ставит его на своё место.
 function appendMessage(message, animate) {
-    if (elements.chatMessages.querySelector(`[data-message-id="${message.id}"]`)) return false;
-    elements.chatMessages.appendChild(createMessageElement(message, animate));
-    if (oldestMessageId === null) oldestMessageId = message.id;
+    if (findMessageEl(message.id)) return false;
+    placeMessageElement(createMessageElement(message, animate));
+    if (oldestSeq === null || Number(message.seq) < oldestSeq) oldestSeq = Number(message.seq);
     return true;
+}
+
+// Элемент сообщения по id. id — строка из цифр, но через CSS.escape: в
+// селектор не должно попасть ничего лишнего, что бы ни пришло с сервера.
+function findMessageEl(id) {
+    return elements.chatMessages.querySelector(`[data-message-id="${CSS.escape(String(id))}"]`);
+}
+
+// Ставит элемент сообщения на место по seq (двоичный поиск); служебные строки
+// без data-seq пропускаются. Сообщение с наибольшим seq (обычный случай) уходит
+// в конец ленты, как и раньше.
+function placeMessageElement(el) {
+    const container = elements.chatMessages;
+    const items = [...container.children].filter(child => child.dataset && child.dataset.seq !== undefined);
+    const seqs = items.map(child => Number(child.dataset.seq));
+    const index = NyxoMessageOrder.insertionIndex(seqs, Number(el.dataset.seq));
+    if (index >= items.length) container.appendChild(el);
+    else container.insertBefore(el, items[index]);
 }
 
 function formatReplyQuote(reply) {
@@ -4317,7 +4352,7 @@ function formatReplyQuote(reply) {
 function updateReplyQuotes(messageId, update) {
     elements.chatMessages.querySelectorAll('.message').forEach((el) => {
         const m = el._message;
-        if (!m || !m.reply_to || Number(m.reply_to.id) !== Number(messageId)) return;
+        if (!m || !m.reply_to || String(m.reply_to.id) !== String(messageId)) return;
         update(m.reply_to);
         const small = el.querySelector('.reply-to small');
         if (small) small.textContent = formatReplyQuote(m.reply_to);
@@ -4325,7 +4360,7 @@ function updateReplyQuotes(messageId, update) {
 }
 
 function removeMessageElement(messageId) {
-    const el = elements.chatMessages.querySelector(`[data-message-id="${messageId}"]`);
+    const el = findMessageEl(messageId);
     if (el) {
         const box = el.querySelector('.encrypted-attachment');
         if (box && attachmentObserver) attachmentObserver.unobserve(box);
@@ -4342,7 +4377,7 @@ function removeMessageElement(messageId) {
 }
 
 function applyMessageEdit(messageId, displayText, failed = false) {
-    const bubble = elements.chatMessages.querySelector(`[data-message-id="${messageId}"]`);
+    const bubble = findMessageEl(messageId);
     if (bubble) {
         if (bubble._message) {
             bubble._message.text = displayText; // чтобы меню "Ответить/Изменить" видело новый текст
@@ -4391,10 +4426,12 @@ function refreshOwnMessageStatuses() {
     elements.chatMessages.querySelectorAll('.message.sent').forEach(renderMessageStatus);
 }
 
-function lastRenderedMessageId() {
+// Последнее показанное сообщение: { id, seq } (служебные строки пропускаются)
+// или null. Лента упорядочена по seq, поэтому последнее в DOM — самое новое.
+function lastRenderedMessage() {
     let el = elements.chatMessages.lastElementChild;
-    while (el && !el.dataset.messageId) el = el.previousElementSibling; // служебные строки пропускаем
-    return el ? Number(el.dataset.messageId) : 0;
+    while (el && el.dataset.seq === undefined) el = el.previousElementSibling;
+    return el ? { id: el.dataset.messageId, seq: Number(el.dataset.seq) } : null;
 }
 
 // Отмечаем прочитанным то, что пользователь реально видит: вкладка
@@ -4402,13 +4439,13 @@ function lastRenderedMessageId() {
 let markReadTimer = null;
 function markVisibleMessagesRead() {
     if (!currentChatId || document.visibilityState !== 'visible' || !isNearBottom()) return;
-    const lastId = lastRenderedMessageId();
-    if (!lastId || lastId <= lastSeenMessageId) return;
-    lastSeenMessageId = lastId;
+    const last = lastRenderedMessage();
+    if (!last || !last.seq || last.seq <= lastSeenSeq) return;
+    lastSeenSeq = last.seq;
     const chatId = currentChatId;
     clearTimeout(markReadTimer);
     markReadTimer = setTimeout(() => {
-        api(`/api/chats/${chatId}/read`, { method: 'POST', body: JSON.stringify({ upToId: lastId }) });
+        api(`/api/chats/${chatId}/read`, { method: 'POST', body: JSON.stringify({ upToSeq: last.seq }) });
     }, 1000);
 }
 
@@ -4479,8 +4516,8 @@ function updatePlaintextMarkers() {
     });
 }
 
-// Время показывается в часовом поясе пользователя (created_at), а не
-// сервера. Для старых сообщений без created_at — прежнее поле time.
+// Время показывается в часовом поясе пользователя (created_at, до минуты),
+// а не сервера: колонки time (HH:MM по часам сервера) больше нет.
 function formatMessageTime(message) {
     if (message.created_at) {
         const date = new Date(message.created_at);
@@ -4490,14 +4527,15 @@ function formatMessageTime(message) {
             return `${date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' })} ${hhmm}`;
         }
     }
-    return message.time || '';
+    return '';
 }
 
 function createMessageElement(message, animate) {
     const isMine = isOwnMessage(message);
     const div = document.createElement('div');
     div.className = `message ${isMine ? 'sent' : 'received'}${animate ? ' message-new' : ''}`;
-    div.dataset.messageId = message.id;
+    div.dataset.messageId = String(message.id);
+    if (message.seq !== undefined && message.seq !== null) div.dataset.seq = String(message.seq);
     div._message = message;
 
     const contentDiv = document.createElement('div');
