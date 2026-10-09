@@ -101,6 +101,8 @@ const { createChallenge, consumeSolution, setSecret: setPowSecret } = require('.
 const { createPgLimits, initPgLimitsSchema, respondBusy, LimitStoreError } = require('./lib/pg-limits');
 // Метрики Prometheus без id и IP; отдаёт их GET /metrics по токену (lib/routes/health.js).
 const { createMetrics } = require('./lib/metrics');
+// CSRF-токен, привязанный к сессии (кука csrf_token + заголовок X-CSRF-Token).
+const { createCsrf } = require('./lib/csrf');
 
 // Несколько экземпляров сервера на одной базе (миграции и фоновые задачи
 // под advisory-блокировками) и запись ошибок в лог без id из detail.
@@ -880,6 +882,10 @@ const pgLimits = createPgLimits({
 const powUsedStore = pgLimits.powUsedStore();
 const bundleLimiter = pgLimits.slidingLimiter('bundle');
 
+// CSRF-токен привязан к сессии: ключ выводится из SESSION_SECRET (HKDF), так что
+// смена секрета заодно сбрасывает все выданные токены.
+const csrf = createCsrf({ secret: sessionSecret, onRejected: metrics.csrfRejected });
+
 // Массовую регистрацию сдерживает proof-of-work (lib/pow.js). IP-лимит остался
 // мягким и только для clearnet: для onion он запер бы регистрацию всем сразу
 // (общий IP контейнера tor).
@@ -1111,56 +1117,9 @@ app.use((req, res, next) => {
 
 app.use(cookieParser());
 
-function issueCsrfCookie(req, res) {
-    const token = crypto.randomBytes(32).toString('hex');
-    res.cookie('csrf_token', token, {
-        httpOnly: false,
-        // Раньше в production — 'none' (кука уходила и на межсайтовые
-        // запросы). Secure — по фактическому протоколу: .onion и локальная
-        // разработка по http иначе не получили бы куку вовсе.
-        sameSite: 'lax',
-        secure: Boolean(req.secure),
-        maxAge: 24 * 60 * 60 * 1000
-    });
-    return token;
-}
-
-app.use((req, res, next) => {
-    if (req.path.startsWith('/socket.io')) return next();
-
-    // Раньше кука csrf_token выставлялась только на небезопасных методах, а
-    // безопасные (GET) сразу пропускались без неё — значит самая первая
-    // загрузка страницы (GET /) никогда не сеяла куку, и когда фронт слал
-    // первый POST (обычно /api/login или /api/register), проверка ниже
-    // видела отсутствие куки и просто выставляла её "на лету", пропуская
-    // САМ этот запрос без проверки (см. п.11 аудита). Теперь кука сеется на
-    // любом запросе, включая GET — к моменту первого POST от SPA (после
-    // того как браузер уже загрузил index.html/script.js через GET) она уже
-    // гарантированно на месте.
-    const cookieToken = req.cookies['csrf_token'];
-    const cookieWasMissing = !cookieToken;
-    const issuedToken = cookieWasMissing ? issueCsrfCookie(req, res) : cookieToken;
-
-    if (SAFE_METHODS.has(req.method)) return next();
-
-    // Небезопасный метод: токен обязателен и должен совпадать с уже
-    // существовавшей (не только что выставленной в этом же запросе) кукой —
-    // иначе это тот самый bootstrap-обход, который раньше пропускал первый
-    // POST без проверки.
-    const headerToken = req.headers['x-csrf-token'];
-    if (cookieWasMissing || !headerToken || issuedToken !== headerToken) {
-        return res.status(403).json({ success: false, message: 'Запрещено: неверный CSRF-токен' });
-    }
-    next();
-});
-
-// Тело парсится только после проверок источника и CSRF. Глобальный лимит
-// остаётся маленьким (100 КБ по умолчанию); key-shares — исключение: до 200
-// получателей по 8 КБ (x3dh-init с постквантовой частью весит 2.4–4 КБ).
-// Специальный парсер стоит раньше: общий видит уже разобранное тело и
-// пропускает запрос.
-app.use('/api/keys/key-shares', express.json({ limit: '2mb' }));
-app.use(express.json());
+// CSRF-токен (lib/csrf.js) проверяется ниже, после sessionMiddleware: токен
+// привязан к сессии, и ему нужен её id. Статике (CSS, JS, иконки) токен не
+// нужен, поэтому она раздаётся раньше и кук не получает.
 
 // Разрешает браузеру хранить ответ, но перед каждым использованием
 // сверяться с сервером (If-None-Match/If-Modified-Since -> 304 без тела).
@@ -1192,7 +1151,7 @@ registerPreSessionRoutes(app, serverContext);
 app.use(sessionMiddleware);
 
 // Сессия проверяется на КАЖДОМ запросе (validateSession). Недействительная
-// (без isAnonymous — от входа по паролю, которого больше нет) или истёкшая
+// (без isAnonymous — от прежней версии с постоянными аккаунтами) или истёкшая
 // заменяется пустой, а /api/auth сообщит клиенту, что сессия закончилась
 // (req.authEnded). Живая — это активность: корзина в БД пишется раз в
 // корзину, и запись ждётся, потому что ответы ниже читают last_active_at.
@@ -1219,6 +1178,19 @@ app.use((req, res, next) => {
         next();
     }).catch(next);
 });
+
+// CSRF: после sessionMiddleware и проверки сессии (привязка — id сессии, а у
+// запроса без входа, например регистрации, — кука nyxo_pre) и до разбора тела.
+// Источник небезопасного запроса проверен ещё раньше (isTrustedOrigin).
+app.use(csrf.middleware);
+
+// Тело парсится только после проверок источника и CSRF. Глобальный лимит
+// остаётся маленьким (100 КБ по умолчанию); key-shares — исключение: до 200
+// получателей по 8 КБ (x3dh-init с постквантовой частью весит 2.4–4 КБ).
+// Специальный парсер стоит раньше: общий видит уже разобранное тело и
+// пропускает запрос.
+app.use('/api/keys/key-shares', express.json({ limit: '2mb' }));
+app.use(express.json());
 
 // Лимит на /api/ — ДО регистрации маршрутов из lib/: Express применяет
 // middleware в порядке регистрации, и раньше /api/keys/* и
@@ -1310,6 +1282,9 @@ function startUserSession(req, fields) {
         req.session.regenerate((err) => {
             if (err) return reject(err);
             Object.assign(req.session, fields);
+            // Новая сессия — новая привязка CSRF-токена: токен «до входа» или от
+            // прежней сессии больше не подходит, клиент получает новый в этом же ответе.
+            csrf.issue(req, req.res);
             resolve();
         });
     });
@@ -1460,10 +1435,10 @@ function endSession(req, res, message) {
     req.session.destroy((err) => {
         if (err) logError('[Account] Не удалось удалить сессию', err);
         res.clearCookie('connect.sid');
-        // CSRF-куку не удаляем, а выдаём новую: страница после удаления не
-        // перезагружается, и следующая регистрация без куки получила бы 403
-        // «неверный CSRF-токен».
-        issueCsrfCookie(req, res);
+        // CSRF-куку не удаляем, а выдаём новую (под привязку «до входа», с новым
+        // nyxo_pre): страница после удаления не перезагружается, и следующая
+        // регистрация без куки получила бы 403 «неверный CSRF-токен».
+        csrf.issue(req, res, { freshPre: true });
         res.set('Clear-Site-Data', '"cache"');
         res.json({ success: true, message });
     });
@@ -1620,9 +1595,8 @@ app.post('/api/user/lifetime', async (req, res) => {
         isAnonymous: true, anonLifetime: lifetime, renewBucket: renewBucket(now, SESSION_RENEW_MS),
     });
     setSessionCookieLifetime(req.session.cookie, lifetime);
-    // Новая сессия — и новый CSRF-токен, как после удаления аккаунта: токен,
+    // Новый CSRF-токен для новой сессии уже выдан в startUserSession: токен,
     // который видели вместе с прежней кукой, дальше не действует.
-    issueCsrfCookie(req, res);
     res.json({ success: true, ...describeAnonLifetime({ lifetime, lastActiveMs }) });
 });
 
