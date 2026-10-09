@@ -78,11 +78,16 @@ test('первый старт на схеме 2.0.0: строки [Reset] в л�
     assert.deepStrictEqual(version.rows, [{ schema_version: 0 }]);
 });
 
-test('повторный старт: строк [Reset] нет, снимок схемы тот же', async () => {
+test('повторный старт: строк [Reset] нет, снимок схемы и строка schema_meta те же', async () => {
     const before = await schemaSnapshot(suite.db);
+    // Строка версии целиком, вместе с updated_at: раннер обновляет её только
+    // когда меняется сама версия, а не на каждом старте.
+    const metaBefore = (await suite.query('SELECT schema_version, updated_at FROM schema_meta')).rows;
+    assert.strictEqual(metaBefore.length, 1);
     const mark = suite.server.logs.mark();
     await suite.server.restart();
     await suite.server.logs.waitFor('База данных инициализирована', { from: mark });
     assert.strictEqual(suite.server.logs.count('[Reset]', { from: mark }), 0, 'сброс не должен повторяться');
     assert.deepStrictEqual(await schemaSnapshot(suite.db), before);
+    assert.deepStrictEqual((await suite.query('SELECT schema_version, updated_at FROM schema_meta')).rows, metaBefore);
 });
