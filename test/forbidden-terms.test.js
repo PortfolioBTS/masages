@@ -59,6 +59,7 @@ const RULES = [
             { file: 'test/legacy-reset.test.js', reason: 'юнит-тест того же модуля сброса старой схемы' },
             { file: 'server.js', line: /Схема версии 2\.0\.0 \(аккаунты с email и паролем\)/, reason: 'комментарий у вызова сброса старой схемы в initDatabase' },
             { file: 'lib/security-utils.js', line: /url\.password|логин\/пароль/, reason: 'проверка Origin: адрес с логином и паролем (userinfo) не принимается — это разбор URL, а не вход в приложение' },
+            { file: 'lib/security-txt.js', line: /url.password/, reason: 'security.txt: адрес связи с логином и паролем (userinfo) не принимается — это разбор URL, а не вход в приложение' },
             { file: 'lib/env-check.js', reason: 'пароль в DATABASE_URL, хэши утёкших паролей базы (DATABASE_PASSWORD), остатки PASSWORD_PEPPER и HIBP_CHECK в предупреждении «переменная не используется»' },
             { file: 'test/env-check.test.js', reason: 'юнит-тест модуля env-check (те же слова: пароль базы, PASSWORD_PEPPER)' },
             { file: /^public\//, line: /ни email, ни телефона, ни паролей/, reason: 'обязательная фраза интерфейса (экран входа, «Как это работает»)' },

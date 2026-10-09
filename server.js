@@ -30,7 +30,7 @@ const { ipKeyGenerator } = rateLimit;
 const { stripMetadataFromFile, cleanupStaleTempFiles } = require('./lib/metadata-stripper');
 const DisappearingMessagesManager = require('./lib/disappearing-messages');
 const { encryptText, decryptText, messageAad } = require('./lib/message-crypto');
-const { sanitizeText, getPrivacyHeaders } = require('./lib/privacy');
+const { sanitizeText, getPrivacyHeaders, createHstsMiddleware } = require('./lib/privacy');
 const {
     ALLOWED_MIME_TYPES,
     MIME_EXTENSIONS,
@@ -96,7 +96,13 @@ const botGuide = require('./lib/bot-guide');
 
 // Onion-сервис (контейнер tor-service/) и proof-of-work для регистрации
 const { ONION_ADDRESS, ONION_PORT, onionMiddleware, onionUrlFor, isOnionHost, isOnionSocket, listenOnionPort } = require('./lib/tor-support');
-const { createChallenge, verifySolution } = require('./lib/pow');
+const { createChallenge, consumeSolution, setSecret: setPowSecret } = require('./lib/pow');
+// Точные лимиты и одноразовость PoW в Postgres (UNLOGGED-таблицы, ключи — HMAC).
+const { createPgLimits, initPgLimitsSchema, respondBusy, LimitStoreError } = require('./lib/pg-limits');
+// Метрики Prometheus без id и IP; отдаёт их GET /metrics по токену (lib/routes/health.js).
+const { createMetrics } = require('./lib/metrics');
+// CSRF-токен, привязанный к сессии (кука csrf_token + заголовок X-CSRF-Token).
+const { createCsrf } = require('./lib/csrf');
 
 // Несколько экземпляров сервера на одной базе (миграции и фоновые задачи
 // под advisory-блокировками) и запись ошибок в лог без id из detail.
@@ -111,6 +117,8 @@ const { registerPreSessionRoutes, registerApiRoutes, registerApiNotFound } = req
 const { createJobScheduler, registerJobModules } = require('./lib/jobs');
 
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+// HSTS preload включает только владелец домена: HSTS_PRELOAD=yes (см. lib/privacy.js).
+const HSTS_PRELOAD = process.env.HSTS_PRELOAD === 'yes';
 
 // ALLOWED_MIME_TYPES и MIME_EXTENSIONS (жёсткий маппинг mimetype ->
 // расширение на диске, расширение никогда не берётся из имени файла) —
@@ -265,6 +273,12 @@ function resolveRealIp(headers, connectingIp) {
     return connectingIp;
 }
 
+// Метрики процесса: счётчики событий и HTTP по шаблону маршрута (lib/metrics.js).
+const metrics = createMetrics();
+// Готовность для GET /readyz: порт открывается только после миграций, но флаг
+// явный — проба не должна зависеть от порядка запуска.
+const readiness = { migrated: false };
+
 const app = express();
 app.set('trust proxy', 1);
 
@@ -297,6 +311,8 @@ const toPositiveInt = (value) => {
 // Самым первым: признак onion-запроса (req.isOnion) нужен лимитерам и
 // заголовкам ниже, а у onion-запроса onionMiddleware ещё и вычищает
 // присланные клиентом X-Forwarded-* — прокси перед приложением там нет.
+// Метрики HTTP — самым первым, чтобы считать и отказы всех проверок ниже.
+app.use(metrics.httpMiddleware());
 app.use(onionMiddleware);
 
 app.use((req, res, next) => {
@@ -313,36 +329,9 @@ const rateLimitKeyGenerator = (req) => ipKeyGenerator(req.realIp || req.ip);
 const sessionUserId = (req) => (req.session && req.session.userId) || null;
 const RATE_LIMIT_DEFAULTS = { standardHeaders: true, legacyHeaders: false };
 
-// Массовую регистрацию теперь сдерживает proof-of-work (lib/pow.js). IP-лимит
-// остался мягким и только для clearnet: для onion он запер бы регистрацию
-// всем сразу (общий IP контейнера tor).
-const registerLimiter = rateLimit({
-    ...RATE_LIMIT_DEFAULTS,
-    windowMs: 60 * 60 * 1000,
-    max: 10,
-    skip: (req) => req.isOnion,
-    keyGenerator: rateLimitKeyGenerator,
-    message: { success: false, message: 'Слишком много регистраций. Попробуйте позже.' }
-});
-
-// Вход в комнату по коду: даже 130-битный код не должен перебираться
-// с бесконечной скоростью, и утёкший список кодов — массово проверяться.
-const joinUserLimiter = rateLimit({
-    ...RATE_LIMIT_DEFAULTS,
-    windowMs: 15 * 60 * 1000,
-    max: 20,
-    skip: (req) => !sessionUserId(req),
-    keyGenerator: (req) => `user:${sessionUserId(req)}`,
-    message: { success: false, message: 'Слишком много попыток входа в чат. Попробуйте позже.' }
-});
-const joinIpLimiter = rateLimit({
-    ...RATE_LIMIT_DEFAULTS,
-    windowMs: 15 * 60 * 1000,
-    max: 60,
-    skip: (req) => req.isOnion,
-    keyGenerator: rateLimitKeyGenerator,
-    message: { success: false, message: 'Слишком много попыток входа в чат. Попробуйте позже.' }
-});
+// Точные лимиты (регистрация, вход по коду, выдача ключей) и одноразовость PoW
+// живут в Postgres и создаются ниже, рядом с пулом и SESSION_SECRET
+// (lib/pg-limits.js). Здесь — общий лимит /api, он только в памяти.
 
 // 300 запросов за 15 минут (~1 в 3 секунды) активный пользователь чата
 // выбирал за несколько минут — особенно когда клиент перезапрашивал
@@ -509,6 +498,7 @@ const DB_POOL_CONFIG = {
     connectionTimeoutMillis: 10000,
 };
 const pool = new Pool(DB_POOL_CONFIG);
+metrics.attachRuntime({ pool, io });
 // Без обработчика 'error' обрыв простаивающего соединения (рестарт или
 // failover Postgres, сетевой сбой) — необработанное событие 'error',
 // которое завершает весь процесс.
@@ -712,6 +702,8 @@ async function initDatabase() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_session_user ON session((sess->>'userId'))`);
 
     await initE2eeGroupsSchema(pool);
+    // Лимиты и использованные решения PoW (UNLOGGED, lib/pg-limits.js).
+    await initPgLimitsSchema(pool);
     // Публичные E2EE-ключи хранятся в этой же базе (lib/key-store.js).
     await initKeyStoreSchema(pool);
     // Таблицы message_expiry/chat_settings/room_settings ссылаются на
@@ -875,6 +867,54 @@ const INVITE_TTL_SECONDS = Math.min(
 
 const sessionSecret = process.env.SESSION_SECRET;
 if (!sessionSecret) throw new Error('SESSION_SECRET не задан в переменных окружения');
+
+// ---- Точные лимиты в Postgres (lib/pg-limits.js, roadmap R11) ----
+//
+// Регистрация, вход по коду, выдача bundle ключей и одноразовость решений PoW
+// переживают рестарт: счётчики лежат в UNLOGGED-таблицах, ключи клиентов (IP,
+// id) — только как HMAC от SESSION_SECRET. Ошибка хранилища закрывает лимит:
+// 503 {success:false, code:'busy'}. Ключ PoW тоже выводится из SESSION_SECRET,
+// чтобы выданные задачи действовали и после рестарта.
+setPowSecret(sessionSecret);
+const pgLimits = createPgLimits({
+    pool,
+    secret: sessionSecret,
+    hooks: { limited: metrics.rateLimited, storeError: metrics.limitStoreError },
+});
+const powUsedStore = pgLimits.powUsedStore();
+const bundleLimiter = pgLimits.slidingLimiter('bundle');
+
+// CSRF-токен привязан к сессии: ключ выводится из SESSION_SECRET (HKDF), так что
+// смена секрета заодно сбрасывает все выданные токены.
+const csrf = createCsrf({ secret: sessionSecret, onRejected: metrics.csrfRejected });
+
+// Массовую регистрацию сдерживает proof-of-work (lib/pow.js). IP-лимит остался
+// мягким и только для clearnet: для onion он запер бы регистрацию всем сразу
+// (общий IP контейнера tor).
+const registerLimiter = pgLimits.rateLimiter('register', {
+    windowMs: 60 * 60 * 1000,
+    max: 10,
+    skip: (req) => req.isOnion,
+    keyGenerator: rateLimitKeyGenerator,
+    message: { success: false, message: 'Слишком много регистраций. Попробуйте позже.' }
+});
+
+// Вход в комнату по коду: даже 130-битный код не должен перебираться
+// с бесконечной скоростью, и утёкший список кодов — массово проверяться.
+const joinUserLimiter = pgLimits.rateLimiter('join-user', {
+    windowMs: 15 * 60 * 1000,
+    max: 20,
+    skip: (req) => !sessionUserId(req),
+    keyGenerator: (req) => `user:${sessionUserId(req)}`,
+    message: { success: false, message: 'Слишком много попыток входа в чат. Попробуйте позже.' }
+});
+const joinIpLimiter = pgLimits.rateLimiter('join-ip', {
+    windowMs: 15 * 60 * 1000,
+    max: 60,
+    skip: (req) => req.isOnion,
+    keyGenerator: rateLimitKeyGenerator,
+    message: { success: false, message: 'Слишком много попыток входа в чат. Попробуйте позже.' }
+});
 
 // Интервал продления сессии: 5 минут; в сквозных тестах —
 // NYXO_TEST_RENEW_INTERVAL_MS (только при NODE_ENV=test).
@@ -1058,13 +1098,11 @@ app.use((req, res, next) => {
         host: req.headers.host,
         secure: req.secure && !req.isOnion,
     }));
-    // HSTS — только для настоящего https в production: по http браузер его
-    // всё равно игнорирует, а в разработке он "залипал" бы на localhost.
-    if (IS_PRODUCTION && req.secure && !req.isOnion) {
-        res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
-    }
     next();
 });
+// HSTS — только для настоящего https в production и не для onion; preload — по
+// HSTS_PRELOAD=yes (риски — в env-check). См. getHstsHeader в lib/privacy.js.
+app.use(createHstsMiddleware({ production: IS_PRODUCTION, preload: HSTS_PRELOAD }));
 
 // Небезопасные методы — только со своих страниц (см. isTrustedOrigin).
 // Второй рубеж к CSRF-токену ниже: SameSite=Lax и токен защищают от
@@ -1073,61 +1111,15 @@ app.use((req, res, next) => {
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 app.use((req, res, next) => {
     if (SAFE_METHODS.has(req.method) || isTrustedOrigin(req.headers)) return next();
+    metrics.originRejected();
     res.status(403).json({ success: false, message: 'Запрещено: запрос с чужого сайта' });
 });
 
 app.use(cookieParser());
 
-function issueCsrfCookie(req, res) {
-    const token = crypto.randomBytes(32).toString('hex');
-    res.cookie('csrf_token', token, {
-        httpOnly: false,
-        // Раньше в production — 'none' (кука уходила и на межсайтовые
-        // запросы). Secure — по фактическому протоколу: .onion и локальная
-        // разработка по http иначе не получили бы куку вовсе.
-        sameSite: 'lax',
-        secure: Boolean(req.secure),
-        maxAge: 24 * 60 * 60 * 1000
-    });
-    return token;
-}
-
-app.use((req, res, next) => {
-    if (req.path.startsWith('/socket.io')) return next();
-
-    // Раньше кука csrf_token выставлялась только на небезопасных методах, а
-    // безопасные (GET) сразу пропускались без неё — значит самая первая
-    // загрузка страницы (GET /) никогда не сеяла куку, и когда фронт слал
-    // первый POST (обычно регистрация), проверка ниже
-    // видела отсутствие куки и просто выставляла её "на лету", пропуская
-    // САМ этот запрос без проверки (см. п.11 аудита). Теперь кука сеется на
-    // любом запросе, включая GET — к моменту первого POST от SPA (после
-    // того как браузер уже загрузил index.html/script.js через GET) она уже
-    // гарантированно на месте.
-    const cookieToken = req.cookies['csrf_token'];
-    const cookieWasMissing = !cookieToken;
-    const issuedToken = cookieWasMissing ? issueCsrfCookie(req, res) : cookieToken;
-
-    if (SAFE_METHODS.has(req.method)) return next();
-
-    // Небезопасный метод: токен обязателен и должен совпадать с уже
-    // существовавшей (не только что выставленной в этом же запросе) кукой —
-    // иначе это тот самый bootstrap-обход, который раньше пропускал первый
-    // POST без проверки.
-    const headerToken = req.headers['x-csrf-token'];
-    if (cookieWasMissing || !headerToken || issuedToken !== headerToken) {
-        return res.status(403).json({ success: false, message: 'Запрещено: неверный CSRF-токен' });
-    }
-    next();
-});
-
-// Тело парсится только после проверок источника и CSRF. Глобальный лимит
-// остаётся маленьким (100 КБ по умолчанию); key-shares — исключение: до 200
-// получателей по 8 КБ (x3dh-init с постквантовой частью весит 2.4–4 КБ).
-// Специальный парсер стоит раньше: общий видит уже разобранное тело и
-// пропускает запрос.
-app.use('/api/keys/key-shares', express.json({ limit: '2mb' }));
-app.use(express.json());
+// CSRF-токен (lib/csrf.js) проверяется ниже, после sessionMiddleware: токен
+// привязан к сессии, и ему нужен её id. Статике (CSS, JS, иконки) токен не
+// нужен, поэтому она раздаётся раньше и кук не получает.
 
 // Разрешает браузеру хранить ответ, но перед каждым использованием
 // сверяться с сервером (If-None-Match/If-Modified-Since -> 304 без тела).
@@ -1149,7 +1141,11 @@ app.use(express.static(path.join(__dirname, 'public'), {
 // Маршруты из lib/routes/ (см. lib/routes/index.js): здесь — те, которым
 // сессия не нужна; ниже, после лимитера /api/, — обычные маршруты API.
 // serverContext — общий контекст маршрутов и задач из lib/ (lib/jobs).
-const serverContext = Object.freeze({ pool, dbGet, dbAll, dbRun, withTransaction, io, logError, isProduction: IS_PRODUCTION });
+const serverContext = Object.freeze({
+    pool, dbGet, dbAll, dbRun, withTransaction, io, logError, isProduction: IS_PRODUCTION,
+    // Мониторинг и security.txt (lib/routes/health.js, lib/routes/well-known.js).
+    metrics, readiness, env: process.env,
+});
 registerPreSessionRoutes(app, serverContext);
 
 app.use(sessionMiddleware);
@@ -1183,6 +1179,19 @@ app.use((req, res, next) => {
     }).catch(next);
 });
 
+// CSRF: после sessionMiddleware и проверки сессии (привязка — id сессии, а у
+// запроса без входа, например регистрации, — кука nyxo_pre) и до разбора тела.
+// Источник небезопасного запроса проверен ещё раньше (isTrustedOrigin).
+app.use(csrf.middleware);
+
+// Тело парсится только после проверок источника и CSRF. Глобальный лимит
+// остаётся маленьким (100 КБ по умолчанию); key-shares — исключение: до 200
+// получателей по 8 КБ (x3dh-init с постквантовой частью весит 2.4–4 КБ).
+// Специальный парсер стоит раньше: общий видит уже разобранное тело и
+// пропускает запрос.
+app.use('/api/keys/key-shares', express.json({ limit: '2mb' }));
+app.use(express.json());
+
 // Лимит на /api/ — ДО регистрации маршрутов из lib/: Express применяет
 // middleware в порядке регистрации, и раньше /api/keys/* и
 // /api/chats/:id/participants шли мимо лимита.
@@ -1191,7 +1200,7 @@ app.use('/api/', apiLimiter);
 // Публичные E2EE-ключи: /api/keys/* → встроенное хранилище (lib/key-store.js).
 // Регистрируется строго ПОСЛЕ sessionMiddleware — маршрутам нужна сессия.
 // Чужие ключи отдаются только при общей комнате — модулю нужна БД.
-registerE2eeKeyRoutes(app, { dbGet, dbAll });
+registerE2eeKeyRoutes(app, { dbGet, dbAll, bundleLimiter });
 // Групповой E2EE: список участников чата + key-shares (тоже нужна сессия).
 registerE2eeGroupRoutes(app, { dbGet, dbAll, dbRun, io });
 registerApiRoutes(app, serverContext);
@@ -1273,6 +1282,9 @@ function startUserSession(req, fields) {
         req.session.regenerate((err) => {
             if (err) return reject(err);
             Object.assign(req.session, fields);
+            // Новая сессия — новая привязка CSRF-токена: токен «до входа» или от
+            // прежней сессии больше не подходит, клиент получает новый в этом же ответе.
+            csrf.issue(req, req.res);
             resolve();
         });
     });
@@ -1283,15 +1295,27 @@ function startUserSession(req, fields) {
 const POW_PURPOSES = new Set(['register-anon']);
 const POW_FAILED_RESPONSE = { success: false, message: 'Не пройдена проверка proof-of-work', powRequired: true };
 
-function checkPow(req, purpose) {
+// 'ok' | 'invalid' | 'replayed' | 'busy'. Задача сжигается в Postgres
+// (pow_used) только у решения, прошедшего проверку, — неверный nonce её не
+// тратит. Хранилище не отвечает — 'busy': регистрацию без проверки
+// одноразовости не пропускаем (лимит закрывается), а решение остаётся
+// несожжённым — клиент повторит его позже.
+async function checkPow(req, purpose) {
     const solution = req.body && req.body.pow;
-    if (!solution || typeof solution !== 'object') return false;
+    if (!solution || typeof solution !== 'object') return 'invalid';
     try {
-        return verifySolution(solution, purpose) === true;
+        return await consumeSolution(solution, purpose, powUsedStore);
     } catch (err) {
-        console.error('[PoW] Ошибка проверки решения:', err.message);
-        return false;
+        // Сбой хранилища уже записан в лог самим хранилищем.
+        if (!(err instanceof LimitStoreError)) logError('[PoW] Ошибка проверки решения', err);
+        return 'busy';
     }
+}
+
+function respondPowFailure(res, verdict) {
+    metrics.powRejected(verdict);
+    if (verdict === 'busy') return respondBusy(res);
+    return res.json(POW_FAILED_RESPONSE);
 }
 
 app.get('/api/pow/challenge', (req, res) => {
@@ -1359,7 +1383,8 @@ app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
     } catch (err) {
         return res.json({ success: false, message: err.message });
     }
-    if (!checkPow(req, 'register-anon')) return res.json(POW_FAILED_RESPONSE);
+    const powVerdict = await checkPow(req, 'register-anon');
+    if (powVerdict !== 'ok') return respondPowFailure(res, powVerdict);
     try {
         const uniqueCode = await generateUniqueCodeAsync();
         const username = await generateAnonymousUsernameAsync();
@@ -1384,6 +1409,7 @@ app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
         // Имя и id анонимного пользователя в лог не пишутся: связка "время
         // создания — id — имя" в логах хостинга как раз и деанонимизирует.
 
+        metrics.registered();
         res.json({
             success: true,
             user: {
@@ -1409,10 +1435,10 @@ function endSession(req, res, message) {
     req.session.destroy((err) => {
         if (err) logError('[Account] Не удалось удалить сессию', err);
         res.clearCookie('connect.sid');
-        // CSRF-куку не удаляем, а выдаём новую: страница после удаления не
-        // перезагружается, и следующая регистрация без куки получила бы 403
-        // «неверный CSRF-токен».
-        issueCsrfCookie(req, res);
+        // CSRF-куку не удаляем, а выдаём новую (под привязку «до входа», с новым
+        // nyxo_pre): страница после удаления не перезагружается, и следующая
+        // регистрация без куки получила бы 403 «неверный CSRF-токен».
+        csrf.issue(req, res, { freshPre: true });
         res.set('Clear-Site-Data', '"cache"');
         res.json({ success: true, message });
     });
@@ -1430,6 +1456,7 @@ async function deleteOwnAccount(req, res) {
         logError('[Account] Не удалось удалить аккаунт', error);
         return res.json({ success: false, message: 'Ошибка удаления аккаунта' });
     }
+    metrics.accountsDeleted('user');
     endSession(req, res, 'Аккаунт и все данные удалены');
 }
 app.post('/api/account/delete', deleteOwnAccount);
@@ -1568,9 +1595,8 @@ app.post('/api/user/lifetime', async (req, res) => {
         isAnonymous: true, anonLifetime: lifetime, renewBucket: renewBucket(now, SESSION_RENEW_MS),
     });
     setSessionCookieLifetime(req.session.cookie, lifetime);
-    // Новая сессия — и новый CSRF-токен, как после удаления аккаунта: токен,
+    // Новый CSRF-токен для новой сессии уже выдан в startUserSession: токен,
     // который видели вместе с прежней кукой, дальше не действует.
-    issueCsrfCookie(req, res);
     res.json({ success: true, ...describeAnonLifetime({ lifetime, lastActiveMs }) });
 });
 
@@ -3269,6 +3295,7 @@ async function purgeExpiredAnonymousUsers() {
             logError('[Anon] Не удалось удалить просроченный аккаунт', err);
         }
     }
+    metrics.accountsDeleted('expired', rows.length - failed);
     if (rows.length > 0) console.log(`[Anon] Удалено просроченных анонимных аккаунтов: ${rows.length - failed}`);
 }
 
@@ -3308,6 +3335,7 @@ const jobs = createJobScheduler({
     runExclusive: createRunExclusive(jobLockPool),
     // Задачи с maintenance: true — каждые N мс вместо минут.
     maintenanceMs: testKnobMs('NYXO_TEST_MAINTENANCE_MS'),
+    onRun: metrics.jobRan,
 });
 // Анонимы проверяются каждые 5 минут: самый короткий срок — 30 минут
 // без активности, и опоздание с удалением не должно быть сравнимо с ним.
@@ -3408,6 +3436,7 @@ async function initDatabaseExclusive() {
 // БД и висели на блокировках ALTER TABLE.
 initDatabaseExclusive()
     .then(() => {
+        readiness.migrated = true;
         server.listen(PORT, HOST, onServerListening);
         // Отдельный внутренний порт для tor-service: соединения с него
         // помечаются как onion (lib/tor-support.js). Наружу его не публиковать.
