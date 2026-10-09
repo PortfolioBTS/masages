@@ -61,11 +61,25 @@ async function userRow(suite, id) {
 }
 
 // Строка session: { sid, expireMs, sess } (sess — разобранный JSON) или null.
+// expire — timestamp БЕЗ часового пояса, который сервер пишет через
+// to_timestamp() в поясе сессии Postgres; драйвер pg прочёл бы его как
+// локальное время процесса теста, поэтому момент считает сама база.
 async function sessionRow(suite, sid) {
-    const { rows } = await suite.query(`SELECT sid, sess, expire FROM session WHERE sid = $1`, [sid]);
+    const { rows } = await suite.query(
+        `SELECT sid, sess, EXTRACT(EPOCH FROM (expire AT TIME ZONE current_setting('TimeZone'))) * 1000 AS expire_ms
+         FROM session WHERE sid = $1`, [sid]
+    );
     if (!rows[0]) return null;
     const sess = typeof rows[0].sess === 'string' ? JSON.parse(rows[0].sess) : rows[0].sess;
-    return { sid: rows[0].sid, expireMs: new Date(rows[0].expire).getTime(), sess };
+    return { sid: rows[0].sid, expireMs: Math.round(Number(rows[0].expire_ms)), sess };
+}
+
+// POST /api/register/anonymous без обёрток: сырой ответ (Set-Cookie, статус).
+async function registerRaw(client, lifetime = 'tab') {
+    const pow = await client.solvePow('register-anon');
+    const res = await client.post('/api/register/anonymous', { lifetime, pow });
+    if (res.body && res.body.success === true) client.user = res.body.user;
+    return res;
 }
 
 async function count(suite, sql, params = []) {
@@ -114,6 +128,7 @@ module.exports = {
     signSessionCookie,
     userRow,
     sessionRow,
+    registerRaw,
     count,
     forceRenewal,
     setLastActive,
