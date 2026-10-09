@@ -199,8 +199,10 @@ class TestClient {
     // Сырой ответ: квота и отказы проверяются по статусу.
     // Порядок полей FormData важен (раздел 6.3 контракта): chatId, encrypted,
     // clientMessageId, envelope — ДО файла, иначе fileFilter сервера их не увидит.
-    // clientMessageId: undefined — не присылать поле; по умолчанию случайный id.
-    async uploadRaw(chatId, bytes, mime, { filename = 'file.bin', text, encrypted, envelope, clientMessageId = newClientMessageId() } = {}) {
+    // clientMessageId: undefined — не присылать поле; ключа нет — случайный id.
+    async uploadRaw(chatId, bytes, mime, opts = {}) {
+        const { filename = 'file.bin', text, encrypted, envelope } = opts;
+        const clientMessageId = 'clientMessageId' in opts ? opts.clientMessageId : newClientMessageId();
         const form = new FormData();
         form.append('chatId', String(chatId));
         if (text !== undefined) form.append('text', text);

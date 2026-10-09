@@ -8,6 +8,9 @@
 
 const { test } = require('node:test');
 const assert = require('assert');
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { createSuite, roomWithMember, waitUntil } = require('./helpers/scenarios');
 
 const suite = createSuite('messages-order');
@@ -106,34 +109,78 @@ test('несколько сообщений за одну минуту от дв
 
 // ---------- граница видимости ----------
 
-test('вступление и отправка одновременно: новичок видит ровно сообщения после своего visible_from_seq', async () => {
+test('вступление и отправка одновременно: новичок видит ровно сообщения после своего visible_from_seq (несколько кругов)', async () => {
+    let sawBefore = false;
+    let sawAfter = false;
+    for (let round = 0; round < 4; round++) {
+        const owner = suite.client({ name: 'владелец' });
+        const guest = suite.client({ name: 'гость' });
+        await owner.registerAnon();
+        await guest.registerAnon();
+        const ownerChat = await owner.createRoom('Граница');
+        const { code } = await owner.invite(ownerChat.id);
+        const pending = await guest.join(code);
+        for (let i = 0; i < 3; i++) await owner.send(ownerChat.id, `до ${i}`);
+
+        // 12 отправок идут в то же время, что и одобрение заявки.
+        const sends = Array.from({ length: 12 }, (_, i) => owner.send(ownerChat.id, `вместе ${i}`));
+        const approval = owner.approve(pending.requestId);
+        await Promise.all([approval, ...sends]);
+
+        const guestChat = (await guest.chats()).find(c => c.room_id === ownerChat.room_id);
+        const bound = (await suite.query('SELECT visible_from_seq FROM room_participants WHERE room_id = $1 AND user_id = $2', [ownerChat.room_id, guest.user.id])).rows[0].visible_from_seq;
+        const all = (await suite.query('SELECT id, seq FROM messages WHERE room_id = $1', [ownerChat.room_id])).rows;
+        const expected = all.filter(m => m.seq > bound).map(m => String(m.id)).sort();
+        // Непрочитанное новичка начинается с той же границы (до открытия истории: она отмечает прочитанным).
+        const unread = (await guest.chats()).find(c => c.id === guestChat.id).unread;
+        assert.strictEqual(unread, expected.length, 'непрочитанное — только то, что видно');
+        const seen = (await guest.messages(guestChat.id)).messages.map(m => m.id).sort();
+        assert.deepStrictEqual(seen, expected, 'новичок видит ровно то, что отправлено после вступления');
+        assert.ok(all.some(m => m.seq <= bound), 'до границы есть сообщения (по меньшей мере три первых)');
+        assert.strictEqual(seen.length, all.length - all.filter(m => m.seq <= bound).length);
+        sawBefore = sawBefore || all.filter(m => m.seq <= bound).length > 3;
+        sawAfter = sawAfter || expected.length > 0;
+    }
+    // Не требуем конкретного исхода гонки, но за четыре круга сообщения обычно оказываются по обе стороны границы.
+    assert.ok(sawBefore || sawAfter, 'гонка действительно шла');
+});
+
+test('граница видимости детерминированно: очередь на строке комнаты — отправка до вступления скрыта, после — видна', async () => {
     const owner = suite.client({ name: 'владелец' });
     const guest = suite.client({ name: 'гость' });
     await owner.registerAnon();
     await guest.registerAnon();
-    const ownerChat = await owner.createRoom('Граница');
+    const ownerChat = await owner.createRoom('Очередь');
     const { code } = await owner.invite(ownerChat.id);
     const pending = await guest.join(code);
-    for (let i = 0; i < 3; i++) await owner.send(ownerChat.id, `до ${i}`);
+    const blocked = async () => Number((await suite.query(
+        `SELECT count(*) AS n FROM pg_stat_activity
+         WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()`)).rows[0].n);
 
-    // 12 отправок идут в то же время, что и одобрение заявки.
-    const sends = Array.from({ length: 12 }, (_, i) => owner.send(ownerChat.id, `вместе ${i}`));
-    const approval = owner.approve(pending.requestId);
-    await Promise.all([approval, ...sends]);
-
-    const guestChat = (await guest.chats()).find(c => c.room_id === ownerChat.room_id);
+    // Тест держит строку комнаты, как держала бы транзакция отправки: три запроса выстраиваются в очередь в известном порядке.
+    const holder = await suite.db.connect();
+    let beforeJoin, approval, afterJoin;
+    try {
+        await holder.query('BEGIN');
+        await holder.query('SELECT id FROM rooms WHERE id = $1 FOR NO KEY UPDATE', [ownerChat.room_id]);
+        beforeJoin = owner.send(ownerChat.id, 'в очереди до вступления');
+        await waitUntil(async () => (await blocked()) >= 1, { what: 'первая отправка встала в очередь' });
+        approval = owner.approve(pending.requestId);
+        await waitUntil(async () => (await blocked()) >= 2, { what: 'вступление встало в очередь' });
+        afterJoin = owner.send(ownerChat.id, 'в очереди после вступления');
+        await waitUntil(async () => (await blocked()) >= 3, { what: 'вторая отправка встала в очередь' });
+        await holder.query('COMMIT');
+    } finally {
+        await holder.query('ROLLBACK').catch(() => {});
+        holder.release();
+    }
+    const [first, , second] = await Promise.all([beforeJoin, approval, afterJoin]);
     const bound = (await suite.query('SELECT visible_from_seq FROM room_participants WHERE room_id = $1 AND user_id = $2', [ownerChat.room_id, guest.user.id])).rows[0].visible_from_seq;
-    const all = (await suite.query('SELECT id, seq FROM messages WHERE room_id = $1', [ownerChat.room_id])).rows;
-    const expected = all.filter(m => m.seq > bound).map(m => String(m.id)).sort();
-    const seen = (await guest.messages(guestChat.id)).messages.map(m => m.id).sort();
-    assert.deepStrictEqual(seen, expected, 'новичок видит ровно то, что отправлено после вступления');
-    assert.ok(all.some(m => m.seq <= bound), 'часть сообщений ушла до вступления');
-    // Граница точна: ни одно зафиксированное до вступления не видно, ни одно после — не скрыто.
-    const hidden = all.filter(m => m.seq <= bound).length;
-    assert.strictEqual(seen.length, all.length - hidden);
-    // Непрочитанное новичка начинается с той же границы.
-    const unread = (await guest.chats()).find(c => c.id === guestChat.id).unread;
-    assert.strictEqual(unread, expected.length - 0, 'непрочитанное — только то, что видно');
+    assert.strictEqual(bound, first.seq, 'граница — seq последнего сообщения, зафиксированного до вступления');
+    assert.ok(second.seq > bound, 'отправка, вставшая в очередь после вступления, получила seq больше границы');
+    const guestChat = (await guest.chats()).find(c => c.room_id === ownerChat.room_id);
+    const seen = (await guest.messages(guestChat.id)).messages;
+    assert.deepStrictEqual(seen.map(m => m.id), [second.id], 'новичок видит только сообщение после вступления');
 });
 
 // ---------- история вверх, непрочитанное, прочтение ----------
@@ -230,5 +277,388 @@ test('схема: колонок time, deleted, visible_from_id, last_read_messa
     assert.ok(indexes.includes('idx_messages_room_seq') && indexes.includes('idx_messages_chat_seq'));
     const dup = await suite.query(`SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_messages_room_seq'`);
     assert.match(dup.rows[0].indexdef, /UNIQUE/);
-    assert.ok(waitUntil, 'helper подключён');
+});
+
+// ---------- идентификаторы клиента ----------
+
+const ID_CONFLICT_BODY = { success: false, code: 'id-conflict', message: 'Идентификатор сообщения занят, повторите отправку' };
+
+const countRows = async (sql, params = []) => Number((await suite.query(sql, params)).rows[0].n);
+const messageRows = (roomId) => countRows('SELECT count(*) AS n FROM messages WHERE room_id = $1', [roomId]);
+
+test('сообщение в комнату без clientMessageId — 400 client-outdated; неверный формат — 400 bad-message-id; ничего не записано', async () => {
+    const p = await pair();
+    const before = await messageRows(p.roomId);
+    for (const missing of [undefined, null, '']) {
+        const res = await p.owner.sendRaw(p.ownerChat.id, 'без id', { clientMessageId: missing });
+        assert.strictEqual(res.status, 400, JSON.stringify(missing));
+        assert.strictEqual(res.body.success, false);
+        assert.strictEqual(res.body.code, 'client-outdated');
+        assert.match(res.body.message, /Обновите страницу/);
+    }
+    const bad = ['abc', '999999', '2147483648', '01234567', ' 1234567', '1234567 ', '1e7', '-1234567', '12345678901', 1234567, true, ['1234567'], {}];
+    for (const value of bad) {
+        const res = await p.owner.sendRaw(p.ownerChat.id, 'неверный id', { clientMessageId: value });
+        assert.strictEqual(res.status, 400, JSON.stringify(value));
+        assert.strictEqual(res.body.code, 'bad-message-id', JSON.stringify(value));
+        assert.strictEqual(res.body.success, false);
+    }
+    assert.strictEqual(await messageRows(p.roomId), before, 'ни одна отправка с плохим id не записалась');
+});
+
+test('чат с ботом clientMessageId игнорирует: id выдаёт сервер, мусор в поле не мешает', async () => {
+    const client = suite.client();
+    await client.registerAnon();
+    const bot = await client.botChat();
+    const plain = await client.sendRaw(bot.id, 'привет', { clientMessageId: undefined });
+    assert.strictEqual(plain.status, 200);
+    assert.strictEqual(plain.body.success, true);
+    const withJunk = await client.sendRaw(bot.id, 'ещё', { clientMessageId: 'abc' });
+    assert.strictEqual(withJunk.status, 200, 'мусорное поле игнорируется');
+    const chosen = await client.sendRaw(bot.id, 'и ещё', { clientMessageId: '1234567' });
+    assert.notStrictEqual(chosen.body.message.id, '1234567', 'id чата с ботом выбирает сервер, а не клиент');
+    assert.match(chosen.body.message.id, /^[1-9]\d{6,9}$/);
+});
+
+test('id сообщения комнаты — тот, что выбрал клиент; seq присваивает сервер', async () => {
+    const p = await pair();
+    const { newClientMessageId } = require('./helpers/client');
+    const id = newClientMessageId();
+    const res = await p.owner.sendRaw(p.ownerChat.id, 'мой id', { clientMessageId: id });
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.body.message.id, id);
+    const row = (await suite.query('SELECT id, seq, room_id, user_id FROM messages WHERE id = $1', [id])).rows[0];
+    assert.strictEqual(String(row.id), id);
+    assert.strictEqual(row.seq, res.body.message.seq);
+    // Игнорируется и seq, присланный клиентом: его выдаёт только триггер.
+    const forged = await p.owner.sendRaw(p.ownerChat.id, 'свой seq', { seq: 1 });
+    assert.ok(forged.body.message.seq > 1);
+});
+
+test('повтор того же запроса (потерян ответ) — 200 с сохранённой строкой, дубля и второй рассылки нет, seq не тратится', async (t) => {
+    const p = await pair();
+    const sock = await p.member.socket();
+    t.after(() => sock.close());
+    const { newClientMessageId } = require('./helpers/client');
+    const id = newClientMessageId();
+    const first = await p.owner.sendRaw(p.ownerChat.id, 'один раз', { clientMessageId: id });
+    const counterBefore = (await suite.query('SELECT msg_seq FROM rooms WHERE id = $1', [p.roomId])).rows[0].msg_seq;
+    const second = await p.owner.sendRaw(p.ownerChat.id, 'один раз', { clientMessageId: id });
+    assert.strictEqual(second.status, 200);
+    assert.strictEqual(second.body.success, true);
+    assert.strictEqual(second.body.message.id, first.body.message.id);
+    assert.strictEqual(second.body.message.seq, first.body.message.seq);
+    assert.strictEqual(second.body.message.text, 'один раз');
+    assert.strictEqual(await countRows('SELECT count(*) AS n FROM messages WHERE id = $1', [id]), 1);
+    const counterAfter = (await suite.query('SELECT msg_seq FROM rooms WHERE id = $1', [p.roomId])).rows[0].msg_seq;
+    assert.strictEqual(counterAfter, counterBefore, 'откат повторной вставки откатил и приращение seq');
+    // Событие newMessage для этого id пришло ровно одно.
+    const barrier = await p.owner.send(p.ownerChat.id, 'барьер');
+    await sock.waitFor('newMessage', m => m.id === barrier.id);
+    assert.strictEqual(sock.collect('newMessage').filter(m => m.id === id).length, 1);
+});
+
+test('одинаковые запросы одновременно — одна строка, все ответы 200 с одним seq', async () => {
+    const p = await pair();
+    const { newClientMessageId } = require('./helpers/client');
+    const id = newClientMessageId();
+    const counterBefore = (await suite.query('SELECT msg_seq FROM rooms WHERE id = $1', [p.roomId])).rows[0].msg_seq;
+    const mark = suite.server.logs.mark();
+    const results = await Promise.all(Array.from({ length: 6 }, () => p.owner.sendRaw(p.ownerChat.id, 'гонка', { clientMessageId: id })));
+    for (const res of results) {
+        assert.strictEqual(res.status, 200, JSON.stringify(res.body));
+        assert.strictEqual(res.body.message.id, id);
+    }
+    assert.strictEqual(new Set(results.map(r => r.body.message.seq)).size, 1, 'у всех ответов один seq');
+    assert.strictEqual(await countRows('SELECT count(*) AS n FROM messages WHERE id = $1', [id]), 1);
+    const counterAfter = (await suite.query('SELECT msg_seq FROM rooms WHERE id = $1', [p.roomId])).rows[0].msg_seq;
+    assert.strictEqual(counterAfter, counterBefore + 1, 'seq израсходован один раз');
+    assert.ok(!suite.server.logs.find(/40P01|Send message error/, { from: mark }), 'ни взаимных блокировок, ни ошибок сервера');
+});
+
+test('конфликт id: чужое сообщение, другой текст, другая комната — 409 id-conflict, чужое не меняется, seq не тратится', async () => {
+    const p = await pair();
+    const other = await pair({ name: 'Другая' });
+    const { newClientMessageId } = require('./helpers/client');
+    const id = newClientMessageId();
+    const original = await p.owner.send(p.ownerChat.id, 'настоящее', { clientMessageId: id });
+    const counterBefore = (await suite.query('SELECT msg_seq FROM rooms WHERE id = $1', [p.roomId])).rows[0].msg_seq;
+
+    // Другой участник той же комнаты занимает id.
+    const taken = await p.member.sendRaw(p.memberChat.id, 'настоящее', { clientMessageId: id });
+    assert.strictEqual(taken.status, 409);
+    assert.deepStrictEqual(taken.body, ID_CONFLICT_BODY);
+    // Тот же автор, но другой текст.
+    const different = await p.owner.sendRaw(p.ownerChat.id, 'другое содержимое', { clientMessageId: id });
+    assert.strictEqual(different.status, 409);
+    assert.deepStrictEqual(different.body, ID_CONFLICT_BODY);
+    // Тот же id из чужой комнаты.
+    const foreign = await other.owner.sendRaw(other.ownerChat.id, 'настоящее', { clientMessageId: id });
+    assert.strictEqual(foreign.status, 409);
+    assert.deepStrictEqual(foreign.body, ID_CONFLICT_BODY);
+
+    const row = (await suite.query('SELECT room_id, user_id FROM messages WHERE id = $1', [id])).rows[0];
+    assert.strictEqual(row.room_id, p.roomId);
+    assert.strictEqual(row.user_id, p.owner.user.id);
+    const history = (await p.member.messages(p.memberChat.id)).messages;
+    assert.strictEqual(history.find(m => m.id === id).text, 'настоящее', 'чужое сообщение не изменилось');
+    assert.strictEqual(history.find(m => m.id === id).seq, original.seq);
+    const counterAfter = (await suite.query('SELECT msg_seq FROM rooms WHERE id = $1', [p.roomId])).rows[0].msg_seq;
+    assert.strictEqual(counterAfter, counterBefore, 'проигравшие вставки откатились вместе с приращением seq');
+    // Следующее обычное сообщение получает следующий seq, дыры нет.
+    const next = await p.owner.send(p.ownerChat.id, 'после конфликтов');
+    assert.strictEqual(next.seq, original.seq + 1);
+});
+
+// ---------- надгробия ----------
+
+const tombstone = async (id) => (await suite.query('SELECT id, expires_at FROM message_tombstones WHERE id = $1', [id])).rows[0];
+
+test('удаление автором оставляет надгробие: id занять нельзя, срок — сутки в пределах 30–31 суток; после просрочки и очистки id свободен', async () => {
+    const p = await pair();
+    const { newClientMessageId } = require('./helpers/client');
+    const id = newClientMessageId();
+    await p.owner.send(p.ownerChat.id, 'удалю', { clientMessageId: id });
+    assert.strictEqual(await tombstone(id), undefined, 'пока сообщение живо, надгробия нет');
+    assert.strictEqual((await p.owner.del(`/api/messages/${id}`)).body.success, true);
+
+    const stone = await tombstone(id);
+    assert.ok(stone, 'надгробие записано триггером');
+    const check = (await suite.query(
+        `SELECT date_trunc('day', expires_at) = expires_at AS whole_day,
+                expires_at >= now() + interval '30 days' AS long_enough,
+                expires_at <= now() + interval '31 days' AS not_too_long
+         FROM message_tombstones WHERE id = $1`, [id])).rows[0];
+    assert.deepStrictEqual(check, { whole_day: true, long_enough: true, not_too_long: true });
+    const cols = (await suite.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'message_tombstones' ORDER BY 1`)).rows.map(r => r.column_name);
+    assert.deepStrictEqual(cols, ['expires_at', 'id'], 'в надгробии нет ни комнаты, ни автора, ни точного времени');
+
+    // Тот же автор с тем же текстом: строки нет, но id в надгробии — 409, а не «повтор».
+    const reuse = await p.owner.sendRaw(p.ownerChat.id, 'удалю', { clientMessageId: id });
+    assert.strictEqual(reuse.status, 409);
+    assert.deepStrictEqual(reuse.body, ID_CONFLICT_BODY);
+    const stranger = await p.member.sendRaw(p.memberChat.id, 'занять', { clientMessageId: id });
+    assert.strictEqual(stranger.status, 409);
+
+    // Сдвиг часов на 31 сутки и очистка надгробий: id принимается.
+    await suite.time.rewindTombstone(id, 31 * 24 * 3600 * 1000 + 1000);
+    await waitUntil(async () => !(await tombstone(id)), { what: 'очистка надгробий убрала просроченную запись', timeoutMs: 8000 });
+    const again = await p.member.sendRaw(p.memberChat.id, 'занять', { clientMessageId: id });
+    assert.strictEqual(again.status, 200, JSON.stringify(again.body));
+    assert.strictEqual(again.body.message.id, id);
+});
+
+test('надгробие оставляют и таймер сообщения, и удаление аккаунта, и каскад комнаты', async () => {
+    const p = await pair();
+    const { newClientMessageId } = require('./helpers/client');
+    // Таймер: сообщение с коротким сроком исчезает само.
+    const timed = await p.owner.send(p.ownerChat.id, 'исчезну', { expirySeconds: 1 });
+    await waitUntil(async () => !(await suite.query('SELECT 1 FROM messages WHERE id = $1', [timed.id])).rows[0], { what: 'сообщение исчезло по таймеру', timeoutMs: 8000 });
+    assert.ok(await tombstone(timed.id), 'по таймеру: надгробие есть');
+
+    // Удаление аккаунта автора.
+    const mine = newClientMessageId();
+    const ownerMessage = await p.member.send(p.memberChat.id, 'аккаунт удалят', { clientMessageId: mine });
+    await p.member.deleteAccount();
+    assert.ok(await tombstone(ownerMessage.id), 'удаление аккаунта: надгробие есть');
+
+    // Каскад комнаты: последний участник выходит, сообщения уходят вместе с комнатой.
+    const lone = suite.client();
+    await lone.registerAnon();
+    const room = await lone.createRoom('Одинокая');
+    const kept = await lone.send(room.id, 'уйду с комнатой');
+    await lone.leave(room.id);
+    assert.strictEqual(await countRows('SELECT count(*) AS n FROM rooms WHERE id = $1', [room.room_id]), 0);
+    assert.ok(await tombstone(kept.id), 'каскад комнаты: надгробие есть');
+    // Чужой участник того же id занять не может.
+    const anyone = await pair({ name: 'Занять' });
+    const grab = await anyone.owner.sendRaw(anyone.ownerChat.id, 'занять', { clientMessageId: kept.id });
+    assert.strictEqual(grab.status, 409);
+});
+
+test('просроченное надгробие, не убранное очисткой, не мешает; повторное удаление начинает срок заново', async () => {
+    const p = await pair();
+    const { newClientMessageId } = require('./helpers/client');
+    const id = newClientMessageId();
+    await p.owner.send(p.ownerChat.id, 'первое', { clientMessageId: id });
+    await p.owner.del(`/api/messages/${id}`);
+    // Срок вышел (очистка могла уже убрать строку, могла ещё нет): id свободен.
+    await suite.query(`UPDATE message_tombstones SET expires_at = now() - interval '1 hour' WHERE id = $1`, [id]);
+    const reuse = await p.owner.sendRaw(p.ownerChat.id, 'второе', { clientMessageId: id });
+    assert.strictEqual(reuse.status, 200, JSON.stringify(reuse.body));
+    // Второе удаление снова запрещает id на 30 суток, а не наследует прошлый срок.
+    await p.owner.del(`/api/messages/${id}`);
+    const stone = (await suite.query(`SELECT expires_at >= now() + interval '30 days' AS ok FROM message_tombstones WHERE id = $1`, [id])).rows[0];
+    assert.ok(stone && stone.ok === true, 'срок надгробия начался заново');
+});
+
+// ---------- вложения ----------
+
+const dirFiles = () => (fs.existsSync(suite.server.uploadsDir) ? fs.readdirSync(suite.server.uploadsDir).sort() : []);
+const ENVELOPE = '{"v":2,"alg":"senderkey-v2","senderKeyId":"k","iteration":0,"iv":"AA","ct":"AA","sig":"AA"}';
+const cipherBytes = () => crypto.randomBytes(300);
+
+function uploadForm(fields, order = ['chatId', 'encrypted', 'clientMessageId', 'envelope']) {
+    const form = new FormData();
+    for (const key of order) if (fields[key] !== undefined) form.append(key, String(fields[key]));
+    form.append('file', new Blob([cipherBytes()], { type: 'application/octet-stream' }), 'file.bin');
+    return form;
+}
+const postForm = (client, form) => client.request('POST', '/api/messages/file', { body: form });
+
+test('вложение: имя файла случайное и без времени, mtime и atime кратны часу, id клиента, E2EE-вложение в комнате', async () => {
+    const p = await pair();
+    const { newClientMessageId } = require('./helpers/client');
+    const id = newClientMessageId();
+    const message = await p.owner.upload(p.ownerChat.id, cipherBytes(), 'application/octet-stream', { encrypted: true, envelope: ENVELOPE, clientMessageId: id });
+    assert.strictEqual(message.id, id);
+    assert.strictEqual(typeof message.seq, 'number');
+    assert.match(message.file_url, /^\/uploads\/[0-9a-f]{32}\.bin$/, 'имя — только случайные байты, без Date.now()');
+    const stat = fs.statSync(path.join(suite.server.uploadsDir, path.basename(message.file_url)));
+    assert.strictEqual(stat.mtimeMs % 3600000, 0, 'mtime кратно часу');
+    assert.strictEqual(stat.atimeMs % 3600000, 0, 'atime кратно часу');
+    assert.ok(stat.mtimeMs <= Date.now() && stat.mtimeMs > Date.now() - 3600000 - 5000, 'округление вниз, не дальше часа');
+    // Обычное вложение в чат с ботом: id не нужен.
+    const bot = await p.owner.botChat();
+    const plain = await p.owner.upload(bot.id, Buffer.from('просто текстовый файл', 'utf8'), 'text/plain', { clientMessageId: undefined });
+    assert.match(plain.file_url, /^\/uploads\/[0-9a-f]{32}\.txt$/);
+    const statPlain = fs.statSync(path.join(suite.server.uploadsDir, path.basename(plain.file_url)));
+    assert.strictEqual(statPlain.mtimeMs % 3600000, 0, 'mtime обработанного файла тоже кратен часу');
+});
+
+test('вложение в комнату без clientMessageId или с ним после файла — 400 client-outdated, на диск ничего не пишется', async () => {
+    const p = await pair();
+    const { newClientMessageId } = require('./helpers/client');
+    const before = dirFiles();
+    const missing = await postForm(p.owner, uploadForm({ chatId: p.ownerChat.id, encrypted: true, envelope: ENVELOPE }));
+    assert.strictEqual(missing.status, 400);
+    assert.strictEqual(missing.body.code, 'client-outdated');
+    // Поле после файла: при проверке перед приёмом файла его ещё нет.
+    const form = new FormData();
+    form.append('chatId', String(p.ownerChat.id));
+    form.append('encrypted', 'true');
+    form.append('envelope', ENVELOPE);
+    form.append('file', new Blob([cipherBytes()], { type: 'application/octet-stream' }), 'file.bin');
+    form.append('clientMessageId', newClientMessageId());
+    const late = await postForm(p.owner, form);
+    assert.strictEqual(late.status, 400);
+    assert.strictEqual(late.body.code, 'client-outdated');
+    const bad = await postForm(p.owner, uploadForm({ chatId: p.ownerChat.id, encrypted: true, envelope: ENVELOPE, clientMessageId: 'abc' }));
+    assert.strictEqual(bad.status, 400);
+    assert.strictEqual(bad.body.code, 'bad-message-id');
+    assert.deepStrictEqual(dirFiles(), before, 'ни один из отказанных запросов не оставил файла');
+    assert.strictEqual(await countRows('SELECT count(*) AS n FROM messages WHERE room_id = $1 AND file_url IS NOT NULL', [p.roomId]), 0);
+});
+
+test('вложение: занятый id — 409 до приёма файла; повтор той же отправки — 200 без второго файла; одновременные повторы — один файл', async () => {
+    const p = await pair();
+    const { newClientMessageId } = require('./helpers/client');
+    const id = newClientMessageId();
+    const bytes = cipherBytes();
+    const first = await p.owner.upload(p.ownerChat.id, bytes, 'application/octet-stream', { encrypted: true, envelope: ENVELOPE, clientMessageId: id });
+    const afterFirst = dirFiles();
+
+    // Повтор после обрыва связи (тот же автор, комната и конверт): 200, второго файла нет.
+    const retry = await p.owner.uploadRaw(p.ownerChat.id, bytes, 'application/octet-stream', { encrypted: true, envelope: ENVELOPE, clientMessageId: id });
+    assert.strictEqual(retry.status, 200, JSON.stringify(retry.body));
+    assert.strictEqual(retry.body.message.id, first.id);
+    assert.strictEqual(retry.body.message.seq, first.seq);
+    assert.strictEqual(retry.body.message.file_url, first.file_url);
+    assert.deepStrictEqual(dirFiles(), afterFirst, 'повтор не сохранил второй файл');
+    assert.strictEqual(await countRows('SELECT count(*) AS n FROM messages WHERE id = $1', [id]), 1);
+
+    // Чужой автор и другой конверт — 409, файл на диск не попадает.
+    const stolen = await p.member.uploadRaw(p.memberChat.id, bytes, 'application/octet-stream', { encrypted: true, envelope: ENVELOPE, clientMessageId: id });
+    assert.strictEqual(stolen.status, 409);
+    assert.deepStrictEqual(stolen.body, ID_CONFLICT_BODY);
+    const changed = await p.owner.uploadRaw(p.ownerChat.id, bytes, 'application/octet-stream', { encrypted: true, envelope: ENVELOPE.replace('"k"', '"z"'), clientMessageId: id });
+    assert.strictEqual(changed.status, 409);
+    assert.deepStrictEqual(dirFiles(), afterFirst, 'при 409 файла на диске нет');
+
+    // Одновременные одинаковые отправки: одна строка, один файл.
+    const raceId = newClientMessageId();
+    const raceBytes = cipherBytes();
+    const results = await Promise.all(Array.from({ length: 4 }, () => p.owner.uploadRaw(p.ownerChat.id, raceBytes, 'application/octet-stream',
+        { encrypted: true, envelope: ENVELOPE, clientMessageId: raceId })));
+    for (const res of results) assert.strictEqual(res.status, 200, JSON.stringify(res.body));
+    assert.strictEqual(new Set(results.map(r => r.body.message.file_url)).size, 1, 'во всех ответах один файл');
+    assert.strictEqual(await countRows('SELECT count(*) AS n FROM messages WHERE id = $1', [raceId]), 1);
+    await waitUntil(() => dirFiles().length === afterFirst.length + 1, { what: 'лишние файлы одновременных повторов удалены', timeoutMs: 5000 });
+});
+
+test('вложение с id из надгробия — 409, файл не сохраняется', async () => {
+    const p = await pair();
+    const { newClientMessageId } = require('./helpers/client');
+    const id = newClientMessageId();
+    await p.owner.send(p.ownerChat.id, 'будет удалено', { clientMessageId: id });
+    await p.owner.del(`/api/messages/${id}`);
+    const before = dirFiles();
+    const res = await p.owner.uploadRaw(p.ownerChat.id, cipherBytes(), 'application/octet-stream', { encrypted: true, envelope: ENVELOPE, clientMessageId: id });
+    assert.strictEqual(res.status, 409);
+    assert.deepStrictEqual(res.body, ID_CONFLICT_BODY);
+    assert.deepStrictEqual(dirFiles(), before);
+});
+
+// ---------- время ----------
+
+test('время в базе огрублено: created_at и edited_at кратны минуте, в API правка — ISO-8601 UTC с нулевыми секундами', async () => {
+    const p = await pair();
+    const sent = await p.owner.send(p.ownerChat.id, 'для правки');
+    const edit = await p.owner.put(`/api/messages/${sent.id}`, { text: 'исправлено' });
+    assert.strictEqual(edit.body.success, true);
+    assert.match(edit.body.edited_at, /^\d{4}-\d\d-\d\dT\d\d:\d\d:00\.000Z$/, edit.body.edited_at);
+    const history = (await p.member.messages(p.memberChat.id)).messages.find(m => m.id === sent.id);
+    assert.strictEqual(history.edited_at, edit.body.edited_at, 'история отдаёт то же значение');
+    assert.match(history.created_at, /^\d{4}-\d\d-\d\dT\d\d:\d\d:00\.000Z$/);
+
+    const rows = [
+        ['messages', 'created_at', 'SELECT created_at AS t FROM messages WHERE room_id = $1', [p.roomId]],
+        ['messages', 'edited_at', 'SELECT edited_at AS t FROM messages WHERE id = $1', [sent.id]],
+        ['rooms', 'created_at', 'SELECT created_at AS t FROM rooms WHERE id = $1', [p.roomId]],
+        ['chats', 'created_at', 'SELECT created_at AS t FROM chats WHERE room_id = $1', [p.roomId]],
+        ['users', 'created_at', 'SELECT created_at AS t FROM users WHERE id = ANY($1::int[])', [[p.owner.user.id, p.member.user.id]]],
+    ];
+    for (const [table, column, sql, params] of rows) {
+        const res = await suite.query(sql, params);
+        assert.ok(res.rows.length > 0, `${table}.${column}: есть строки`);
+        for (const { t } of res.rows) assert.strictEqual(new Date(t).getTime() % MINUTE_MS, 0, `${table}.${column} кратно минуте`);
+    }
+    // Заявка на вступление.
+    const joiner = suite.client();
+    await joiner.registerAnon();
+    const invite = await p.owner.invite(p.ownerChat.id);
+    const pending = await joiner.join(invite.code);
+    const request = (await suite.query('SELECT created_at FROM join_requests WHERE id = $1', [pending.requestId])).rows[0];
+    assert.strictEqual(new Date(request.created_at).getTime() % MINUTE_MS, 0, 'join_requests.created_at кратно минуте');
+    assert.strictEqual((await suite.query(`SELECT 1 FROM information_schema.columns WHERE table_name = 'e2ee_key_shares' AND column_name = 'created_at'`)).rows.length, 0, 'у key-share нет времени создания');
+});
+
+test('срок исчезающего сообщения в базе округлён ВВЕРХ до минуты; в памяти точный — не исчезает раньше срока', async () => {
+    const p = await pair();
+    const sent = await p.owner.send(p.ownerChat.id, 'на пять минут', { expirySeconds: 300 });
+    const row = (await suite.query(
+        `SELECT date_trunc('minute', expires_at) = expires_at AS whole_minute,
+                expires_at >= LOCALTIMESTAMP + interval '300 seconds' - interval '2 seconds' AS not_early,
+                expires_at <= LOCALTIMESTAMP + interval '361 seconds' AS not_late
+         FROM message_expiry WHERE message_id = $1`, [sent.id])).rows[0];
+    assert.deepStrictEqual(row, { whole_minute: true, not_early: true, not_late: true });
+
+    // Короткий срок: сообщение живо через секунду и пропадает по точному таймеру в памяти.
+    const short = await p.owner.send(p.ownerChat.id, 'на две секунды', { expirySeconds: 2 });
+    const stored = (await suite.query('SELECT expires_at >= LOCALTIMESTAMP + interval \'1 second\' AS late_enough FROM message_expiry WHERE message_id = $1', [short.id])).rows[0];
+    assert.strictEqual(stored.late_enough, true, 'в базе срок не раньше обещанного');
+    const started = Date.now();
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    assert.ok((await suite.query('SELECT 1 FROM messages WHERE id = $1', [short.id])).rows[0], 'через секунду сообщение ещё есть');
+    await waitUntil(async () => !(await suite.query('SELECT 1 FROM messages WHERE id = $1', [short.id])).rows[0], { what: 'сообщение удалено по таймеру', timeoutMs: 8000 });
+    assert.ok(Date.now() - started >= 1900, `не раньше срока (прошло ${Date.now() - started} мс)`);
+});
+
+test('после перезапуска сервера сообщение с таймером удаляет фоновый воркер по сроку из базы (не раньше срока)', async () => {
+    const p = await pair();
+    const sent = await p.owner.send(p.ownerChat.id, 'переживу рестарт', { expirySeconds: 300 });
+    await suite.server.restart();
+    assert.ok((await suite.query('SELECT 1 FROM messages WHERE id = $1', [sent.id])).rows[0], 'после рестарта сообщение на месте: срок ещё не вышел');
+    await suite.time.expireMessage(sent.id);
+    await waitUntil(async () => !(await suite.query('SELECT 1 FROM messages WHERE id = $1', [sent.id])).rows[0], { what: 'воркер удалил просроченное', timeoutMs: 8000 });
 });

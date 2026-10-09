@@ -1863,9 +1863,10 @@ async function postFormData(url, formData, retried = false) {
             body: formData,
         });
     } catch {
-        return { success: false, message: 'Нет соединения с сервером' };
+        return { success: false, networkError: true, message: 'Нет соединения с сервером' };
     }
     const data = await res.json().catch(() => ({ success: false, message: `Ошибка сервера (HTTP ${res.status})` }));
+    if (data && typeof data === 'object') data.httpStatus = res.status;
     if (res.status === 403 && !retried && /CSRF/i.test(data.message || '')) {
         await fetch('/api/auth').catch(() => {});
         return postFormData(url, formData, true);
@@ -1891,7 +1892,7 @@ function postFormDataWithProgress(url, formData, options = {}, retried = false) 
             if (e.lengthComputable && typeof options.onProgress === 'function') options.onProgress(e.loaded / e.total);
         };
         xhr.onabort = () => resolve({ success: false, aborted: true, message: 'Загрузка отменена' });
-        xhr.onerror = () => resolve({ success: false, message: 'Нет соединения с сервером' });
+        xhr.onerror = () => resolve({ success: false, networkError: true, message: 'Нет соединения с сервером' });
         xhr.onload = async () => {
             let data;
             try {
@@ -1899,6 +1900,7 @@ function postFormDataWithProgress(url, formData, options = {}, retried = false) 
             } catch {
                 data = { success: false, message: `Ошибка сервера (HTTP ${xhr.status})` };
             }
+            if (data && typeof data === 'object') data.httpStatus = xhr.status;
             if (xhr.status === 403 && !retried && /CSRF/i.test((data && data.message) || '')) {
                 await fetch('/api/auth').catch(() => {});
                 resolve(postFormDataWithProgress(url, formData, options, true));
@@ -4730,6 +4732,64 @@ function cancelEditing() {
 // ничего не делает. Берёт его вызывающий (sendMessage), а не sendText.
 let sending = false;
 
+// ---- Исходы отправки сообщения (message-ordering.md, раздел 6.5) ----
+//
+//   200                              показать сообщение из ответа (дубликат от
+//                                    newMessage отсекается по id);
+//   обрыв сети, таймаут, 5xx         исход неизвестен: тот же запрос с тем же id
+//                                    и тем же конвертом, не больше трёх раз с
+//                                    нарастающей паузой. Повтор идемпотентен;
+//   409 id-conflict                  новый id, содержимое шифруется заново (новый
+//                                    mid и итерация цепочки; старая итерация
+//                                    остаётся пропуском, получатели его терпят),
+//                                    не больше трёх конфликтов подряд;
+//   400 client-outdated              «Обновите страницу», не повторять;
+//   400 bad-message-id               ошибка клиента: не повторять, в консоль.
+const SEND_RETRY_DELAYS_MS = [500, 1500, 4000];
+const MAX_ID_CONFLICTS = 3;
+
+function isUnknownSendOutcome(data) {
+    return !data.success && (data.networkError === true || (Number(data.httpStatus) >= 500));
+}
+
+// buildRequest(clientMessageId) → запрос (шифрует содержимое под этим id) или
+// null, если собрать нельзя; post(запрос) → тело ответа. clientMessageId —
+// только для комнаты, у чата с ботом он null. shouldStop() — отмена между
+// повторами. Возвращает { data }; data.success === false с кодом из тела — отказ.
+async function sendWithOutcomes({ roomId, buildRequest, post, shouldStop = () => false }) {
+    let conflicts = 0;
+    let clientMessageId = roomId ? NyxoMessageOrder.newClientMessageId() : null;
+    for (;;) {
+        const request = await buildRequest(clientMessageId);
+        if (request === null) return { data: { success: false, message: '' } };
+        let data = await post(request);
+        for (let retry = 0; isUnknownSendOutcome(data) && retry < SEND_RETRY_DELAYS_MS.length; retry++) {
+            if (shouldStop()) return { data };
+            await delay(SEND_RETRY_DELAYS_MS[retry]);
+            data = await post(request);
+        }
+        if (data.success) return { data };
+        if (roomId && data.httpStatus === 409 && data.code === 'id-conflict' && ++conflicts < MAX_ID_CONFLICTS) {
+            clientMessageId = NyxoMessageOrder.newClientMessageId();
+            continue;
+        }
+        return { data };
+    }
+}
+
+// Текст для пользователя по отказу сервера. client-outdated — просьба обновить
+// страницу; bad-message-id — ошибка клиента, подробности только в консоль.
+function sendFailureText(data, fallback) {
+    if (data.code === 'client-outdated') return data.message || 'Обновите страницу: эта версия приложения устарела';
+    if (data.code === 'bad-message-id') {
+        console.error('Сервер отклонил идентификатор сообщения (bad-message-id)');
+        return fallback;
+    }
+    if (data.code === 'id-conflict') return 'Не удалось отправить сообщение: идентификатор занят, попробуйте ещё раз';
+    if (data.networkError) return 'Нет соединения с сервером — сообщение не отправлено';
+    return data.message || fallback;
+}
+
 // Отправляет уже готовый текст в ЯВНО указанный чат: шифрует (если для чата
 // включено шифрование), шлёт на сервер и сразу показывает сообщение в ленте.
 // Поле ввода не читает и не очищает — это дело вызывающего, поэтому тем же
@@ -4751,26 +4811,38 @@ async function sendText(text, { chatId, roomId, replyToId } = {}) {
         showToast(err.message, 'error', 6000);
         return false;
     }
-    let outgoingText = text;
-    let encrypted = false;
-    if (client) {
-        try {
-            outgoingText = await client.encryptOutgoing(roomId, text);
-            encrypted = true;
-        } catch (err) {
-            console.error('E2EE: encryptOutgoing failed:', err);
-            showToast('Не удалось зашифровать сообщение — попробуйте ещё раз или выключите шифрование', 'error');
-            return false;
-        }
-    }
-    const payload = { chatId, text: outgoingText, encrypted };
-    if (replyToId) payload.replyToId = replyToId;
-    const data = await api('/api/messages', {
-        method: 'POST',
-        body: JSON.stringify(payload),
+    // Id сообщения комнаты выбирает клиент ДО шифрования и кладёт его внутрь
+    // конверта (mid): сервер не сможет выдать конверт за другое сообщение. Чат с
+    // ботом id не присылает. Исходы отправки — sendWithOutcomes (раздел 6.5).
+    const encrypted = Boolean(client);
+    let encryptFailed = false;
+    const outcome = await sendWithOutcomes({
+        roomId,
+        buildRequest: async (clientMessageId) => {
+            let outgoingText = text;
+            if (client) {
+                try {
+                    outgoingText = await client.encryptOutgoing(roomId, text, { messageId: clientMessageId });
+                } catch (err) {
+                    console.error('E2EE: encryptOutgoing failed:', err);
+                    encryptFailed = true;
+                    return null;
+                }
+            }
+            const payload = { chatId, text: outgoingText, encrypted };
+            if (clientMessageId) payload.clientMessageId = clientMessageId;
+            if (replyToId) payload.replyToId = replyToId;
+            return payload;
+        },
+        post: (payload) => api('/api/messages', { method: 'POST', body: JSON.stringify(payload) }),
     });
+    if (encryptFailed) {
+        showToast('Не удалось зашифровать сообщение — попробуйте ещё раз или выключите шифрование', 'error');
+        return false;
+    }
+    const data = outcome.data;
     if (!data.success) {
-        showToast(data.message || 'Не удалось отправить сообщение', 'error');
+        showToast(sendFailureText(data, 'Не удалось отправить сообщение'), 'error');
         return false;
     }
     // Показываем сразу из ответа — не зависим от того, успел ли
@@ -5101,42 +5173,68 @@ async function sendOneFile(queue, item, index, total) {
     }
     if (queue.cancelled) return { ok: false };
 
-    const formData = new FormData();
-    formData.append('chatId', String(chatId));
+    // Шифротекст вложения от id сообщения не зависит: при 409 заново
+    // шифруется только конверт (с новым mid), тот же шифротекст загружается снова.
     let localFile = null;
+    let enc = null;
     if (client) {
         setUploadStatus(`${prefix}шифрование…`, null);
         try {
-            const enc = await client.encryptFile(clean);
-            if (enc.ciphertext.byteLength > MAX_UPLOAD_BYTES) {
-                return { ok: false, message: 'Файл слишком большой для отправки с шифрованием (макс. 50 МБ)' };
-            }
-            localFile = { mime: item.mime, name: encryptedFileName(item.file, item.mime), size: enc.size, key: enc.key, iv: enc.iv };
-            const envelope = await client.encryptOutgoing(roomId, { type: 'file', ...localFile, caption: '' });
-            // Порядок полей важен: сервер читает chatId/encrypted/envelope
-            // до того, как начнёт принимать сам файл.
-            formData.append('encrypted', 'true');
-            formData.append('envelope', envelope);
-            formData.append('file', new Blob([enc.ciphertext], { type: 'application/octet-stream' }), 'blob');
+            enc = await client.encryptFile(clean);
         } catch (err) {
             console.error('E2EE: не удалось зашифровать файл:', err);
             return { ok: false, message: 'Не удалось зашифровать файл' };
         }
-    } else {
-        formData.append('file', new Blob([clean], { type: item.mime }), MimePolicy.anonymousFileName(item.mime));
+        if (enc.ciphertext.byteLength > MAX_UPLOAD_BYTES) {
+            return { ok: false, message: 'Файл слишком большой для отправки с шифрованием (макс. 50 МБ)' };
+        }
+        localFile = { mime: item.mime, name: encryptedFileName(item.file, item.mime), size: enc.size, key: enc.key, iv: enc.iv };
     }
     if (queue.cancelled) return { ok: false };
 
-    setUploadStatus(`${prefix}загрузка…`, 0);
-    const data = await postFormDataWithProgress('/api/messages/file', formData, {
-        onXhr: (xhr) => { queue.xhr = xhr; },
-        onProgress: (p) => {
-            if (!queue.cancelled) setUploadStatus(`${prefix}загрузка ${Math.round(p * 100)}%`, p);
+    let encryptFailed = false;
+    const outcome = await sendWithOutcomes({
+        roomId,
+        shouldStop: () => queue.cancelled,
+        buildRequest: async (clientMessageId) => {
+            const formData = new FormData();
+            // Порядок полей важен: сервер читает chatId/encrypted/clientMessageId/
+            // envelope ДО того, как начнёт принимать сам файл (fileFilter), и проверяет
+            // id раньше, чем файл попадёт на диск. Поле после файла — 400 client-outdated.
+            formData.append('chatId', String(chatId));
+            if (client) formData.append('encrypted', 'true');
+            if (clientMessageId) formData.append('clientMessageId', clientMessageId);
+            if (client) {
+                try {
+                    const envelope = await client.encryptOutgoing(roomId, { type: 'file', ...localFile, caption: '' }, { messageId: clientMessageId });
+                    formData.append('envelope', envelope);
+                } catch (err) {
+                    console.error('E2EE: не удалось зашифровать файл:', err);
+                    encryptFailed = true;
+                    return null;
+                }
+                formData.append('file', new Blob([enc.ciphertext], { type: 'application/octet-stream' }), 'blob');
+            } else {
+                formData.append('file', new Blob([clean], { type: item.mime }), MimePolicy.anonymousFileName(item.mime));
+            }
+            return formData;
+        },
+        post: async (formData) => {
+            setUploadStatus(`${prefix}загрузка…`, 0);
+            const result = await postFormDataWithProgress('/api/messages/file', formData, {
+                onXhr: (xhr) => { queue.xhr = xhr; },
+                onProgress: (p) => {
+                    if (!queue.cancelled) setUploadStatus(`${prefix}загрузка ${Math.round(p * 100)}%`, p);
+                },
+            });
+            queue.xhr = null;
+            return result;
         },
     });
-    queue.xhr = null;
+    if (encryptFailed) return { ok: false, message: 'Не удалось зашифровать файл' };
+    const data = outcome.data;
     if (data.aborted || queue.cancelled) return { ok: false };
-    if (!data.success) return { ok: false, message: data.message || 'Не удалось отправить файл' };
+    if (!data.success) return { ok: false, message: sendFailureText(data, 'Не удалось отправить файл') };
     if (chatId === currentChatId && data.message) {
         const message = localFile
             ? { ...data.message, text: '', _file: localFile, _localBytes: clean }

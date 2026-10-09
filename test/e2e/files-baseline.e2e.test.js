@@ -33,7 +33,7 @@ test('EXIF снимается, имя файла обезличено — в о�
     assert.strictEqual(message.file_name, 'photo.jpg');
     assert.strictEqual(message.text, 'photo.jpg');
     assert.strictEqual(message.message_type, 'image');
-    assert.match(message.file_url, /^\/uploads\/\d+-[0-9a-f]{24}\.jpg$/);
+    assert.match(message.file_url, /^\/uploads\/[0-9a-f]{32}\.jpg$/, 'имя файла случайное, без времени загрузки');
     assert.ok(!message.file_url.includes('Ivanov'));
 
     const row = (await suite.query('SELECT file_name, file_size FROM messages WHERE id = $1', [message.id])).rows[0];

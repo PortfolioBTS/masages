@@ -188,6 +188,17 @@ function removeUploadedFiles(fileUrls) {
     }
 }
 
+// Ответ, который отдаёт обработчик ошибок Express вместо ошибки: так из
+// fileFilter multer уходят 400/409 с телом { success, code, message } и даже 200
+// с уже сохранённым сообщением (повтор отправки), не принимая файл на диск.
+class EarlyResponse extends Error {
+    constructor(status, body) {
+        super(body && body.message ? body.message : 'early response');
+        this.status = status;
+        this.body = body;
+    }
+}
+
 const upload = multer({
     storage: multer.diskStorage({
         destination: (req, file, cb) => cb(null, UPLOADS_DIR),
@@ -197,7 +208,10 @@ const upload = multer({
             // file.originalname — см. комментарий у MIME_EXTENSIONS.
             // Шифротекст E2EE-вложения — всегда .bin.
             const ext = file.mimetype === ENCRYPTED_FILE_MIME ? ENCRYPTED_FILE_EXTENSION : (MIME_EXTENSIONS[file.mimetype] || '');
-            const safeName = `${Date.now()}-${crypto.randomBytes(12).toString('hex')}${ext}`;
+            // Имя — только случайное, без Date.now(): время загрузки в имени файла
+            // (message-ordering.md, раздел 11) вернуло бы секунды, которые мы
+            // огрубили в базе. 16 случайных байт: перебрать нельзя.
+            const safeName = `${crypto.randomBytes(16).toString('hex')}${ext}`;
             if (!SAFE_FILENAME_RE.test(safeName)) {
                 return cb(new Error('Не удалось сформировать безопасное имя файла'));
             }
@@ -222,14 +236,60 @@ const upload = multer({
         // encrypted=true с обычным типом — тоже отказ.
         const wantsEncrypted = Boolean(req.body) && req.body.encrypted === 'true';
         if (file.mimetype === ENCRYPTED_FILE_MIME) {
-            return wantsEncrypted ? cb(null, true) : cb(new Error('Неподдерживаемый тип файла'), false);
+            return wantsEncrypted ? acceptUpload(req, file, cb) : cb(new Error('Неподдерживаемый тип файла'), false);
         }
         if (wantsEncrypted || !ALLOWED_MIME_TYPES.includes(file.mimetype)) {
             return cb(new Error('Неподдерживаемый тип файла'), false);
         }
-        cb(null, true);
+        acceptUpload(req, file, cb);
     }
 });
+
+// Проверки запроса ДО приёма файла (message-ordering.md, раздел 6.3). multer
+// уже разобрал поля формы, пришедшие раньше файла (chatId, encrypted,
+// clientMessageId, envelope), а тело файла ещё не читал: заведомо ненужный файл
+// на диск не пишется. Клиент обязан класть эти поля в FormData ДО поля file;
+// если clientMessageId пришёл позже, здесь его ещё нет и ответ — 400
+// client-outdated.
+//
+//   * нет сессии — 401;
+//   * чат с ботом — clientMessageId игнорируется (id выдаёт DEFAULT);
+//   * комната: нет id — 400 client-outdated, неверный формат — 400 bad-message-id;
+//   * id занят чужим сообщением или стоит в надгробии — 409 id-conflict;
+//   * тот же автор, комната и конверт (повтор после обрыва связи) — 200 с уже
+//     сохранённым сообщением, второй файл не принимается.
+// Если чата нет среди разобранных полей (chatId пришёл позже файла или чат
+// неизвестен), остальное проверит обработчик после приёма файла.
+function acceptUpload(req, file, cb) {
+    // Поля снимаются СЕЙЧАС, синхронно: fileFilter вызывается в тот момент,
+    // когда разобрано всё, что стоит до файла. Пока идёт запрос в базу, парсер
+    // может успеть разобрать и поля после небольшого файла, но «после файла»
+    // для проверки по-прежнему значит «нет».
+    const body = { ...req.body };
+    checkUploadBeforeStore(req.session, body, file).then(() => cb(null, true), (err) => cb(err, false));
+}
+
+async function checkUploadBeforeStore(session, body, file) {
+    const userId = session && session.userId;
+    if (!userId) throw new EarlyResponse(401, { success: false, message: 'Не авторизован' });
+    const chat = toPositiveInt(body.chatId) ? await getOwnChat(body.chatId, userId) : null;
+    if (chat && !chat.room_id) return;
+    const raw = body.clientMessageId;
+    if (raw === undefined || raw === null || raw === '') {
+        // Чат назван, но такого нет: ответит обработчик («Чат не найден»).
+        if (!chat && toPositiveInt(body.chatId)) return;
+        throw new EarlyResponse(400, CLIENT_OUTDATED);
+    }
+    const id = parseClientMessageId(raw);
+    if (id === null) throw new EarlyResponse(400, BAD_MESSAGE_ID);
+    if (!chat) return;
+    const expectedText = expectedFileMessageText(body, file.mimetype);
+    const use = await describeMessageIdUse({ id, roomId: chat.room_id, userId, expectedText, file: true });
+    if (use.status === 'duplicate') {
+        throw new EarlyResponse(200, { success: true, message: messageFromRow(use.row, session, expectedText) });
+    }
+    if (use.status === 'conflict') throw new EarlyResponse(409, ID_CONFLICT);
+}
 
 // === Верификация CF-Connecting-IP (см. https://www.cloudflare.com/ips/) ===
 // Список подтверждён на 2026-08-10. CF-Connecting-IP — это просто HTTP-заголовок,
@@ -858,7 +918,7 @@ async function initJoinRequests() {
             id INTEGER PRIMARY KEY,
             room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
             user_id INTEGER NOT NULL REFERENCES users(id),
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT date_trunc('minute', now()),
             UNIQUE (room_id, user_id)
         )
     `);
@@ -2137,6 +2197,122 @@ function scheduleBotReply(chat, userText) {
     }, BOT_REPLY_DELAY_MS);
 }
 
+// ---- Вставка сообщения: id клиента, блокировки, повторы ----
+//
+// id сообщения комнаты выбирает клиент (clientMessageId) ДО шифрования и кладёт
+// его внутрь E2EE-содержимого (mid): сервер не может выдать правку одного
+// сообщения за другое. Чат с ботом id не присылает: его выдаёт DEFAULT.
+// Конфликт id (первичный ключ или надгробие) и повтор запроса после обрыва связи
+// разбирает describeMessageIdUse (раздел 6.4 контракта порядка сообщений).
+
+// Колонки, которые разрешено вставлять через insertMessageRow: имена идут в
+// текст SQL, поэтому только из этого списка.
+const MESSAGE_INSERT_COLUMNS = new Set([
+    'id', 'chat_id', 'room_id', 'user_id', 'text', 'file_url', 'file_name', 'file_type',
+    'message_type', 'sent', 'status', 'reply_to_id', 'encrypted', 'file_size',
+]);
+
+// INSERT сообщения; если задан срок жизни — тем же оператором и запись
+// message_expiry (раздел 8.4): сообщение не остаётся без срока при сбое между
+// операторами. Время удаления в базе округлено вверх до минуты. Возвращает
+// { id, seq, created_at }.
+async function insertMessageRow(client, fields, expirySeconds) {
+    const names = Object.keys(fields);
+    for (const name of names) {
+        if (!MESSAGE_INSERT_COLUMNS.has(name)) throw new Error(`insertMessageRow: неизвестная колонка ${name}`);
+    }
+    const values = names.map(name => fields[name]);
+    const insert = `INSERT INTO messages (${names.join(', ')}) VALUES (${names.map((_, i) => `$${i + 1}`).join(', ')})`;
+    if (!expirySeconds) {
+        const result = await client.query(`${insert} RETURNING id, seq, created_at`, values);
+        return result.rows[0];
+    }
+    values.push(expirySeconds);
+    const result = await client.query(
+        `WITH m AS (${insert} RETURNING id, seq, created_at),
+              e AS (INSERT INTO message_expiry (message_id, expires_at, auto_delete_on_read)
+                    SELECT m.id, ${DisappearingMessagesManager.expiresAtSql(`$${values.length}`)}, FALSE FROM m)
+         SELECT id, seq, created_at FROM m`,
+        values
+    );
+    return result.rows[0];
+}
+
+// Вставка сообщения от пользователя userId. Порядок блокировок
+// users → rooms → room_participants → chats → messages (раздел 8): строка
+// отправителя берётся явно ПЕРВОЙ (FOR KEY SHARE), и только потом INSERT, у
+// которого триггер seq блокирует строку комнаты (или чата с ботом), а внешние
+// ключи — chats и снова users. Без явного шага INSERT проверял бы внешние ключи
+// в порядке их создания, и отправка сходилась бы во взаимной блокировке с
+// удалением аккаунта (users FOR UPDATE → rooms FOR UPDATE → chats). Нет строки
+// users — аккаунт удалён: null, сообщение не остаётся без владельца. INSERT —
+// последний оператор транзакции: окно блокировки строки области — один INSERT и
+// COMMIT. При 40P01 транзакция повторяется один раз (идемпотентно по id клиента).
+async function insertChatMessage(userId, fields, expirySeconds) {
+    const row = await withTransactionRetry(async (client) => {
+        const sender = await client.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE', [userId]);
+        if (sender.rows.length === 0) return null;
+        return insertMessageRow(client, fields, expirySeconds);
+    });
+    // Таймер в памяти — точный; в базе срок округлён вверх до минуты.
+    if (row && expirySeconds) disappearingMessagesManager.scheduleNewMessage(row.id, expirySeconds);
+    return row;
+}
+
+// Срок жизни нового сообщения в секундах (общий таймер чата; личный срок из
+// запроса — только если он не длиннее общего) или null — не исчезает.
+async function newMessageExpirySeconds(chat, requestedSeconds = null) {
+    return effectiveMessageExpiry(requestedSeconds, await getDefaultExpirySeconds(chat)) || null;
+}
+
+// Текст сообщения-вложения, как он хранится в messages.text: для E2EE — конверт,
+// иначе подпись или обезличенное имя по типу. null — конверта нет (так сравнить
+// с сохранённой строкой нечем).
+function expectedFileMessageText(body, mimetype) {
+    if (body.encrypted === 'true') return typeof body.envelope === 'string' ? body.envelope.trim() : null;
+    const caption = typeof body.text === 'string' ? sanitizeText(body.text.trim()) : '';
+    return caption || anonymizedFileName(mimetype);
+}
+
+// Что сейчас с id сообщения (раздел 6.4):
+//   free      — свободен;
+//   duplicate — строка уже есть, и это тот же запрос: та же комната, тот же автор
+//               (до sealed sender — user_id), расшифрованный на сервере текст равен
+//               присланному, а у вложения file_url задан. Повтор после обрыва связи
+//               идемпотентен: клиент получает уже сохранённое сообщение (row);
+//   conflict  — id занят другим сообщением либо стоит в надгробии: 409, клиент
+//               выберет новый id и зашифрует содержимое заново.
+async function describeMessageIdUse({ id, roomId, userId, expectedText, file }) {
+    const row = await dbGet(
+        `SELECT id, seq, chat_id, room_id, user_id, text, file_url, file_name, file_type, message_type,
+                sent, status, edited_at, encrypted, created_at, reply_to_id
+         FROM messages WHERE id = $1`,
+        [id]
+    );
+    if (row) {
+        const same = row.room_id === roomId && row.user_id === userId
+            && Boolean(row.file_url) === Boolean(file)
+            && expectedText !== null && expectedText !== undefined
+            && readMessageText(row.text, row) === expectedText;
+        return same ? { status: 'duplicate', row } : { status: 'conflict' };
+    }
+    const retired = await dbGet('SELECT 1 AS retired FROM message_tombstones WHERE id = $1 AND expires_at > now()', [id]);
+    return retired ? { status: 'conflict' } : { status: 'free' };
+}
+
+// Сообщение для ответа клиенту по уже сохранённой строке (повтор запроса):
+// то же, что вернула бы первая отправка. text — открытый текст или конверт.
+function messageFromRow(row, session, text, replyTo = null) {
+    return apiMessage({
+        id: row.id, seq: row.seq, chat_id: row.chat_id, room_id: row.room_id, user_id: row.user_id,
+        text, file_url: row.file_url, file_name: row.file_name, file_type: row.file_type,
+        message_type: row.message_type, sent: row.sent, status: row.status, edited_at: row.edited_at,
+        encrypted: row.encrypted, created_at: row.created_at,
+        reply_to_id: replyTo ? replyTo.id : null, reply_to: replyTo, reactions: [],
+        sender_username: session.username, sender_avatar: session.avatar || '',
+    });
+}
+
 app.post('/api/messages', async (req, res) => {
     const userId = req.session.userId;
     if (!userId) return res.json({ success: false, message: 'Не авторизован' });
@@ -2158,6 +2334,17 @@ app.post('/api/messages', async (req, res) => {
     try {
         const chat = await getOwnChat(chatId, userId);
         if (!chat) return res.json({ success: false, message: 'Чат не найден' });
+
+        // Сообщение комнаты без clientMessageId — устаревшая вкладка: 400
+        // client-outdated; неверный формат — ошибка клиента: 400 bad-message-id.
+        // Чат с ботом поле игнорирует: id выдаёт DEFAULT.
+        let clientId = null;
+        if (chat.room_id) {
+            const raw = req.body.clientMessageId;
+            if (raw === undefined || raw === null || raw === '') return res.status(400).json(CLIENT_OUTDATED);
+            clientId = parseClientMessageId(raw);
+            if (clientId === null) return res.status(400).json(BAD_MESSAGE_ID);
+        }
 
         // Для E2EE-конверта sanitizeText не нужен и вреден по смыслу: это
         // не человеческий текст, а base64/JSON, который клиент должен
@@ -2187,15 +2374,34 @@ app.post('/api/messages', async (req, res) => {
         }
 
         const roomId = chat.room_id || null;
-        const inserted = await dbGet(
-            `INSERT INTO messages (chat_id, room_id, user_id, text, message_type, sent, status, reply_to_id, encrypted)
-             VALUES ($1, $2, $3, $4, 'text', 1, 'sent', $5, $6)
-             RETURNING id, seq, created_at`,
-            [chat.id, roomId, userId, writeMessageText(safeText, { room_id: roomId, chat_id: chat.id, user_id: userId }),
-                replyTo ? replyTo.id : null, encrypted]
-        );
-
-        await applyNewMessageExpiry(chat, inserted.id, requestedExpiry);
+        const fields = {
+            ...(clientId !== null ? { id: clientId } : {}),
+            chat_id: chat.id, room_id: roomId, user_id: userId,
+            text: writeMessageText(safeText, { room_id: roomId, chat_id: chat.id, user_id: userId }),
+            message_type: 'text', sent: 1, status: 'sent',
+            reply_to_id: replyTo ? replyTo.id : null, encrypted,
+        };
+        const expirySeconds = await newMessageExpirySeconds(chat, requestedExpiry);
+        let inserted;
+        try {
+            // Бот: id по DEFAULT, при гонке или попадании в надгробие — один повтор.
+            inserted = roomId
+                ? await insertChatMessage(userId, fields, expirySeconds)
+                : await withMessageIdRetry(() => insertChatMessage(userId, fields, expirySeconds));
+        } catch (err) {
+            if (roomId && isMessageIdConflict(err)) {
+                // Вставка откатилась целиком (в том числе приращение seq). Тот же
+                // запрос — 200 с сохранённой строкой, без повторной рассылки; иначе 409.
+                const use = await describeMessageIdUse({ id: clientId, roomId, userId, expectedText: safeText, file: false });
+                if (use.status === 'duplicate') {
+                    return res.json({ success: true, message: messageFromRow(use.row, req.session, safeText, replyTo) });
+                }
+                return res.status(409).json(ID_CONFLICT);
+            }
+            throw err;
+        }
+        // Нет строки пользователя: аккаунт удалён, пока шёл запрос.
+        if (!inserted) return res.status(401).json({ success: false, message: 'Не авторизован' });
 
         // text уже известен в открытом виде (safeText) — не расшифровываем то,
         // что сами только что зашифровали, и не перечитываем строку из БД.
@@ -2215,6 +2421,7 @@ app.post('/api/messages', async (req, res) => {
         // если он всё же пришёл, прочитать его бот не может — ответит подсказкой.
         if (chat.is_bot) scheduleBotReply(chat, encrypted ? '' : safeText);
     } catch (error) {
+        if (respondIfDeadlock(res, error)) return;
         console.error('Send message error:', error);
         res.json({ success: false, message: 'Ошибка отправки' });
     }
@@ -2869,6 +3076,25 @@ function rejectUpload(res, file, status, message) {
     return res.status(status).json({ success: false, message });
 }
 
+// То же с готовым телом ответа (коды ошибок контракта порядка сообщений).
+function rejectUploadWith(res, file, status, body) {
+    cleanupUploadedFile(file);
+    return res.status(status).json(body);
+}
+
+// mtime и atime файла вложения — с точностью до часа, вниз: по времени
+// изменения файла иначе восстанавливалось бы время сообщения до секунды
+// (раздел 11 контракта). Уборщик файлов-сирот учитывает округление: его порог
+// возраста не меньше двух часов (lib/coarse-time.js). Сбой не фатален.
+async function coarsenFileTimes(filePath) {
+    try {
+        const hour = floorToHour();
+        await fs.promises.utimes(filePath, hour, hour);
+    } catch (err) {
+        console.error('[Uploads] Не удалось округлить время файла:', err.code || err.message);
+    }
+}
+
 // Квота вложений: сумма file_size всех сообщений пользователя плюс новый
 // файл (index-only scan по idx_messages_user_files).
 async function exceedsUploadQuota(userId, incomingBytes) {
@@ -2885,6 +3111,10 @@ async function exceedsUploadQuota(userId, incomingBytes) {
 //   * E2EE (encrypted=true, только в комнатах) — сервер получает лишь
 //     шифротекст (.bin) и E2EE-конверт с типом, именем и ключом файла;
 //     сигнатуры и метаданные тут проверять не у чего — это случайные байты.
+// Сообщение комнаты несёт clientMessageId (раздел 6 контракта порядка сообщений):
+// его формат и занятость проверяет fileFilter ещё до приёма файла
+// (acceptUpload), здесь — повторно и для случая, когда chatId пришёл позже
+// файла. При 409 и при повторе той же отправки файл удаляется с диска.
 app.post('/api/messages/file', upload.single('file'), async (req, res) => {
     const file = req.file;
     const userId = req.session.userId;
@@ -2913,13 +3143,30 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
         if (caption.length > 4000) return rejectUpload(res, file, 400, 'Подпись слишком длинная');
     }
 
-    // Сначала проверка чата и квоты (дёшево), потом обработка файла (дорого).
+    // Сначала проверка чата, id и квоты (дёшево), потом обработка файла (дорого).
     let chat;
+    let clientId = null;
+    const fileType = file.mimetype;
+    // Исходное имя файла (file.originalname) не хранится и не логируется.
+    const fileName = encrypted ? null : anonymizedFileName(fileType);
+    const messageText = encrypted ? envelope : (caption || fileName);
     try {
         chat = await getOwnChat(body.chatId, userId);
         if (!chat) return rejectUpload(res, file, 404, 'Чат не найден');
         if (encrypted && !chat.room_id) {
             return rejectUpload(res, file, 400, 'Зашифрованные вложения доступны только в групповых чатах');
+        }
+        if (chat.room_id) {
+            const raw = body.clientMessageId;
+            if (raw === undefined || raw === null || raw === '') return rejectUploadWith(res, file, 400, CLIENT_OUTDATED);
+            clientId = parseClientMessageId(raw);
+            if (clientId === null) return rejectUploadWith(res, file, 400, BAD_MESSAGE_ID);
+            const use = await describeMessageIdUse({ id: clientId, roomId: chat.room_id, userId, expectedText: messageText, file: true });
+            if (use.status === 'duplicate') {
+                cleanupUploadedFile(file);
+                return res.json({ success: true, message: messageFromRow(use.row, req.session, messageText) });
+            }
+            if (use.status === 'conflict') return rejectUploadWith(res, file, 409, ID_CONFLICT);
         }
         if (await exceedsUploadQuota(userId, file.size)) {
             return rejectUpload(res, file, 413, 'Превышена квота хранилища вложений');
@@ -2949,27 +3196,41 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
             return rejectUpload(res, file, 400, 'Не удалось проверить содержимое файла');
         }
     }
+    await coarsenFileTimes(uploadedFilePath);
 
     try {
         const roomId = chat.room_id || null;
         const fileUrl = `/uploads/${file.filename}`;
-        const fileType = file.mimetype;
-        // Исходное имя файла (file.originalname) не хранится и не логируется.
-        const fileName = encrypted ? null : anonymizedFileName(fileType);
-
         const messageType = encrypted ? 'file'
             : fileType.startsWith('image/') ? 'image' : fileType.startsWith('video/') ? 'video' : 'file';
-        const messageText = encrypted ? envelope : (caption || fileName);
 
-        const inserted = await dbGet(
-            `INSERT INTO messages (chat_id, room_id, user_id, text, file_url, file_name, file_type, message_type, sent, status, encrypted, file_size)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, 'sent', $9, $10)
-             RETURNING id, seq, created_at`,
-            [chat.id, roomId, userId, writeMessageText(messageText, { room_id: roomId, chat_id: chat.id, user_id: userId }),
-                fileUrl, fileName, fileType, messageType, encrypted, fileSize]
-        );
-
-        await applyNewMessageExpiry(chat, inserted.id);
+        const fields = {
+            ...(clientId !== null ? { id: clientId } : {}),
+            chat_id: chat.id, room_id: roomId, user_id: userId,
+            text: writeMessageText(messageText, { room_id: roomId, chat_id: chat.id, user_id: userId }),
+            file_url: fileUrl, file_name: fileName, file_type: fileType, message_type: messageType,
+            sent: 1, status: 'sent', encrypted, file_size: fileSize,
+        };
+        const expirySeconds = await newMessageExpirySeconds(chat);
+        let inserted;
+        try {
+            inserted = roomId
+                ? await insertChatMessage(userId, fields, expirySeconds)
+                : await withMessageIdRetry(() => insertChatMessage(userId, fields, expirySeconds));
+        } catch (err) {
+            if (roomId && isMessageIdConflict(err)) {
+                // Параллельная такая же отправка успела раньше: файл этой
+                // не нужен ни при повторе (200), ни при конфликте (409).
+                cleanupUploadedFile(file);
+                const use = await describeMessageIdUse({ id: clientId, roomId, userId, expectedText: messageText, file: true });
+                if (use.status === 'duplicate') {
+                    return res.json({ success: true, message: messageFromRow(use.row, req.session, messageText) });
+                }
+                return res.status(409).json(ID_CONFLICT);
+            }
+            throw err;
+        }
+        if (!inserted) return rejectUpload(res, file, 401, 'Не авторизован');
 
         // Раньше здесь по setTimeout статус "доставлено"/"прочитано"
         // выставлялся через 1 и 2 секунды независимо от реальности (и без
@@ -2987,8 +3248,9 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
         res.json({ success: true, message: fileMessage });
         if (roomId) unarchiveForRecipients(chat, userId);
     } catch (error) {
-        console.error('Upload file error:', error);
         cleanupUploadedFile(file);
+        if (respondIfDeadlock(res, error)) return;
+        console.error('Upload file error:', error);
         res.status(500).json({ success: false, message: 'Ошибка отправки файла' });
     }
 });
@@ -3325,6 +3587,9 @@ registerApiNotFound(app);
 
 app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
+    // Ответ из fileFilter multer: 400/409 с кодом контракта порядка сообщений
+    // или 200 с уже сохранённым сообщением (повтор отправки).
+    if (err instanceof EarlyResponse) return res.status(err.status).json(err.body);
     if (err instanceof multer.MulterError) {
         if (err.code === 'LIMIT_FILE_SIZE') {
             return res.status(413).json({ success: false, message: 'Файл слишком большой (макс. 50 МБ)' });
@@ -3535,8 +3800,10 @@ jobs.register({
     firstDelayMs: 90 * 1000, intervalMs: 60 * 60 * 1000, maintenance: true,
 });
 // Брошенные временные файлы обработки вложений — в папке этого процесса.
+// Порог возраста — не меньше двух часов: mtime файлов округлён вниз до часа
+// (coarsenFileTimes), и свежий файл выглядит старше настоящего возраста.
 jobs.register({
-    name: 'cleanupStaleTempFiles', run: () => cleanupStaleTempFiles(UPLOADS_DIR, 60 * 60 * 1000),
+    name: 'cleanupStaleTempFiles', run: () => cleanupStaleTempFiles(UPLOADS_DIR, orphanAgeThresholdMs(60 * 60 * 1000)),
     intervalMs: 60 * 60 * 1000, exclusive: false,
 });
 // Задачи lib-модулей (JOB_MODULES в lib/jobs/index.js).
