@@ -1926,17 +1926,29 @@ function scheduleBotReply(chat, userText) {
         // Весь колбэк в try: раньше ошибка БД в первом же запросе здесь
         // была необработанным reject'ом и роняла процесс.
         try {
-            const stillExists = await dbGet('SELECT id FROM chats WHERE id = $1 AND is_bot = 1', [chat.id]);
-            if (!stillExists) return;
-
             const replyText = botGuide.botReply(userText).text;
-            // Сообщения бота хранятся от имени владельца чата (sent = 0).
-            const botMessage = await dbGet(
-                `INSERT INTO messages (chat_id, room_id, user_id, text, sent, time, status)
-                 VALUES ($1, NULL, $2, $3, 0, $4, 'read')
-                 RETURNING id, chat_id, room_id, user_id, sent, time, status, created_at, message_type, encrypted`,
-                [chat.id, chat.user_id, writeMessageText(replyText, { room_id: null, chat_id: chat.id, user_id: chat.user_id }), getCurrentTime()]
-            );
+            // Порядок блокировок users → chats → messages
+            // (docs/security/message-ordering.md, §8): строку владельца
+            // берём явно и первой. Иначе INSERT сам проверял бы внешние
+            // ключи — сначала chats, потом users — и сходился во взаимной
+            // блокировке с удалением аккаунта (users FOR UPDATE, затем
+            // DELETE FROM chats), если пользователь удаляет аккаунт, пока
+            // бот готовит ответ. Аккаунта или чата уже нет — отвечать некому.
+            const botMessage = await withTransaction(async (client) => {
+                const owner = await client.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE', [chat.user_id]);
+                if (owner.rows.length === 0) return null;
+                const alive = await client.query('SELECT id FROM chats WHERE id = $1 AND is_bot = 1 FOR KEY SHARE', [chat.id]);
+                if (alive.rows.length === 0) return null;
+                // Сообщения бота хранятся от имени владельца чата (sent = 0).
+                const inserted = await client.query(
+                    `INSERT INTO messages (chat_id, room_id, user_id, text, sent, time, status)
+                     VALUES ($1, NULL, $2, $3, 0, $4, 'read')
+                     RETURNING id, chat_id, room_id, user_id, sent, time, status, created_at, message_type, encrypted`,
+                    [chat.id, chat.user_id, writeMessageText(replyText, { room_id: null, chat_id: chat.id, user_id: chat.user_id }), getCurrentTime()]
+                );
+                return inserted.rows[0];
+            });
+            if (!botMessage) return;
             // Личный таймер чата с ботом действует и на ответы бота.
             await applyNewMessageExpiry(chat, botMessage.id);
             // Бот "прочитал" сообщения пользователя.
