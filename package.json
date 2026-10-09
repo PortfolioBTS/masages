@@ -34,7 +34,6 @@
     "url": "https://github.com/PortfolioBTS/masages.git"
   },
   "dependencies": {
-    "bcryptjs": "^2.4.3",
     "connect-pg-simple": "^10.0.0",
     "cookie-parser": "^1.4.7",
     "dotenv": "^16.4.5",
