@@ -128,9 +128,26 @@ function main() {
     });
 
     test('the same value reused for two secrets is an error', () => {
+        // base64 от 32 байт годится и как SESSION_SECRET, и как ключ сообщений.
+        const same = crypto.randomBytes(32).toString('base64');
+        const r = checkEnv(goodEnv({ SESSION_SECRET: same, MESSAGE_ENCRYPTION_KEY: same }));
+        assert.ok(has(r.errors, 'SESSION_SECRET / MESSAGE_ENCRYPTION_KEY', /одинаковые/));
+    });
+
+    test('PASSWORD_PEPPER and HIBP_CHECK: in the common "not used" warning, not checked, not compared as secrets', () => {
+        const pepper = rnd(48);
+        const r = checkEnv(goodEnv({ PASSWORD_PEPPER: pepper, HIBP_CHECK: 'true', ANON_SERVICE_URL: 'http://anon.railway.internal:8080' }));
+        assert.deepStrictEqual(r.errors, []);
+        assert.strictEqual(r.warnings.length, 1, 'one warning for all unused variables');
+        assert.deepStrictEqual(r.warnings[0].name.split(', ').sort(), ['ANON_SERVICE_URL', 'HIBP_CHECK', 'PASSWORD_PEPPER']);
+        assert.match(r.warnings[0].message, /не используется.*удалите/);
+        assert.deepStrictEqual(r.info, [], 'no note about keeping the pepper any more');
+        // Заглушка или короткое значение — больше не ошибка: переменная не проверяется.
+        assert.deepStrictEqual(checkEnv(goodEnv({ PASSWORD_PEPPER: 'changeme' })).errors, []);
+        // И не сравнивается с живыми секретами.
         const same = rnd(48);
-        const r = checkEnv(goodEnv({ SESSION_SECRET: same, PASSWORD_PEPPER: same }));
-        assert.ok(has(r.errors, 'SESSION_SECRET / PASSWORD_PEPPER', /одинаковые/));
+        assert.deepStrictEqual(checkEnv(goodEnv({ SESSION_SECRET: same, PASSWORD_PEPPER: same })).errors, []);
+        assert.ok(!formatEnvReport(r).includes(pepper), 'report must not contain the value');
     });
 
     test('Railway without a volume for attachments, onion port clash', () => {

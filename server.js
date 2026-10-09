@@ -22,7 +22,6 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const { Server } = require('socket.io');
-const pgSession = require('connect-pg-simple')(session);
 const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
 const { ipKeyGenerator } = rateLimit;
@@ -31,14 +30,7 @@ const { ipKeyGenerator } = rateLimit;
 const { stripMetadataFromFile, cleanupStaleTempFiles } = require('./lib/metadata-stripper');
 const DisappearingMessagesManager = require('./lib/disappearing-messages');
 const { encryptText, decryptText, messageAad } = require('./lib/message-crypto');
-const { addRandomDelay, sanitizeText, getPrivacyHeaders } = require('./lib/privacy');
-const {
-    hashPassword,
-    verifyPassword,
-    needsRehash,
-    checkPasswordPolicy,
-    DUMMY_PASSWORD_HASH
-} = require('./lib/passwords');
+const { sanitizeText, getPrivacyHeaders } = require('./lib/privacy');
 const {
     ALLOWED_MIME_TYPES,
     MIME_EXTENSIONS,
@@ -57,9 +49,7 @@ const {
     buildContentSecurityPolicy,
     resolveDbTlsConfig,
     createCounter,
-    normalizeEmail,
     positiveNumberOr,
-    classifyUserAgent
 } = require('./lib/security-utils');
 const {
     JOIN_REQUEST_TTL_SECONDS,
@@ -78,17 +68,19 @@ const {
 } = require('./lib/chat-settings');
 const {
     ANON_LIFETIMES,
-    ANON_MAX_AGE_SECONDS,
     ANON_SOCKET_ACTIVITY_INTERVAL_MS,
+    SESSION_RENEW_INTERVAL_MS,
     parseAnonLifetime,
-    storedAnonLifetime,
-    anonLifetimeSeconds,
-    anonExpiresAtMs,
-    isAnonExpired,
-    anonCookieMaxAgeMs,
-    shouldPersistActivity,
-    anonWelcomeText
+    parseAnonLifetimeStrict,
+    activityBucketMs,
+    sessionRenewIntervalMs,
+    renewBucket,
+    describeAnonLifetime
 } = require('./lib/anon-lifetime');
+// Сессии в Postgres с огрублением времени, их продление и активность
+// анонимов (контракт этапа 1, §4).
+const { createNyxoPgStore, setSessionCookieLifetime, renewSession, extendTabSessions } = require('./lib/session-store');
+const { createAnonActivity } = require('./lib/anon-activity');
 
 // Маршруты /api/keys/* (регистрируются после sessionMiddleware — см. вызов
 // registerE2eeKeyRoutes ниже) и встроенное хранилище публичных E2EE-ключей
@@ -103,7 +95,7 @@ const { initE2eeGroupsSchema, registerE2eeGroupRoutes } = require('./lib/e2ee-gr
 const botGuide = require('./lib/bot-guide');
 
 // Onion-сервис (контейнер tor-service/) и proof-of-work для регистрации
-const { ONION_ADDRESS, ONION_PORT, onionMiddleware, isOnionHost, isOnionSocket, listenOnionPort } = require('./lib/tor-support');
+const { ONION_ADDRESS, ONION_PORT, onionMiddleware, onionUrlFor, isOnionHost, isOnionSocket, listenOnionPort } = require('./lib/tor-support');
 const { createChallenge, verifySolution } = require('./lib/pow');
 
 // Несколько экземпляров сервера на одной базе (миграции и фоновые задачи
@@ -221,7 +213,7 @@ const upload = multer({
 // который любой клиент может подставить сам. Доверять ему можно только если сам
 // запрос физически пришёл с IP-адреса Cloudflare — иначе, обращаясь напрямую на
 // публичный *.up.railway.app домен, атакующий получает "новый IP" на каждый
-// запрос и обнуляет все rate-limit'ы (login/register/change-password).
+// запрос и обнуляет все rate-limit'ы по IP (регистрация, вход в комнаты, API).
 // Список можно переопределить через переменную окружения CF_IP_RANGES
 // (через запятую), если Cloudflare обновит диапазоны.
 const DEFAULT_CLOUDFLARE_IP_RANGES = [
@@ -321,27 +313,6 @@ const rateLimitKeyGenerator = (req) => ipKeyGenerator(req.realIp || req.ip);
 const sessionUserId = (req) => (req.session && req.session.userId) || null;
 const RATE_LIMIT_DEFAULTS = { standardHeaders: true, legacyHeaders: false };
 
-// Вход: для clearnet — по IP; для onion IP общий у всех, поэтому ключ —
-// email (перебор паролей одного аккаунта через Tor всё равно упирается
-// в loginAccountLimiter ниже).
-const loginLimiter = rateLimit({
-    ...RATE_LIMIT_DEFAULTS,
-    windowMs: 15 * 60 * 1000,
-    max: 5,
-    keyGenerator: (req) => (req.isOnion ? `onion:${normalizeEmail(req.body && req.body.email)}` : rateLimitKeyGenerator(req)),
-    message: { success: false, message: 'Слишком много попыток входа. Попробуйте позже.' }
-});
-
-// Лимит на аккаунт для всех: смена IP (ботнет, новые цепочки Tor) не даёт
-// перебирать пароль одного пользователя быстрее 10 попыток в час.
-const loginAccountLimiter = rateLimit({
-    ...RATE_LIMIT_DEFAULTS,
-    windowMs: 60 * 60 * 1000,
-    max: 10,
-    keyGenerator: (req) => `account:${normalizeEmail(req.body && req.body.email)}`,
-    message: { success: false, message: 'Слишком много попыток входа в этот аккаунт. Попробуйте позже.' }
-});
-
 // Массовую регистрацию теперь сдерживает proof-of-work (lib/pow.js). IP-лимит
 // остался мягким и только для clearnet: для onion он запер бы регистрацию
 // всем сразу (общий IP контейнера tor).
@@ -352,17 +323,6 @@ const registerLimiter = rateLimit({
     skip: (req) => req.isOnion,
     keyGenerator: rateLimitKeyGenerator,
     message: { success: false, message: 'Слишком много регистраций. Попробуйте позже.' }
-});
-
-// Смена пароля и удаление аккаунта (оба — только для залогиненных). Ключ —
-// пользователь: угадывать пароль по украденной сессии можно только в
-// рамках её аккаунта, а onion-пользователи не делят один счётчик на всех.
-const passwordLimiter = rateLimit({
-    ...RATE_LIMIT_DEFAULTS,
-    windowMs: 15 * 60 * 1000,
-    max: 3,
-    keyGenerator: (req) => (sessionUserId(req) ? `user:${sessionUserId(req)}` : rateLimitKeyGenerator(req)),
-    message: { success: false, message: 'Слишком много попыток ввода пароля. Попробуйте позже.' }
 });
 
 // Вход в комнату по коду: даже 130-битный код не должен перебираться
@@ -390,9 +350,9 @@ const joinIpLimiter = rateLimit({
 // "висло" с ошибкой на 15 минут. Залогиненных считаем по аккаунту (за
 // одним NAT или onion-адресом их много), остальных — по IP. Неавторизованные
 // onion-запросы не считаются: у них один IP на всех, и любой исчерпал бы
-// общую квоту за всех onion-посетителей. Их открытые маршруты (вход,
-// регистрация) защищены лимитом на аккаунт и proof-of-work, а от флуда —
-// защита самого onion-сервиса (см. tor-service/README.md).
+// общую квоту за всех onion-посетителей. Их открытый маршрут (регистрация)
+// защищён proof-of-work, а от флуда — защита самого onion-сервиса (см.
+// tor-service/README.md).
 const apiLimiter = rateLimit({
     ...RATE_LIMIT_DEFAULTS,
     windowMs: 15 * 60 * 1000,
@@ -880,11 +840,6 @@ function getLocalAddresses() {
     return addresses;
 }
 
-function normalizeAvatarColor(value) {
-    const color = String(value || '').trim();
-    return /^#[0-9a-fA-F]{6}$/.test(color) ? color.toUpperCase() : '#667EEA';
-}
-
 function getCurrentTime() {
     const now = new Date();
     return `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
@@ -918,25 +873,27 @@ const INVITE_TTL_SECONDS = Math.min(
     10 * 365 * 24 * 3600
 );
 
-// Длина пароля: при регистрации и смене — не больше 256 символов (политика
-// в lib/passwords.js); при входе — лишь анти-DoS порог, чтобы мегабайтная
-// строка не уходила в HMAC/bcrypt, но и пароль, заданный по старым
-// правилам, не отвергался заранее.
-const MAX_PASSWORD_LENGTH = 256;
-const MAX_LOGIN_PASSWORD_LENGTH = 1024;
-
 const sessionSecret = process.env.SESSION_SECRET;
 if (!sessionSecret) throw new Error('SESSION_SECRET не задан в переменных окружения');
 
+// Интервал продления сессии: 5 минут; в сквозных тестах —
+// NYXO_TEST_RENEW_INTERVAL_MS (только при NODE_ENV=test).
+const SESSION_RENEW_MS = sessionRenewIntervalMs(process.env);
+if (SESSION_RENEW_MS !== SESSION_RENEW_INTERVAL_MS) {
+    console.log(`[Test] NYXO_TEST_RENEW_INTERVAL_MS=${SESSION_RENEW_MS}: сессии продлеваются каждые ${SESSION_RENEW_MS} мс`);
+}
+
+// NyxoPgStore (lib/session-store.js) — стор connect-pg-simple, который пишет
+// время в таблицу session огрублённым до 5 минут и без createdAt.
+const NyxoPgStore = createNyxoPgStore(session);
 const sessionMiddleware = session({
-    store: new pgSession({
+    store: new NyxoPgStore({
         pool: pool,
         tableName: 'session',
         createTableIfMissing: true,
-        // Без rolling кука сессии перевыставляется браузеру только при
-        // изменении сессии, так что продлевать expire строки в БД на каждом
-        // запросе бессмысленно — а это был лишний UPDATE session на КАЖДЫЙ
-        // HTTP-запрос (включая, раньше, каждый CSS/JS-файл).
+        // touch стора писал бы строку session на КАЖДЫЙ запрос. Сессия
+        // продлевается явно: маркером renewSession не чаще раза в интервал
+        // (middleware после sessionMiddleware) и touch открытых сокетов.
         disableTouch: true
     }),
     secret: sessionSecret,
@@ -958,104 +915,16 @@ const sessionMiddleware = session({
     }
 });
 
-// ---- Срок жизни анонимного аккаунта (lib/anon-lifetime.js) ----
+// ---- Срок жизни анонимного аккаунта (lib/anon-lifetime.js, lib/anon-activity.js) ----
 //
-// Аноним удаляется после выбранного срока БЕЗ АКТИВНОСТИ (30 минут / сутки /
-// неделя), но не позже 7 дней с создания; сессия живёт по тем же правилам.
-// Активность — открытый сокет (продлевается при подключении, при отключении
-// последнего сокета и раз в 5 минут, пока сокет открыт) и запросы к API.
-//
-// Источник истины — users.last_active_at: по нему удаляет
-// purgeExpiredAnonymousUsers и его же видят другие экземпляры сервера.
-// anonStates — кэш процесса, чтобы каждый запрос не делал SELECT, а
-// активность по API писалась в БД не чаще раза в минуту на пользователя.
-// Активность обычных аккаунтов не отслеживается и не хранится вовсе.
-const anonStates = new Map(); // userId -> { lifetime, createdAtMs, lastActiveMs, persistedMs }
-const anonSocketCount = createCounter();
-
-async function loadAnonState(userId, sess) {
-    const row = await dbGet(
-        `SELECT anon_lifetime,
-                EXTRACT(EPOCH FROM last_active_at) * 1000 AS last_active_ms,
-                EXTRACT(EPOCH FROM created_at::timestamptz) * 1000 AS created_ms
-         FROM users WHERE id = $1`,
-        [userId]
-    );
-    if (!row) {
-        anonStates.delete(userId);
-        return null;
-    }
-    // Время создания — из сессии (его ставит сам сервер, Date.now()), из
-    // БД — только если в сессии его нет.
-    const createdAtMs = Number(sess && sess.createdAt) || Number(row.created_ms);
-    const lastActiveMs = row.last_active_ms === null ? createdAtMs : Number(row.last_active_ms);
-    const state = {
-        lifetime: storedAnonLifetime(row.anon_lifetime),
-        createdAtMs,
-        lastActiveMs,
-        persistedMs: lastActiveMs,
-    };
-    anonStates.set(userId, state);
-    return state;
-}
-
-// Истекла ли анонимная сессия. Жёсткий потолок проверяется без БД; "истекла
-// по неактивности" из кэша перепроверяется по БД — активность могла прийти
-// на другой экземпляр сервера. Аккаунт уже удалён — тоже истекла.
-async function isExpiredAnonymousSession(sess) {
-    if (!sess || !sess.isAnonymous) return false;
-    const createdAtMs = Number(sess.createdAt);
-    if (!sess.userId || !Number.isFinite(createdAtMs)) return true;
-    const now = Date.now();
-    if (now - createdAtMs >= ANON_MAX_AGE_SECONDS * 1000) return true;
-    const cached = anonStates.get(sess.userId);
-    if (cached && !isAnonExpired({ ...cached, now })) return false;
-    const state = await loadAnonState(sess.userId, sess);
-    return !state || isAnonExpired({ ...state, now });
-}
-
-function persistAnonActivity(userIds) {
-    if (userIds.length === 0) return;
-    dbRun(
-        'UPDATE users SET last_active_at = NOW() WHERE id = ANY($1::int[])',
-        [userIds]
-    ).catch(err => logError('[Anon] Не удалось записать активность', err));
-}
-
-// Отметить активность анонима: в памяти — всегда, в БД — не чаще раза в
-// минуту (force — сразу, например при отключении последнего сокета).
-function noteAnonActivity(userId, { force = false } = {}) {
-    const state = anonStates.get(userId);
-    if (!state) return;
-    const now = Date.now();
-    state.lastActiveMs = now;
-    if (!force && !shouldPersistActivity(state.persistedMs, now)) return;
-    state.persistedMs = now;
-    persistAnonActivity([userId]);
-}
-
-// Раз в 5 минут — продление всем анонимам с открытым сокетом, одним UPDATE.
-function touchAnonymousSockets() {
-    const ids = anonSocketCount.keys();
-    const now = Date.now();
-    for (const id of ids) {
-        const state = anonStates.get(id);
-        if (state) {
-            state.lastActiveMs = now;
-            state.persistedMs = now;
-        }
-    }
-    persistAnonActivity(ids);
-}
-
-// Для /api/auth: когда аккаунт удалится, если больше не будет активности.
-function describeAnonLifetime(state) {
-    if (!state) return { anonLifetime: null, anonExpiresAt: null };
-    return {
-        anonLifetime: state.lifetime,
-        anonExpiresAt: new Date(anonExpiresAtMs(state)).toISOString(),
-    };
-}
+// Аккаунт удаляется после выбранного срока БЕЗ АКТИВНОСТИ (30 минут /
+// сутки / неделя); потолка от создания нет. Активность — HTTP-запрос
+// (middleware после sessionMiddleware) и открытый сокет: подключение,
+// отключение последнего и touch раз в 2,5 минуты (задача touchOnlineSockets).
+// Источник истины — users.last_active_at (корзина 5 минут, округление
+// вверх): по нему удаляет purgeExpiredAnonymousUsers, его же видят другие
+// экземпляры сервера; anonActivity — кэш процесса поверх него.
+const anonActivity = createAnonActivity({ dbGet, dbRun });
 
 // Socket.io: источник (allowRequest выше) -> сессия -> авторизация ->
 // лимит подключений на аккаунт и (для clearnet) на IP.
@@ -1068,8 +937,10 @@ io.use((socket, next) => {
     // 'connection' — клиент после этого сам не переподключался, и после
     // входа в аккаунт realtime не работал до перезагрузки страницы.
     if (!sess || !sess.userId) return next(new Error('Не авторизован'));
-    isExpiredAnonymousSession(sess).then((expired) => {
-        if (expired) return next(new Error('Не авторизован'));
+    // Та же проверка, что у HTTP-запросов. Продлить куку сокет не может —
+    // её ставит только HTTP-ответ (клиент для этого вызывает /api/auth).
+    anonActivity.validateSession(sess).then((verdict) => {
+        if (verdict !== 'ok') return next(new Error('Не авторизован'));
         if (userSocketCount.get(sess.userId) >= MAX_SOCKETS_PER_USER) {
             return next(new Error('Слишком много подключений'));
         }
@@ -1083,36 +954,30 @@ io.use((socket, next) => {
         socket.data.clientIp = ip;
         next();
     }, (err) => {
-        console.error('[Socket] Ошибка проверки сессии:', err.message);
+        logError('[Socket] Ошибка проверки сессии', err);
         next(new Error('Ошибка сервера'));
     });
 });
 
 io.on('connection', async (socket) => {
     const userId = socket.request.session.userId;
-    const isAnonymous = Boolean(socket.request.session.isAnonymous);
 
     // Счётчики растут только для реально установленных соединений. Раньше
     // счётчик IP увеличивался ещё в middleware, а единственное место
     // уменьшения — 'disconnect' — для отклонённого рукопожатия не наступает:
-    // IP мог навсегда упереться в лимит.
+    // IP мог навсегда упереться в лимит. userSocketCount заодно — признак
+    // «в сети на этом экземпляре» для touch и чистки неактивных.
     const ip = socket.data.clientIp;
     userSocketCount.increment(userId);
     if (ip) ipSocketCount.increment(ip);
-    if (isAnonymous) {
-        anonSocketCount.increment(userId);
-        // Первый сокет — сразу в БД; остальные вкладки — не чаще раза в минуту.
-        noteAnonActivity(userId, { force: anonSocketCount.get(userId) === 1 });
-    }
+    // Подключение — активность (в БД — не чаще раза за корзину).
+    anonActivity.noteActivity(userId);
     socket.on('disconnect', () => {
         userSocketCount.decrement(userId);
         if (ip) ipSocketCount.decrement(ip);
-        if (isAnonymous) {
-            anonSocketCount.decrement(userId);
-            // Закрылся последний сокет — отсчёт неактивности начинается
-            // отсюда, поэтому момент пишется в БД сразу.
-            if (anonSocketCount.get(userId) === 0) noteAnonActivity(userId, { force: true });
-        }
+        // Закрылся последний сокет — отсчёт неактивности начинается отсюда:
+        // корзина этого момента попадает в БД.
+        if (userSocketCount.get(userId) === 0) anonActivity.noteActivity(userId);
     });
 
     // Личная комната пользователя (на всех его вкладках/устройствах) —
@@ -1289,24 +1154,33 @@ registerPreSessionRoutes(app, serverContext);
 
 app.use(sessionMiddleware);
 
-// Анонимная сессия проверяется на КАЖДОМ запросе (раньше — только в
-// /api/auth, остальные маршруты принимали её дальше): истёкшая
-// заменяется пустой, живая — продлевает активность аккаунта (в БД — не
-// чаще раза в минуту, см. noteAnonActivity). app.use не оборачивается
-// wrapAsync, поэтому ошибки — вручную в next.
+// Сессия проверяется на КАЖДОМ запросе (validateSession). Недействительная
+// (без isAnonymous — от входа по паролю, которого больше нет) или истёкшая
+// заменяется пустой, а /api/auth сообщит клиенту, что сессия закончилась
+// (req.authEnded). Живая — это активность: корзина в БД пишется раз в
+// корзину, и запись ждётся, потому что ответы ниже читают last_active_at.
+// И продление сессии раз в интервал (renewSession): строка session
+// пересохраняется, кука day/week уходит заново с новым Expires. app.use не
+// оборачивается wrapAsync, поэтому ошибки — вручную в next.
 app.use((req, res, next) => {
     const sess = req.session;
-    if (!sess || !sess.userId || !sess.isAnonymous) return next();
-    isExpiredAnonymousSession(sess).then((expired) => {
-        if (!expired) {
-            noteAnonActivity(sess.userId);
-            return next();
+    if (!sess || !sess.userId) return next();
+    const userId = sess.userId;
+    anonActivity.validateSession(sess).then(async (verdict) => {
+        if (verdict !== 'ok') {
+            return req.session.regenerate((err) => {
+                req.authEnded = verdict;
+                next(err);
+            });
         }
-        req.session.regenerate((err) => {
-            req.anonSessionExpired = true;
-            next(err);
+        await anonActivity.noteActivity(userId);
+        renewSession(sess, {
+            lifetime: anonActivity.lifetimeOf(userId) || sess.anonLifetime,
+            now: Date.now(),
+            intervalMs: SESSION_RENEW_MS,
         });
-    }, next);
+        next();
+    }).catch(next);
 });
 
 // Лимит на /api/ — ДО регистрации маршрутов из lib/: Express применяет
@@ -1392,8 +1266,8 @@ function readMessageText(stored, row) {
     }
 }
 
-// Новая сессия с защитой от фиксации (regenerate) — и при входе, и при
-// регистрации (раньше при регистрации id сессии не менялся).
+// Новая сессия с защитой от фиксации (regenerate): id сессии, который был
+// у браузера до регистрации, к аккаунту не привязывается.
 function startUserSession(req, fields) {
     return new Promise((resolve, reject) => {
         req.session.regenerate((err) => {
@@ -1404,9 +1278,9 @@ function startUserSession(req, fields) {
     });
 }
 
-// Proof-of-work (lib/pow.js): решение одноразовое и привязано к цели
-// (register / register-anon).
-const POW_PURPOSES = new Set(['register', 'register-anon']);
+// Proof-of-work (lib/pow.js): решение одноразовое и привязано к цели.
+// Цель одна — регистрация временного аккаунта; ?purpose=register — 400.
+const POW_PURPOSES = new Set(['register-anon']);
 const POW_FAILED_RESPONSE = { success: false, message: 'Не пройдена проверка proof-of-work', powRequired: true };
 
 function checkPow(req, purpose) {
@@ -1430,14 +1304,17 @@ app.get('/api/pow/challenge', (req, res) => {
 });
 
 // Новый аккаунт и его чат с ботом с приветствием — внутри транзакции client.
-// Аккаунты только временные: anonLifetime обязателен (users.anon_lifetime NOT
-// NULL), с него же начинается отсчёт активности.
-async function insertUserWithBotChat(client, { uniqueCode, username, welcomeText, anonLifetime }) {
+// lastActiveAt — корзина активности момента регистрации (lib/anon-lifetime.js).
+// Отметки о прочтении у нового аккаунта выключены явно, а не через DEFAULT
+// колонки: ответ регистрации обещает readReceipts: false. Текст приветствия
+// выбирает вызывающий. Возвращает { userId, botChatId } — id чата с ботом
+// уходит клиенту.
+async function insertUserWithBotChat(client, { uniqueCode, username, anonLifetime, lastActiveAt, welcomeText }) {
     const userResult = await client.query(
-        `INSERT INTO users (unique_code, username, avatar, anon_lifetime, last_active_at)
-         VALUES ($1, $2, $3, $4, NOW())
+        `INSERT INTO users (unique_code, username, avatar, anon_lifetime, last_active_at, read_receipts)
+         VALUES ($1, $2, $3, $4, $5, FALSE)
          RETURNING id`,
-        [uniqueCode, username, '#667EEA', anonLifetime]
+        [uniqueCode, username, '#667EEA', anonLifetime, lastActiveAt]
     );
     const userId = userResult.rows[0].id;
     const botResult = await client.query(
@@ -1449,7 +1326,7 @@ async function insertUserWithBotChat(client, { uniqueCode, username, welcomeText
         'INSERT INTO messages (chat_id, user_id, text, sent, time, status) VALUES ($1, $2, $3, $4, $5, $6)',
         [botChatId, userId, writeMessageText(welcomeText, { room_id: null, chat_id: botChatId, user_id: userId }), 0, getCurrentTime(), 'read']
     );
-    return userId;
+    return { userId, botChatId };
 }
 
 async function withTransaction(work) {
@@ -1467,54 +1344,15 @@ async function withTransaction(work) {
     }
 }
 
-app.post('/api/register', registerLimiter, async (req, res) => {
-    const { email, password, confirmPassword } = req.body || {};
-    const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
-    if (!username || !isNonEmptyString(email) || !isNonEmptyString(password) || typeof confirmPassword !== 'string')
-        return res.json({ success: false, message: 'Заполните все поля' });
-    if (username.length > 32)
-        return res.json({ success: false, message: 'Имя не может быть длиннее 32 символов' });
-    if (email.length > 254)
-        return res.json({ success: false, message: 'Email слишком длинный' });
-    if (password.length > MAX_PASSWORD_LENGTH)
-        return res.json({ success: false, message: `Пароль не может быть длиннее ${MAX_PASSWORD_LENGTH} символов` });
-    if (password !== confirmPassword)
-        return res.json({ success: false, message: 'Пароли не совпадают' });
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
-        return res.json({ success: false, message: 'Введите корректный email' });
-
-    try {
-        // Политика — до PoW: решение одноразовое, и отказ из-за слабого
-        // пароля не должен заставлять решать задачу заново.
-        const policyError = await checkPasswordPolicy(password, { username, email });
-        if (policyError) return res.json({ success: false, message: policyError });
-        // PoW — до любых обращений к users: иначе ответ "такие данные уже
-        // заняты" можно было бы получать бесплатно, перебирая email.
-        if (!checkPow(req, 'register')) return res.json(POW_FAILED_RESPONSE);
-
-        const existing = await dbGet('SELECT id FROM users WHERE email = $1 OR username = $2', [email, username]);
-        if (existing) return res.json({ success: false, message: 'Ошибка регистрации. Проверьте введённые данные.' });
-
-        const uniqueCode = await generateUniqueCodeAsync();
-        const passwordHash = await hashPassword(password);
-        const userId = await withTransaction(client => insertUserWithBotChat(client, {
-            uniqueCode, username, email, passwordHash,
-            welcomeText: 'Привет! Я бот-помощник. Чем могу помочь?',
-        }));
-
-        await startUserSession(req, { userId, username, uniqueCode, avatar: '#667EEA' });
-        recordSecurityEvent(userId, 'register', req);
-        res.json({ success: true, message: 'Регистрация успешна!', user: { id: userId, username, uniqueCode, avatar: '#667EEA', readReceipts: true } });
-    } catch (error) {
-        console.error('Register error:', error);
-        res.json({ success: false, message: 'Ошибка сервера' });
-    }
-});
-
 // lifetime: 'tab' | 'day' | 'week' (по умолчанию 'tab') — см.
-// lib/anon-lifetime.js. Проверяется до PoW: решение одноразовое, и отказ
-// из-за опечатки в параметре не должен заставлять решать задачу заново.
+// lib/anon-lifetime.js. Живая сессия — 409 ещё до PoW: второй аккаунт в
+// том же браузере не нужен (клиент в этом случае входит через /api/auth), а
+// решение одноразовое. lifetime тоже проверяется до PoW: отказ из-за
+// опечатки в параметре не должен заставлять решать задачу заново.
 app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
+    if (req.session.userId) {
+        return res.status(409).json({ success: false, code: 'already-authenticated', message: 'Вы уже вошли в аккаунт' });
+    }
     let lifetime;
     try {
         lifetime = parseAnonLifetime(req.body?.lifetime);
@@ -1525,236 +1363,143 @@ app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
     try {
         const uniqueCode = await generateUniqueCodeAsync();
         const username = await generateAnonymousUsernameAsync();
+        // Регистрация — первая активность; в БД — её корзина.
+        const now = Date.now();
+        const lastActiveMs = activityBucketMs(now);
 
-        const userId = await withTransaction(client => insertUserWithBotChat(client, {
-            uniqueCode, username,
-            welcomeText: botGuide.welcomeText(lifetime), anonLifetime: lifetime,
+        const { userId, botChatId } = await withTransaction(client => insertUserWithBotChat(client, {
+            uniqueCode, username, anonLifetime: lifetime, lastActiveAt: new Date(lastActiveMs),
+            welcomeText: botGuide.welcomeText(lifetime),
         }));
 
-        const createdAtMs = Date.now();
         await startUserSession(req, {
             userId, username, uniqueCode, avatar: '#667EEA',
-            isAnonymous: true, createdAt: createdAtMs, anonLifetime: lifetime,
+            isAnonymous: true, anonLifetime: lifetime, renewBucket: renewBucket(now, SESSION_RENEW_MS),
         });
-        // 'tab' — кука без срока (до закрытия браузера), 'day'/'week' — до
-        // жёсткого потолка; неактивность сервер проверяет сам на каждом
-        // запросе (isExpiredAnonymousSession).
-        req.session.cookie.maxAge = anonCookieMaxAgeMs({ lifetime, createdAtMs, now: createdAtMs });
-        const state = { lifetime, createdAtMs, lastActiveMs: createdAtMs, persistedMs: createdAtMs };
-        anonStates.set(userId, state);
+        // 'tab' — кука без срока (до закрытия браузера), 'day'/'week' — срок
+        // + 15 минут; она продлевается вместе с сессией.
+        setSessionCookieLifetime(req.session.cookie, lifetime);
+        anonActivity.remember(userId, { lifetime, lastActiveMs: now, persistedBucketMs: lastActiveMs });
 
         // Имя и id анонимного пользователя в лог не пишутся: связка "время
         // создания — id — имя" в логах хостинга как раз и деанонимизирует.
 
         res.json({
             success: true,
-            message: 'Приватный режим активирован!',
             user: {
                 id: userId,
                 username,
                 uniqueCode,
-                avatar: '#667EEA',
                 isAnonymous: true,
-                readReceipts: true,
-                ...describeAnonLifetime(state),
-                // Срок без активности, секунды (поле старых клиентов).
-                sessionExpiresIn: anonLifetimeSeconds(lifetime)
-            }
+                readReceipts: false,
+                ...describeAnonLifetime({ lifetime, lastActiveMs }),
+            },
+            botChatId,
         });
     } catch (error) {
-        console.error('Anonymous register error:', error);
+        logError('[Anon] Не удалось зарегистрировать аккаунт', error);
         res.json({ success: false, message: 'Ошибка сервера' });
     }
 });
 
-app.post('/api/login', loginLimiter, loginAccountLimiter, async (req, res) => {
-    const { email, password } = req.body || {};
-    if (!isNonEmptyString(email) || !isNonEmptyString(password)) return res.json({ success: false, message: 'Введите email и пароль' });
-    if (email.length > 254 || password.length > MAX_LOGIN_PASSWORD_LENGTH) return res.json({ success: false, message: 'Неверный email или пароль' });
-
-    try {
-        // Добавляем случайную задержку для защиты от timing attacks
-        await addRandomDelay(50, 150);
-
-        const user = await dbGet('SELECT id, username, unique_code, avatar, password, read_receipts FROM users WHERE email = $1', [email]);
-        // Проверка пароля выполняется независимо от того, найден ли юзер —
-        // это убирает разницу во времени ответа между "нет такого email"
-        // и "неверный пароль" (см. п.4 аудита).
-        const hashToCheck = (user && user.password) ? user.password : DUMMY_PASSWORD_HASH;
-        const validPassword = await verifyPassword(password, hashToCheck);
-
-        // Дополнительная случайная задержка
-        await addRandomDelay(20, 80);
-
-        if (!user || !user.password || !validPassword) {
-            // Неудачный вход в СУЩЕСТВУЮЩИЙ аккаунт — в его журнал. Запись не
-            // ожидается: иначе ответ для существующего email приходил бы
-            // заметно позже, чем для несуществующего (оракул по времени).
-            if (user && user.password) recordSecurityEvent(user.id, 'login_failed', req);
-            return res.json({ success: false, message: 'Неверный email или пароль' });
-        }
-
-        // Хэш старого формата (bcrypt без предхэша обрезал пароль на 72
-        // байтах) или с устаревшей стоимостью — перехэшируем, пока пароль
-        // известен. Условие на старый хэш: параллельная смена пароля важнее.
-        if (needsRehash(user.password)) {
-            try {
-                await dbRun('UPDATE users SET password = $1 WHERE id = $2 AND password = $3', [await hashPassword(password), user.id, user.password]);
-            } catch (rehashError) {
-                console.error('[Auth] Не удалось обновить хэш пароля:', rehashError.message);
-            }
-        }
-
-        await startUserSession(req, {
-            userId: user.id, username: user.username, uniqueCode: user.unique_code, avatar: user.avatar || '',
-        });
-        recordSecurityEvent(user.id, 'login', req);
-        res.json({
-            success: true, message: 'Вход выполнен!',
-            user: { id: user.id, username: user.username, uniqueCode: user.unique_code, avatar: user.avatar || '', readReceipts: user.read_receipts },
-        });
-    } catch (error) {
-        console.error('Login error:', error);
-        res.json({ success: false, message: 'Ошибка базы данных' });
-    }
-});
-
-// Завершает сессию после выхода/удаления аккаунта. clearSiteCache —
-// Clear-Site-Data: "cache": браузер выбрасывает кэш сайта (страницы,
-// вложения), чтобы на общем устройстве не оставалось следов переписки.
-function endSession(req, res, { clearSiteCache, message }) {
+// Завершает сессию после удаления аккаунта. Clear-Site-Data: "cache" —
+// браузер выбрасывает кэш сайта (страницы, вложения), чтобы на общем
+// устройстве не оставалось следов переписки.
+function endSession(req, res, message) {
     req.session.destroy((err) => {
+        if (err) logError('[Account] Не удалось удалить сессию', err);
         res.clearCookie('connect.sid');
-        // CSRF-куку НЕ удаляем, а выдаём новую: после выхода страница не
-        // перезагружается, и следующий POST /api/login без куки получал
-        // 403 "неверный CSRF-токен" — войти снова можно было только после F5.
+        // CSRF-куку не удаляем, а выдаём новую: страница после удаления не
+        // перезагружается, и следующая регистрация без куки получила бы 403
+        // «неверный CSRF-токен».
         issueCsrfCookie(req, res);
-        if (clearSiteCache) res.set('Clear-Site-Data', '"cache"');
-        if (err) console.error('Session destroy error:', err);
+        res.set('Clear-Site-Data', '"cache"');
         res.json({ success: true, message });
     });
 }
 
-app.post('/api/logout', async (req, res) => {
-    const isAnonymous = Boolean(req.session?.isAnonymous);
-    const userId = req.session?.userId;
-
-    // Для анонимных пользователей удаляем все данные
-    if (isAnonymous && userId) {
-        try {
-            await deleteUserAccount(userId);
-        } catch (error) {
-            console.error('[Anon] Ошибка удаления данных при выходе:', error.message);
-        }
-    }
-
-    endSession(req, res, { clearSiteCache: isAnonymous, message: isAnonymous ? 'Данные удалены' : 'Выход выполнен' });
-});
-
-// Удаление аккаунта со всеми данными (см. deleteUserAccount). Обычному
-// аккаунту нужен пароль — украденной сессии (или забытой открытой вкладки)
-// недостаточно; анонимный аккаунт пароля не имеет и удаляется сразу.
-app.post('/api/account/delete', passwordLimiter, async (req, res) => {
+// Удаление аккаунта со всеми данными (см. deleteUserAccount). Пароля нет:
+// аккаунт временный, и войти в него иначе, чем этой сессией, нельзя.
+// POST /api/logout — псевдоним: выйти из такого аккаунта и значит удалить его.
+async function deleteOwnAccount(req, res) {
     const userId = req.session.userId;
     if (!userId) return res.json({ success: false, message: 'Не авторизован' });
     try {
-        const user = await dbGet('SELECT password FROM users WHERE id = $1', [userId]);
-        if (!user) return res.json({ success: false, message: 'Пользователь не найден' });
-        if (user.password) {
-            const password = req.body?.password;
-            if (!isNonEmptyString(password) || password.length > MAX_LOGIN_PASSWORD_LENGTH) {
-                return res.json({ success: false, message: 'Введите пароль' });
-            }
-            if (!(await verifyPassword(password, user.password))) {
-                return res.json({ success: false, message: 'Неверный пароль' });
-            }
-        }
         await deleteUserAccount(userId);
-        endSession(req, res, { clearSiteCache: true, message: 'Аккаунт и все данные удалены' });
     } catch (error) {
-        console.error('Delete account error:', error);
-        res.json({ success: false, message: 'Ошибка удаления аккаунта' });
+        logError('[Account] Не удалось удалить аккаунт', error);
+        return res.json({ success: false, message: 'Ошибка удаления аккаунта' });
     }
-});
+    endSession(req, res, 'Аккаунт и все данные удалены');
+}
+app.post('/api/account/delete', deleteOwnAccount);
+app.post('/api/logout', deleteOwnAccount);
 
-app.get('/api/auth', async (req, res) => {
-    // Анонимная сессия только что истекла (см. middleware выше) — клиент
-    // покажет "данные удалены по сроку", а не просто форму входа.
-    if (!req.session.userId) return res.json(req.anonSessionExpired ? { authenticated: false, expired: true } : { authenticated: false });
-    try {
-        const row = await dbGet('SELECT avatar, read_receipts FROM users WHERE id = $1', [req.session.userId]);
-        if (!row) {
-            // Пользователь удалён (например, анонимный после выхода) — сессия больше не нужна
-            req.session.destroy(() => {});
-            return res.json({ authenticated: false, expired: true });
-        }
-
-        const avatar = row.avatar || '';
-        req.session.avatar = avatar;
-        const isAnonymous = Boolean(req.session.isAnonymous);
-        // Срок анонима — оценка "если с этого момента больше не будет
-        // активности" (этот запрос сам — активность, см. noteAnonActivity).
-        const lifetime = describeAnonLifetime(isAnonymous ? anonStates.get(req.session.userId) : null);
-
-        res.json({
-            authenticated: true,
-            user: {
-                id: req.session.userId,
-                username: req.session.username,
-                uniqueCode: req.session.uniqueCode,
-                avatar,
-                isAnonymous,
-                readReceipts: row.read_receipts,
-                ...lifetime
-            }
-        });
-    } catch (error) {
-        res.json({ authenticated: false });
-    }
-});
-
-// ---- Журнал безопасности ----
-//
-// Последние SECURITY_EVENTS_PER_USER событий входа и смены пароля — чтобы
-// пользователь заметил чужой вход. Хранится только тип, грубое семейство
-// клиента (classifyUserAgent: «Firefox · Android») и время; ни IP, ни
-// полной строки User-Agent. Для анонимов не ведётся. Запись — в фоне: её
-// сбой не должен ломать вход, а ожидание — выдавать по времени ответа,
-// существует ли аккаунт (см. login_failed в /api/login).
-const SECURITY_EVENT_TYPES = new Set(['login', 'login_failed', 'password_changed', 'register']);
-const SECURITY_EVENTS_PER_USER = 50;
-
-function recordSecurityEvent(userId, type, req) {
-    if (!SECURITY_EVENT_TYPES.has(type)) return;
-    const client = classifyUserAgent(req && req.headers && req.headers['user-agent']);
-    (async () => {
-        await dbRun('INSERT INTO security_events (user_id, type, client) VALUES ($1, $2, $3)', [userId, type, client]);
-        await dbRun(
-            `DELETE FROM security_events WHERE user_id = $1 AND id <= (
-                 SELECT id FROM security_events WHERE user_id = $1 ORDER BY id DESC OFFSET $2 LIMIT 1
-             )`,
-            [userId, SECURITY_EVENTS_PER_USER]
-        );
-    })().catch((err) => {
-        // 23503 — аккаунт удалён в этот же момент: писать уже некуда.
-        if (err.code !== '23503') console.error('[Security] Не удалось записать событие:', err.message);
-    });
+// Поля аккаунта для ответов API — из строки users: срок и корзина последней
+// активности (её только что записал middleware после sessionMiddleware,
+// если корзина сменилась). anonExpiresAt — «когда удалится, если больше не
+// будет активности».
+async function loadAccount(userId) {
+    const row = await dbGet(
+        `SELECT username, unique_code, read_receipts, anon_lifetime,
+                EXTRACT(EPOCH FROM last_active_at) * 1000 AS last_active_ms
+         FROM users WHERE id = $1`,
+        [userId]
+    );
+    if (!row) return null;
+    return {
+        id: userId,
+        username: row.username,
+        uniqueCode: row.unique_code,
+        readReceipts: row.read_receipts,
+        ...describeAnonLifetime({
+            lifetime: row.anon_lifetime,
+            lastActiveMs: row.last_active_ms === null ? null : Number(row.last_active_ms),
+        }),
+    };
 }
 
-app.get('/api/security-events', async (req, res) => {
-    const userId = req.session.userId;
-    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
-    if (req.session.isAnonymous) return res.json({ success: true, events: [] });
-    try {
-        const rows = await dbAll(
-            'SELECT type, client, created_at FROM security_events WHERE user_id = $1 ORDER BY id DESC LIMIT $2',
-            [userId, SECURITY_EVENTS_PER_USER]
-        );
-        res.json({ success: true, events: rows.map(r => ({ type: r.type, client: r.client, createdAt: r.created_at })) });
-    } catch (error) {
-        console.error('Security events error:', error);
-        res.json({ success: false, message: 'Ошибка загрузки журнала' });
+// «Не вошёл» (контракт этапа 1, §3): reason/expired — только если сессия
+// была, но аккаунт удалён по сроку или сессия недействительна. Клиент
+// покажет «данные удалены по сроку», а не просто экран входа.
+function signedOutResponse(req) {
+    const body = { authenticated: false };
+    if (req.authEnded) {
+        body.reason = 'expired';
+        body.expired = true;
     }
+    body.onionUrl = onionUrlFor(req);
+    return body;
+}
+
+// Состояние входа. Сам запрос — активность и продление сессии (middleware
+// после sessionMiddleware); CSRF-куку, если её нет, выдаёт middleware CSRF.
+// onionUrl — адрес onion-зеркала при тех же условиях, что заголовок
+// Onion-Location (lib/tor-support.js), иначе null.
+app.get('/api/auth', async (req, res) => {
+    const userId = req.session.userId;
+    if (!userId) return res.json(signedOutResponse(req));
+    const account = await loadAccount(userId);
+    if (!account) {
+        // Аккаунт удалён между проверкой сессии и этим запросом.
+        anonActivity.forget(userId);
+        req.authEnded = 'expired';
+        return req.session.destroy(() => res.json(signedOutResponse(req)));
+    }
+    res.json({
+        authenticated: true,
+        user: {
+            id: account.id,
+            username: account.username,
+            uniqueCode: account.uniqueCode,
+            isAnonymous: true,
+            readReceipts: account.readReceipts,
+            anonLifetime: account.anonLifetime,
+            anonInactivitySeconds: account.anonInactivitySeconds,
+            anonExpiresAt: account.anonExpiresAt,
+        },
+        onionUrl: onionUrlFor(req),
+    });
 });
 
 // Отметки прочтения: выключенные — собеседники не видят ✓✓ и не получают
@@ -1775,26 +1520,58 @@ app.post('/api/user/privacy', async (req, res) => {
 });
 
 app.get('/api/user', async (req, res) => {
-    if (!req.session.userId) return res.json({ success: false });
-    try {
-        const user = await dbGet('SELECT id, unique_code, username, email, avatar, created_at FROM users WHERE id = $1', [req.session.userId]);
-        if (!user) return res.json({ success: false });
-        res.json({ success: true, user: { id: user.id, uniqueCode: user.unique_code, username: user.username, avatar: user.avatar || '', email: user.email, createdAt: user.created_at } });
-    } catch (error) {
-        res.json({ success: false });
-    }
+    const userId = req.session.userId;
+    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    const account = await loadAccount(userId);
+    if (!account) return res.json({ success: false, message: 'Пользователь не найден' });
+    res.json({ success: true, user: account });
 });
 
-app.post('/api/user/avatar-color', async (req, res) => {
-    if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
-    const avatarColor = normalizeAvatarColor(req.body && req.body.avatarColor);
+// Смена срока жизни аккаунта (контракт этапа 1, §3). Срок обязателен и без
+// значения по умолчанию (parseAnonLifetimeStrict): пустой или кривой запрос
+// не должен молча превращать неделю в 30 минут. Новый срок отсчитывается от
+// момента смены: last_active_at — текущая корзина (только вверх, как и любая
+// запись активности). Сессия пересоздаётся с новым sid: у новой куки другой
+// срок (tab — без Expires, day/week — с Expires), а копия прежней куки,
+// которая жила бы по старому сроку, больше ничего не открывает. Сокет
+// держится на прежней сессии — клиент после ответа переподключает его.
+app.post('/api/user/lifetime', async (req, res) => {
+    const sess = req.session;
+    const userId = sess.userId;
+    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    let lifetime;
     try {
-        await dbRun('UPDATE users SET avatar = $1 WHERE id = $2', [avatarColor, req.session.userId]);
-        req.session.avatar = avatarColor;
-        res.json({ success: true, avatar: avatarColor });
-    } catch (error) {
-        res.json({ success: false, message: 'Ошибка обновления цвета аватара' });
+        lifetime = parseAnonLifetimeStrict(req.body?.lifetime);
+    } catch (err) {
+        return res.json({ success: false, message: err.message });
     }
+    const now = Date.now();
+    const row = await dbGet(
+        `UPDATE users SET anon_lifetime = $2, last_active_at = GREATEST(last_active_at, $3)
+         WHERE id = $1
+         RETURNING EXTRACT(EPOCH FROM last_active_at) * 1000 AS last_active_ms`,
+        [userId, lifetime, new Date(activityBucketMs(now))]
+    );
+    if (!row) {
+        // Аккаунт удалён между проверкой сессии и этим запросом: следующая
+        // проверка перечитает БД и закончит сессию.
+        anonActivity.forget(userId);
+        return res.json({ success: false, message: 'Пользователь не найден' });
+    }
+    const lastActiveMs = Number(row.last_active_ms);
+    // Кэш — сразу после записи в БД: даже если пересоздать сессию не выйдет,
+    // срок аккаунта уже новый, и прежнюю сессию middleware приведёт к нему
+    // при следующем продлении (renewSession).
+    anonActivity.remember(userId, { lifetime, lastActiveMs: now, persistedBucketMs: lastActiveMs });
+    await startUserSession(req, {
+        userId, username: sess.username, uniqueCode: sess.uniqueCode, avatar: sess.avatar,
+        isAnonymous: true, anonLifetime: lifetime, renewBucket: renewBucket(now, SESSION_RENEW_MS),
+    });
+    setSessionCookieLifetime(req.session.cookie, lifetime);
+    // Новая сессия — и новый CSRF-токен, как после удаления аккаунта: токен,
+    // который видели вместе с прежней кукой, дальше не действует.
+    issueCsrfCookie(req, res);
+    res.json({ success: true, ...describeAnonLifetime({ lifetime, lastActiveMs }) });
 });
 
 // Личная строка chats вызывающего (chats.id — у каждого участника своя) и
@@ -3338,45 +3115,6 @@ app.post('/api/chats/:chatId/prefs', async (req, res) => {
     }
 });
 
-app.post('/api/change-password', passwordLimiter, async (req, res) => {
-    const userId = req.session.userId;
-    if (!userId) return res.json({ success: false, message: 'Не авторизован' });
-    const { currentPassword, newPassword, confirmPassword } = req.body || {};
-    if (!isNonEmptyString(currentPassword) || !isNonEmptyString(newPassword) || typeof confirmPassword !== 'string') return res.json({ success: false, message: 'Заполните все поля' });
-    if (newPassword !== confirmPassword) return res.json({ success: false, message: 'Новые пароли не совпадают' });
-    if (newPassword.length > MAX_PASSWORD_LENGTH) return res.json({ success: false, message: `Пароль не может быть длиннее ${MAX_PASSWORD_LENGTH} символов` });
-    if (currentPassword.length > MAX_LOGIN_PASSWORD_LENGTH) return res.json({ success: false, message: 'Неверный текущий пароль' });
-
-    try {
-        const user = await dbGet('SELECT username, email, password FROM users WHERE id = $1', [userId]);
-        if (!user) return res.json({ success: false, message: 'Пользователь не найден' });
-        if (!user.password) return res.json({ success: false, message: 'У этого аккаунта нет пароля (приватный режим)' });
-        const validPassword = await verifyPassword(currentPassword, user.password);
-        if (!validPassword) return res.json({ success: false, message: 'Неверный текущий пароль' });
-        // Та же политика, что и при регистрации (длина, блок-лист, не
-        // содержит имя/почту — поэтому они и выбираются выше).
-        const policyError = await checkPasswordPolicy(newPassword, { username: user.username, email: user.email });
-        if (policyError) return res.json({ success: false, message: policyError });
-        const hashedPassword = await hashPassword(newPassword);
-
-        await dbRun('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, userId]);
-        recordSecurityEvent(userId, 'password_changed', req);
-        // Смена пароля завершает ВСЕ сессии пользователя (другие устройства,
-        // в т.ч. того, кто мог узнать старый пароль), а не только текущую.
-        await dbRun(`DELETE FROM session WHERE sess->>'userId' = $1`, [String(userId)]);
-        io.in('user:' + userId).disconnectSockets(true);
-
-        req.session.destroy((err) => {
-            res.clearCookie('connect.sid');
-            if (err) console.error('Session destroy error on password change:', err);
-            res.json({ success: true, message: 'Пароль успешно изменён. Войдите заново.' });
-        });
-    } catch (error) {
-        console.error('Change password error:', error);
-        res.json({ success: false, message: 'Ошибка изменения пароля' });
-    }
-});
-
 // После ВСЕХ маршрутов: неизвестный /api/* — JSON-404.
 registerApiNotFound(app);
 
@@ -3401,11 +3139,11 @@ app.use((err, req, res, next) => {
     res.status(500).json({ success: false, message: 'Внутренняя ошибка сервера' });
 });
 
-// Полное удаление пользователя (анонимного при выходе/по сроку или любого
-// по POST /api/account/delete): его сообщения (и их файлы), реакции, E2EE
-// key-shares, участие в комнатах, его заявки на вступление, журнал
-// безопасности, опустевшие комнаты со всей историей и заявками в них,
-// chats (chat_settings — каскадом), сама строка users;
+// Полное удаление пользователя (POST /api/account/delete и его псевдоним
+// /api/logout, чистка по сроку): его сообщения (и их файлы), реакции, E2EE
+// key-shares, участие в комнатах, его заявки на вступление, опустевшие
+// комнаты со всей историей и заявками в них,
+// chats (chat_settings — каскадом), unread, сама строка users;
 // message_expiry и реакции на его сообщения уходят каскадом. Одной
 // транзакцией — раньше это была серия отдельных DELETE, и первая же ошибка
 // FK (например, из e2ee_key_shares, который ссылается на users без каскада)
@@ -3440,7 +3178,6 @@ async function deleteUserAccount(userId) {
         await client.query('DELETE FROM chats WHERE user_id = $1', [userId]);
         const ownRequests = await client.query('DELETE FROM join_requests WHERE user_id = $1 RETURNING room_id', [userId]);
         requestRoomIds = [...new Set(ownRequests.rows.map(r => r.room_id))];
-        await client.query('DELETE FROM security_events WHERE user_id = $1', [userId]);
 
         if (roomIds.length > 0) {
             const orphaned = await client.query(
@@ -3474,7 +3211,7 @@ async function deleteUserAccount(userId) {
     if (!deleted) return false;
 
     removeUploadedFiles(fileUrls);
-    anonStates.delete(userId);
+    anonActivity.forget(userId);
     io.in('user:' + userId).disconnectSockets(true);
     for (const roomId of survivingRoomIds) notifyRoomMembersChanged(roomId);
     for (const roomId of requestRoomIds) notifyJoinRequestsChanged(roomId);
@@ -3491,42 +3228,38 @@ async function deleteUserAccount(userId) {
 }
 
 // Анонимные аккаунты, срок которых вышел (lib/anon-lifetime.js): выбранный
-// срок без активности (users.last_active_at, у совсем старых строк — время
-// создания) или 7 дней с создания. Раньше удаление шло только через 5 часов
-// после создания и откладывалось, пока жива строка в таблице session, —
-// даже если вкладку давно закрыли. Анонимы с открытым сокетом в этом
-// процессе не трогаются (кроме жёсткого потолка): их активность и так
-// продлевается каждые 5 минут, а сокеты других экземпляров сервера
-// продлевают users.last_active_at в БД.
+// срок без активности по users.last_active_at (корзина, округлённая вверх,
+// — граница та же, что у isAnonExpired). Потолка от создания нет. Раньше
+// удаление шло только через 5 часов после создания и откладывалось, пока
+// жива строка в таблице session, — даже если вкладку давно закрыли.
+// Пользователи с открытым сокетом на этом экземпляре не трогаются: их
+// активность продлевает touch, а сокеты других экземпляров продлевают
+// last_active_at в БД сами. Время — часы сервера, как у записи корзин.
+// Ошибка выборки — наверх, в runExclusive (lib/jobs): такой проход не
+// засчитывается.
 async function purgeExpiredAnonymousUsers() {
-    try {
-        const online = anonSocketCount.keys();
-        const rows = await dbAll(`
-            SELECT u.id FROM users u
-            WHERE u.created_at < NOW() - $1::integer * INTERVAL '1 second'
-               OR (
-                   COALESCE(u.last_active_at, u.created_at) < NOW() - (CASE u.anon_lifetime
-                       WHEN 'day' THEN $2::integer WHEN 'week' THEN $3::integer ELSE $4::integer
-                   END) * INTERVAL '1 second'
-                   AND NOT (u.id = ANY($5::int[]))
-               )
-            ORDER BY u.created_at
-            LIMIT 200
-        `, [ANON_MAX_AGE_SECONDS, ANON_LIFETIMES.day, ANON_LIFETIMES.week, ANON_LIFETIMES.tab, online]);
-        // В лог — только счётчики, без id анонимных аккаунтов.
-        let failed = 0;
-        for (const row of rows) {
-            try {
-                await deleteUserAccount(row.id);
-            } catch (err) {
-                failed++;
-                logError('[Anon] Не удалось удалить просроченный аккаунт', err);
-            }
+    const now = Date.now();
+    const deadline = (lifetime) => new Date(now - ANON_LIFETIMES[lifetime] * 1000);
+    const rows = await dbAll(`
+        SELECT id FROM users
+        WHERE ((anon_lifetime = 'tab' AND last_active_at <= $1)
+            OR (anon_lifetime = 'day' AND last_active_at <= $2)
+            OR (anon_lifetime = 'week' AND last_active_at <= $3))
+          AND NOT (id = ANY($4::int[]))
+        ORDER BY last_active_at
+        LIMIT 200
+    `, [deadline('tab'), deadline('day'), deadline('week'), userSocketCount.keys()]);
+    // В лог — только счётчики, без id анонимных аккаунтов.
+    let failed = 0;
+    for (const row of rows) {
+        try {
+            await deleteUserAccount(row.id);
+        } catch (err) {
+            failed++;
+            logError('[Anon] Не удалось удалить просроченный аккаунт', err);
         }
-        if (rows.length > 0) console.log(`[Anon] Удалено просроченных анонимных аккаунтов: ${rows.length - failed}`);
-    } catch (error) {
-        logError('[Anon] Purge error', error);
     }
+    if (rows.length > 0) console.log(`[Anon] Удалено просроченных анонимных аккаунтов: ${rows.length - failed}`);
 }
 
 // Заявки на вступление старше недели: заявителю — "отклонена", участникам
@@ -3572,10 +3305,17 @@ jobs.register({
     name: 'purgeExpiredAnonymousUsers', run: purgeExpiredAnonymousUsers,
     firstDelayMs: 60 * 1000, intervalMs: 5 * 60 * 1000, maintenance: true, testTick: true,
 });
-// Продление активности анонимов с открытыми сокетами ЭТОГО процесса: у
-// каждого экземпляра свои сокеты, поэтому без блокировки.
+// Открытые сокеты ЭТОГО процесса (у каждого экземпляра свои, поэтому без
+// блокировки), раз в 2,5 минуты: активность их пользователей одним UPDATE и
+// строки tab-сессий (кука без срока) — ещё 24 часа: HTTP-ответа, который
+// пересохранил бы строку, может не быть часами, пока вкладка открыта.
 jobs.register({
-    name: 'touchAnonymousSockets', run: touchAnonymousSockets,
+    name: 'touchOnlineSockets',
+    run: async () => {
+        const online = userSocketCount.keys();
+        await anonActivity.touch(online);
+        await extendTabSessions(dbRun, online);
+    },
     intervalMs: ANON_SOCKET_ACTIVITY_INTERVAL_MS, exclusive: false, maintenance: true,
 });
 jobs.register({
@@ -3619,7 +3359,6 @@ function onServerListening() {
     console.log('  + Исчезающие сообщения, физическое удаление');
     console.log('  + Шифрование текста сообщений в БД (AES-256-GCM с привязкой к комнате)');
     console.log('  + CSP с nonce, заголовки приватности' + (IS_PRODUCTION ? ', HSTS по https' : ''));
-    console.log('  + Выравнивание времени ответа при входе');
     console.log('  + E2EE: ключи во встроенном хранилище (эта же база)');
     if (ONION_ADDRESS && ONION_PORT) console.log(`  + Onion-сервис: http://${ONION_ADDRESS} (внутренний порт ${ONION_PORT})`);
     console.log(`\n${'='.repeat(60)}\n`);

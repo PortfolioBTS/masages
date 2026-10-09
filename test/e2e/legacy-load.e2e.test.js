@@ -57,7 +57,8 @@ test('первый старт на схеме 2.0.0: строки [Reset] в л�
         sids: Object.values(suite.legacy.users).map(u => u.sid),
     });
 
-    assert.deepStrictEqual(await suite.client().auth(), { authenticated: false });
+    // Контракт этапа 1, §3: onionUrl есть всегда (без onion-сервиса — null).
+    assert.deepStrictEqual(await suite.client().auth(), { authenticated: false, onionUrl: null });
 
     // Старых данных нет: ни аккаунтов, ни комнат, ни сообщений, ни старых сессий.
     for (const table of ['users', 'rooms', 'chats', 'messages', 'room_participants', 'session']) {
