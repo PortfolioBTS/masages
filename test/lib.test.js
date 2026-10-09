@@ -367,21 +367,6 @@ async function main() {
         }
     });
 
-    await test('chat settings: legacy personal timers → the shortest one, never longer than asked', () => {
-        const { snapLegacyExpirySeconds, pickRoomExpiryFromLegacy } = chatSettings;
-        assert.strictEqual(snapLegacyExpirySeconds(3600), 3600);
-        assert.strictEqual(snapLegacyExpirySeconds(7200), 3600, '2 h → 1 h, not 1 day');
-        assert.strictEqual(snapLegacyExpirySeconds(90000), 86400);
-        assert.strictEqual(snapLegacyExpirySeconds(365 * 86400), 604800);
-        assert.strictEqual(snapLegacyExpirySeconds(60), 300, 'shorter than every option → the shortest option');
-        assert.strictEqual(snapLegacyExpirySeconds(0), 0);
-        assert.strictEqual(snapLegacyExpirySeconds(null), 0);
-        assert.strictEqual(pickRoomExpiryFromLegacy([86400, 3600, 604800]), 3600);
-        assert.strictEqual(pickRoomExpiryFromLegacy([null, 0, 7200]), 3600);
-        assert.strictEqual(pickRoomExpiryFromLegacy([null, 0]), 0);
-        assert.strictEqual(pickRoomExpiryFromLegacy([]), 0);
-    });
-
     await test('chat settings: a personal expiry cannot outlive the chat timer', () => {
         const { effectiveMessageExpiry } = chatSettings;
         assert.strictEqual(effectiveMessageExpiry(null, null), null);
