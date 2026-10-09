@@ -159,18 +159,18 @@ for (const lifetime of LIFETIMES) {
     });
 }
 
-test('у самой границы срока пользователь жив: до конца срока остаётся меньше двух минут — чистка его не трогает', async () => {
+test('у самой границы срока пользователь жив: до конца срока остаётся от полутора до шести с половиной минут — чистка его не трогает', async () => {
     for (const lifetime of LIFETIMES) {
         const client = suite.client();
         const user = await client.registerAnon({ lifetime });
         const bot = await client.botChat();
         await client.send(bot.id, 'я ещё здесь');
-        // last_active_at = «сейчас − срок + 90 секунд»: до удаления остаётся 90 с.
+        // last_active_at = «сейчас − срок + 90 секунд» (на границе корзины, вверх): до удаления остаётся не меньше 90 с.
         await setLastActive(suite, user.id, lifetime, { pastMs: -90 * 1000 });
         await afterPurgePass();
         const row = await userRow(suite, user.id);
         assert.ok(row, `${lifetime}: за 90 секунд до границы пользователь удалён раньше срока`);
-        assert.ok(row.lastActiveMs < Date.now() - LIFETIME_MS[lifetime] + 2 * MINUTE_MS, `${lifetime}: проверка не должна была продлить аккаунт`);
+        assert.ok(row.lastActiveMs < Date.now() - LIFETIME_MS[lifetime] + 7 * MINUTE_MS, `${lifetime}: проверка не должна была продлить аккаунт`);
         assert.strictEqual(await count(suite, 'SELECT 1 FROM messages WHERE user_id = $1', [user.id]) >= 2, true, `${lifetime}: сообщения целы`);
         // И сам он — по-прежнему в аккаунте (этот запрос — уже активность).
         assert.strictEqual((await client.auth()).authenticated, true, `${lifetime}`);

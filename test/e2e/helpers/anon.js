@@ -100,16 +100,21 @@ async function forceRenewal(suite, sid, { rewindExpireMs = 0 } = {}) {
     if (rowCount === 0) throw new Error(`forceRenewal: нет сессии ${sid}`);
 }
 
-// last_active_at ровно «сейчас − срок − запас»: срок вышел запас назад. Сдвиг
-// от текущего значения (rewindUser) здесь не годится: оно лежит в корзине, то
-// есть до 5 минут в будущем, и «срок + минута» от него мог бы ещё не выйти.
-// Отрицательный запас — до конца срока остаётся столько же.
+// last_active_at «сейчас − срок − запас» на границе корзины (в рабочем режиме
+// сервер пишет только их): при положительном запасе — вниз (срок точно вышел
+// не меньше чем запас назад), при отрицательном — вверх (до конца срока
+// остаётся не меньше |запаса|, но не больше |запаса| + 5 минут). Без
+// выравнивания проверка срока по HTTP (она округляет last_active_at вверх до
+// корзины) и чистка по базе (сравнивает как есть) расходились бы на подложном
+// значении, которого сервер сам не записывает. Сдвиг от текущего значения
+// (rewindUser) здесь не годится по той же причине: оно лежит в корзине, то
+// есть до 5 минут в будущем.
 async function setLastActive(suite, id, lifetime, { pastMs = 60 * 1000 } = {}) {
-    const { rowCount } = await suite.query(
-        `UPDATE users SET last_active_at = NOW() - make_interval(secs => $2::float8 / 1000) WHERE id = $1`,
-        [id, LIFETIME_MS[lifetime] + pastMs]
-    );
+    const target = Date.now() - LIFETIME_MS[lifetime] - pastMs;
+    const aligned = pastMs >= 0 ? Math.floor(target / BUCKET_MS) * BUCKET_MS : bucketCeil(target);
+    const { rowCount } = await suite.query('UPDATE users SET last_active_at = $2 WHERE id = $1', [id, new Date(aligned)]);
     if (rowCount === 0) throw new Error(`setLastActive: нет пользователя ${id}`);
+    return aligned;
 }
 
 module.exports = {
