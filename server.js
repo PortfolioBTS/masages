@@ -2181,12 +2181,10 @@ async function addRoomMember(roomId, userId, check) {
         const members = await client.query('SELECT COUNT(*)::int AS n FROM room_participants WHERE room_id = $1', [roomId]);
         if (isRoomFull(members.rows[0].n, room.invite_max_members)) return { error: 'full' };
 
-        const other = await client.query(
-            `SELECT u.username FROM room_participants rp JOIN users u ON u.id = rp.user_id
-             WHERE rp.room_id = $1 AND rp.user_id <> $2 ORDER BY rp.id LIMIT 1`,
-            [roomId, userId]
-        );
-        const name = other.rows[0] ? `Чат с ${other.rows[0].username}` : room.name;
+        // Новичок видит группу под её названием — тем же, что в предпросмотре
+        // приглашения. Раньше строка называлась «Чат с <имя первого
+        // участника>»: в группе это неверно и лишний раз показывает имя.
+        const name = room.name;
         const avatar = name.charAt(0).toUpperCase();
         await client.query(
             `INSERT INTO room_participants (room_id, user_id, visible_from_id)
