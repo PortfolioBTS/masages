@@ -388,62 +388,112 @@ async function main() {
 
     // ---- срок жизни анонима (lib/anon-lifetime.js) ----
 
-    await test('anon lifetime: allowed values, default and legacy NULL', () => {
+    await test('anon lifetime: allowed values; registration defaults to tab, the change of lifetime has no default', () => {
         assert.strictEqual(anon.parseAnonLifetime(undefined), 'tab');
         assert.strictEqual(anon.parseAnonLifetime(null), 'tab');
         assert.strictEqual(anon.parseAnonLifetime(''), 'tab');
-        for (const v of ['tab', 'day', 'week']) assert.strictEqual(anon.parseAnonLifetime(v), v);
+        for (const v of ['tab', 'day', 'week']) {
+            assert.strictEqual(anon.parseAnonLifetime(v), v);
+            assert.strictEqual(anon.parseAnonLifetimeStrict(v), v);
+        }
         for (const bad of ['month', 'TAB', 1, true, {}, '__proto__', 'constructor', 'toString']) {
             assert.throws(() => anon.parseAnonLifetime(bad), RangeError, String(bad));
+            assert.throws(() => anon.parseAnonLifetimeStrict(bad), RangeError, String(bad));
         }
-        assert.strictEqual(anon.storedAnonLifetime(null), 'tab', 'accounts created before the choice live by the shortest rule');
+        // Строгий парсер: пустое значение — ошибка, а не 'tab'.
+        for (const empty of [undefined, null, '']) {
+            assert.throws(() => anon.parseAnonLifetimeStrict(empty), RangeError, String(empty));
+        }
+        assert.strictEqual(anon.storedAnonLifetime(null), 'tab', 'unknown stored value lives by the shortest rule');
         assert.strictEqual(anon.storedAnonLifetime('week'), 'week');
         assert.strictEqual(anon.storedAnonLifetime('__proto__'), 'tab');
         assert.deepStrictEqual(anon.ANON_LIFETIMES, { tab: 1800, day: 86400, week: 604800 });
-    });
-
-    await test('anon lifetime: expiry = last activity + TTL, capped at 7 days from creation', () => {
-        const created = Date.parse('2026-09-20T00:00:00Z');
-        const min = 60 * 1000, day = 24 * 60 * min;
-        // Без активности — от создания.
-        assert.strictEqual(anon.anonExpiresAtMs({ lifetime: 'tab', createdAtMs: created }), created + 30 * min);
-        assert.strictEqual(anon.anonExpiresAtMs({ lifetime: 'tab', createdAtMs: created, lastActiveMs: null }), created + 30 * min);
-        assert.strictEqual(anon.anonExpiresAtMs({ lifetime: 'day', createdAtMs: created, lastActiveMs: created + 2 * day }), created + 3 * day);
-        // Активность не продлевает дальше 7 дней с создания.
-        assert.strictEqual(anon.anonExpiresAtMs({ lifetime: 'week', createdAtMs: created, lastActiveMs: created + 5 * day }), created + 7 * day);
-        assert.strictEqual(anon.anonExpiresAtMs({ lifetime: 'tab', createdAtMs: created, lastActiveMs: created + 7 * day - min }), created + 7 * day);
-        assert.strictEqual(anon.anonExpiresAtMs({ lifetime: null, createdAtMs: created, lastActiveMs: created + day }), created + day + 30 * min, 'legacy NULL = tab');
-
-        const active = { lifetime: 'tab', createdAtMs: created, lastActiveMs: created + day };
-        assert.strictEqual(anon.isAnonExpired({ ...active, now: created + day + 29 * min }), false);
-        assert.strictEqual(anon.isAnonExpired({ ...active, now: created + day + 30 * min }), true);
-        assert.strictEqual(anon.isAnonExpired({ lifetime: 'week', createdAtMs: created, lastActiveMs: created + 7 * day - 1, now: created + 7 * day }), true, 'hard cap');
-        assert.strictEqual(anon.isAnonExpired({ lifetime: 'week', createdAtMs: undefined, lastActiveMs: Date.now(), now: Date.now() }), true, 'no creation time — fail closed');
-    });
-
-    await test('anon lifetime: cookie max-age and activity throttling', () => {
-        const created = Date.parse('2026-09-20T00:00:00Z');
-        const day = 24 * 3600 * 1000;
-        assert.strictEqual(anon.anonCookieMaxAgeMs({ lifetime: 'tab', createdAtMs: created, now: created }), null, "'tab' — browser-session cookie");
-        assert.strictEqual(anon.anonCookieMaxAgeMs({ lifetime: 'day', createdAtMs: created, now: created }), 7 * day);
-        assert.strictEqual(anon.anonCookieMaxAgeMs({ lifetime: 'week', createdAtMs: created, now: created + 2 * day }), 5 * day);
-        assert.strictEqual(anon.anonCookieMaxAgeMs({ lifetime: 'week', createdAtMs: created, now: created + 8 * day }), 0);
-
-        const t = 1_000_000;
-        assert.strictEqual(anon.shouldPersistActivity(undefined, t), true);
-        assert.strictEqual(anon.shouldPersistActivity(t - 59 * 1000, t), false, 'API activity is written at most once a minute');
-        assert.strictEqual(anon.shouldPersistActivity(t - 60 * 1000, t), true);
-        assert.ok(anon.ANON_SOCKET_ACTIVITY_INTERVAL_MS < anon.ANON_LIFETIMES.tab * 1000 / 2, 'open sockets refresh well within the shortest TTL');
-    });
-
-    await test('anon lifetime: welcome text names the chosen rule and has no emoji', () => {
-        const emoji = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}️•]/u;
-        for (const [lifetime, phrase] of [['tab', '30 минут'], ['day', 'сутки'], ['week', '7 дней без активности'], [null, '30 минут']]) {
-            const text = anon.anonWelcomeText(lifetime);
-            assert.ok(text.includes(phrase), `${lifetime}: ${text}`);
-            assert.ok(text.includes('не позже чем через 7 дней'), 'hard cap is mentioned');
-            assert.doesNotMatch(text, emoji);
+        assert.deepStrictEqual(Object.keys(anon.LIFETIME_PHRASES).sort(), ['day', 'tab', 'week']);
+        for (const removed of ['ANON_MAX_AGE_SECONDS', 'shouldPersistActivity', 'ANON_ACTIVITY_PERSIST_INTERVAL_MS']) {
+            assert.strictEqual(anon[removed], undefined, removed);
         }
+    });
+
+    await test('anon lifetime: activity bucket is rounded UP to 5 minutes', () => {
+        const step = 5 * 60 * 1000;
+        const t0 = Date.parse('2026-10-03T12:00:00Z');
+        assert.strictEqual(anon.ACTIVITY_STEP_MS, step);
+        assert.strictEqual(anon.activityBucketMs(t0), t0, 'a boundary stays itself');
+        assert.strictEqual(anon.activityBucketMs(t0 + 1), t0 + step);
+        assert.strictEqual(anon.activityBucketMs(t0 + step - 1), t0 + step);
+        assert.strictEqual(anon.activityBucketMs(anon.activityBucketMs(t0 + 1234)), anon.activityBucketMs(t0 + 1234), 'idempotent');
+        assert.ok(Number.isNaN(anon.activityBucketMs(null)));
+    });
+
+    await test('anon lifetime: expiry = activity bucket + lifetime, no cap from creation', () => {
+        const min = 60 * 1000, day = 24 * 60 * min;
+        const t0 = Date.parse('2026-10-03T12:00:00Z');
+        const exact = t0 + 61 * 1000; // 12:01:01 -> корзина 12:05
+        assert.strictEqual(anon.anonExpiresAtMs({ lifetime: 'tab', lastActiveMs: exact }), t0 + 5 * min + 30 * min);
+        assert.strictEqual(anon.anonExpiresAtMs({ lifetime: 'day', lastActiveMs: exact }), t0 + 5 * min + day);
+        assert.strictEqual(anon.anonExpiresAtMs({ lifetime: 'week', lastActiveMs: exact }), t0 + 5 * min + 7 * day);
+        assert.strictEqual(anon.anonExpiresAtMs({ lifetime: null, lastActiveMs: t0 }), t0 + 30 * min, 'unknown = tab');
+        // Никогда не раньше настоящего срока и не позже чем на корзину.
+        for (let i = 0; i < 200; i++) {
+            const t = t0 + Math.floor(Math.random() * 7 * day);
+            for (const lifetime of ['tab', 'day', 'week']) {
+                const expires = anon.anonExpiresAtMs({ lifetime, lastActiveMs: t });
+                const term = anon.ANON_LIFETIMES[lifetime] * 1000;
+                assert.ok(expires >= t + term && expires < t + term + 5 * min, `${lifetime} ${t}`);
+            }
+        }
+        // Потолка от создания нет: неделя активности за неделей — аккаунт жив.
+        const active = { lifetime: 'week', lastActiveMs: t0 + 30 * day };
+        assert.strictEqual(anon.isAnonExpired({ ...active, now: t0 + 30 * day + 6 * day }), false);
+        // Граница: за миллисекунду до срока — жив, ровно в срок — истёк.
+        const tab = { lifetime: 'tab', lastActiveMs: t0 };
+        assert.strictEqual(anon.isAnonExpired({ ...tab, now: t0 + 30 * min - 1 }), false);
+        assert.strictEqual(anon.isAnonExpired({ ...tab, now: t0 + 30 * min }), true);
+        // Нет времени активности — истёк (fail closed).
+        for (const missing of [null, undefined, NaN, '']) {
+            assert.strictEqual(anon.isAnonExpired({ lifetime: 'week', lastActiveMs: missing, now: t0 }), true, String(missing));
+        }
+    });
+
+    await test('anon lifetime: cookie max-age — tab without Expires, day/week = lifetime + 15 minutes', () => {
+        const min = 60 * 1000;
+        assert.strictEqual(anon.anonCookieMaxAgeMs('tab'), null, "'tab' — browser-session cookie");
+        assert.strictEqual(anon.anonCookieMaxAgeMs('day'), 24 * 60 * min + 15 * min);
+        assert.strictEqual(anon.anonCookieMaxAgeMs('week'), 7 * 24 * 60 * min + 15 * min);
+        assert.strictEqual(anon.anonCookieMaxAgeMs('month'), null, 'unknown = tab');
+        assert.strictEqual(anon.ANON_COOKIE_GRACE_MS, 15 * min);
+    });
+
+    await test('anon lifetime: session renew interval (5 minutes; test knob only with NODE_ENV=test) and renewBucket', () => {
+        const fiveMin = 5 * 60 * 1000;
+        assert.strictEqual(anon.SESSION_RENEW_INTERVAL_MS, fiveMin);
+        assert.strictEqual(anon.sessionRenewIntervalMs({}), fiveMin);
+        assert.strictEqual(anon.sessionRenewIntervalMs({ NODE_ENV: 'test', NYXO_TEST_RENEW_INTERVAL_MS: '1000' }), 1000);
+        for (const nodeEnv of ['production', 'development', undefined]) {
+            assert.strictEqual(anon.sessionRenewIntervalMs({ NODE_ENV: nodeEnv, NYXO_TEST_RENEW_INTERVAL_MS: '1000' }), fiveMin, String(nodeEnv));
+        }
+        for (const bad of [undefined, '', '0', '-5', 'abc', '1.5']) {
+            assert.strictEqual(anon.sessionRenewIntervalMs({ NODE_ENV: 'test', NYXO_TEST_RENEW_INTERVAL_MS: bad }), fiveMin, String(bad));
+        }
+        const t0 = Date.parse('2026-10-03T12:00:00Z');
+        assert.strictEqual(anon.renewBucket(t0), t0 / fiveMin);
+        assert.strictEqual(anon.renewBucket(t0 + fiveMin - 1), anon.renewBucket(t0), 'same interval — same bucket');
+        assert.strictEqual(anon.renewBucket(t0 + fiveMin), anon.renewBucket(t0) + 1);
+        assert.strictEqual(anon.renewBucket(t0 + 1500, 1000), Math.floor((t0 + 1500) / 1000));
+        // Сокеты продлеваются чаще шага корзины.
+        assert.ok(anon.ANON_SOCKET_ACTIVITY_INTERVAL_MS < anon.ACTIVITY_STEP_MS);
+    });
+
+    await test('anon lifetime: API fields — anonExpiresAt only for day/week', () => {
+        const t0 = Date.parse('2026-10-03T12:00:00Z');
+        assert.deepStrictEqual(anon.describeAnonLifetime({ lifetime: 'tab', lastActiveMs: t0 }),
+            { anonLifetime: 'tab', anonInactivitySeconds: 1800, anonExpiresAt: null });
+        assert.deepStrictEqual(anon.describeAnonLifetime({ lifetime: 'day', lastActiveMs: t0 + 1 }),
+            { anonLifetime: 'day', anonInactivitySeconds: 86400, anonExpiresAt: '2026-10-04T12:05:00.000Z' });
+        assert.deepStrictEqual(anon.describeAnonLifetime({ lifetime: 'week', lastActiveMs: t0 }),
+            { anonLifetime: 'week', anonInactivitySeconds: 604800, anonExpiresAt: '2026-10-10T12:00:00.000Z' });
+        assert.strictEqual(anon.describeAnonLifetime({ lifetime: 'week', lastActiveMs: null }).anonExpiresAt, null);
+        assert.strictEqual(anon.describeAnonLifetime({ lifetime: 'bogus', lastActiveMs: t0 }).anonLifetime, 'tab');
     });
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
