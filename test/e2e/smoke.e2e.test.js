@@ -29,7 +29,8 @@ async function withScratchDatabase(fn) {
 
 test('старт на пустой базе: схема создана, версия схемы записана, сервер отвечает', async () => {
     const auth = await suite.client().auth();
-    assert.deepStrictEqual(auth, { authenticated: false });
+    // Контракт этапа 1, §3: onionUrl есть всегда (без onion-сервиса — null).
+    assert.deepStrictEqual(auth, { authenticated: false, onionUrl: null });
     const tables = (await suite.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`))
         .rows.map(r => r.table_name);
     for (const table of ['users', 'rooms', 'chats', 'messages', 'room_participants', 'join_requests', 'schema_meta']) {
