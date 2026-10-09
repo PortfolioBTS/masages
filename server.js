@@ -96,7 +96,9 @@ const botGuide = require('./lib/bot-guide');
 
 // Onion-сервис (контейнер tor-service/) и proof-of-work для регистрации
 const { ONION_ADDRESS, ONION_PORT, onionMiddleware, onionUrlFor, isOnionHost, isOnionSocket, listenOnionPort } = require('./lib/tor-support');
-const { createChallenge, verifySolution } = require('./lib/pow');
+const { createChallenge, consumeSolution, setSecret: setPowSecret } = require('./lib/pow');
+// Точные лимиты и одноразовость PoW в Postgres (UNLOGGED-таблицы, ключи — HMAC).
+const { createPgLimits, initPgLimitsSchema, respondBusy, LimitStoreError } = require('./lib/pg-limits');
 
 // Несколько экземпляров сервера на одной базе (миграции и фоновые задачи
 // под advisory-блокировками) и запись ошибок в лог без id из detail.
@@ -313,36 +315,9 @@ const rateLimitKeyGenerator = (req) => ipKeyGenerator(req.realIp || req.ip);
 const sessionUserId = (req) => (req.session && req.session.userId) || null;
 const RATE_LIMIT_DEFAULTS = { standardHeaders: true, legacyHeaders: false };
 
-// Массовую регистрацию теперь сдерживает proof-of-work (lib/pow.js). IP-лимит
-// остался мягким и только для clearnet: для onion он запер бы регистрацию
-// всем сразу (общий IP контейнера tor).
-const registerLimiter = rateLimit({
-    ...RATE_LIMIT_DEFAULTS,
-    windowMs: 60 * 60 * 1000,
-    max: 10,
-    skip: (req) => req.isOnion,
-    keyGenerator: rateLimitKeyGenerator,
-    message: { success: false, message: 'Слишком много регистраций. Попробуйте позже.' }
-});
-
-// Вход в комнату по коду: даже 130-битный код не должен перебираться
-// с бесконечной скоростью, и утёкший список кодов — массово проверяться.
-const joinUserLimiter = rateLimit({
-    ...RATE_LIMIT_DEFAULTS,
-    windowMs: 15 * 60 * 1000,
-    max: 20,
-    skip: (req) => !sessionUserId(req),
-    keyGenerator: (req) => `user:${sessionUserId(req)}`,
-    message: { success: false, message: 'Слишком много попыток входа в чат. Попробуйте позже.' }
-});
-const joinIpLimiter = rateLimit({
-    ...RATE_LIMIT_DEFAULTS,
-    windowMs: 15 * 60 * 1000,
-    max: 60,
-    skip: (req) => req.isOnion,
-    keyGenerator: rateLimitKeyGenerator,
-    message: { success: false, message: 'Слишком много попыток входа в чат. Попробуйте позже.' }
-});
+// Точные лимиты (регистрация, вход по коду, выдача ключей) и одноразовость PoW
+// живут в Postgres и создаются ниже, рядом с пулом и SESSION_SECRET
+// (lib/pg-limits.js). Здесь — общий лимит /api, он только в памяти.
 
 // 300 запросов за 15 минут (~1 в 3 секунды) активный пользователь чата
 // выбирал за несколько минут — особенно когда клиент перезапрашивал
@@ -712,6 +687,8 @@ async function initDatabase() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_session_user ON session((sess->>'userId'))`);
 
     await initE2eeGroupsSchema(pool);
+    // Лимиты и использованные решения PoW (UNLOGGED, lib/pg-limits.js).
+    await initPgLimitsSchema(pool);
     // Публичные E2EE-ключи хранятся в этой же базе (lib/key-store.js).
     await initKeyStoreSchema(pool);
     // Таблицы message_expiry/chat_settings/room_settings ссылаются на
@@ -875,6 +852,46 @@ const INVITE_TTL_SECONDS = Math.min(
 
 const sessionSecret = process.env.SESSION_SECRET;
 if (!sessionSecret) throw new Error('SESSION_SECRET не задан в переменных окружения');
+
+// ---- Точные лимиты в Postgres (lib/pg-limits.js, roadmap R11) ----
+//
+// Регистрация, вход по коду, выдача bundle ключей и одноразовость решений PoW
+// переживают рестарт: счётчики лежат в UNLOGGED-таблицах, ключи клиентов (IP,
+// id) — только как HMAC от SESSION_SECRET. Ошибка хранилища закрывает лимит:
+// 503 {success:false, code:'busy'}. Ключ PoW тоже выводится из SESSION_SECRET,
+// чтобы выданные задачи действовали и после рестарта.
+setPowSecret(sessionSecret);
+const pgLimits = createPgLimits({ pool, secret: sessionSecret });
+const powUsedStore = pgLimits.powUsedStore();
+const bundleLimiter = pgLimits.slidingLimiter('bundle');
+
+// Массовую регистрацию сдерживает proof-of-work (lib/pow.js). IP-лимит остался
+// мягким и только для clearnet: для onion он запер бы регистрацию всем сразу
+// (общий IP контейнера tor).
+const registerLimiter = pgLimits.rateLimiter('register', {
+    windowMs: 60 * 60 * 1000,
+    max: 10,
+    skip: (req) => req.isOnion,
+    keyGenerator: rateLimitKeyGenerator,
+    message: { success: false, message: 'Слишком много регистраций. Попробуйте позже.' }
+});
+
+// Вход в комнату по коду: даже 130-битный код не должен перебираться
+// с бесконечной скоростью, и утёкший список кодов — массово проверяться.
+const joinUserLimiter = pgLimits.rateLimiter('join-user', {
+    windowMs: 15 * 60 * 1000,
+    max: 20,
+    skip: (req) => !sessionUserId(req),
+    keyGenerator: (req) => `user:${sessionUserId(req)}`,
+    message: { success: false, message: 'Слишком много попыток входа в чат. Попробуйте позже.' }
+});
+const joinIpLimiter = pgLimits.rateLimiter('join-ip', {
+    windowMs: 15 * 60 * 1000,
+    max: 60,
+    skip: (req) => req.isOnion,
+    keyGenerator: rateLimitKeyGenerator,
+    message: { success: false, message: 'Слишком много попыток входа в чат. Попробуйте позже.' }
+});
 
 // Интервал продления сессии: 5 минут; в сквозных тестах —
 // NYXO_TEST_RENEW_INTERVAL_MS (только при NODE_ENV=test).
@@ -1191,7 +1208,7 @@ app.use('/api/', apiLimiter);
 // Публичные E2EE-ключи: /api/keys/* → встроенное хранилище (lib/key-store.js).
 // Регистрируется строго ПОСЛЕ sessionMiddleware — маршрутам нужна сессия.
 // Чужие ключи отдаются только при общей комнате — модулю нужна БД.
-registerE2eeKeyRoutes(app, { dbGet, dbAll });
+registerE2eeKeyRoutes(app, { dbGet, dbAll, bundleLimiter });
 // Групповой E2EE: список участников чата + key-shares (тоже нужна сессия).
 registerE2eeGroupRoutes(app, { dbGet, dbAll, dbRun, io });
 registerApiRoutes(app, serverContext);
@@ -1283,15 +1300,26 @@ function startUserSession(req, fields) {
 const POW_PURPOSES = new Set(['register-anon']);
 const POW_FAILED_RESPONSE = { success: false, message: 'Не пройдена проверка proof-of-work', powRequired: true };
 
-function checkPow(req, purpose) {
+// 'ok' | 'invalid' | 'replayed' | 'busy'. Задача сжигается в Postgres
+// (pow_used) только у решения, прошедшего проверку, — неверный nonce её не
+// тратит. Хранилище не отвечает — 'busy': регистрацию без проверки
+// одноразовости не пропускаем (лимит закрывается), а решение остаётся
+// несожжённым — клиент повторит его позже.
+async function checkPow(req, purpose) {
     const solution = req.body && req.body.pow;
-    if (!solution || typeof solution !== 'object') return false;
+    if (!solution || typeof solution !== 'object') return 'invalid';
     try {
-        return verifySolution(solution, purpose) === true;
+        return await consumeSolution(solution, purpose, powUsedStore);
     } catch (err) {
-        console.error('[PoW] Ошибка проверки решения:', err.message);
-        return false;
+        // Сбой хранилища уже записан в лог самим хранилищем.
+        if (!(err instanceof LimitStoreError)) logError('[PoW] Ошибка проверки решения', err);
+        return 'busy';
     }
+}
+
+function respondPowFailure(res, verdict) {
+    if (verdict === 'busy') return respondBusy(res);
+    return res.json(POW_FAILED_RESPONSE);
 }
 
 app.get('/api/pow/challenge', (req, res) => {
@@ -1359,7 +1387,8 @@ app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
     } catch (err) {
         return res.json({ success: false, message: err.message });
     }
-    if (!checkPow(req, 'register-anon')) return res.json(POW_FAILED_RESPONSE);
+    const powVerdict = await checkPow(req, 'register-anon');
+    if (powVerdict !== 'ok') return respondPowFailure(res, powVerdict);
     try {
         const uniqueCode = await generateUniqueCodeAsync();
         const username = await generateAnonymousUsernameAsync();
