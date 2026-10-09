@@ -2444,17 +2444,11 @@ button.reply-to:hover {
     opacity: 0.9;
 }
 
-.message-video,
-.message-audio {
+.message-video {
     display: block;
     max-width: min(320px, 100%);
     margin-bottom: 4px;
     border-radius: var(--radius-sm);
-}
-
-.message-audio {
-    width: 280px;
-    height: 40px;
 }
 
 .file-attachment {
@@ -2898,6 +2892,72 @@ a.file-attachment:hover {
     font-size: 14px;
 }
 
+/* Подсказки в чате с ботом: ряд кнопок-тем над полем ввода. Каждая — обычный
+   .chip (button.chip), только крупнее; цвета берутся из токенов, поэтому
+   обе темы работают без отдельных правил. */
+.suggestions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.suggestion {
+    height: 32px;
+    padding: 0 12px;
+    font-size: 13px;
+}
+
+/* Кольцо фокуса — внутри кнопки: у прокручиваемого ряда (телефон, ниже)
+   внешнее кольцо обрезалось бы краем контейнера. */
+.suggestion:focus-visible {
+    outline-offset: -2px;
+}
+
+/* Идёт отправка: кнопка остаётся в порядке фокуса (aria-disabled, не
+   disabled), но выглядит неактивной и не подсвечивается при наведении. */
+.suggestion[aria-disabled="true"] {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.suggestion[aria-disabled="true"]:hover {
+    border-color: var(--border);
+    color: var(--text-2);
+}
+
+/* Телефон и планшет: одна строка с горизонтальной прокруткой без полосы.
+   Затухание у правого края подсказывает, что ряд прокручивается; отступ
+   справа на ту же ширину оставляет последней кнопке место вне затухания. */
+@media (max-width: 768px) {
+    .suggestions {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        padding-right: 24px;
+        scroll-snap-type: x proximity;
+        scrollbar-width: none;
+        overscroll-behavior-x: contain;
+        -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+        mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+    }
+
+    .suggestions::-webkit-scrollbar {
+        display: none;
+    }
+
+    .suggestion {
+        flex: none;
+        scroll-snap-align: start;
+    }
+}
+
+/* Сенсорный экран: цель нажатия не ниже 40 px. */
+@media (pointer: coarse) {
+    .suggestion {
+        height: 40px;
+    }
+}
+
 .input-wrapper {
     display: flex;
     align-items: flex-end;
@@ -2940,18 +3000,6 @@ a.file-attachment:hover {
     border-color: var(--surface-3);
     color: var(--text-3);
     opacity: 1;
-}
-
-/* Запись голосового (зарезервировано): мигающая обводка вместо красной точки. */
-.recording {
-    background: var(--text) !important;
-    color: var(--bg) !important;
-    animation: rec-blink 1.2s steps(2, jump-none) infinite;
-}
-
-@keyframes rec-blink {
-    from { outline: 2px solid var(--text); outline-offset: 2px; }
-    to { outline: 2px solid transparent; outline-offset: 2px; }
 }
 
 /* Статус загрузки: подпись + полоса прогресса (ширина — el.style.width). */
@@ -3046,6 +3094,9 @@ a.file-attachment:hover {
 
 .send-file-row {
     display: flex;
+    /* Строки не сжимаются: при многих файлах (или длинном пояснении об отказе
+       на узком экране) список прокручивается, а не накладывает строки друг на друга. */
+    flex: none;
     align-items: center;
     gap: 12px;
     min-height: 48px;
@@ -4457,10 +4508,6 @@ a.file-attachment:hover {
 
     .footer-btn {
         padding: 0 8px;
-    }
-
-    .input-wrapper #record-btn:disabled {
-        display: none;
     }
 
     .request-row {
