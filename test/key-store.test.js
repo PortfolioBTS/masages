@@ -235,9 +235,10 @@ async function main() {
         assert.strictEqual(db._state.opks.filter(o => o.user_id === 2).length, opkBefore - 1, 'one OPK of bob consumed');
         assert.strictEqual((await bob.syncKeyShares(22, 500)).applied, 1);
         assert.strictEqual((await carol.syncKeyShares(33, 500)).applied, 1);
-        const ct = await alice.encryptOutgoing(500, 'через встроенное хранилище');
-        assert.strictEqual((await bob.decryptIncoming(500, 1, ct, 1)).text, 'через встроенное хранилище');
-        assert.strictEqual((await carol.decryptIncoming(500, 1, ct, 1)).text, 'через встроенное хранилище');
+        // Содержимое привязано к id сообщения (mid), поэтому id выбирается до шифрования.
+        const ct = await alice.encryptOutgoing(500, 'через встроенное хранилище', { messageId: '1000001' });
+        assert.strictEqual((await bob.decryptIncoming(500, 1, ct, '1000001')).text, 'через встроенное хранилище');
+        assert.strictEqual((await carol.decryptIncoming(500, 1, ct, '1000001')).text, 'через встроенное хранилище');
         // Коды безопасности совпадают — identity берутся из того же хранилища
         await alice.checkPeerIdentities([2]);
         await bob.checkPeerIdentities([1]);

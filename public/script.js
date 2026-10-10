@@ -936,6 +936,12 @@ async function prepareOutgoingE2ee(chatId, roomId) {
 // которой здесь нет, получает общий текст. Новая причина — новая строка.
 const E2EE_FAILURE_TEXTS = {
     replay: 'Повтор старого сообщения (возможна подмена сервером)',
+    // Содержимое привязано к сообщению (message-ordering.md, раздел 9): внутри
+    // шифротекста лежат id сообщения, автор версии и время правки.
+    'id-mismatch': 'Сообщение выдано под чужим номером (возможна подмена сервером)',
+    'sender-mismatch': 'У сообщения сменился автор (возможна подмена сервером)',
+    'stale-edit': 'Старая версия сообщения вместо более новой (возможна подмена сервером)',
+    'no-mid': 'Сообщение старого формата, показать его нельзя',
 };
 const E2EE_FAILURE_DEFAULT_TEXT = 'Не удалось расшифровать';
 
@@ -998,6 +1004,7 @@ async function decryptMessageInPlace(message, roomId) {
             if (res.ok) {
                 message.text = res.text || '';
                 if (res.file) message._file = res.file;
+                message._ts = res.ts; // время отправителя для показа (раздел 9.5)
             } else {
                 message.text = e2eeFailureText(res.reason);
                 message._e2eeFailed = true;
@@ -4384,6 +4391,15 @@ function applyMessageEdit(messageId, displayText, failed = false) {
         if (bubble._message) {
             bubble._message.text = displayText; // чтобы меню "Ответить/Изменить" видело новый текст
             bubble._message._e2eeFailed = failed;
+            // У правленого сообщения показывается created_at (раздел 9.5): ts в конверте
+            // правки — время правки, а не создания. Метка edited_at нужна только для этого.
+            delete bubble._message._ts;
+            bubble._message.edited_at = bubble._message.edited_at || true;
+            const timeEl = bubble.querySelector('.message-time');
+            if (timeEl) {
+                timeEl.textContent = formatMessageTime(bubble._message);
+                timeEl.removeAttribute('title');
+            }
         }
         const textEl = bubble.querySelector('.message-text');
         if (textEl) setMessageText(textEl, displayText, failed);
@@ -4520,16 +4536,25 @@ function updatePlaintextMarkers() {
 
 // Время показывается в часовом поясе пользователя (created_at, до минуты),
 // а не сервера: колонки time (HH:MM по часам сервера) больше нет.
+// Что именно показывать — решает NyxoMessageOrder.displayTimeMs (раздел 9.5): у
+// неправленого сообщения ts отправителя из конверта, если он в пределах 10
+// минут от created_at; у правленого и без пригодного ts — created_at.
 function formatMessageTime(message) {
-    if (message.created_at) {
-        const date = new Date(message.created_at);
-        if (!Number.isNaN(date.getTime())) {
-            const hhmm = date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-            if (date.toDateString() === new Date().toDateString()) return hhmm;
-            return `${date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' })} ${hhmm}`;
-        }
-    }
-    return '';
+    const ms = NyxoMessageOrder.displayTimeMs(message, message._ts);
+    if (ms === null) return '';
+    const date = new Date(ms);
+    const hhmm = date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    if (date.toDateString() === new Date().toDateString()) return hhmm;
+    return `${date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' })} ${hhmm}`;
+}
+
+// Точное время для всплывающей подсказки: только если оно пришло внутри
+// конверта (секунды в базе не хранятся) и показано вместо created_at.
+function formatMessageTimeTitle(message) {
+    if (!Number.isSafeInteger(message._ts)) return '';
+    const ms = NyxoMessageOrder.displayTimeMs(message, message._ts);
+    if (ms !== message._ts) return '';
+    return new Date(ms).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 function createMessageElement(message, animate) {
@@ -4582,6 +4607,8 @@ function createMessageElement(message, animate) {
     const timeSpan = document.createElement('span');
     timeSpan.className = 'message-time';
     timeSpan.textContent = formatMessageTime(message);
+    const timeTitle = formatMessageTimeTitle(message);
+    if (timeTitle) timeSpan.title = timeTitle;
     metaDiv.appendChild(timeSpan);
     if (isMine) {
         const statusSpan = document.createElement('span');
@@ -4890,7 +4917,9 @@ async function sendMessage() {
             if (encryptEdit) {
                 const client = roomId ? await getReadyE2eeClient() : null;
                 if (!client) { showToast('Не удалось зашифровать правку: сквозное шифрование недоступно', 'error'); return; }
-                try { outgoingText = await client.encryptOutgoing(roomId, text); }
+                // mid правки — id редактируемого сообщения (строка), edit:true поднимает ts
+                // выше известной версии: правка при отстающих часах не выглядит старой.
+                try { outgoingText = await client.encryptOutgoing(roomId, text, { messageId: String(messageId), edit: true }); }
                 catch { showToast('Не удалось зашифровать правку', 'error'); return; }
             }
             const data = await api(`/api/messages/${messageId}`, {
