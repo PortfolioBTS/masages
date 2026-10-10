@@ -1688,6 +1688,23 @@ hr.divider {
     background-size: 16px 16px;
 }
 
+/* Фильтр по названиям ничего не нашёл. */
+.chats-empty {
+    flex: none;
+    padding: 16px 20px;
+    color: var(--text-3);
+    font-size: 13px;
+    line-height: 20px;
+}
+
+/* Совпадение в названии чата: инверсная метка, как у выбранного. */
+.chat-name mark {
+    padding: 0 1px;
+    border-radius: 2px;
+    background: var(--accent);
+    color: var(--accent-fg);
+}
+
 .chats-list {
     flex: 1;
     min-height: 0;
@@ -3152,6 +3169,75 @@ a.file-attachment:hover {
     border-color: var(--surface-3);
     color: var(--text-3);
     opacity: 1;
+}
+
+/* Поиск по загруженным сообщениям открытого чата: панель под шапкой, подсветка через
+   CSS Custom Highlight API (DOM не меняется). Текущее совпадение — инверсия, остальные — заливка. */
+.chat-search {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    flex: none;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+}
+
+.chat-search input {
+    flex: 1 1 200px;
+    min-width: 0;
+    height: 32px;
+}
+
+.chat-search-counter {
+    flex: none;
+    min-width: 72px;
+    color: var(--text-2);
+    font-size: 12px;
+    line-height: 16px;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+.chat-search .icon-btn,
+.chat-search-older {
+    flex: none;
+}
+
+.message.is-search-current {
+    outline: 2px solid var(--text-2);
+    outline-offset: 2px;
+}
+
+::highlight(nyxo-search) {
+    background-color: color-mix(in srgb, var(--text) 28%, transparent);
+    color: var(--text);
+}
+
+::highlight(nyxo-search-current) {
+    background-color: var(--text);
+    color: var(--bg);
+}
+
+/* Узкие экраны: поле на всю ширину, «Искать в более ранних» — отдельной строкой. */
+@media (max-width: 480px) {
+    .chat-search {
+        padding: 8px 12px;
+    }
+
+    .chat-search input {
+        flex-basis: 100%;
+    }
+
+    .chat-search-counter {
+        flex: 1 1 auto;
+    }
+
+    .chat-search-older {
+        flex: 1 1 100%;
+        order: 5;
+    }
 }
 
 /* Состояние шифрования под полем ввода: что защищено, чего не хватает и что делать.

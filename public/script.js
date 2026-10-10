@@ -16,7 +16,6 @@ let oldestSeq = null;         // seq самого старого загруже�
 let hasMoreHistory = false;
 let loadingHistory = false;
 let lastSeenSeq = 0;          // до какого seq пользователь уже видел открытый чат (seq сравнивается только внутри чата)
-let chatListMode = 'chats';   // 'chats' | 'search' — что сейчас показано в сайдбаре
 let membersChangedTimer = null; // debounce событий roomMembersChanged
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
@@ -100,6 +99,7 @@ const elements = {
     anonNote: document.getElementById('anon-note'),
     anonNoteText: document.getElementById('anon-note-text'),
     searchInput: document.getElementById('search-input'),
+    chatsEmpty: document.getElementById('chats-empty'),
     chatsList: document.getElementById('chats-list'),
     profileBtn: document.getElementById('profile-btn'),
     logoutBtn: document.getElementById('logout-btn'),
@@ -115,6 +115,14 @@ const elements = {
     mutedIndicator: document.getElementById('muted-indicator'),
     getChatCodeBtn: document.getElementById('get-chat-code-btn'),
     chatMenuBtn: document.getElementById('chat-menu-btn'),
+    chatSearchBtn: document.getElementById('chat-search-btn'),
+    chatSearch: document.getElementById('chat-search'),
+    chatSearchInput: document.getElementById('chat-search-input'),
+    chatSearchCounter: document.getElementById('chat-search-counter'),
+    chatSearchPrev: document.getElementById('chat-search-prev'),
+    chatSearchNext: document.getElementById('chat-search-next'),
+    chatSearchOlder: document.getElementById('chat-search-older'),
+    chatSearchClose: document.getElementById('chat-search-close'),
 
     // ---- Сквозное шифрование: значок в шапке и баннер ----
     e2eeIndicator: document.getElementById('e2ee-indicator'),
@@ -1751,6 +1759,7 @@ function resetChatView() {
 // смены ключей, отложенные служебные строки, полоса заявок, кнопка «вниз»,
 // подсказки бота (они рисуются заново после загрузки истории).
 function releaseChatResources() {
+    closeChatSearch();
     resetAttachmentDecrypts();
     clearBotSuggestions();
     pendingIdentityChanges.clear();
@@ -1819,7 +1828,7 @@ socket.io.on('reconnect', () => {
     // После обрыва связи (или рестарта сервера) догружаем пропущенное и
     // продлеваем сессию: пока связи не было, HTTP-запросов тоже не было.
     if (!currentUser) return;
-    if (chatListMode === 'chats') loadChats();
+    loadChats();
     if (currentChatId) refreshCurrentChat();
     if (currentChatId && currentRoomId) loadJoinRequestsCount();
     pingSession();
@@ -2231,14 +2240,33 @@ function setupMessageMenuListeners() {
     });
 }
 
-// Поиск по чатам и сообщениям: запрос уходит на сервер через 300 мс после
-// последнего нажатия клавиши.
+// Поиск по названиям чатов: фильтр на клиенте, без запросов; перерисовка — на
+// следующем кадре после ввода. Escape очищает фильтр, стрелка вниз переводит фокус
+// на первый чат, Enter открывает первый. Поиск по сообщениям открытого чата — в
+// шапке (setupChatSearchListeners).
 function setupSearchListeners() {
-    let searchTimeout;
+    let frame = 0;
     elements.searchInput.addEventListener('input', () => {
-        clearTimeout(searchTimeout);
-        searchTimeout = setTimeout(performSearch, 300);
+        if (frame) cancelAnimationFrame(frame);
+        frame = requestAnimationFrame(() => {
+            frame = 0;
+            applyChatFilter();
+        });
     });
+    elements.searchInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && elements.searchInput.value) {
+            e.preventDefault();
+            elements.searchInput.value = '';
+            applyChatFilter();
+        } else if (e.key === 'ArrowDown' || e.key === 'Enter') {
+            const first = elements.chatsList.querySelector('.chat-item');
+            if (!first) return;
+            e.preventDefault();
+            if (e.key === 'Enter') first.click();
+            else first.focus();
+        }
+    });
+    setupChatSearchListeners();
 }
 
 // Модальные окна: закрытие по крестику и кнопкам «Отмена», по оверлею и
@@ -2366,7 +2394,7 @@ function setupSocketListeners() {
         const value = normalizeExpiry(seconds);
         const meta = findChatMeta(chatId, roomId);
         if (meta) meta.expiry_seconds = value;
-        if (chatListMode === 'chats') renderChatList();
+        renderChatList();
         if (!belongsToCurrentChat(chatId, roomId)) return;
         if (!meta) currentChatExtra.expiry_seconds = value;
         updateChatIndicators();
@@ -3922,7 +3950,7 @@ function attachLongPress(el, onLongPress) {
     el.addEventListener('contextmenu', cancel);
 }
 
-function createChatItem({ id, roomId, name, isBot, preview, unread, onClick, meta }) {
+function createChatItem({ id, roomId, name, isBot, preview, unread, onClick, meta, nameRanges }) {
     const div = document.createElement('div');
     div.className = 'chat-item';
     div.dataset.id = id;
@@ -3945,7 +3973,14 @@ function createChatItem({ id, roomId, name, isBot, preview, unread, onClick, met
     info.className = 'chat-info';
     const nameEl = document.createElement('div');
     nameEl.className = 'chat-name';
-    nameEl.textContent = name;
+    setHighlightedText(nameEl, name, nameRanges);
+    if (nameRanges && meta && meta.archived) {
+        // В общем списке фильтра архивный чат отличается только классом: для скринридера — слово.
+        const hint = document.createElement('span');
+        hint.className = 'visually-hidden';
+        hint.textContent = ', в архиве';
+        nameEl.appendChild(hint);
+    }
     const lastEl = document.createElement('div');
     lastEl.className = 'chat-last';
     setChatLast(lastEl, preview);
@@ -3987,8 +4022,9 @@ function setChatLast(el, preview) {
     else el.textContent = text;
 }
 
-function createChatItemFromMeta(chat) {
+function createChatItemFromMeta(chat, nameRanges) {
     return createChatItem({
+        nameRanges,
         id: chat.id,
         roomId: chat.room_id,
         name: chat.name,
@@ -4012,10 +4048,23 @@ function sortedChats(list) {
 
 let focusArchiveToggle = false;
 function renderChatList() {
-    if (chatListMode !== 'chats') return;
     const focused = document.activeElement && document.activeElement.closest
         ? document.activeElement.closest('#chats-list .chat-item') : null;
     const focusedId = focused ? focused.dataset.id : null;
+
+    // Фильтр по названию (R6): совпадения из того же списка, закреплённые сверху,
+    // архивные — наравне с остальными (переключатель архива в это время не нужен).
+    const filtered = NyxoTextSearch.filterChats(chatListData, chatFilter);
+    if (filtered !== null) {
+        elements.chatsEmpty.classList.toggle('hidden', filtered.length > 0);
+        elements.chatsList.replaceChildren(...filtered.map(({ chat, ranges }) => createChatItemFromMeta(chat, ranges)));
+        if (focusedId) {
+            const again = elements.chatsList.querySelector(`.chat-item[data-id="${CSS.escape(focusedId)}"]`);
+            if (again) again.focus({ preventScroll: true });
+        }
+        return;
+    }
+    elements.chatsEmpty.classList.add('hidden');
 
     const active = sortedChats(chatListData.filter(c => !c.archived));
     const archived = sortedChats(chatListData.filter(c => c.archived));
@@ -4428,6 +4477,7 @@ function appendMessage(message, animate) {
     if (findMessageEl(message.id)) return false;
     placeMessageElement(createMessageElement(message, animate));
     if (oldestSeq === null || Number(message.seq) < oldestSeq) oldestSeq = Number(message.seq);
+    markChatSearchStale();
     return true;
 }
 
@@ -4480,6 +4530,7 @@ function removeMessageElement(messageId) {
         menuMessage = null;
     }
     updateReplyQuotes(messageId, (reply) => { reply.deleted = true; reply.text = ''; });
+    markChatSearchStale();
 }
 
 function applyMessageEdit(messageId, displayText, failed = false) {
@@ -4511,6 +4562,7 @@ function applyMessageEdit(messageId, displayText, failed = false) {
         }
     }
     updateReplyQuotes(messageId, (reply) => { reply.text = displayText; });
+    markChatSearchStale();
 }
 
 // ---- Отметки о прочтении ----
@@ -5506,54 +5558,260 @@ async function deleteChat() {
 }
 
 // ==================== Поиск ====================
+// Серверного поиска нет (R6): список чатов фильтруется по названию, а в открытом
+// чате ищется по уже загруженным и расшифрованным сообщениям. Запросов на сервер
+// при поиске нет (кнопка «Искать в более ранних» догружает обычные страницы
+// истории), открытый текст нигде не сохраняется — ни в localStorage, ни в
+// IndexedDB: свёртка текста m._fold живёт в памяти вкладки вместе с самим
+// сообщением. Сравнение и индексы — public/lib/text-search.js (NyxoTextSearch).
 
-function renderSearchSection(title) {
-    const header = document.createElement('div');
-    header.className = 'search-section-title chats-section-title';
-    header.textContent = title;
-    return header;
+let chatFilter = '';
+
+// Текст с выделением совпадений через <mark>: узлы строятся из textContent,
+// innerHTML не используется (название чата — данные).
+function setHighlightedText(el, text, ranges) {
+    if (!ranges || ranges.length === 0) {
+        el.textContent = text;
+        return;
+    }
+    el.replaceChildren(...NyxoTextSearch.splitSegments(text, ranges).map((part) => {
+        if (!part.match) return document.createTextNode(part.text);
+        const mark = document.createElement('mark');
+        mark.textContent = part.text;
+        return mark;
+    }));
 }
 
-let searchSeq = 0;
-async function performSearch() {
-    const q = elements.searchInput.value.trim();
-    const seq = ++searchSeq;
-    if (!q) {
-        chatListMode = 'chats';
-        return loadChats();
-    }
-    const data = await api(`/api/search?q=${encodeURIComponent(q)}`);
-    if (!data.success || seq !== searchSeq) return;
-    chatListMode = 'search';
-    hideChatItemMenu();
+// Фильтр списка чатов: перерисовка на следующем кадре после ввода.
+function applyChatFilter() {
+    chatFilter = elements.searchInput.value;
+    renderChatList();
+}
 
-    const { chats = [], messages = [] } = data.results || {};
-    const fragment = document.createDocumentFragment();
-    if (chats.length > 0) {
-        fragment.appendChild(renderSearchSection('Чаты'));
-        chats.forEach(chat => {
-            fragment.appendChild(createChatItem({
-                id: chat.id, roomId: chat.room_id, name: chat.name, isBot: Boolean(Number(chat.is_bot)),
-                preview: { icon: chat.room_id ? 'users' : null, text: chat.room_id ? 'Групповой чат' : 'Личный чат' }, unread: 0,
-                onClick: () => openChat(chat.id, chat.room_id, chat.name, chat.avatar, chat.online, chat.is_bot),
-            }));
-        });
+// ---- Поиск в открытом чате ----
+
+const CHAT_SEARCH_DEBOUNCE_MS = 150;
+const CHAT_SEARCH_OLDER_PAGES = 3;          // «Искать в более ранних»: до 3 страниц за нажатие
+const HIGHLIGHT_ALL = 'nyxo-search';
+const HIGHLIGHT_CURRENT = 'nyxo-search-current';
+
+const chatSearch = {
+    open: false,
+    matches: [],        // [{ key: элемент сообщения, start, end }] в порядке ленты
+    current: -1,
+    capped: false,      // совпадений больше предела
+    timer: 0,
+    pending: false,     // введён запрос, пауза до пересчёта ещё не прошла
+    loadingOlder: false,
+};
+
+// CSS Custom Highlight API: подсветка без изменения DOM. Где её нет, подсвечивается
+// только сообщение с текущим совпадением (рамка).
+function supportsCustomHighlights() {
+    return typeof CSS !== 'undefined' && Boolean(CSS.highlights) && typeof Highlight === 'function';
+}
+
+function clearCurrentSearchMark() {
+    if (supportsCustomHighlights()) CSS.highlights.delete(HIGHLIGHT_CURRENT);
+    elements.chatMessages.querySelectorAll('.message.is-search-current').forEach(el => el.classList.remove('is-search-current'));
+}
+
+function clearSearchHighlights() {
+    if (supportsCustomHighlights()) CSS.highlights.delete(HIGHLIGHT_ALL);
+    clearCurrentSearchMark();
+}
+
+// Ищется только то, что расшифровано и лежит в пузыре одним текстовым узлом, равным
+// тексту сообщения: нерасшифрованные (_e2eeFailed) и сообщения без текста пропускаются.
+function searchableText(el) {
+    const message = el && el._message;
+    if (!message || message._e2eeFailed || typeof message.text !== 'string' || message.text === '') return null;
+    const textEl = el.querySelector('.message-text');
+    const node = textEl && textEl.firstChild;
+    return node && node.nodeType === Node.TEXT_NODE && node.data === message.text ? { message, node } : null;
+}
+
+function collectSearchEntries() {
+    const entries = [];
+    elements.chatMessages.querySelectorAll('.message').forEach((el) => {
+        const found = searchableText(el);
+        if (!found) return;
+        const { message } = found;
+        // Свёртка считается один раз на текст; правка сообщения меняет text — свёртка пересчитывается.
+        if (!message._fold || message._fold.source !== message.text) message._fold = NyxoTextSearch.foldText(message.text);
+        entries.push({ key: el, folded: message._fold });
+    });
+    return entries;
+}
+
+function matchRange(match) {
+    const found = searchableText(match.key);
+    if (!found) return null;
+    const range = new Range();
+    range.setStart(found.node, match.start);
+    range.setEnd(found.node, match.end);
+    return range;
+}
+
+function paintSearchHighlights() {
+    if (!supportsCustomHighlights()) return;
+    const all = new Highlight();
+    for (const match of chatSearch.matches) {
+        const range = matchRange(match);
+        if (range) all.add(range);
     }
-    // Раньше найденные сообщения сервер возвращал, но они нигде не выводились.
-    if (messages.length > 0) {
-        fragment.appendChild(renderSearchSection('Сообщения'));
-        messages.forEach(m => {
-            fragment.appendChild(createChatItem({
-                id: m.chat_id, roomId: m.room_id, name: m.chat_name, isBot: Boolean(Number(m.is_bot)),
-                preview: { icon: 'search', text: m.text || '' }, unread: 0,
-                onClick: () => openChat(m.chat_id, m.room_id, m.chat_name, m.avatar, m.online, m.is_bot),
-            }));
-        });
+    CSS.highlights.set(HIGHLIGHT_ALL, all);
+}
+
+function renderChatSearchCounter() {
+    const query = elements.chatSearchInput.value.trim();
+    elements.chatSearchCounter.textContent = query
+        ? NyxoTextSearch.formatCounter(chatSearch.current, chatSearch.matches.length, chatSearch.capped)
+        : '';
+}
+
+function updateChatSearchButtons() {
+    const none = chatSearch.matches.length === 0;
+    elements.chatSearchPrev.disabled = none;
+    elements.chatSearchNext.disabled = none;
+    elements.chatSearchOlder.disabled = !hasMoreHistory || chatSearch.loadingOlder;
+}
+
+function goToSearchMatch(index, { scroll = true } = {}) {
+    chatSearch.current = index;
+    clearCurrentSearchMark();
+    const match = chatSearch.matches[index];
+    if (match) {
+        match.key.classList.add('is-search-current');
+        if (supportsCustomHighlights()) {
+            const range = matchRange(match);
+            if (range) CSS.highlights.set(HIGHLIGHT_CURRENT, new Highlight(range));
+        }
+        if (scroll) match.key.scrollIntoView({ block: 'center', behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
     }
-    if (chats.length === 0 && messages.length === 0) {
-        fragment.appendChild(renderSearchSection('Ничего не найдено'));
+    renderChatSearchCounter();
+    updateChatSearchButtons();
+}
+
+// Пересчёт совпадений. keep — после догрузки или правки: остаться на том же
+// совпадении, если оно ещё есть, и не прокручивать ленту. Без keep выбирается самое
+// новое совпадение (нижнее в ленте) — оно же чаще всего нужно.
+function runChatSearch({ keep = false } = {}) {
+    clearTimeout(chatSearch.timer);
+    chatSearch.pending = false;
+    const query = elements.chatSearchInput.value.trim();
+    const previous = keep && chatSearch.current >= 0 ? chatSearch.matches[chatSearch.current] : null;
+    const { matches, capped } = NyxoTextSearch.collectMatches(collectSearchEntries(), query);
+    chatSearch.matches = matches;
+    chatSearch.capped = capped;
+    clearSearchHighlights();
+    if (matches.length === 0) {
+        chatSearch.current = -1;
+        renderChatSearchCounter();
+        updateChatSearchButtons();
+        return;
     }
-    elements.chatsList.replaceChildren(fragment);
+    paintSearchHighlights();
+    let index = matches.length - 1;
+    if (previous) {
+        const same = matches.findIndex(m => m.key === previous.key && m.start === previous.start);
+        if (same >= 0) index = same;
+    }
+    goToSearchMatch(index, { scroll: !previous });
+}
+
+// Новое, исправленное или удалённое сообщение сделало результаты устаревшими:
+// пересчёт через короткую паузу, без прокрутки.
+function markChatSearchStale() {
+    if (!chatSearch.open || !elements.chatSearchInput.value.trim()) return;
+    clearTimeout(chatSearch.timer);
+    chatSearch.timer = setTimeout(() => runChatSearch({ keep: true }), CHAT_SEARCH_DEBOUNCE_MS);
+}
+
+function stepChatSearch(dir) {
+    if (chatSearch.matches.length === 0) return;
+    // Сообщение из результатов могло исчезнуть (удаление, смена чата): пересчёт.
+    if (chatSearch.matches.some(m => !m.key.isConnected)) {
+        runChatSearch({ keep: true });
+        if (chatSearch.matches.length === 0) return;
+    }
+    goToSearchMatch(NyxoTextSearch.stepIndex(chatSearch.current, chatSearch.matches.length, dir));
+}
+
+function openChatSearch() {
+    if (!currentChatId) return;
+    chatSearch.open = true;
+    elements.chatSearch.classList.remove('hidden');
+    elements.chatSearchBtn.setAttribute('aria-expanded', 'true');
+    updateChatSearchButtons();
+    elements.chatSearchInput.focus({ preventScroll: true });
+    if (elements.chatSearchInput.value.trim()) runChatSearch();
+}
+
+function closeChatSearch({ focusButton = false } = {}) {
+    clearTimeout(chatSearch.timer);
+    chatSearch.pending = false;
+    const wasOpen = chatSearch.open;
+    chatSearch.open = false;
+    chatSearch.matches = [];
+    chatSearch.current = -1;
+    chatSearch.capped = false;
+    chatSearch.loadingOlder = false;
+    clearSearchHighlights();
+    elements.chatSearch.classList.add('hidden');
+    elements.chatSearchBtn.setAttribute('aria-expanded', 'false');
+    elements.chatSearchInput.value = '';
+    elements.chatSearchCounter.textContent = '';
+    if (wasOpen && focusButton) elements.chatSearchBtn.focus({ preventScroll: true });
+}
+
+// «Искать в более ранних»: за одно нажатие догружает до трёх страниц истории тем же
+// путём, что прокрутка вверх (loadOlderMessages), и показывает ход. Смена чата
+// прерывает загрузку.
+async function searchOlderMessages() {
+    if (!chatSearch.open || chatSearch.loadingOlder || !hasMoreHistory) return;
+    const seq = openChatSeq;
+    chatSearch.loadingOlder = true;
+    updateChatSearchButtons();
+    try {
+        for (let page = 1; page <= CHAT_SEARCH_OLDER_PAGES && hasMoreHistory; page++) {
+            elements.chatSearchCounter.textContent = `Загружаем ранние сообщения: ${page} из ${CHAT_SEARCH_OLDER_PAGES}`;
+            await loadOlderMessages();
+            if (seq !== openChatSeq) return;
+        }
+    } finally {
+        if (seq === openChatSeq) {
+            chatSearch.loadingOlder = false;
+            if (chatSearch.open) runChatSearch({ keep: true });
+        }
+    }
+}
+
+function setupChatSearchListeners() {
+    elements.chatSearchBtn.addEventListener('click', () => {
+        if (chatSearch.open) closeChatSearch({ focusButton: true });
+        else openChatSearch();
+    });
+    elements.chatSearchInput.addEventListener('input', () => {
+        clearTimeout(chatSearch.timer);
+        chatSearch.pending = true;
+        chatSearch.timer = setTimeout(() => runChatSearch(), CHAT_SEARCH_DEBOUNCE_MS);
+    });
+    elements.chatSearchInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.isComposing) {
+            e.preventDefault();
+            // Ввод ещё не обработан (пауза не прошла): сначала пересчёт.
+            if (chatSearch.pending) runChatSearch();
+            else stepChatSearch(e.shiftKey ? -1 : 1);
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            closeChatSearch({ focusButton: true });
+        }
+    });
+    elements.chatSearchPrev.addEventListener('click', () => stepChatSearch(-1));
+    elements.chatSearchNext.addEventListener('click', () => stepChatSearch(1));
+    elements.chatSearchOlder.addEventListener('click', searchOlderMessages);
+    elements.chatSearchClose.addEventListener('click', () => closeChatSearch({ focusButton: true }));
 }
 
 function isNearBottom() {
