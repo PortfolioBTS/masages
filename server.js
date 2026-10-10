@@ -89,6 +89,7 @@ const { initKeyStoreSchema } = require('./lib/key-store');
 // Групповой E2EE: участники чата + попарная доставка Sender Key
 // (key-shares). Тоже регистрируется после sessionMiddleware.
 const { initE2eeGroupsSchema, registerE2eeGroupRoutes } = require('./lib/e2ee-groups');
+const { createTransactionRetry } = require('./lib/tx-retry');
 
 // Бот-помощник: ответ по теме запроса, приветствие нового аккаунта и подписи
 // кнопок-подсказок — чистые функции без БД (lib/bot-guide.js).
@@ -1308,7 +1309,7 @@ app.use('/api/', apiLimiter);
 // Чужие ключи отдаются только при общей комнате — модулю нужна БД.
 registerE2eeKeyRoutes(app, { dbGet, dbAll, bundleLimiter });
 // Групповой E2EE: список участников чата + key-shares (тоже нужна сессия).
-registerE2eeGroupRoutes(app, { dbGet, dbAll, dbRun, io });
+registerE2eeGroupRoutes(app, { dbGet, dbAll, dbRun, io, queryWithRetry, respondIfDeadlock });
 registerApiRoutes(app, serverContext);
 
 app.get('/uploads/:filename', async (req, res) => {
@@ -1482,20 +1483,19 @@ async function withTransaction(work) {
 }
 
 // Транзакция с одним повтором при взаимной блокировке (40P01, раздел 8.3
-// контракта порядка сообщений). Первая попытка откатилась целиком, поэтому
-// повтор безопасен: work() обязана не иметь побочных эффектов вне БД и
-// читать всё заново (вставка сообщения идемпотентна по clientMessageId). Если
-// вторая попытка тоже упала с 40P01, ошибка уходит вызывающему, а он отвечает
-// 503 busy (respondTransactionError). В лог — только код ошибки, без id.
-async function withTransactionRetry(work) {
-    try {
-        return await withTransaction(work);
-    } catch (err) {
-        if (!isDeadlock(err)) throw err;
-        // Строка нужна сквозным тестам блокировок: они считают повторы.
-        console.warn('[DB] Взаимная блокировка (40P01), транзакция повторяется');
-        return withTransaction(work);
-    }
+// контракта порядка сообщений; lib/tx-retry.js). Первая попытка откатилась
+// целиком, поэтому повтор безопасен: work() обязана не иметь побочных эффектов
+// вне БД и читать всё заново (вставка сообщения идемпотентна по clientMessageId).
+// Если вторая попытка тоже упала с 40P01, ошибка уходит вызывающему, а он
+// отвечает 503 busy (respondIfDeadlock). В лог — только код ошибки, без id.
+// Строка предупреждения нужна сквозным тестам блокировок: они считают повторы.
+const withTransactionRetry = createTransactionRetry({ withTransaction, warn: (message) => console.warn(message) });
+
+// Один оператор с повтором при 40P01: для записей, которые не вошли в порядок
+// блокировок целиком (реакции, заявки, key-share — раздел 8.2), но ссылаются на
+// users и rooms внешними ключами и потому могут сойтись с удалением аккаунта.
+function queryWithRetry(sql, params) {
+    return withTransactionRetry((client) => client.query(sql, params));
 }
 
 // Ответ на взаимную блокировку, которая повторилась и после повтора
@@ -2157,7 +2157,7 @@ function scheduleBotReply(chat, userText) {
             // блокировке с удалением аккаунта (users FOR UPDATE, затем
             // DELETE FROM chats), если пользователь удаляет аккаунт, пока
             // бот готовит ответ. Аккаунта или чата уже нет — отвечать некому.
-            const botMessage = await withMessageIdRetry(() => withTransaction(async (client) => {
+            const botMessage = await withMessageIdRetry(() => withTransactionRetry(async (client) => {
                 const owner = await client.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE', [chat.user_id]);
                 if (owner.rows.length === 0) return null;
                 // Строку чата блокируем сразу так, как её всё равно обновит
@@ -2632,10 +2632,10 @@ async function createJoinRequest(roomId, userId) {
     if (pending.n >= MAX_PENDING_JOIN_REQUESTS_PER_ROOM) {
         return { error: 'В эту группу слишком много заявок. Попробуйте позже.' };
     }
-    const inserted = await dbGet(
+    const inserted = (await queryWithRetry(
         'INSERT INTO join_requests (room_id, user_id) VALUES ($1, $2) ON CONFLICT (room_id, user_id) DO NOTHING RETURNING id',
         [roomId, userId]
-    );
+    )).rows[0];
     if (!inserted) {
         // Параллельный такой же запрос успел раньше — это та же заявка.
         const concurrent = await dbGet('SELECT id FROM join_requests WHERE room_id = $1 AND user_id = $2', [roomId, userId]);
@@ -3321,9 +3321,10 @@ app.post('/api/reactions', async (req, res) => {
         if (!(await userCanAccessMessage(req.session.userId, messageId))) {
             return res.json({ success: false, message: 'Сообщение недоступно' });
         }
-        await pool.query('INSERT INTO reactions (message_id, user_id, emoji) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [messageId, req.session.userId, emoji]);
+        await queryWithRetry('INSERT INTO reactions (message_id, user_id, emoji) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [messageId, req.session.userId, emoji]);
         res.json({ success: true });
     } catch (error) {
+        if (respondIfDeadlock(res, error)) return;
         console.error('Add reaction error:', error);
         res.json({ success: false, message: 'Ошибка добавления реакции' });
     }

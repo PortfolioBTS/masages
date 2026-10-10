@@ -662,3 +662,209 @@ test('после перезапуска сервера сообщение с т�
     await suite.time.expireMessage(sent.id);
     await waitUntil(async () => !(await suite.query('SELECT 1 FROM messages WHERE id = $1', [sent.id])).rows[0], { what: 'воркер удалил просроченное', timeoutMs: 8000 });
 });
+
+// ---------- блокировки (раздел 8) ----------
+//
+// Гонки между операциями из таблицы 8.2: порядок users → rooms → room_participants
+// → chats → messages плюс один повтор при 40P01. Воспроизвести взаимную блокировку
+// по требованию нельзя, поэтому каждая операция идёт несколько кругов подряд. Тест
+// считает повторы (строка «Взаимная блокировка (40P01), транзакция повторяется» —
+// допустимы, это работа withTransactionRetry) и требует главного: ни одного ответа
+// 5xx / 503 busy и ни одной взаимной блокировки, которая повторилась и после повтора.
+
+const LOCK_ROUNDS = 12;
+const RETRY_LOG = /Взаимная блокировка \(40P01\), транзакция повторяется/;
+const FAILED_LOG = /Взаимная блокировка повторилась|Send message error|Bot error|Delete chat error|Join chat error|Approve join request error|Add reaction error/;
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Запуск операции со сдвигом: по кругам сдвиг разный, чтобы запросы пересекались в разных
+// местах транзакций, а не всегда в одном и том же порядке.
+const later = (ms, operation) => sleep(ms).then(operation);
+const jitter = (round) => (round * 7) % 31;
+
+// Все ответы разом; падение самого запроса (сеть) — тоже провал.
+async function allResponses(promises) {
+    const settled = await Promise.allSettled(promises);
+    return settled.map((item) => {
+        if (item.status === 'rejected') throw item.reason;
+        return item.value;
+    });
+}
+
+// Главные утверждения набора блокировок. Ответы — {status, body}.
+function assertNoLockFailures(label, responses, mark) {
+    for (const res of responses) {
+        assert.ok(res.status < 500, `${label}: ответ ${res.status}: ${res.text}`);
+        assert.notStrictEqual(res.body && res.body.code, 'busy', `${label}: 503 busy после повтора`);
+    }
+    const failed = suite.server.logs.find(FAILED_LOG, { from: mark });
+    assert.ok(!failed, `${label}: в логе сервера: ${failed && failed.text}`);
+}
+
+const retriesSince = (mark) => suite.server.logs.count(RETRY_LOG, { from: mark });
+
+test('отправка против удаления своего аккаунта: ни дедлока, ни сообщения без владельца', async (t) => {
+    const mark = suite.server.logs.mark();
+    for (let round = 0; round < LOCK_ROUNDS; round++) {
+        const p = await pair({ name: `Отправка и удаление ${round}` });
+        const memberId = p.member.user.id;
+        const responses = await allResponses([
+            p.member.sendRaw(p.memberChat.id, 'раз'),
+            p.member.sendRaw(p.memberChat.id, 'два'),
+            p.owner.sendRaw(p.ownerChat.id, 'от владельца'),
+            later(jitter(round), () => p.member.post('/api/account/delete', {})),
+            later(jitter(round) / 2, () => p.member.sendRaw(p.memberChat.id, 'три')),
+        ]);
+        const user = (await suite.query('SELECT 1 FROM users WHERE id = $1', [memberId])).rows;
+        assert.strictEqual(user.length, 0, 'аккаунт удалён');
+        const left = (await suite.query('SELECT 1 FROM messages WHERE user_id = $1', [memberId])).rows;
+        assert.strictEqual(left.length, 0, 'ни одного сообщения удалённого аккаунта');
+        assertNoLockFailures(`круг ${round}`, responses, mark);
+    }
+    t.diagnostic(`повторов при 40P01: ${retriesSince(mark)} за ${LOCK_ROUNDS} кругов`);
+});
+
+test('ответ бота против удаления аккаунта (живой дедлок, исправленный явной блокировкой users)', async (t) => {
+    const mark = suite.server.logs.mark();
+    const rounds = await Promise.all(Array.from({ length: LOCK_ROUNDS }, async (_, round) => {
+        const user = suite.client();
+        await user.registerAnon();
+        const bot = await user.botChat();
+        await user.send(bot.id, 'привет');
+        // Ответ бота готовится через 600 мс: удаляем аккаунт в окне вокруг этого срока.
+        await sleep(520 + round * 15);
+        return { userId: user.user.id, response: await user.post('/api/account/delete', {}) };
+    }));
+    await sleep(1200); // дождаться запоздавших ответов бота
+    for (const round of rounds) {
+        assert.strictEqual((await suite.query('SELECT 1 FROM users WHERE id = $1', [round.userId])).rows.length, 0);
+        assert.strictEqual((await suite.query('SELECT 1 FROM messages WHERE user_id = $1', [round.userId])).rows.length, 0, 'ответ бота не пережил аккаунт');
+    }
+    assertNoLockFailures('бот', rounds.map(r => r.response), mark);
+    t.diagnostic(`повторов при 40P01: ${retriesSince(mark)}`);
+});
+
+test('одобрение заявки против удаления заявителя: либо вступил и удалён, либо заявки уже нет; ни дедлока, ни следов', async (t) => {
+    const mark = suite.server.logs.mark();
+    let approved = 0;
+    for (let round = 0; round < LOCK_ROUNDS; round++) {
+        const owner = suite.client({ name: 'владелец' });
+        const applicant = suite.client({ name: 'заявитель' });
+        await owner.registerAnon();
+        await applicant.registerAnon();
+        const ownerChat = await owner.createRoom(`Заявка и удаление ${round}`);
+        const { code } = await owner.invite(ownerChat.id);
+        const pending = await applicant.join(code);
+        const applicantId = applicant.user.id;
+        const responses = await allResponses([
+            owner.post(`/api/join-requests/${pending.requestId}/approve`, {}),
+            later(jitter(round), () => applicant.post('/api/account/delete', {})),
+        ]);
+        if (responses[0].body && responses[0].body.success) approved++;
+        assert.strictEqual((await suite.query('SELECT 1 FROM users WHERE id = $1', [applicantId])).rows.length, 0);
+        for (const table of ['room_participants', 'chats', 'join_requests']) {
+            const rows = (await suite.query(`SELECT 1 FROM ${table} WHERE user_id = $1`, [applicantId])).rows;
+            assert.strictEqual(rows.length, 0, `${table}: следов заявителя нет`);
+        }
+        assertNoLockFailures(`круг ${round}`, responses, mark);
+    }
+    t.diagnostic(`одобрений успело: ${approved} из ${LOCK_ROUNDS}, повторов при 40P01: ${retriesSince(mark)}`);
+});
+
+test('вход по коду против выхода последнего участника: комната либо цела с новичком, либо снесена целиком', async (t) => {
+    const mark = suite.server.logs.mark();
+    let joined = 0;
+    for (let round = 0; round < LOCK_ROUNDS; round++) {
+        const owner = suite.client({ name: 'владелец' });
+        const guest = suite.client({ name: 'гость' });
+        await owner.registerAnon();
+        await guest.registerAnon();
+        const ownerChat = await owner.createRoom(`Вход и выход ${round}`);
+        // Без одобрения: вход идёт сразу, через addRoomMember под блокировкой комнаты.
+        const { code } = await owner.rotateInvite(ownerChat.id, { requireApproval: false });
+        await owner.send(ownerChat.id, 'было');
+        const responses = await allResponses([
+            guest.post('/api/chats/join', { code }),
+            later(jitter(round), () => owner.del(`/api/chats/${ownerChat.id}`)),
+        ]);
+        const room = (await suite.query('SELECT id FROM rooms WHERE id = $1', [ownerChat.room_id])).rows;
+        const participants = (await suite.query('SELECT user_id FROM room_participants WHERE room_id = $1', [ownerChat.room_id])).rows;
+        const chats = (await suite.query('SELECT user_id FROM chats WHERE room_id = $1', [ownerChat.room_id])).rows;
+        const messages = (await suite.query('SELECT 1 FROM messages WHERE room_id = $1', [ownerChat.room_id])).rows;
+        if (room.length === 0) {
+            assert.deepStrictEqual([participants.length, chats.length, messages.length], [0, 0, 0], 'комната снесена целиком');
+        } else {
+            joined++;
+            assert.deepStrictEqual(participants.map(r => r.user_id), [guest.user.id], 'в комнате остался только гость');
+            assert.deepStrictEqual(chats.map(r => r.user_id), [guest.user.id], 'и только его чат');
+        }
+        assertNoLockFailures(`круг ${round}`, responses, mark);
+    }
+    t.diagnostic(`гость успел вступить: ${joined} из ${LOCK_ROUNDS}, повторов при 40P01: ${retriesSince(mark)}`);
+});
+
+test('двое последних участников выходят одновременно: комната не остаётся в базе пустой', async (t) => {
+    const mark = suite.server.logs.mark();
+    for (let round = 0; round < LOCK_ROUNDS; round++) {
+        const p = await pair({ name: `Двойной выход ${round}` });
+        const responses = await allResponses([
+            p.owner.del(`/api/chats/${p.ownerChat.id}`),
+            later(jitter(round), () => p.member.del(`/api/chats/${p.memberChat.id}`)),
+        ]);
+        assert.strictEqual((await suite.query('SELECT 1 FROM rooms WHERE id = $1', [p.roomId])).rows.length, 0, 'комната снесена');
+        assert.strictEqual((await suite.query('SELECT 1 FROM messages WHERE room_id = $1', [p.roomId])).rows.length, 0);
+        assertNoLockFailures(`круг ${round}`, responses, mark);
+    }
+    t.diagnostic(`повторов при 40P01: ${retriesSince(mark)}`);
+});
+
+test('оба участника комнаты удаляют аккаунты одновременно: комната и история снесены, дедлока нет', async (t) => {
+    const mark = suite.server.logs.mark();
+    for (let round = 0; round < LOCK_ROUNDS; round++) {
+        const p = await pair({ name: `Двойное удаление ${round}` });
+        await p.owner.send(p.ownerChat.id, 'история');
+        await p.member.send(p.memberChat.id, 'ещё');
+        const responses = await allResponses([
+            p.owner.post('/api/account/delete', {}),
+            later(jitter(round), () => p.member.post('/api/account/delete', {})),
+        ]);
+        assert.strictEqual((await suite.query('SELECT 1 FROM rooms WHERE id = $1', [p.roomId])).rows.length, 0, 'комната снесена');
+        assert.strictEqual((await suite.query('SELECT 1 FROM messages WHERE room_id = $1', [p.roomId])).rows.length, 0);
+        assertNoLockFailures(`круг ${round}`, responses, mark);
+    }
+    t.diagnostic(`повторов при 40P01: ${retriesSince(mark)}`);
+});
+
+test('создание комнат против удаления аккаунта создателя: пустых комнат не остаётся', async (t) => {
+    const mark = suite.server.logs.mark();
+    for (let round = 0; round < LOCK_ROUNDS; round++) {
+        const user = suite.client();
+        await user.registerAnon();
+        const responses = await allResponses([
+            user.post('/api/chats', { name: `Гонка ${round} а` }),
+            later(jitter(round) / 2, () => user.post('/api/chats', { name: `Гонка ${round} б` })),
+            later(jitter(round), () => user.post('/api/account/delete', {})),
+        ]);
+        assertNoLockFailures(`круг ${round}`, responses, mark);
+    }
+    const empty = (await suite.query(
+        'SELECT r.id FROM rooms r WHERE NOT EXISTS (SELECT 1 FROM room_participants rp WHERE rp.room_id = r.id)'
+    )).rows;
+    assert.deepStrictEqual(empty, [], 'комнат без участников нет');
+    t.diagnostic(`повторов при 40P01: ${retriesSince(mark)}`);
+});
+
+test('реакция против удаления аккаунта автора сообщения: ни дедлока, ни 5xx', async (t) => {
+    const mark = suite.server.logs.mark();
+    for (let round = 0; round < LOCK_ROUNDS; round++) {
+        const p = await pair({ name: `Реакция и удаление ${round}` });
+        const message = await p.owner.send(p.ownerChat.id, 'поставьте реакцию');
+        const responses = await allResponses([
+            p.member.post('/api/reactions', { messageId: message.id, emoji: '👍' }),
+            later(jitter(round), () => p.owner.post('/api/account/delete', {})),
+        ]);
+        assertNoLockFailures(`круг ${round}`, responses, mark);
+    }
+    t.diagnostic(`повторов при 40P01: ${retriesSince(mark)}`);
+});
