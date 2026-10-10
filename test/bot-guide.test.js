@@ -513,9 +513,14 @@ test('script.js: подсказки рисуются через textContent и �
     assert.match(functionBody(script, 'releaseChatResources'), /clearBotSuggestions\(\)/);
 });
 
-test('script.js: плейсхолдер и статус шапки чата с ботом', () => {
+test('плейсхолдер поля ввода и статус шапки чата с ботом', () => {
+    // Подсказка в поле ввода выбирается в public/lib/e2ee-policy.js (composerView, R7);
+    // подпись «без сквозного шифрования» в шапке рисует script.js.
+    const policy = require('../public/lib/e2ee-policy.js');
+    assert.strictEqual(policy.PLACEHOLDERS.bot, 'Спросите бота или выберите тему');
+    const view = policy.composerView({ inRoom: false, plaintextOk: true, e2ee: 'ready', initError: null, block: null });
+    assert.strictEqual(view.placeholder, 'Спросите бота или выберите тему');
     const script = readPublic('script.js');
-    assert.ok(script.includes("const BOT_INPUT_PLACEHOLDER = 'Спросите бота или выберите тему';"));
     assert.ok(script.includes("'Бот · без сквозного шифрования'"));
 });
 

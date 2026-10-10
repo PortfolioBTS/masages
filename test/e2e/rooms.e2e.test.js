@@ -10,6 +10,7 @@
 const { test } = require('node:test');
 const assert = require('assert');
 const { createSuite } = require('./helpers/scenarios');
+const { fakeEnvelope } = require('./helpers/envelope');
 const { INVALID_INVITE_MESSAGE } = require('../../lib/invites');
 
 const suite = createSuite('rooms');
@@ -69,16 +70,16 @@ test('полный цикл комнаты с сокетами', async (t) => {
     // Новичок видит только новое.
     const after = await owner.send(ownerChat.id, 'после вступления гостя');
     const delivered = await guestSock.waitFor('newMessage', m => m.id === after.id);
-    assert.strictEqual(delivered.text, 'после вступления гостя');
+    assert.strictEqual(delivered.text, fakeEnvelope('после вступления гостя'));
     const guestView = await guest.messages(guestChat.id);
-    assert.deepStrictEqual(guestView.messages.map(m => m.text), ['после вступления гостя']);
+    assert.deepStrictEqual(guestView.messages.map(m => m.text), [fakeEnvelope('после вступления гостя')]);
     assert.ok(!guestSock.collect('newMessage').some(m => m.id === before.id), 'старое сообщение гостю не приходило');
     const ownerView = await owner.messages(ownerChat.id);
-    assert.deepStrictEqual(ownerView.messages.map(m => m.text), ['до вступления гостя', 'после вступления гостя']);
+    assert.deepStrictEqual(ownerView.messages.map(m => m.text), [fakeEnvelope('до вступления гостя'), fakeEnvelope('после вступления гостя')]);
 
     // Гость пишет — владелец получает.
     const reply = await guest.send(guestChat.id, 'привет от гостя');
-    assert.strictEqual((await ownerSock.waitFor('newMessage', m => m.id === reply.id)).text, 'привет от гостя');
+    assert.strictEqual((await ownerSock.waitFor('newMessage', m => m.id === reply.id)).text, fakeEnvelope('привет от гостя'));
 
     // Выход гостя: комната живёт, состав обновился.
     const leaveMark = ownerSock.mark();

@@ -12,6 +12,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { createSuite, roomWithMember, waitUntil } = require('./helpers/scenarios');
+const { fakeEnvelope } = require('./helpers/envelope');
 
 const suite = createSuite('messages-order');
 
@@ -348,7 +349,7 @@ test('повтор того же запроса (потерян ответ) — 
     assert.strictEqual(second.body.success, true);
     assert.strictEqual(second.body.message.id, first.body.message.id);
     assert.strictEqual(second.body.message.seq, first.body.message.seq);
-    assert.strictEqual(second.body.message.text, 'один раз');
+    assert.strictEqual(second.body.message.text, fakeEnvelope('один раз'));
     assert.strictEqual(await countRows('SELECT count(*) AS n FROM messages WHERE id = $1', [id]), 1);
     const counterAfter = (await suite.query('SELECT msg_seq FROM rooms WHERE id = $1', [p.roomId])).rows[0].msg_seq;
     assert.strictEqual(counterAfter, counterBefore, 'откат повторной вставки откатил и приращение seq');
@@ -401,7 +402,7 @@ test('конфликт id: чужое сообщение, другой текс�
     assert.strictEqual(row.room_id, p.roomId);
     assert.strictEqual(row.user_id, p.owner.user.id);
     const history = (await p.member.messages(p.memberChat.id)).messages;
-    assert.strictEqual(history.find(m => m.id === id).text, 'настоящее', 'чужое сообщение не изменилось');
+    assert.strictEqual(history.find(m => m.id === id).text, fakeEnvelope('настоящее'), 'чужое сообщение не изменилось');
     assert.strictEqual(history.find(m => m.id === id).seq, original.seq);
     const counterAfter = (await suite.query('SELECT msg_seq FROM rooms WHERE id = $1', [p.roomId])).rows[0].msg_seq;
     assert.strictEqual(counterAfter, counterBefore, 'проигравшие вставки откатились вместе с приращением seq');
@@ -495,7 +496,8 @@ test('просроченное надгробие, не убранное очи�
 // ---------- вложения ----------
 
 const dirFiles = () => (fs.existsSync(suite.server.uploadsDir) ? fs.readdirSync(suite.server.uploadsDir).sort() : []);
-const ENVELOPE = '{"v":2,"alg":"senderkey-v2","senderKeyId":"k","iteration":0,"iv":"AA","ct":"AA","sig":"AA"}';
+// Сервер проверяет форму конверта (R7), поэтому нужен конверт правильной формы.
+const ENVELOPE = fakeEnvelope('вложение');
 const cipherBytes = () => crypto.randomBytes(300);
 
 function uploadForm(fields, order = ['chatId', 'encrypted', 'clientMessageId', 'envelope']) {
@@ -571,7 +573,7 @@ test('вложение: занятый id — 409 до приёма файла; 
     const stolen = await p.member.uploadRaw(p.memberChat.id, bytes, 'application/octet-stream', { encrypted: true, envelope: ENVELOPE, clientMessageId: id });
     assert.strictEqual(stolen.status, 409);
     assert.deepStrictEqual(stolen.body, ID_CONFLICT_BODY);
-    const changed = await p.owner.uploadRaw(p.ownerChat.id, bytes, 'application/octet-stream', { encrypted: true, envelope: ENVELOPE.replace('"k"', '"z"'), clientMessageId: id });
+    const changed = await p.owner.uploadRaw(p.ownerChat.id, bytes, 'application/octet-stream', { encrypted: true, envelope: fakeEnvelope('другое вложение'), clientMessageId: id });
     assert.strictEqual(changed.status, 409);
     assert.deepStrictEqual(dirFiles(), afterFirst, 'при 409 файла на диске нет');
 
@@ -604,7 +606,7 @@ test('вложение с id из надгробия — 409, файл не со
 test('время в базе огрублено: created_at и edited_at кратны минуте, в API правка — ISO-8601 UTC с нулевыми секундами', async () => {
     const p = await pair();
     const sent = await p.owner.send(p.ownerChat.id, 'для правки');
-    const edit = await p.owner.put(`/api/messages/${sent.id}`, { text: 'исправлено' });
+    const edit = await p.owner.put(`/api/messages/${sent.id}`, { text: fakeEnvelope('исправлено') });
     assert.strictEqual(edit.body.success, true);
     assert.match(edit.body.edited_at, /^\d{4}-\d\d-\d\dT\d\d:\d\d:00\.000Z$/, edit.body.edited_at);
     const history = (await p.member.messages(p.memberChat.id)).messages.find(m => m.id === sent.id);

@@ -158,11 +158,12 @@
     //   protocol    — ответ не того формата или ключ неверной длины.
     const ERROR_CODES = Object.freeze(['unsupported', 'storage', 'network', 'server', 'protocol']);
 
-    // Пока бросается encryptOutgoing без корректного messageId (protocol).
-    // init() и транспорт перейдут на неё вместе с типизацией ошибок
-    // инициализации; класс и коды уже входят в API модуля, чтобы script.js и
-    // тесты могли на них ссылаться. status — HTTP-статус для network/server, у
-    // остальных кодов его нет.
+    // Ею отвечает init() (и транспорт ключей) по фазам: probeSupport →
+    // unsupported, хранилище → storage, запросы к серверу ключей → network,
+    // server или protocol; кроме того, её бросает encryptOutgoing без
+    // корректного messageId (protocol). script.js выбирает текст по err.code, а не
+    // разбором сообщения. status — HTTP-статус для network/server, у остальных
+    // кодов его нет.
     class E2eeError extends Error {
         constructor(code, message, { status, cause } = {}) {
             super(message || ('E2EE: ' + code), cause === undefined ? undefined : { cause });
@@ -170,6 +171,47 @@
             this.code = code;
             if (status !== undefined) this.status = status;
         }
+    }
+
+    // Ошибки хранилища и транспорта приводятся к E2eeError на самой границе,
+    // а не по фазам init(): хранилище отказывает и посреди отправки, и там тоже
+    // нужно отличить «браузер не даёт сохранить ключи» от «нет связи».
+    //   * хранилище: NotSupportedError → unsupported, любое другое исключение → storage;
+    //   * транспорт: отказ fetch (TypeError, AbortError) → network.
+    // Уже типизированные ошибки проходят как есть. Результат вызова, в том числе
+    // синхронный, не меняется.
+    function guardCalls(target, convert) {
+        return new Proxy(target, {
+            get(obj, key) {
+                const value = obj[key];
+                if (typeof value !== 'function') return value;
+                return (...args) => {
+                    let result;
+                    try {
+                        result = value.apply(obj, args);
+                    } catch (err) {
+                        throw convert(err);
+                    }
+                    return result && typeof result.then === 'function' ? result.catch((err) => { throw convert(err); }) : result;
+                };
+            },
+        });
+    }
+
+    function storageFailure(err) {
+        if (err instanceof E2eeError) return err;
+        if (err && err.name === 'NotSupportedError') {
+            return new E2eeError('unsupported', 'E2EE: браузер не поддерживает хранение этих ключей', { cause: err });
+        }
+        return new E2eeError('storage', 'E2EE: хранилище ключей устройства недоступно', { cause: err });
+    }
+
+    function transportFailure(err) {
+        if (err instanceof E2eeError) return err;
+        if (err instanceof TypeError || (err && err.name === 'AbortError')) {
+            return new E2eeError('network', 'E2EE: нет связи с сервером ключей', { cause: err });
+        }
+        return err;
     }
 
     // ===================== Кодирование =====================
@@ -753,15 +795,28 @@
 
     function makeFetchTransport() {
         async function call(url, method, body) {
-            const res = await fetch(url, {
-                method,
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRF-Token': getCsrfTokenFromCookies(),
-                },
-                body: body !== undefined ? JSON.stringify(body) : undefined,
-            });
-            const data = await res.json().catch(() => ({ success: false }));
+            let res;
+            try {
+                res = await fetch(url, {
+                    method,
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRF-Token': getCsrfTokenFromCookies(),
+                    },
+                    body: body !== undefined ? JSON.stringify(body) : undefined,
+                });
+            } catch (cause) {
+                throw new E2eeError('network', 'E2EE: нет связи с сервером ключей', { cause });
+            }
+            let data;
+            try {
+                data = await res.json();
+            } catch (cause) {
+                // Страница ошибки прокси или шлюза (502, 503) — это «сервер не отвечает»,
+                // а не нарушение формата: повтор имеет смысл. Остальное — не наш формат.
+                throw new E2eeError(res.status >= 500 ? 'server' : 'protocol',
+                    'E2EE: сервер ключей ответил не JSON', { status: res.status, cause });
+            }
             return { status: res.status, data };
         }
         return {
@@ -941,8 +996,8 @@
     //               позволяет тестам проверять сроки в 7 и 14 дней;
     //   lock      — внешняя блокировка lock(fn) → Promise, см. withLock ниже.
     function createClient(options) {
-        const storage = options.storage;
-        const transport = options.transport || makeFetchTransport();
+        const storage = guardCalls(options.storage, storageFailure);
+        const transport = guardCalls(options.transport || makeFetchTransport(), transportFailure);
         // Часы внедряются ради тестов ротации prekey (7/14 дней).
         const now = typeof options.now === 'function' ? options.now : () => Date.now();
         let kem = options.kem || null;
@@ -1124,7 +1179,7 @@
             if (!pq) {
                 const seed = randomBytes(PQ_SEED_BYTES);
                 const { publicKey } = await getKem().keygen(seed);
-                if (!publicKey || publicKey.length !== PQ_PUBLIC_KEY_BYTES) throw new Error('E2EE: ML-KEM вернул ключ неверной длины');
+                if (!publicKey || publicKey.length !== PQ_PUBLIC_KEY_BYTES) throw new E2eeError('protocol', 'E2EE: ML-KEM вернул ключ неверной длины');
                 const keyId = await nextKeyId();
                 const sig = await sign(identity.signPriv, publicKey);
                 pq = { keyId, pub: b64encode(publicKey), seed: b64encode(seed), sig: b64encode(sig), createdAt: t };
@@ -1139,13 +1194,14 @@
             }
         }
 
-        // Ошибка сервера ключей помечается code/status: интерфейсу нужно
-        // отличать «сервер ключей не отвечает» от «браузер не умеет X25519».
+        // Отказ сервера ключей при публикации своих ключей. Код — по статусу:
+        // 400 на собственные ключи и 2xx без success:true (или ответ не того вида)
+        // — protocol; 5xx, 401, 403, 404 и остальное — server. Статус сохраняется.
         function keyServerError(what, res) {
-            const err = new Error('E2EE: не удалось зарегистрировать ' + what);
-            err.code = 'key-server';
-            err.status = res && typeof res.status === 'number' ? res.status : 0;
-            return err;
+            const known = Boolean(res) && typeof res === 'object' && typeof res.status === 'number';
+            const status = known ? res.status : 0;
+            const protocol = !known || status === 400 || (status >= 200 && status < 300);
+            return new E2eeError(protocol ? 'protocol' : 'server', 'E2EE: не удалось зарегистрировать ' + what, known ? { status } : {});
         }
 
         async function putIdentity(identity) {
@@ -1227,16 +1283,84 @@
         // публичные части на сервер, пополнить пул OPK. Идемпотентна —
         // можно вызывать повторно (например, раз в сутки), чтобы ротация
         // срабатывала и без перезагрузки страницы.
+        //
+        // Ошибки — только E2eeError (ERROR_CODES), по фазам:
+        //   probeSupport                 → unsupported;
+        //   ensureLocal                  → storage (NotSupportedError → unsupported);
+        //   maintainPrekeysLocked        → unsupported или protocol (длина ключа ML-KEM);
+        //   uploadKeysIfNeeded и topUp*  → network, server или protocol.
         async function init() {
-            await ensureLocal();
-            const identity = await withLock(async () => {
-                const id = await loadIdentityLocked();
-                await maintainPrekeysLocked(id);
-                return id;
-            });
-            await uploadKeysIfNeeded();
-            await topUpOneTimePreKeysIfNeeded();
+            await probeSupport();
+            try {
+                await ensureLocal();
+            } catch (err) {
+                throw asInitError(err, 'storage');
+            }
+            let identity;
+            try {
+                identity = await withLock(async () => {
+                    const id = await loadIdentityLocked();
+                    await maintainPrekeysLocked(id);
+                    return id;
+                });
+            } catch (err) {
+                throw asInitError(err, 'unsupported');
+            }
+            try {
+                await uploadKeysIfNeeded();
+                await topUpOneTimePreKeysIfNeeded();
+            } catch (err) {
+                throw asInitError(err, 'protocol');
+            }
             return { identityPub: identity.dhPub, signPub: identity.signPub };
+        }
+
+        // Приводит любую ошибку фазы к E2eeError; fallback — код, если ничего
+        // более точного о ней не известно (непонятное исключение внутри фазы).
+        // Отказ fetch (TypeError, AbortError) в фазе обмена с сервером — network.
+        function asInitError(err, fallback) {
+            if (err instanceof E2eeError) return err;
+            if (err && err.name === 'NotSupportedError') {
+                return new E2eeError('unsupported', 'E2EE: браузер не поддерживает нужный алгоритм', { cause: err });
+            }
+            if (fallback === 'protocol' && (err instanceof TypeError || (err && err.name === 'AbortError'))) {
+                return new E2eeError('network', 'E2EE: нет связи с сервером ключей', { cause: err });
+            }
+            const detail = err && err.message ? ': ' + err.message : '';
+            return new E2eeError(fallback, 'E2EE: не удалось подготовить ключи устройства' + detail, { cause: err });
+        }
+
+        // Умеет ли этот браузер то, без чего E2EE не заработает: X25519, Ed25519,
+        // HKDF и ML-KEM. Успех запоминается на клиента; отказ — нет, чтобы
+        // «Повторить» (после обновления браузера, подгрузки модуля) не требовало
+        // нового клиента. Бросает E2eeError('unsupported').
+        let supportProbe = null;
+        function probeSupport() {
+            if (!supportProbe) {
+                supportProbe = (async () => {
+                    if (typeof globalThis.crypto === 'undefined' || !globalThis.crypto.subtle) {
+                        throw new E2eeError('unsupported', 'E2EE: в браузере нет Web Crypto (нужен https или localhost)');
+                    }
+                    try {
+                        await generateX25519();
+                        await generateEd25519();
+                        await subtle.importKey('raw', new Uint8Array(32), 'HKDF', false, ['deriveBits']);
+                    } catch (cause) {
+                        throw new E2eeError('unsupported', 'E2EE: браузер не поддерживает X25519, Ed25519 или HKDF', { cause });
+                    }
+                    let module;
+                    try {
+                        module = getKem();
+                    } catch (cause) {
+                        throw new E2eeError('unsupported', 'E2EE: модуль ML-KEM недоступен', { cause });
+                    }
+                    if (!module || ['keygen', 'encapsulate', 'decapsulate'].some(name => typeof module[name] !== 'function')) {
+                        throw new E2eeError('unsupported', 'E2EE: модуль ML-KEM неполный');
+                    }
+                })();
+                supportProbe.catch(() => { supportProbe = null; });
+            }
+            return supportProbe;
         }
 
         function setUserId(id) { userId = id; }
@@ -1814,7 +1938,7 @@
             await ensureLocal();
             const me = Number(userId);
             const current = normalizeParticipants(participants);
-            const empty = { newMembers: [], removedMembers: [], rotated: false, identityChanges: [] };
+            const empty = { newMembers: [], removedMembers: [], rotated: false, identityChanges: [], peers: 0, keyHolders: 0 };
             if (!current.some(p => p.id === me)) {
                 return Object.assign({ ok: false, warnings: [{ reason: 'вы не участник этой комнаты' }] }, empty);
             }
@@ -1907,12 +2031,25 @@
                 await withLock(async () => { for (const name of done) await storage.set(name, true); });
             }
 
+            // Сколько остальных участников получили ТЕКУЩИЙ ключ (по отметкам об успешной
+            // рассылке). Если участники есть, а ключа нет ни у кого, отправка в комнату
+            // бессмысленна: никто не прочтёт — script.js в этом случае её блокирует.
+            const ownNow = await storage.get(ownKeyName(roomId));
+            let keyHolders = 0;
+            if (ownNow) {
+                for (const peer of others) {
+                    if (await storage.get(sharedMarkName(roomId, ownNow.senderKeyId, peer.id))) keyHolders++;
+                }
+            }
+
             return {
                 ok, warnings,
                 newMembers: membership.newMembers,
                 removedMembers: membership.removedMembers,
                 rotated: membership.rotated,
                 identityChanges,
+                peers: others.length,
+                keyHolders,
             };
         }
 
@@ -2165,6 +2302,7 @@
         return {
             // Инициализация и пользователь
             init,
+            probeSupport,
             setUserId,
 
             // Комнаты: Sender Key и key-share
