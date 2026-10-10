@@ -9,3 +9,6 @@ tmp_*.js
 bd/
 .DS_Store
 test/e2e/.logs/
+
+# Каталог релизных файлов (scripts/release-manifest.js) — собирается заново, в git не хранится
+release/
