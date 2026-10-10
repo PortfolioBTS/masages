@@ -79,6 +79,8 @@ function builtinTransport(server, store, userId) {
         putSignedPrekey: (b) => via('PUT', '/internal/v1/keys/signed-prekey', b),
         putPqPrekey: (b) => via('PUT', '/internal/v1/keys/pq-prekey', b),
         postOneTimePrekeys: (b) => via('POST', '/internal/v1/keys/one-time-prekeys', b),
+        postPqOneTimePrekeys: (b) => via('POST', '/internal/v1/keys/pq-one-time-prekeys', b),
+        deletePqOneTimePrekeys: () => via('DELETE', '/internal/v1/keys/pq-one-time-prekeys'),
         getOneTimePrekeyCount: () => via('GET', '/internal/v1/keys/one-time-prekeys/count'),
         getBundle: (id) => via('GET', '/internal/v1/keys/bundle/' + id),
         deleteKeys: () => via('DELETE', '/internal/v1/keys'),
@@ -228,11 +230,14 @@ async function main() {
         await alice.init(); await bob.init(); await carol.init();
         assert.ok(db._state.identities.has(1) && db._state.pqs.has(2) && db._state.spks.has(3), 'keys registered in the built-in store');
         const opkBefore = db._state.opks.filter(o => o.user_id === 2).length;
+        const pqBefore = db._state.pqOpks.filter(o => o.user_id === 2).length;
+        assert.ok(pqBefore >= 5, 'init() filled the PQ one-time pool through the store (with its signature check)');
         const parts = [{ id: 1, username: 'alice' }, { id: 2, username: 'bob' }, { id: 3, username: 'carol' }];
         const r = await alice.ensureRoomSession(11, 500, parts);
         assert.strictEqual(r.ok, true);
         assert.deepStrictEqual(r.warnings, []);
         assert.strictEqual(db._state.opks.filter(o => o.user_id === 2).length, opkBefore - 1, 'one OPK of bob consumed');
+        assert.strictEqual(db._state.pqOpks.filter(o => o.user_id === 2).length, pqBefore - 1, 'one PQ one-time prekey of bob consumed');
         assert.strictEqual((await bob.syncKeyShares(22, 500)).applied, 1);
         assert.strictEqual((await carol.syncKeyShares(33, 500)).applied, 1);
         // Содержимое привязано к id сообщения (mid), поэтому id выбирается до шифрования.

@@ -23,11 +23,21 @@ async function verifyEd25519(signPubB64, sigB64, data) {
     }
 }
 
+// Подписываемые байты одноразового PQ-prekey собраны здесь независимо от
+// клиента и сервера: 'nyxo-pqopk-v1' + NUL, u64be(key_id), ключ.
+function pqOneTimeMessage(keyId, publicKey) {
+    const label = Buffer.from([...'nyxo-pqopk-v1'].map(c => c.charCodeAt(0)).concat([0]));
+    const id = Buffer.alloc(8);
+    id.writeBigUInt64BE(BigInt(keyId));
+    return new Uint8Array(Buffer.concat([label, id, Buffer.from(publicKey)]));
+}
+
 function makeFakeServer() {
     const identityKeys = new Map(); // userId -> {identity_signing_key, identity_dh_key}
     const signedPrekeys = new Map(); // userId -> {key_id, public_key, signature}
     const pqPrekeys = new Map(); // userId -> {key_id, public_key, signature}
     const oneTimePrekeys = new Map(); // userId -> Map<key_id, public_key> (insertion order = FIFO)
+    const pqOneTimePrekeys = new Map(); // userId -> Map<key_id, {key_id, public_key, signature}> (FIFO)
     const rooms = new Map(); // roomId -> Set<userId>
     const userChats = new Map(); // userId -> Map<chatId, roomId>
     const keyShares = []; // {id, roomId, senderId, recipientId, ciphertext}
@@ -41,7 +51,13 @@ function makeFakeServer() {
 
     // Подмены злонамеренного сервера.
     const impersonations = new Map(); // victimId -> attackerId (чьи ключи отдаются вместо victim)
-    const hiddenPq = new Set(); // userId, у кого pq_prekey "пропал" из bundle
+    const hiddenPq = new Set(); // userId, у кого pq_prekey и одноразовые PQ-ключи "пропали" из bundle
+    const strippedPqOneTime = new Set(); // userId, у кого пропал только одноразовый PQ-ключ (и он не расходуется)
+    const reusedPqOneTime = new Set(); // userId, чей одноразовый PQ-ключ сервер выдаёт повторно
+    const relabelOneTimeAsLastResort = new Set(); // одноразовый PQ-ключ выдан в поле pq_prekey
+    const relabelLastResortAsOneTime = new Set(); // запасной ключ выдан в поле pq_one_time_prekey
+    const lastServedPq = new Map(); // userId -> последний выданный одноразовый PQ-ключ (для reuse)
+    let pqUploadFailure = null; // { mode: 'refuse' | 'network', skip }: сбой загрузки пула после skip успешных пачек
 
     function room(userId, chatId) {
         const m = userChats.get(userId);
@@ -84,6 +100,14 @@ function makeFakeServer() {
         const t = {
             async putIdentity(body) {
                 if (shadow) return { status: 200, data: { success: true } };
+                const old = identityKeys.get(userId);
+                if (old && (old.identity_signing_key !== body.identity_signing_key || old.identity_dh_key !== body.identity_dh_key)) {
+                    // lib/key-store.js: prekey подписаны старой identity — стираются.
+                    signedPrekeys.delete(userId);
+                    pqPrekeys.delete(userId);
+                    oneTimePrekeys.delete(userId);
+                    pqOneTimePrekeys.delete(userId);
+                }
                 identityKeys.set(userId, { identity_signing_key: body.identity_signing_key, identity_dh_key: body.identity_dh_key });
                 return { status: 200, data: { success: true } };
             },
@@ -121,10 +145,55 @@ function makeFakeServer() {
                 }
                 return { status: 200, data: { success: true, inserted } };
             },
+            // Одноразовые PQ-prekey: как lib/key-store.js — identity обязана быть
+            // (409), не больше 50 в запросе и 100 на пользователя, подпись с
+            // меткой над key_id, 1184 байта и подпись 64 байта.
+            async postPqOneTimePrekeys(body) {
+                if (shadow) return { status: 200, data: { success: true, inserted: body.keys.length } };
+                if (pqUploadFailure && pqUploadFailure.skip > 0) {
+                    pqUploadFailure.skip--;
+                } else if (pqUploadFailure) {
+                    const { mode } = pqUploadFailure;
+                    pqUploadFailure = null;
+                    if (mode === 'network') throw new TypeError('fetch failed');
+                    return { status: 400, data: { success: false, message: 'refused' } };
+                }
+                const identity = identityKeys.get(userId);
+                if (!identity) return { status: 409, data: { success: false, message: 'identity keys must be registered first' } };
+                if (!Array.isArray(body.keys) || body.keys.length === 0 || body.keys.length > 50) {
+                    return { status: 400, data: { success: false, message: 'bad batch' } };
+                }
+                if (!pqOneTimePrekeys.has(userId)) pqOneTimePrekeys.set(userId, new Map());
+                const map = pqOneTimePrekeys.get(userId);
+                if (map.size + body.keys.length > 100) return { status: 400, data: { success: false, message: 'too many stored keys' } };
+                for (const item of body.keys) {
+                    const pub = b64ToBytes(item.public_key);
+                    if (!Number.isSafeInteger(item.key_id) || item.key_id < 0 || pub.length !== 1184 || b64ToBytes(item.signature).length !== 64) {
+                        return { status: 400, data: { success: false, message: 'bad key' } };
+                    }
+                    if (!(await verifyEd25519(identity.identity_signing_key, item.signature, pqOneTimeMessage(item.key_id, pub)))) {
+                        return { status: 400, data: { success: false, message: 'bad signature' } };
+                    }
+                }
+                let inserted = 0;
+                for (const item of body.keys) {
+                    if (!map.has(item.key_id)) {
+                        map.set(item.key_id, { key_id: item.key_id, public_key: item.public_key, signature: item.signature });
+                        inserted++;
+                    }
+                }
+                return { status: 200, data: { success: true, inserted } };
+            },
+            async deletePqOneTimePrekeys() {
+                if (shadow) return { status: 200, data: { success: true } };
+                pqOneTimePrekeys.delete(userId);
+                return { status: 200, data: { success: true } };
+            },
             async getOneTimePrekeyCount() {
-                if (shadow) return { status: 200, data: { count: 100 } };
+                if (shadow) return { status: 200, data: { count: 100, pq_count: 100 } };
                 const map = oneTimePrekeys.get(userId);
-                return { status: 200, data: { count: map ? map.size : 0 } };
+                const pqMap = pqOneTimePrekeys.get(userId);
+                return { status: 200, data: { count: map ? map.size : 0, pq_count: pqMap ? pqMap.size : 0 } };
             },
             async deleteKeys() {
                 if (shadow) return { status: 200, data: { success: true } };
@@ -132,6 +201,7 @@ function makeFakeServer() {
                 signedPrekeys.delete(userId);
                 pqPrekeys.delete(userId);
                 oneTimePrekeys.delete(userId);
+                pqOneTimePrekeys.delete(userId);
                 return { status: 200, data: { success: true } };
             },
             async getBundle(targetUserId) {
@@ -150,7 +220,22 @@ function makeFakeServer() {
                     otpk = { key_id: firstKey, public_key: map.get(firstKey) };
                     map.delete(firstKey); // атомарный consume, как в db.rs::fetch_bundle
                 }
-                const pq = hiddenPq.has(targetUserId) ? null : (pqPrekeys.get(owner) || null);
+                let pq = hiddenPq.has(targetUserId) ? null : (pqPrekeys.get(owner) || null);
+                // Одноразовый PQ-ключ: первый в очереди, расходуется при выдаче.
+                let pqOne = null;
+                const pqMap = pqOneTimePrekeys.get(owner);
+                if (!hiddenPq.has(targetUserId) && !strippedPqOneTime.has(targetUserId)) {
+                    if (reusedPqOneTime.has(targetUserId) && lastServedPq.has(owner)) {
+                        pqOne = lastServedPq.get(owner); // злонамеренный сервер: тот же ключ второй раз
+                    } else if (pqMap && pqMap.size > 0) {
+                        const firstKey = pqMap.keys().next().value;
+                        pqOne = pqMap.get(firstKey);
+                        pqMap.delete(firstKey);
+                        lastServedPq.set(owner, pqOne);
+                    }
+                }
+                if (pqOne && relabelOneTimeAsLastResort.has(targetUserId)) { pq = pqOne; pqOne = null; }
+                else if (relabelLastResortAsOneTime.has(targetUserId) && pq) { pqOne = pq; }
                 return {
                     status: 200,
                     data: {
@@ -158,6 +243,7 @@ function makeFakeServer() {
                         identity_dh_key: identity.identity_dh_key,
                         signed_prekey: spk,
                         one_time_prekey: otpk,
+                        pq_one_time_prekey: pqOne,
                         pq_prekey: pq,
                     },
                 };
@@ -242,8 +328,17 @@ function makeFakeServer() {
         // attackerId) за ключи victimId — классическая попытка MITM.
         impersonate(victimId, attackerId) { impersonations.set(victimId, attackerId); },
         stopImpersonating(victimId) { impersonations.delete(victimId); },
-        // Сервер "теряет" PQ-prekey в bundle — попытка понизить PQXDH до X3DH.
+        // Сервер "теряет" все PQ-ключи в bundle (запасной и одноразовые) —
+        // попытка понизить PQXDH до X3DH.
         hidePqPrekey(userId) { hiddenPq.add(userId); },
+        // Сервер срезает только одноразовый PQ-ключ: инициатор переходит на запасной.
+        stripPqOneTime(userId) { strippedPqOneTime.add(userId); },
+        // Сервер выдаёт один и тот же одноразовый PQ-ключ всем инициаторам.
+        reusePqOneTime(userId) { reusedPqOneTime.add(userId); },
+        // Подмена роли ключа: одноразовый ключ (подпись с меткой) в поле pq_prekey...
+        relabelPqOneTimeAsLastResort(userId) { relabelOneTimeAsLastResort.add(userId); },
+        // ... и запасной ключ («сырая» подпись) в поле pq_one_time_prekey.
+        relabelLastResortAsPqOneTime(userId) { relabelLastResortAsOneTime.add(userId); },
         // Произвольная правка bundle (подмена подписи и т.п.).
         async tamperedBundle(requesterId, targetUserId, mutate) {
             const res = await transportFor(requesterId).getBundle(targetUserId);
@@ -277,6 +372,9 @@ function makeFakeServer() {
         // Транспорт "от имени" userId для клиента атакующего: читает и шлёт
         // как userId, но не перезаписывает зарегистрированные ключи жертвы.
         shadowTransportFor(userId) { return transportFor(userId, { shadow: true }); },
+        // Загрузка пула одноразовых PQ-ключей после skip принятых пачек:
+        // 'refuse' — явный отказ сервера (success: false), 'network' — исключение fetch.
+        failNextPqUpload(mode, skip = 0) { pqUploadFailure = { mode, skip }; },
         addParticipant, removeParticipant, participantsOf,
         newMessageId, postMessage, editMessage, getMessage,
         evil,
@@ -286,6 +384,7 @@ function makeFakeServer() {
         _signedPrekeys: signedPrekeys,
         _pqPrekeys: pqPrekeys,
         _oneTimePrekeys: oneTimePrekeys,
+        _pqOneTimePrekeys: pqOneTimePrekeys,
     };
 }
 
