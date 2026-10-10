@@ -21,6 +21,7 @@ const DAY = 24 * 60 * 60 * 1000;
 const CLIENT_METHODS = [
     // Инициализация и пользователь
     'init',
+    'probeSupport',
     'setUserId',
 
     // Комнаты: Sender Key и key-share
