@@ -530,6 +530,11 @@ function getE2eeClient() {
             e2eeClient = E2EE.createClient({
                 userId: currentUser.id,
                 storage: E2EE.makeIndexedDbStorage('nyxo-e2ee-' + currentUser.id),
+                // Две вкладки одного аккаунта делят IndexedDB с ключами: Web Locks не дают им
+                // выдать одну итерацию Sender Key двум сообщениям (message-ordering.md, 9.7).
+                // Без Web Locks lock = null — работает внутренняя очередь клиента, в консоли предупреждение.
+                lock: NyxoE2eeLock.makeLock(typeof navigator !== 'undefined' ? navigator.locks : null, currentUser.id,
+                    (message) => console.warn(message)),
             });
             e2eeClientUserId = currentUser.id;
         } catch (err) {
