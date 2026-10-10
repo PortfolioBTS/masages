@@ -19,6 +19,7 @@
 | Документ | О чём |
 |---|---|
 | [threat-model.md](threat-model.md) | Модель угроз: ценности, противники, что видит и хранит сервер, угрозы по компонентам, честные ограничения. Версия указана в начале документа |
+| [VERIFY.md](VERIFY.md) | Как сверить файлы клиента с релизом: скрипт, sha256sum, PowerShell, сторож |
 | [security/message-ordering.md](security/message-ordering.md) | Порядок, идентификаторы и время сообщений (R1) |
 | [security/sealed-sender.md](security/sealed-sender.md) | Скрытие автора сообщения комнаты на хранении (R8) |
 | [security/signed-membership.md](security/signed-membership.md) | Подписанный состав группы и приглашения (5.4) |
