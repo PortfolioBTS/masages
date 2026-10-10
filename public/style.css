@@ -2275,6 +2275,27 @@ button.indicator:hover {
     background: color-mix(in srgb, var(--accent) 84%, var(--bg));
 }
 
+/* Закрепление кода (service worker, lib/sw-client.js): «Доступна новая версия»
+   и сообщения о проверке. Поверх приложения, а не в потоке: приложение занимает
+   весь экран (100dvh), и плашка в потоке сдвинула бы вёрстку. Выше соединения (250),
+   ниже тоста (300). */
+body > .code-banner {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 260;
+    padding-top: max(8px, env(safe-area-inset-top));
+    border-bottom: 1px solid var(--border-strong);
+    box-shadow: var(--shadow);
+    animation: fade-in var(--dur) var(--ease);
+}
+
+.code-banner .banner-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
 /* Заявки на вступление: полоса над лентой. */
 .requests-bar {
     display: flex;
@@ -3728,6 +3749,18 @@ a.file-attachment:hover {
 
 .profile-lifetime {
     margin-bottom: 24px;
+}
+
+/* «Защита кода» в профиле: статус и три действия столбиком, как .profile-actions. */
+.profile-code {
+    margin-top: 24px;
+}
+
+.profile-code-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 12px;
 }
 
 /* Когда аккаунт удалится — главное в этом блоке, поэтому ярче подсказки. */
