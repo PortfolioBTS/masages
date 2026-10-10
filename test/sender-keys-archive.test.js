@@ -31,8 +31,16 @@ async function pair(opts = {}) {
 }
 
 // Alice меняет ключ и рассылает новый; Bob забирает его (если sync = true).
-async function rotate(ctx, sync = true) {
+// withoutPrev: отправитель прежней версии не сообщает prev.final, и цепочка
+// старого ключа у получателя остаётся открытой.
+async function rotate(ctx, sync = true, { withoutPrev = false } = {}) {
     await ctx.alice.rotateRoomKey(ROOM);
+    if (withoutPrev) {
+        const name = 'senderKey:' + ROOM + ':1';
+        const own = await ctx.alice._storage.get(name);
+        delete own.prev;
+        await ctx.alice._storage.set(name, own);
+    }
     await ctx.alice.ensureRoomSession(chatOf(1), ROOM, ctx.parts);
     if (sync) await ctx.bob.syncKeyShares(chatOf(2), ROOM);
 }
@@ -227,7 +235,7 @@ function rawSkdm(extra = {}, overrides = {}) {
     await test('миграция: встроенный archived раскладывается по записям skArchive, история читается', async () => {
         const ctx = await pair();
         const msgs = [await send(ctx.alice, ROOM, 'прошлый ключ')];
-        await rotate(ctx);
+        await rotate(ctx, true, { withoutPrev: true });
         msgs.push(await send(ctx.alice, ROOM, 'текущий ключ'));
         // Боб ещё не читал ни одно сообщение: цепочка старого ключа в архиве открыта.
         const name = 'senderKey:' + ROOM + ':1';
@@ -336,7 +344,7 @@ function rawSkdm(extra = {}, overrides = {}) {
         const clock = makeClock();
         const ctx = await pair({ clock });
         const unread = await send(ctx.alice, ROOM, 'не прочитано до ротации');
-        await rotate(ctx);
+        await rotate(ctx, true, { withoutPrev: true });
         const oldId = (await stored(ctx.bob, 'senderKey:' + ROOM + ':1')).archive[0].id;
         const name = 'skArchive:' + ROOM + ':1:' + oldId;
         assert.ok((await stored(ctx.bob, name)).chainKey, 'цепочка открыта');

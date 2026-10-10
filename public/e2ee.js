@@ -940,6 +940,10 @@
             async getParticipants(chatId) { return call('/api/chats/' + encodeURIComponent(chatId) + '/participants', 'GET'); },
             async postKeyShares(chatId, shares) { return call('/api/keys/key-shares', 'POST', { chatId, shares }); },
             async getKeyShares(chatId) { return call('/api/keys/key-shares/' + encodeURIComponent(chatId), 'GET'); },
+            // Запрос ключа: «пришлите Sender Key с этим id» (потерянный key-share).
+            async postKeyRequests(chatId, senderKeyIds) { return call('/api/keys/key-requests', 'POST', { chatId, senderKeyIds }); },
+            async getKeyRequests(chatId) { return call('/api/keys/key-requests/' + encodeURIComponent(chatId), 'GET'); },
+            async postKeyRequestsDone(chatId, senderKeyIds) { return call('/api/keys/key-requests/done', 'POST', { chatId, senderKeyIds }); },
         };
     }
 
@@ -1566,6 +1570,17 @@
             }
 
             for (const senderId of dirty) await storage.set(stateName(roomId, senderId), states.get(senderId));
+
+            // Служебные отметки запросов ключа: свой запрос живёт столько же, сколько
+            // строка на сервере, отметка об ответе владельца — не дольше часа.
+            for (const name of await storage.keys('keyReq:' + roomId + ':')) {
+                const at = await storage.get(name);
+                if (!Number.isFinite(at) || t - at >= KEY_REQUEST_RETENTION_MS) await storage.delete(name);
+            }
+            for (const name of await storage.keys('keyServed:' + roomId + ':')) {
+                const at = await storage.get(name);
+                if (!Number.isFinite(at) || t - at >= HOUR_MS) await storage.delete(name);
+            }
             return stats;
         }
 
@@ -2308,12 +2323,21 @@
                 session.n = n + 1;
                 await storage.set('pw2Send:' + peerId, session);
 
+                // Участникам, которые были в комнате при создании ключа, ключ
+                // выдаётся «с начала эпохи» (chainKey0, итерация 0): так читается
+                // всё, что отправлено им до того, как key-share дошёл (поздняя
+                // настройка E2EE, потеря share, запрос ключа). Новичкам — текущая
+                // позиция: что было до их вступления, они читать не должны. На
+                // прямую секретность это не влияет: свои ключи сообщений
+                // отправитель и так хранит в cachedKeys.
+                const fromStart = Boolean(own.origin && own.origin.chainKey0)
+                    && Array.isArray(own.entitled) && own.entitled.includes(Number(peerId));
                 const skdm = buildSkdm(roomId, {
                     senderKeyId: own.senderKeyId,
-                    chainKey: own.chainKey,
-                    iteration: own.nextIteration,
+                    chainKey: fromStart ? own.origin.chainKey0 : own.chainKey,
+                    iteration: fromStart ? 0 : own.nextIteration,
                     signingPublicKey: own.signingPublicKey,
-                });
+                }, own.prev ? { prev: own.prev } : null);
                 const aesKey = await hkdf(messageKey, ZERO32, 'nyxo-e2ee-skdm-v2', 32);
                 const aad = skdmAadV2(roomId, userId, peerId, identity.signPub, identity.dhPub, session.peerSignPub, session.peerDhPub);
                 const { iv, ct } = await aesGcmEncrypt(aesKey, utf8encode(JSON.stringify(skdm)), aad);
@@ -2455,15 +2479,68 @@
             };
         }
 
-        // order = { eph, n } — позиция key-share в попарной сессии.
+        // Достраивает цепочку назад: SKDM «с начала эпохи» (iteration раньше
+        // startIteration) отдаёт ключи сообщений, отправленных до того, как у нас
+        // появился этот ключ (поздняя настройка E2EE, потерянный share, запрос
+        // ключа). Выводятся итерации [skdm.iteration, startIteration), не больше
+        // MAX_SKIP; уже имеющиеся ключи не перезаписываются, текущая позиция
+        // цепочки не трогается. Разрыв больше MAX_SKIP не достраивается: вывести
+        // середину, не пройдя начало, нельзя.
+        async function mergeEarlierChain(rec, skdm, hour) {
+            const gap = rec.startIteration - skdm.iteration;
+            if (gap <= 0 || gap > MAX_SKIP) return false;
+            if (!rec.keyTimes) rec.keyTimes = {};
+            let chain = b64decode(skdm.chainKey);
+            for (let it = skdm.iteration; it < rec.startIteration; it++) {
+                const step = await chainStep(chain);
+                if (!rec.cachedKeys[it]) {
+                    rec.cachedKeys[it] = b64encode(step.messageKey);
+                    rec.keyTimes[it] = hour;
+                }
+                chain = step.nextChainKey;
+            }
+            rec.startIteration = skdm.iteration;
+            trimChain(rec);
+            return true;
+        }
+
+        // prev из SKDM нового ключа для УЖЕ архивного ключа (не для вытесняемого
+        // сейчас — тому final передаётся прямо в moveToArchiveLocked): закрывает его
+        // открытую цепочку по final. true — индекс state.archive изменён, основную
+        // запись сохраняет вызывающий.
+        async function applyPrevLocked(roomId, senderId, state, prev) {
+            if (!prev || prev.id === state.senderKeyId || !archiveHas(state, prev.id)) return false;
+            const name = archiveName(roomId, senderId, prev.id);
+            const rec = await storage.get(name);
+            if (!rec || !rec.chainKey) return false;
+            if (!(await closeChain(rec, prev.final, hourOf(now())))) return false;
+            await storage.set(name, rec);
+            const entry = state.archive.find(item => typeof item === 'object' && item.id === prev.id);
+            if (entry) entry.final = rec.final;
+            return true;
+        }
+
+        // order = { eph, n } — позиция key-share в попарной сессии. Возвращает
+        // senderKeyId ключа, который теперь есть у нас (новый или уже имевшийся).
         async function installSenderKeyLocked(roomId, senderId, skdm, order) {
             const name = stateName(roomId, senderId);
             const existing = await readStateLocked(roomId, senderId);
-            if (existing && existing.senderKeyId === skdm.senderKeyId) return; // уже есть, не откатываем состояние
+            const t = now();
+            const prev = skdm.ext && skdm.ext.prev ? skdm.ext.prev : null;
+            if (existing && existing.senderKeyId === skdm.senderKeyId) {
+                // Уже есть: состояние вперёд не откатываем. Но SKDM «с начала эпохи»
+                // достраивает цепочку назад, а prev закрывает архивный предыдущий ключ.
+                // Тот же id при другом ключе подписи — сбой или подделка: не трогаем.
+                if (existing.signingPublicKey !== skdm.signingPublicKey) return skdm.senderKeyId;
+                let changed = false;
+                if (skdm.iteration < existing.startIteration) changed = await mergeEarlierChain(existing, skdm, hourOf(t));
+                if (await applyPrevLocked(roomId, senderId, existing, prev)) changed = true;
+                if (changed) await storage.set(name, existing);
+                return skdm.senderKeyId;
+            }
             // Ключ, который уже был заменён ротацией, обратно не ставим: иначе
             // повтор старого key-share возвращал бы в оборот старый ключ.
-            if (existing && archiveHas(existing, skdm.senderKeyId)) return;
-            const t = now();
+            if (existing && archiveHas(existing, skdm.senderKeyId)) return skdm.senderKeyId;
             if (existing && existing.installedBy && existing.installedBy.eph === order.eph && order.n < existing.installedBy.n) {
                 // Более ранняя передача той же сессии, пришедшая позже более
                 // поздней, несёт более старый ключ: текущий ею не заменяем, но и
@@ -2479,9 +2556,10 @@
                 });
                 existing.archive.unshift({ id: skdm.senderKeyId, archivedAt: t, final: null });
                 const evicted = trimArchiveIndex(existing);
+                await applyPrevLocked(roomId, senderId, existing, prev);
                 await storage.set(name, existing);
                 await dropArchivesLocked(roomId, senderId, evicted);
-                return;
+                return skdm.senderKeyId;
             }
             const next = {
                 senderKeyId: skdm.senderKeyId,
@@ -2497,11 +2575,16 @@
             };
             let evicted = [];
             if (existing) {
-                evicted = await moveToArchiveLocked(roomId, senderId, existing);
+                // Отправитель сообщил, до какой итерации дошёл прежний ключ (prev.final):
+                // оставшиеся ключи выводятся сразу, chainKey стирается.
+                const final = prev && prev.id === existing.senderKeyId ? prev.final : null;
+                evicted = await moveToArchiveLocked(roomId, senderId, existing, { final });
                 next.archive = existing.archive;
+                await applyPrevLocked(roomId, senderId, next, prev);
             }
             await storage.set(name, next);
             await dropArchivesLocked(roomId, senderId, evicted);
+            return skdm.senderKeyId;
         }
 
         async function queuePendingShareLocked(senderId, roomId, ciphertext) {
@@ -2514,7 +2597,9 @@
         }
 
         // Обрабатывает один key-share → 'applied' | 'failed' | 'changed'.
-        async function applyShare(roomId, senderId, ciphertext) {
+        // onInstalled(senderKeyId) — вызывается для применённого ключа: syncKeyShares
+        // по нему снимает собственные запросы этого ключа.
+        async function applyShare(roomId, senderId, ciphertext, onInstalled) {
             const me = Number(userId);
             if (!Number.isSafeInteger(senderId) || senderId <= 0 || senderId === me) return 'failed';
             if (typeof ciphertext !== 'string') return 'failed';
@@ -2561,42 +2646,83 @@
                 if (!opened) return 'failed';
                 if (!pin) await storage.set('peer:' + senderId, { signPub: h.signPub, dhPub: h.dhPub, verified: false, firstSeenAt: now() });
                 await opened.commit();
-                await installSenderKeyLocked(roomId, senderId, opened.skdm, { eph: h.eph, n: env.n });
+                const keyId = await installSenderKeyLocked(roomId, senderId, opened.skdm, { eph: h.eph, n: env.n });
+                if (onInstalled) onInstalled(keyId);
                 return 'applied';
             });
         }
 
         // ---- Sender Key: моё состояние в комнате ----
 
-        async function newOwnSenderKeyState() {
+        // entitled — участники (id), которые были в комнате при создании ключа:
+        // им ключ выдаётся с начала эпохи (prepareShareForPeer). prev — { id, final }
+        // прежнего ключа: уходит в ext каждого SKDM нового ключа.
+        async function newOwnSenderKeyState({ entitled = [], prev = null } = {}) {
             const signKp = await generateEd25519();
-            return {
+            const chainKey = b64encode(randomBytes(32));
+            const state = {
                 senderKeyId: b64encode(randomBytes(16)),
                 signingPublicKey: b64encode(signKp.pub),
                 signingPrivateKey: signKp.priv,
-                chainKey: b64encode(randomBytes(32)),
+                chainKey,
                 nextIteration: 0,
                 startIteration: 0,
                 cachedKeys: {},
                 keyTimes: {},
                 createdAt: now(),
+                origin: { chainKey0: chainKey },
+                entitled: normalizeIds(entitled).filter(id => id !== Number(userId)),
                 archive: [],
             };
+            if (prev) state.prev = prev;
+            return state;
         }
 
-        // Ротация собственного Sender Key: новый chainKey и новая
-        // подписывающая пара, старое состояние уходит в архив, чтобы уже
-        // отправленные сообщения остались читаемыми для нас самих.
-        async function rotateRoomKeyLocked(roomId) {
+        // Ключ пора менять (мягкий порог): 100 сообщений или 7 дней. Состояние без
+        // createdAt — из версии до ротации: считается просроченным и меняется при
+        // первом же использовании комнаты, лениво и без всплеска рассылок.
+        function ownKeyDue(state) {
+            if (!Number.isFinite(state.createdAt)) return true;
+            const sent = state.nextIteration - (state.startIteration || 0);
+            return sent >= ROTATE_AFTER_MESSAGES || now() - state.createdAt >= ROTATE_AFTER_MS;
+        }
+
+        // Жёсткий порог: 200 сообщений или 8 дней. Дальше encryptOutgoing не шифрует,
+        // пока ключ не сменят: граница держится, даже если фоновая ротация не удалась.
+        function ownKeyExpired(state) {
+            if (!Number.isFinite(state.createdAt)) return true;
+            const sent = state.nextIteration - (state.startIteration || 0);
+            return sent >= FORCE_ROTATE_AFTER_MESSAGES || now() - state.createdAt >= FORCE_ROTATE_AFTER_MS;
+        }
+
+        // Участники, которым новый ключ выдаётся с начала эпохи: весь известный
+        // состав комнаты, кроме меня (members:<комната> ведёт ensureRoomSession).
+        async function knownMemberIdsLocked(roomId) {
+            const known = await storage.get('members:' + roomId);
+            return Array.isArray(known) ? known.map(p => Number(p.id)).filter(id => id !== Number(userId)) : [];
+        }
+
+        // Ротация собственного Sender Key: новый chainKey и новая подписывающая
+        // пара, старое состояние уходит в архив, чтобы уже отправленные сообщения
+        // остались читаемыми для нас самих. В ext нового ключа едет prev — id
+        // прежнего и последняя использованная им итерация: получатели закроют по
+        // ней цепочку старого ключа и сотрут её chainKey. Если старым ключом
+        // ничего не отправлено, закрывать нечего и prev не пишется.
+        async function rotateRoomKeyLocked(roomId, entitled) {
             const existing = await loadOwnSenderKeyLocked(roomId);
-            const next = await newOwnSenderKeyState();
+            const ids = entitled || await knownMemberIdsLocked(roomId);
+            const prev = existing && existing.nextIteration > 0 ? { id: existing.senderKeyId, final: existing.nextIteration - 1 } : null;
+            const next = await newOwnSenderKeyState({ entitled: ids, prev });
             if (existing) {
                 const evicted = await moveToArchiveLocked(roomId, userId, existing, { own: true });
                 next.archive = existing.archive;
                 await dropArchivesLocked(roomId, userId, evicted);
-                // Отметки рассылки старого ключа больше ни к чему.
-                for (const name of await storage.keys('sharedWith2:' + roomId + ':' + existing.senderKeyId + ':')) {
-                    await storage.delete(name);
+                // Отметки рассылки старого ключа и ответов на его запросы больше ни к чему.
+                for (const prefix of [
+                    'sharedWith2:' + roomId + ':' + existing.senderKeyId + ':',
+                    'keyServed:' + roomId + ':' + existing.senderKeyId + ':',
+                ]) {
+                    for (const name of await storage.keys(prefix)) await storage.delete(name);
                 }
             }
             await storage.set(ownKeyName(roomId), next);
@@ -2605,12 +2731,22 @@
 
         // После ротации нужно вызвать ensureRoomSession, чтобы разослать
         // новый ключ, — и сделать это ДО отправки сообщений новым ключом:
-        // key-share несёт текущую позицию цепочки, более ранние итерации
-        // получатели вывести не смогут.
+        // участникам, которых не было в комнате при создании ключа, key-share
+        // несёт текущую позицию цепочки, более ранние итерации они не выведут.
         async function rotateRoomKey(roomId) {
             await ensureLocal();
             const next = await withLock(() => rotateRoomKeyLocked(roomId));
             return { senderKeyId: next.senderKeyId };
+        }
+
+        // Пора ли менять ключ комнаты (мягкий порог). script.js после отправки
+        // запускает ensureRoomSession в фоне, и тот ротирует ключ до рассылки.
+        async function roomKeyDue(roomId) {
+            await ensureLocal();
+            return withLock(async () => {
+                const own = await loadOwnSenderKeyLocked(roomId);
+                return Boolean(own) && ownKeyDue(own);
+            });
         }
 
         async function hasRoomKey(roomId) {
@@ -2628,21 +2764,25 @@
             await ensureLocal();
             const me = Number(userId);
             const current = normalizeParticipants(participants);
-            const empty = { newMembers: [], removedMembers: [], rotated: false, identityChanges: [], peers: 0, keyHolders: 0 };
+            const empty = { newMembers: [], removedMembers: [], rotated: false, rotationReason: null, identityChanges: [], peers: 0, keyHolders: 0 };
             if (!current.some(p => p.id === me)) {
                 return Object.assign({ ok: false, warnings: [{ reason: 'вы не участник этой комнаты' }] }, empty);
             }
 
             const membership = await withLock(async () => {
+                // Новый ключ с начала эпохи читают все, кто в комнате сейчас.
+                const entitledNow = current.filter(p => p.id !== me).map(p => p.id);
                 let own = await loadOwnSenderKeyLocked(roomId);
                 let rotated = false;
+                let rotationReason = null;
                 if (!own) {
-                    own = await newOwnSenderKeyState();
+                    own = await newOwnSenderKeyState({ entitled: entitledNow });
                     await storage.set(ownKeyName(roomId), own);
                 } else if (!own.signingPrivateKey) {
                     // Состояние из очень старой версии без ключа подписи.
-                    await rotateRoomKeyLocked(roomId);
+                    await rotateRoomKeyLocked(roomId, entitledNow);
                     rotated = true;
+                    rotationReason = 'upgrade';
                 }
                 const known = await storage.get('members:' + roomId);
                 let newMembers = [];
@@ -2660,12 +2800,20 @@
                     // читать всё будущее — ротируем до рассылки, так что
                     // новый ключ он не получит.
                     if (removedMembers.length > 0 && !rotated) {
-                        await rotateRoomKeyLocked(roomId);
+                        await rotateRoomKeyLocked(roomId, entitledNow);
                         rotated = true;
+                        rotationReason = 'member-left';
                     }
                 }
+                // Плановая ротация: 100 сообщений или 7 дней. Делается здесь, до
+                // рассылки, чтобы новый ключ ушёл тем же проходом, что и все остальные.
+                if (!rotated && ownKeyDue(own)) {
+                    await rotateRoomKeyLocked(roomId, entitledNow);
+                    rotated = true;
+                    rotationReason = 'scheduled';
+                }
                 await storage.set('members:' + roomId, current);
-                return { newMembers, removedMembers, rotated };
+                return { newMembers, removedMembers, rotated, rotationReason };
             });
 
             const others = current.filter(p => p.id !== me);
@@ -2737,6 +2885,7 @@
                 newMembers: membership.newMembers,
                 removedMembers: membership.removedMembers,
                 rotated: membership.rotated,
+                rotationReason: membership.rotationReason,
                 identityChanges,
                 peers: others.length,
                 keyHolders,
@@ -2750,15 +2899,128 @@
             const list = res && res.data && Array.isArray(res.data.shares) ? res.data.shares : [];
             let applied = 0, failed = 0;
             const changes = [];
+            const installed = new Set();
             for (const item of list) {
                 const senderId = Number(item && item.senderId);
                 let result;
-                try { result = await applyShare(roomId, senderId, item && item.ciphertext); } catch { result = 'failed'; }
+                try {
+                    result = await applyShare(roomId, senderId, item && item.ciphertext, keyId => installed.add(keyId));
+                } catch { result = 'failed'; }
                 if (result === 'applied') applied++;
                 else if (result === 'changed') { if (!changes.includes(senderId)) changes.push(senderId); }
                 else failed++;
             }
+            await settleKeyRequests(chatId, roomId, Array.from(installed));
             return { applied, failed, identityChanges: changes };
+        }
+
+        // ---- Запрос ключа (план криптографии, раздел 5) ----
+        //
+        // Лечит потерю key-share: сообщение пришло, а Sender Key его автора у нас
+        // нет (share не дошёл, вытеснен из очереди, в T3.2 — одноразовый PQ-prekey
+        // «сожжён» без применённого share). Клиент просит ключ по id из конверта,
+        // не называя отправителя (после 4.3 его и нет), владелец ключа переотправляет
+        // его с начала эпохи, если мы имели на неё право. Для архивных ключей
+        // (ротированных) переотправки нет.
+
+        const keyRequestName = (roomId, keyId) => 'keyReq:' + roomId + ':' + keyId;
+        const keyServedName = (roomId, keyId, requesterId) => 'keyServed:' + roomId + ':' + keyId + ':' + requesterId;
+
+        function envelopeKeyId(text) {
+            let envelope;
+            try { envelope = JSON.parse(text); } catch { return null; }
+            return envelope && typeof envelope === 'object' && isCanonicalKeyId(envelope.senderKeyId) ? envelope.senderKeyId : null;
+        }
+
+        // envelopes — тексты конвертов, которые не удалось расшифровать из-за
+        // 'no-sender-key' или 'stale-sender-key'. Один и тот же ключ запрашивается
+        // не чаще раза в час; не больше MAX_KEY_REQUEST_IDS ключей за раз.
+        // → { requested: сколько ключей запрошено }
+        async function requestRoomKeys(chatId, roomId, envelopes) {
+            await ensureLocal();
+            const ids = [];
+            for (const text of Array.isArray(envelopes) ? envelopes : []) {
+                const id = envelopeKeyId(text);
+                if (id && !ids.includes(id)) ids.push(id);
+                if (ids.length >= MAX_KEY_REQUEST_IDS) break;
+            }
+            const t = now();
+            const fresh = await withLock(async () => {
+                const out = [];
+                for (const id of ids) {
+                    const last = await storage.get(keyRequestName(roomId, id));
+                    if (Number.isFinite(last) && t - last < KEY_REQUEST_COOLDOWN_MS) continue;
+                    await storage.set(keyRequestName(roomId, id), t);
+                    out.push(id);
+                }
+                return out;
+            });
+            if (fresh.length === 0) return { requested: 0 };
+            let ok = false;
+            try {
+                const res = await transport.postKeyRequests(chatId, fresh);
+                ok = Boolean(res && res.data && res.data.success === true);
+            } catch { ok = false; }
+            if (!ok) {
+                // Не дошло (сеть, лимит сервера): отметки снимаем, чтобы повторить сразу, как станет можно.
+                await withLock(async () => { for (const id of fresh) await storage.delete(keyRequestName(roomId, id)); });
+                return { requested: 0 };
+            }
+            return { requested: fresh.length };
+        }
+
+        // Ключи из key-share дошли: свои запросы этих ключей снимаем (локально и на сервере).
+        async function settleKeyRequests(chatId, roomId, installedIds) {
+            if (installedIds.length === 0) return;
+            const fulfilled = await withLock(async () => {
+                const out = [];
+                for (const id of installedIds) {
+                    if ((await storage.get(keyRequestName(roomId, id))) === null) continue;
+                    await storage.delete(keyRequestName(roomId, id));
+                    out.push(id);
+                }
+                return out;
+            });
+            if (fulfilled.length === 0) return;
+            try { await transport.postKeyRequestsDone(chatId, fulfilled.slice(0, MAX_KEY_REQUEST_IDS)); } catch { /* срок строки на сервере — 7 суток */ }
+        }
+
+        // Владелец отвечает на запросы ключа. requests — [{ fromUserId, senderKeyIds }]
+        // (событие e2eeKeyRequest или ответ GET); не переданы — берутся с сервера
+        // (владелец был офлайн). Если среди запрошенных есть МОЙ ТЕКУЩИЙ ключ и
+        // запросил участник комнаты, снимается отметка «разослано» — следующий
+        // ensureRoomSession переотправит ему ключ (с начала эпохи, если он имеет на
+        // неё право). Чужие и архивные ключи игнорируются; повторная выдача одного
+        // ключа одному участнику — не чаще раза в 10 минут.
+        // → { resend: [id участников] }; при непустом списке нужен ensureRoomSession.
+        async function answerKeyRequests(chatId, roomId, requests) {
+            await ensureLocal();
+            let list = requests;
+            if (!Array.isArray(list)) {
+                let res = null;
+                try { res = await transport.getKeyRequests(chatId); } catch { res = null; }
+                list = res && res.data && res.data.success === true && Array.isArray(res.data.requests) ? res.data.requests : [];
+            }
+            const t = now();
+            return withLock(async () => {
+                const resend = [];
+                const own = await loadOwnSenderKeyLocked(roomId);
+                if (!own) return { resend };
+                const members = await knownMemberIdsLocked(roomId);
+                for (const request of list) {
+                    const from = Number(request && request.fromUserId);
+                    if (!Number.isSafeInteger(from) || from <= 0 || from === Number(userId) || !members.includes(from)) continue;
+                    const ids = request && Array.isArray(request.senderKeyIds) ? request.senderKeyIds : [];
+                    if (!ids.includes(own.senderKeyId)) continue;
+                    const served = keyServedName(roomId, own.senderKeyId, from);
+                    const last = await storage.get(served);
+                    if (Number.isFinite(last) && t - last < KEY_RESEND_COOLDOWN_MS) continue;
+                    await storage.set(served, t);
+                    await storage.delete(sharedMarkName(roomId, own.senderKeyId, from));
+                    if (!resend.includes(from)) resend.push(from);
+                }
+                return { resend };
+            });
         }
 
         // ---- Шифрование/расшифровка сообщений чата ----
@@ -2799,6 +3061,9 @@
             editCounts.set(roomId, count);
         }
 
+        // Бросает E2eeError('needs-room-session'), если ключ комнаты исчерпал жёсткий
+        // порог ротации: script.js ждёт ensureRoomSession и повторяет один раз.
+        //
         // options: { messageId, edit? }. messageId обязателен (строка по формату
         // 6.1: id сообщения, который клиент выбрал ДО шифрования и отправит на
         // сервер как clientMessageId), иначе E2eeError('protocol'): содержимое
@@ -2822,6 +3087,11 @@
                 const st = await loadOwnSenderKeyLocked(roomId);
                 if (!st) throw new Error('E2EE: для этой комнаты ещё не создан Sender Key — вызовите ensureRoomSession()');
                 if (!st.signingPrivateKey) throw new Error('E2EE: ключ комнаты устарел — вызовите ensureRoomSession()');
+                // Жёсткая граница ротации (200 сообщений или 8 дней): мягкая — в
+                // ensureRoomSession; если она не состоялась, дальше шифровать нельзя.
+                if (ownKeyExpired(st)) {
+                    throw new E2eeError('needs-room-session', 'E2EE: ключ комнаты пора сменить — вызовите ensureRoomSession()');
+                }
                 const it = st.nextIteration;
                 const step = await chainStep(b64decode(st.chainKey));
                 st.cachedKeys[it] = b64encode(step.messageKey); // сохраняем и для собственного отображения истории
@@ -3008,6 +3278,11 @@
             syncKeyShares,
             hasRoomKey,
             rotateRoomKey,
+
+            // Комнаты: ротация ключа и запрос ключа
+            roomKeyDue,
+            requestRoomKeys,
+            answerKeyRequests,
 
             // Комнаты: хранение ключей на устройстве (архив, срок, бюджет)
             maintainRoomKeys,

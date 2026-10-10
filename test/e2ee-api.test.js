@@ -30,6 +30,11 @@ const CLIENT_METHODS = [
     'hasRoomKey',
     'rotateRoomKey',
 
+    // Комнаты: ротация ключа и запрос ключа
+    'roomKeyDue',
+    'requestRoomKeys',
+    'answerKeyRequests',
+
     // Комнаты: хранение ключей на устройстве (архив, срок, бюджет)
     'maintainRoomKeys',
     'setRoomPolicy',

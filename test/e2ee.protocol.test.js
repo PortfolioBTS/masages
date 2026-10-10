@@ -1066,6 +1066,11 @@ async function main() {
         assert.notStrictEqual(ctx.server._signedPrekeys.get(2).key_id, oldSpk, 'SPK ротирован');
         assert.notStrictEqual(ctx.server._pqPrekeys.get(2).key_id, oldPq, 'PQ-prekey ротирован');
         assert.strictEqual((await ctx.bob.syncKeyShares(22, ctx.roomId)).applied, 1);
+        // Через 8 дней ключ комнаты Alice просрочен: перед отправкой его меняет плановая
+        // ротация в ensureRoomSession, ключ уходит Бобу по новой сессии на свежих prekey.
+        const rotation = await ctx.alice.ensureRoomSession(11, ctx.roomId, ctx.parts);
+        assert.strictEqual(rotation.rotationReason, 'scheduled');
+        assert.strictEqual((await ctx.bob.syncKeyShares(22, ctx.roomId)).applied, 1);
         const ct = await ctx.alice.encryptOutgoing(ctx.roomId, 'через неделю');
         assert.strictEqual((await ctx.bob.decryptIncoming(ctx.roomId, 1, ct, 1)).text, 'через неделю');
     });
@@ -1170,6 +1175,7 @@ async function main() {
         const name = 'senderKey:' + ctx.roomId + ':1';
         const state = await getStored(ctx.alice, name);
         state.nextIteration += E2EE._internal.MAX_SKIP + 10;
+        state.startIteration = state.nextIteration; // иначе жёсткий порог числа сообщений не даст шифровать
         await ctx.alice._storage.set(name, state);
         const far = await ctx.alice.encryptOutgoing(ctx.roomId, 'далеко');
         assert.deepStrictEqual(await ctx.bob.decryptIncoming(ctx.roomId, 1, far, 1), { ok: false, reason: 'too-far-ahead' });
