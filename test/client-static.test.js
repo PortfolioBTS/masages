@@ -14,7 +14,7 @@
 //      on*= и атрибутов style=: CSP (style-src 'self') их не пропускает, а
 //      весь код клиента должен лежать в отдельных файлах;
 //   3. каждый файл, подключённый в index.html через src/href, существует в
-//      public/ (/socket.io/socket.io.js отдаёт сам socket.io).
+//      public/ (клиент socket.io тоже там: public/vendor/socket.io.min.js).
 //
 // Запуск: node test/client-static.test.js
 
@@ -28,9 +28,6 @@ const INDEX_HTML = path.join(PUBLIC_DIR, 'index.html');
 // Файлы клиента, чьи ссылки на id проверяются. Появился новый файл, который
 // обращается к элементам страницы, — допишите его сюда.
 const CLIENT_SCRIPTS = ['script.js', 'lib/invite.js', 'lib/lifetime.js', 'lib/mime-policy.js', 'lib/message-order.js', 'lib/e2ee-lock.js', 'lib/e2ee-policy.js', 'lib/text-search.js'];
-
-// Подключается не из public/, а самим сервером (socket.io).
-const SERVED_BY_SERVER = new Set(['/socket.io/socket.io.js']);
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -96,11 +93,10 @@ function hasAttr(attrs, name) {
 }
 
 // Путь файла в public/ для адреса из src/href; null — проверять нечего
-// (якорь внутри страницы, data:/blob:, адрес, который отдаёт сам сервер).
+// (якорь внутри страницы, data:/blob:).
 function resolveLinkedFile(url) {
     if (!url || url.startsWith('#')) return null;
     if (/^(?:data|blob|mailto|tel):/i.test(url)) return null;
-    if (SERVED_BY_SERVER.has(url)) return null;
     const clean = url.split(/[?#]/)[0];
     const relative = clean.startsWith('/') ? clean.slice(1) : clean;
     return path.resolve(PUBLIC_DIR, relative);

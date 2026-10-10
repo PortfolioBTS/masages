@@ -483,6 +483,11 @@ if (process.env.NODE_ENV === 'production') {
 // сокету от его имени и читать входящие сообщения в реальном времени.
 // Рукопожатие (и polling, и websocket) пускаем только со своего источника.
 const io = new Server(server, {
+    // Клиент socket.io лежит в public/vendor/ и входит в манифест клиента
+    // (lib/client-manifest.js): его хэш сверяется с релизом, как у любого
+    // другого файла. Раньше сервер сам отдавал /socket.io/socket.io.js из
+    // node_modules — мимо статики, и в манифест этот файл не попал бы.
+    serveClient: false,
     allowRequest: (req, callback) => {
         if (isTrustedOrigin(req.headers)) return callback(null, true);
         callback('Origin not allowed', false);
