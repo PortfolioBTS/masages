@@ -67,6 +67,13 @@
 
     const SHA256_RE = /^[0-9a-f]{64}$/;
 
+    // Сообщения страница -> SW (postMessage; ответ приходит в MessageChannel). Одна таблица на обе стороны.
+    //   SKIP_WAITING  — активировать ожидающий SW; страница шлёт его только после «Обновить»;
+    //   CHECK         — проверить манифест сейчас (по запросу пользователя и раз в час);
+    //   APPLY         — переключить закрепление на скачанную версию (с отпечатком из баннера);
+    //   GET_STATE     — состояние закрепления для баннера и профиля.
+    const MSG = Object.freeze({ SKIP_WAITING: 'SKIP_WAITING', CHECK: 'CHECK', APPLY: 'APPLY', GET_STATE: 'GET_STATE' });
+
     function requireVerify() {
         if (!Verify) throw new Error('lib/client-verify.js не загружен');
         return Verify;
@@ -742,6 +749,7 @@
     }
 
     return {
+        MSG,
         MANIFEST_PATH,
         SW_PATH,
         STATE_CACHE,
