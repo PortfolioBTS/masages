@@ -39,6 +39,12 @@ const CLIENT_METHODS = [
     'maintainRoomKeys',
     'setRoomPolicy',
 
+    // Комнаты: «Не хранить историю на устройстве»
+    'setRoomHistoryMode',
+    'getRoomHistoryMode',
+    'forgetRoomHistory',
+    'forgetAllNoHistoryRooms',
+
     // Сообщения и файлы
     'encryptOutgoing',
     'decryptIncoming',

@@ -1437,8 +1437,11 @@
             return normalizePolicy(await storage.get('roomPolicy:' + roomId));
         }
 
-        // Почему ключа архивного сообщения нет, хотя id в индексе остался.
-        async function goneKeyReasonLocked(roomId) {
+        // Почему ключа архивного сообщения нет, хотя id в индексе остался: режим
+        // «Не хранить историю» (сейчас включён или уже срабатывал на этом ключе
+        // отправителя) либо срок и бюджет хранения.
+        async function goneKeyReasonLocked(roomId, state) {
+            if (state && state.forgottenBelow > 0) return 'history-not-kept';
             return (await readPolicyLocked(roomId)).historyMode === 'none' ? 'history-not-kept' : 'key-expired';
         }
 
@@ -1589,9 +1592,13 @@
             return withLock(() => maintainRoomKeysLocked(roomId));
         }
 
-        // Политика комнаты на этом устройстве. Сейчас меняется только срок
-        // исчезающих сообщений: expirySeconds — число секунд или 0/null (нет
-        // срока). Смена срока сразу применяется к ключам комнаты.
+        // Политика комнаты на этом устройстве (личная настройка, roadmap R9):
+        //   expirySeconds — срок исчезающих сообщений комнаты в секундах или 0/null
+        //     (нет срока): ключи удаляются вместе с сообщениями (maintainRoomKeysLocked);
+        //   historyMode   — 'keep' (по умолчанию) или 'none' («Не хранить историю на
+        //     устройстве», forgetRoomHistoryLocked).
+        // Смена срока сразу применяется к ключам комнаты; включение 'none' сразу
+        // забывает историю. Возврат в 'keep' удалённое не воскрешает.
         async function setRoomPolicy(roomId, patch) {
             if (!patch || typeof patch !== 'object') throw new TypeError('E2EE: setRoomPolicy ждёт объект с настройками');
             await ensureLocal();
@@ -1605,15 +1612,102 @@
                     else if (Number.isSafeInteger(seconds) && seconds > 0) next.expirySeconds = seconds;
                     else throw new TypeError('E2EE: expirySeconds — целое число секунд, 0 или null');
                 }
-                const changed = next.expirySeconds !== current.expirySeconds;
-                if (changed) {
+                if (patch.historyMode !== undefined) {
+                    if (patch.historyMode !== 'keep' && patch.historyMode !== 'none') {
+                        throw new TypeError("E2EE: historyMode — 'keep' или 'none'");
+                    }
+                    next.historyMode = patch.historyMode;
+                }
+                const expiryChanged = next.expirySeconds !== current.expirySeconds;
+                const modeChanged = next.historyMode !== current.historyMode;
+                if (expiryChanged || modeChanged) {
                     next.updatedAt = now();
                     if (next.expirySeconds === null && next.historyMode === 'keep') await storage.delete(name);
                     else await storage.set(name, next);
-                    await maintainRoomKeysLocked(roomId);
                 }
+                // Настройка записана до удаления: оборванное забывание повторится при init().
+                if (modeChanged && next.historyMode === 'none') await forgetRoomHistoryLocked(roomId);
+                else if (expiryChanged) await maintainRoomKeysLocked(roomId);
                 return next;
             });
+        }
+
+        // ---- «Не хранить историю на устройстве» (план криптографии, раздел 6) ----
+        //
+        // Режим 'none' — личная настройка этого устройства: другие участники и сервер
+        // о ней не знают, их копии сообщений остаются. Что забывает
+        // forgetRoomHistoryLocked: ключи сообщений всех отправителей комнаты (включая
+        // свои), все записи архива, таблицы повторов seen, записи о версиях сообщений
+        // edit:<комната>:*, отметки запросов ключа и, у своего ключа, chainKey0 —
+        // иначе вся эпоха выводилась бы заново. Что остаётся: текущие chainKey и
+        // nextIteration (они открывают только будущие сообщения), ключи подписи,
+        // попарные сессии, закрепления identity, состав комнаты.
+        // Предел честности: браузер не гарантирует затирание данных на диске до
+        // уплотнения базы IndexedDB.
+        async function forgetRoomHistoryLocked(roomId) {
+            const forgotten = { senders: 0, archives: 0 };
+            for (const name of await storage.keys('senderKey:' + roomId + ':')) {
+                const parts = name.split(':');
+                if (parts.length !== 3) continue;
+                const senderId = Number(parts[2]);
+                const state = await readStateLocked(roomId, senderId);
+                if (!state) continue;
+                const next = Number.isInteger(state.nextIteration) ? state.nextIteration : 0;
+                state.forgottenBelow = Math.max(state.forgottenBelow || 0, next);
+                state.cachedKeys = {};
+                state.keyTimes = {};
+                state.startIteration = next;
+                delete state.expiredBelow;
+                delete state.origin;
+                // В индексе архива остаются только id: старый ключ обратно не поставить.
+                state.archive = (state.archive || []).map(archiveEntryId).filter(Boolean);
+                await storage.set(name, state);
+                forgotten.senders++;
+            }
+            for (const name of await storage.keys(archivePrefix(roomId))) {
+                await storage.delete(name);
+                forgotten.archives++;
+            }
+            for (const prefix of ['seen:' + roomId + ':', editPrefix(roomId), 'keyReq:' + roomId + ':', 'keyServed:' + roomId + ':']) {
+                for (const name of await storage.keys(prefix)) await storage.delete(name);
+            }
+            editCounts.delete(roomId);
+            return forgotten;
+        }
+
+        async function forgetRoomHistory(roomId) {
+            await ensureLocal();
+            return withLock(() => forgetRoomHistoryLocked(roomId));
+        }
+
+        // Все комнаты в режиме 'none': init() зовёт это на старте, на случай закрытой
+        // или упавшей вкладки (событие закрытия не гарантировано).
+        async function forgetAllNoHistoryRoomsLocked() {
+            const rooms = [];
+            for (const name of await storage.keys('roomPolicy:')) {
+                const policy = normalizePolicy(await storage.get(name));
+                if (policy.historyMode !== 'none') continue;
+                const roomId = name.slice('roomPolicy:'.length);
+                await forgetRoomHistoryLocked(roomId);
+                rooms.push(roomId);
+            }
+            return rooms;
+        }
+
+        async function forgetAllNoHistoryRooms() {
+            await ensureLocal();
+            return withLock(forgetAllNoHistoryRoomsLocked);
+        }
+
+        async function setRoomHistoryMode(roomId, mode) {
+            if (mode !== 'keep' && mode !== 'none') throw new TypeError("E2EE: режим истории — 'keep' или 'none'");
+            const policy = await setRoomPolicy(roomId, { historyMode: mode });
+            return policy.historyMode;
+        }
+
+        async function getRoomHistoryMode(roomId) {
+            await ensureLocal();
+            return withLock(async () => (await readPolicyLocked(roomId)).historyMode);
         }
 
         // Разовая миграция хранилища прежней версии: JWK → неизвлекаемые
@@ -1944,6 +2038,17 @@
             } catch (err) {
                 throw asInitError(err, 'storage');
             }
+            // Комнаты в режиме «Не хранить историю»: прошлая вкладка могла закрыться или
+            // упасть, не успев стереть ключи. Только при первом init() клиента — плановый
+            // init() раз в 6 часов не должен стирать историю открытой комнаты.
+            if (!forgotNoHistoryAtStart) {
+                try {
+                    await forgetAllNoHistoryRooms();
+                    forgotNoHistoryAtStart = true;
+                } catch (err) {
+                    console.warn('E2EE: не удалось забыть историю комнат без хранения:', err);
+                }
+            }
             let identity;
             try {
                 identity = await withLock(async () => {
@@ -1983,6 +2088,7 @@
         // HKDF и ML-KEM. Успех запоминается на клиента; отказ — нет, чтобы
         // «Повторить» (после обновления браузера, подгрузки модуля) не требовало
         // нового клиента. Бросает E2eeError('unsupported').
+        let forgotNoHistoryAtStart = false;
         let supportProbe = null;
         function probeSupport() {
             if (!supportProbe) {
@@ -2533,7 +2639,11 @@
                 // Тот же id при другом ключе подписи — сбой или подделка: не трогаем.
                 if (existing.signingPublicKey !== skdm.signingPublicKey) return skdm.senderKeyId;
                 let changed = false;
-                if (skdm.iteration < existing.startIteration) changed = await mergeEarlierChain(existing, skdm, hourOf(t));
+                // Забытое режимом «не хранить историю» не воскрешается: SKDM с начала
+                // эпохи достраивает цепочку назад только если ниже границы ничего не стирали.
+                if (skdm.iteration < existing.startIteration && !(existing.forgottenBelow > skdm.iteration)) {
+                    changed = await mergeEarlierChain(existing, skdm, hourOf(t));
+                }
                 if (await applyPrevLocked(roomId, senderId, existing, prev)) changed = true;
                 if (changed) await storage.set(name, existing);
                 return skdm.senderKeyId;
@@ -3176,7 +3286,7 @@
                     if (!rec) {
                         // В индексе есть, а записи нет — ключ удалён намеренно
                         // (режим «не хранить историю», таймер комнаты, бюджет).
-                        if (archiveHas(state, keyId)) return { ok: false, reason: await goneKeyReasonLocked(roomId) };
+                        if (archiveHas(state, keyId)) return { ok: false, reason: await goneKeyReasonLocked(roomId, state) };
                         return { ok: false, reason: 'stale-sender-key' };
                     }
                     saveRec = () => storage.set(archiveKey, rec);
@@ -3287,6 +3397,12 @@
             // Комнаты: хранение ключей на устройстве (архив, срок, бюджет)
             maintainRoomKeys,
             setRoomPolicy,
+
+            // Комнаты: «Не хранить историю на устройстве»
+            setRoomHistoryMode,
+            getRoomHistoryMode,
+            forgetRoomHistory,
+            forgetAllNoHistoryRooms,
 
             // Сообщения и файлы
             encryptOutgoing,
