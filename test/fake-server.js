@@ -32,6 +32,14 @@ function pqOneTimeMessage(keyId, publicKey) {
     return new Uint8Array(Buffer.concat([label, id, Buffer.from(publicKey)]));
 }
 
+// Оставляет в списке не больше max подходящих под условие записей, самые новые
+// (по id): вытеснение очереди key-share, как на сервере.
+function evictOldest(list, match, max) {
+    const scope = list.filter(match).sort((a, b) => b.id - a.id);
+    const victims = new Set(scope.slice(max));
+    for (let i = list.length - 1; i >= 0; i--) if (victims.has(list[i])) list.splice(i, 1);
+}
+
 function makeFakeServer() {
     const identityKeys = new Map(); // userId -> {identity_signing_key, identity_dh_key}
     const signedPrekeys = new Map(); // userId -> {key_id, public_key, signature}
@@ -42,7 +50,9 @@ function makeFakeServer() {
     const userChats = new Map(); // userId -> Map<chatId, roomId>
     const keyShares = []; // {id, roomId, senderId, recipientId, ciphertext}
     const deliveredKeyShares = []; // всё, что уже забрали получатели (для повторов)
+    const keyRequests = []; // {roomId, requesterId, keyId (base64)}: запросы ключа Sender Key, ожидающие владельцев
     const messages = new Map(); // id (строка) -> {id, roomId, senderId, text}
+    const keyRequestPosts = []; // журнал POST /key-requests: что и кто просил
     let nextShareId = 1;
     // Id сообщений как у настоящего сервера (message-ordering.md, 6.1): строка из
     // 7-10 цифр. Клиент выбирает id ДО шифрования (mid внутри содержимого), сервер
@@ -280,6 +290,48 @@ function makeFakeServer() {
                 for (const s of shares) {
                     keyShares.push({ id: nextShareId++, roomId, senderId: userId, recipientId: s.recipientUserId, ciphertext: s.ciphertext });
                 }
+                // Как lib/e2ee-groups.js: сверх потолков вытесняются самые старые строки
+                // (200 от одного отправителя получателю, 1000 получателю в комнате).
+                for (const recipientId of new Set(shares.map(s => s.recipientUserId))) {
+                    evictOldest(keyShares, sh => sh.roomId === roomId && sh.senderId === userId && sh.recipientId === recipientId, 200);
+                    evictOldest(keyShares, sh => sh.roomId === roomId && sh.recipientId === recipientId, 1000);
+                }
+                return { status: 200, data: { success: true } };
+            },
+            // Запросы ключа (lib/e2ee-groups.js): до 20 id в запросе, запрос видят все
+            // участники комнаты, строки читает владелец ключа, свои стирает запросивший.
+            async postKeyRequests(chatId, senderKeyIds) {
+                const roomId = room(userId, chatId);
+                if (!roomId) return { status: 200, data: { success: false, message: 'no room' } };
+                if (!Array.isArray(senderKeyIds) || senderKeyIds.length === 0 || senderKeyIds.length > 20) {
+                    return { status: 400, data: { success: false, message: 'bad ids' } };
+                }
+                for (const keyId of new Set(senderKeyIds)) {
+                    if (!keyRequests.some(r => r.roomId === roomId && r.requesterId === userId && r.keyId === keyId)) {
+                        keyRequests.push({ roomId, requesterId: userId, keyId });
+                    }
+                }
+                keyRequestPosts.push({ roomId, requesterId: userId, senderKeyIds: senderKeyIds.slice() });
+                return { status: 200, data: { success: true, requested: senderKeyIds.length } };
+            },
+            async getKeyRequests(chatId) {
+                const roomId = room(userId, chatId);
+                if (!roomId) return { status: 200, data: { success: true, roomId: null, requests: [] } };
+                const byRequester = new Map();
+                for (const r of keyRequests) {
+                    if (r.roomId !== roomId || r.requesterId === userId) continue;
+                    if (!byRequester.has(r.requesterId)) byRequester.set(r.requesterId, []);
+                    byRequester.get(r.requesterId).push(r.keyId);
+                }
+                return { status: 200, data: { success: true, roomId, requests: [...byRequester].map(([fromUserId, senderKeyIds]) => ({ fromUserId, senderKeyIds })) } };
+            },
+            async postKeyRequestsDone(chatId, senderKeyIds) {
+                const roomId = room(userId, chatId);
+                if (!roomId) return { status: 200, data: { success: false } };
+                for (let i = keyRequests.length - 1; i >= 0; i--) {
+                    const r = keyRequests[i];
+                    if (r.roomId === roomId && r.requesterId === userId && senderKeyIds.includes(r.keyId)) keyRequests.splice(i, 1);
+                }
                 return { status: 200, data: { success: true } };
             },
             async getKeyShares(chatId) {
@@ -379,6 +431,8 @@ function makeFakeServer() {
         newMessageId, postMessage, editMessage, getMessage,
         evil,
         _rooms: rooms,
+        _keyRequests: keyRequests,
+        _keyRequestPosts: keyRequestPosts,
         _keyShares: keyShares,
         _deliveredKeyShares: deliveredKeyShares,
         _signedPrekeys: signedPrekeys,

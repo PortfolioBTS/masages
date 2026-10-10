@@ -113,6 +113,9 @@ const elements = {
     expiryIndicator: document.getElementById('expiry-indicator'),
     expiryIndicatorText: document.getElementById('expiry-indicator-text'),
     mutedIndicator: document.getElementById('muted-indicator'),
+    noHistoryIndicator: document.getElementById('no-history-indicator'),
+    deviceSettings: document.getElementById('device-settings'),
+    noHistoryToggle: document.getElementById('no-history-toggle'),
     getChatCodeBtn: document.getElementById('get-chat-code-btn'),
     chatMenuBtn: document.getElementById('chat-menu-btn'),
     chatSearchBtn: document.getElementById('chat-search-btn'),
@@ -960,12 +963,17 @@ function syncE2eeKeyShares(chatId, roomId) {
 let roomSessionChain = Promise.resolve();
 let lastRoomSession = null;   // { roomId, promise } — последний запуск, его ждёт отправка
 
-async function runRoomSession(chatId, roomId) {
+async function runRoomSession(chatId, roomId, { answerKeyRequests = false } = {}) {
     const client = await getReadyE2eeClient();
     if (!client) return null;
     const part = await api(`/api/chats/${chatId}/participants`);
     if (!part.success || !part.roomId || Number(part.roomId) !== Number(roomId)) return null;
     rememberRoomParticipants(roomId, part.participants);
+    // Запросы ключа, накопившиеся, пока я была офлайн: снимаем отметки «разослано»
+    // до ensureRoomSession, и тот переотправит мой текущий ключ.
+    if (answerKeyRequests) {
+        try { await client.answerKeyRequests(chatId, roomId); } catch (err) { console.warn('E2EE: запросы ключа не прочитаны:', err); }
+    }
     let result;
     try {
         result = await client.ensureRoomSession(chatId, roomId, part.participants);
@@ -981,8 +989,8 @@ async function runRoomSession(chatId, roomId) {
     return result;
 }
 
-function ensureE2eeRoomSession(chatId, roomId) {
-    const run = () => runRoomSession(chatId, roomId).catch((err) => {
+function ensureE2eeRoomSession(chatId, roomId, options) {
+    const run = () => runRoomSession(chatId, roomId, options).catch((err) => {
         console.error('E2EE: ensureRoomSession failed:', err);
         return null;
     });
@@ -1074,6 +1082,10 @@ const E2EE_FAILURE_TEXTS = {
     'sender-mismatch': 'У сообщения сменился автор (возможна подмена сервером)',
     'stale-edit': 'Старая версия сообщения вместо более новой (возможна подмена сервером)',
     'no-mid': 'Сообщение старого формата, показать его нельзя',
+    // Ключ сообщения удалён на этом устройстве: по сроку исчезающих сообщений или бюджету
+    // хранения (раздел 5 плана криптографии) либо режимом «Не хранить историю» (раздел 6).
+    'key-expired': 'Недоступно на этом устройстве: ключ удалён по сроку хранения',
+    'history-not-kept': 'Недоступно на этом устройстве: история не хранится',
     // Открытых сообщений в комнатах нет: сервер их не принимает. Пришло такое — его
     // прислал не клиент участника; показывать его текст как сообщение нельзя.
     'not-encrypted': 'Сообщение пришло без шифрования — так не должно быть (возможна подмена сервером), поэтому оно не показано',
@@ -1099,6 +1111,7 @@ function safeDisplayName(name) {
 
 // Текст цитаты/превью для результата decryptIncoming.
 function decryptedSummary(res) {
+    if (!res.ok && res.reason === 'history-not-kept') return 'Сообщение недоступно на этом устройстве';
     if (!res.ok) return e2eeFailureText(res.reason);
     if (res.file) return `Файл: ${res.text || safeDisplayName(res.file.name)}`;
     return res.text;
@@ -1129,6 +1142,9 @@ async function decryptEnvelope(roomId, senderId, text, messageId) {
         await syncE2eeKeyShares(currentChatId, roomId);
         res = await attempt();
     }
+    // Ключа всё ещё нет (key-share потерян или вытеснен из очереди): просим владельца
+    // прислать его снова, не чаще раза в час на ключ.
+    if (!res.ok && (res.reason === 'no-sender-key' || res.reason === 'stale-sender-key')) requestMissingRoomKey(roomId, text);
     return res;
 }
 
@@ -1150,6 +1166,8 @@ async function decryptMessageInPlace(message, roomId) {
             } else {
                 message.text = e2eeFailureText(res.reason);
                 message._e2eeFailed = true;
+                // Серия таких сообщений сворачивается в одну служебную строку (renderMessages).
+                if (res.reason === 'history-not-kept') message._historyNotKept = true;
             }
         } else {
             message.text = 'Зашифрованное сообщение';
@@ -1173,6 +1191,220 @@ async function decryptMessagesInPlace(messages, roomId) {
     for (const m of messages) await decryptMessageInPlace(m, roomId);
     return messages;
 }
+
+// >>> e2ee-room-keys
+// Ключи комнат на устройстве (план криптографии, раздел 5): плановая ротация своего
+// ключа после отправки, повтор шифрования после needs-room-session, запрос потерянного
+// ключа и ответ владельца, срок исчезающих сообщений для хранилища ключей.
+// Логика вынесена в отдельный блок, чтобы проверяться юнит-тестом
+// (test/e2ee-room-keys-client.test.js) без браузера.
+
+// Шифрует сообщение комнаты. Если ключ комнаты исчерпал жёсткий порог ротации
+// (200 сообщений или 8 суток, E2eeError с кодом 'needs-room-session'), ждёт
+// ensureRoomSession — он ротирует ключ и рассылает новый — и повторяет шифрование
+// один раз. Любая другая ошибка и повторный отказ уходят вызывающему.
+async function encryptForRoom(client, chatId, roomId, content, options) {
+    try {
+        return await client.encryptOutgoing(roomId, content, options);
+    } catch (err) {
+        if (!err || err.code !== 'needs-room-session') throw err;
+        await ensureE2eeRoomSession(chatId, roomId);
+        return client.encryptOutgoing(roomId, content, options);
+    }
+}
+
+// После отправки: ключ комнаты мог дойти до мягкого порога ротации (100 сообщений
+// или 7 суток). Проверка локальная и дешёвая; ротацию и рассылку нового ключа
+// делает ensureRoomSession в фоне, и отправка её не ждёт.
+async function checkRoomKeyRotation(chatId, roomId) {
+    if (!roomId) return;
+    try {
+        const client = await getReadyE2eeClient();
+        if (client && await client.roomKeyDue(roomId)) await ensureE2eeRoomSession(chatId, roomId);
+    } catch (err) {
+        console.warn('E2EE: плановая ротация ключа комнаты не удалась:', err);
+    }
+}
+
+// Запрос потерянного ключа. Сообщение не расшифровалось из-за 'no-sender-key' или
+// 'stale-sender-key', а синхронизация key-share ключа не принесла: просим владельца
+// прислать его снова. Конверты открытой комнаты копятся и уходят одним запросом.
+const KEY_REQUEST_DEBOUNCE_MS = 800;
+const pendingKeyRequests = new Map();   // roomId → { chatId, envelopes: Set<string>, timer }
+
+function requestMissingRoomKey(roomId, envelopeText) {
+    if (!roomId || !currentChatId || Number(roomId) !== Number(currentRoomId) || typeof envelopeText !== 'string') return;
+    let entry = pendingKeyRequests.get(roomId);
+    if (!entry) {
+        entry = { chatId: currentChatId, envelopes: new Set(), timer: null };
+        pendingKeyRequests.set(roomId, entry);
+    }
+    entry.envelopes.add(envelopeText);
+    clearTimeout(entry.timer);
+    entry.timer = setTimeout(() => flushKeyRequest(roomId), KEY_REQUEST_DEBOUNCE_MS);
+}
+
+async function flushKeyRequest(roomId) {
+    const entry = pendingKeyRequests.get(roomId);
+    pendingKeyRequests.delete(roomId);
+    if (!entry || !currentUser) return;
+    try {
+        const client = await getReadyE2eeClient();
+        if (client) await client.requestRoomKeys(entry.chatId, roomId, Array.from(entry.envelopes));
+    } catch (err) {
+        console.warn('E2EE: запрос ключа не удался:', err);
+    }
+}
+
+function clearPendingKeyRequests() {
+    pendingKeyRequests.forEach(entry => clearTimeout(entry.timer));
+    pendingKeyRequests.clear();
+}
+
+// Событие e2eeKeyRequest: участник просит ключ. Если это мой текущий ключ, клиент
+// снимает отметку «разослано», и ensureRoomSession переотправляет его.
+async function handleKeyRequestEvent(payload) {
+    if (!currentUser || !payload) return;
+    const roomId = Number(payload.roomId);
+    const meta = roomId ? findChatMeta(null, roomId) : null;
+    if (!meta) return;
+    try {
+        const client = await getReadyE2eeClient();
+        if (!client) return;
+        const answer = await client.answerKeyRequests(meta.id, roomId, [{ fromUserId: payload.fromUserId, senderKeyIds: payload.senderKeyIds }]);
+        if (answer && Array.isArray(answer.resend) && answer.resend.length > 0) await ensureE2eeRoomSession(meta.id, roomId);
+    } catch (err) {
+        console.warn('E2EE: ответ на запрос ключа не удался:', err);
+    }
+}
+
+// Срок исчезающих сообщений комнаты нужен хранилищу ключей на устройстве: ключи
+// удаляются вместе с сообщениями, через срок и час запаса. Передаётся при открытии
+// комнаты и при смене срока (список чатов, событие chatExpiryChanged).
+async function syncRoomKeyPolicy(roomId, seconds) {
+    if (!roomId) return;
+    try {
+        const client = await getReadyE2eeClient();
+        if (client) await client.setRoomPolicy(roomId, { expirySeconds: normalizeExpiry(seconds) });
+    } catch (err) {
+        console.warn('E2EE: не удалось передать срок хранения ключам комнаты:', err);
+    }
+}
+
+// Раз в час и при открытии комнаты: хранение ключей (срок, цепочки без prev.final, бюджет)
+// по всем комнатам из списка чатов; для комнат со сроком заодно сверяется сам срок.
+const ROOM_KEYS_MAINTENANCE_MS = 60 * 60 * 1000;
+let roomKeysMaintenanceTimer = null;
+let roomKeysFirstRunTimer = null;
+
+async function maintainAllRoomKeys() {
+    if (!currentUser || e2eeState !== 'ready') return;
+    const client = getE2eeClient();
+    if (!client) return;
+    for (const chat of chatListData.slice()) {
+        if (chat.room_id == null) continue;
+        try {
+            await client.setRoomPolicy(chat.room_id, { expirySeconds: normalizeExpiry(chat.expiry_seconds) });
+            await client.maintainRoomKeys(chat.room_id);
+        } catch (err) {
+            console.warn('E2EE: обслуживание ключей комнаты не удалось:', err);
+        }
+    }
+}
+
+function startRoomKeysMaintenance() {
+    stopRoomKeysMaintenance();
+    roomKeysFirstRunTimer = setTimeout(maintainAllRoomKeys, 20 * 1000); // к этому времени список чатов уже загружен
+    roomKeysMaintenanceTimer = setInterval(maintainAllRoomKeys, ROOM_KEYS_MAINTENANCE_MS);
+}
+
+function stopRoomKeysMaintenance() {
+    clearTimeout(roomKeysFirstRunTimer);
+    clearInterval(roomKeysMaintenanceTimer);
+    roomKeysFirstRunTimer = null;
+    roomKeysMaintenanceTimer = null;
+    clearPendingKeyRequests();
+}
+// ---- «Не хранить историю на этом устройстве» (план криптографии, раздел 6) ----
+//
+// Настройка личная и живёт в хранилище ключей устройства. Пока она включена, ключи
+// сообщений комнаты стираются, когда комнату перестают смотреть: уход в другой чат,
+// закрытие или скрытие вкладки (дольше 5 минут). Страховка на случай упавшей вкладки —
+// клиент забывает такие комнаты при первом init() следующего запуска.
+
+const HISTORY_HIDDEN_FORGET_MS = 5 * 60 * 1000;
+const roomHistoryModes = new Map();   // roomId → 'keep' | 'none' (что вкладка знает о комнатах)
+let hiddenForgetTimer = null;
+
+function roomHistoryMode(roomId) {
+    return roomId ? (roomHistoryModes.get(Number(roomId)) || 'keep') : 'keep';
+}
+
+// Читает режим комнаты из хранилища ключей и запоминает его.
+async function loadRoomHistoryMode(roomId) {
+    if (!roomId) return 'keep';
+    try {
+        const client = await getSettledE2eeClient();
+        if (client) roomHistoryModes.set(Number(roomId), await client.getRoomHistoryMode(roomId));
+    } catch (err) {
+        console.warn('E2EE: не удалось прочитать режим хранения истории:', err);
+    }
+    return roomHistoryMode(roomId);
+}
+
+// Включает или выключает режим. Включение забывает историю сразу (клиент), выключение
+// удалённое не возвращает. Бросает ошибку, если сохранить настройку не удалось.
+async function applyRoomHistoryMode(roomId, mode) {
+    const client = await getSettledE2eeClient();
+    if (!client) throw new Error('сквозное шифрование недоступно');
+    const saved = await client.setRoomHistoryMode(roomId, mode);
+    roomHistoryModes.set(Number(roomId), saved);
+    return saved;
+}
+
+// Забывает историю комнаты на этом устройстве, если для неё включено «не хранить».
+async function forgetRoomIfNoHistory(roomId) {
+    if (!roomId || roomHistoryMode(roomId) !== 'none') return false;
+    try {
+        const client = await getSettledE2eeClient();
+        if (!client) return false;
+        await client.forgetRoomHistory(roomId);
+        return true;
+    } catch (err) {
+        console.warn('E2EE: не удалось забыть историю комнаты:', err);
+        return false;
+    }
+}
+
+// Вкладка скрыта дольше 5 минут — забываем историю открытой комнаты; вернулись — отсчёт сброшен.
+function onHistoryVisibilityChange(hidden) {
+    clearTimeout(hiddenForgetTimer);
+    hiddenForgetTimer = null;
+    if (!hidden) return;
+    hiddenForgetTimer = setTimeout(() => { forgetRoomIfNoHistory(currentRoomId); }, HISTORY_HIDDEN_FORGET_MS);
+}
+
+// Закрытие страницы (pagehide). Запись в IndexedDB на выгрузке не гарантирована, поэтому
+// есть страховка: init() следующего запуска забывает такие комнаты.
+function forgetOpenRoomOnPageHide() {
+    forgetRoomIfNoHistory(currentRoomId);
+}
+
+// Подряд идущие сообщения с историей, которой нет на устройстве, сворачиваются в одну
+// служебную строку вместо десятков серых пузырей: возвращает группы индексов (по две и
+// более подряд). Одиночное сообщение остаётся обычным пузырём.
+function historyGapRuns(messages) {
+    const runs = [];
+    let run = [];
+    const close = () => { if (run.length >= 2) runs.push(run); run = []; };
+    messages.forEach((message, index) => {
+        if (message && message._historyNotKept) run.push(index);
+        else close();
+    });
+    close();
+    return runs;
+}
+// <<< e2ee-room-keys
 
 // ==================== Файлы: белый список, очистка, шифрование ====================
 // Какие типы можно отправлять, как их распознавать, называть и показывать —
@@ -1541,6 +1773,7 @@ function enterApp(user) {
     socket.connect();
     startKeepalive();
     startE2eeMaintenance();
+    startRoomKeysMaintenance();
     loadChats();
     updateAnonNote();
     // Ответ регистрации мог прийти без настроек и срока — их знает /api/auth.
@@ -1777,6 +2010,7 @@ function updateAnonNote() {
 }
 
 function resetChatView() {
+    forgetRoomIfNoHistory(currentRoomId);
     currentChatId = null;
     currentRoomId = null;
     oldestSeq = null;
@@ -1828,6 +2062,7 @@ function leaveApp(message) {
     const user = currentUser;
     stopKeepalive();
     stopE2eeMaintenance();
+    stopRoomKeysMaintenance();
     socket.disconnect();
     currentUser = null;
     e2eeClient = null;
@@ -1917,6 +2152,11 @@ window.addEventListener('online', () => {
     if (!currentUser) return;
     if (!socket.connected) setConnectionStatus('reconnecting');
     pingSession();
+});
+
+socket.on('e2eeKeyRequest', (payload) => {
+    // Участник просит прислать Sender Key: если это мой текущий ключ, переотправляем.
+    handleKeyRequestEvent(payload);
 });
 
 socket.on('e2eeKeyShare', ({ roomId } = {}) => {
@@ -2172,6 +2412,7 @@ function setupChatMenuListeners() {
 function setupE2eeListeners() {
     elements.e2eeIndicator.addEventListener('click', openMembersModal);
     elements.membersKeysBtn.addEventListener('click', openMembersModal);
+    elements.noHistoryToggle.addEventListener('change', onNoHistoryToggle);
     elements.e2eeBannerBtn.addEventListener('click', openMembersModal);
     elements.composerStatusRetry.addEventListener('click', () => retryE2ee());
 }
@@ -2347,7 +2588,9 @@ function setupFeedListeners() {
         if (document.visibilityState === 'visible') markVisibleMessagesRead();
         keepaliveOnVisible();
         maintainE2eeKeys();
+        onHistoryVisibilityChange(document.visibilityState === 'hidden');
     });
+    window.addEventListener('pagehide', forgetOpenRoomOnPageHide);
 
     // Ссылка-приглашение, вставленная в уже открытую вкладку.
     window.addEventListener('hashchange', consumeJoinFragment);
@@ -2436,6 +2679,7 @@ function setupSocketListeners() {
         const value = normalizeExpiry(seconds);
         const meta = findChatMeta(chatId, roomId);
         if (meta) meta.expiry_seconds = value;
+        if (roomId) syncRoomKeyPolicy(roomId, value);
         renderChatList();
         if (!belongsToCurrentChat(chatId, roomId)) return;
         if (!meta) currentChatExtra.expiry_seconds = value;
@@ -4300,6 +4544,44 @@ function renderChatMenu() {
         ? 'Срок действует для новых сообщений всех участников группы. Уже отправленные сообщения не изменятся.'
         : 'Срок действует для новых сообщений этого чата. Уже отправленные сообщения не изменятся.';
     syncExpiryRadios();
+    // «На этом устройстве» — только для групп: у чата с ботом нет ключей комнаты.
+    elements.deviceSettings.classList.toggle('hidden', !currentRoomId);
+    elements.noHistoryToggle.checked = roomHistoryMode(currentRoomId) === 'none';
+}
+
+// Включение «Не хранить историю» необратимо для уже прочитанного, поэтому требует
+// подтверждения; выключение — без него. Что именно меняется и чего это не делает,
+// сказано в окне (раздел 6 плана криптографии).
+const NO_HISTORY_CONFIRM = 'Включить «Не хранить историю на этом устройстве»?\n\n'
+    + 'Расшифрованные сообщения этой группы будут стираться из браузера, когда вы закроете чат или вкладку. '
+    + 'Более ранние сообщения здесь больше не откроются, вернуть их нельзя.\n\n'
+    + 'Это касается только этого устройства: у других участников и на сервере сообщения остаются, '
+    + 'а чтобы они исчезли у всех, включите исчезающие сообщения. Другие участники об этой настройке не узнают.\n\n'
+    + 'Браузер не гарантирует, что данные сразу будут затёрты на диске.';
+
+async function onNoHistoryToggle() {
+    const roomId = currentRoomId;
+    const toggle = elements.noHistoryToggle;
+    if (!roomId) return;
+    const wantNone = toggle.checked;
+    if (wantNone && !confirm(NO_HISTORY_CONFIRM)) {
+        toggle.checked = false;
+        return;
+    }
+    toggle.disabled = true;
+    try {
+        await applyRoomHistoryMode(roomId, wantNone ? 'none' : 'keep');
+        showToast(wantNone
+            ? 'История не хранится на этом устройстве'
+            : 'История снова хранится на этом устройстве. Стёртое не возвращается', 'success');
+    } catch (err) {
+        console.error('E2EE: не удалось изменить режим хранения истории:', err);
+        toggle.checked = !wantNone;
+        showToast('Не удалось изменить настройку', 'error');
+    } finally {
+        toggle.disabled = false;
+        if (roomId === currentRoomId) updateChatIndicators();
+    }
 }
 
 function syncExpiryRadios() {
@@ -4328,6 +4610,7 @@ async function setChatExpiry(seconds) {
     }
     const value = normalizeExpiry(data.seconds !== undefined ? data.seconds : seconds);
     meta.expiry_seconds = value;
+    if (currentRoomId && chatId === currentChatId) syncRoomKeyPolicy(currentRoomId, value);
     renderChatList();
     if (chatId === currentChatId) {
         updateChatIndicators();
@@ -4366,6 +4649,7 @@ function updateChatIndicators() {
     if (title) elements.expiryIndicator.setAttribute('aria-label', title);
     else elements.expiryIndicator.removeAttribute('aria-label');
     elements.mutedIndicator.classList.toggle('hidden', !meta.muted);
+    elements.noHistoryIndicator.classList.toggle('hidden', !(currentRoomId && roomHistoryMode(currentRoomId) === 'none'));
 }
 
 // ==================== Открытый чат ====================
@@ -4374,6 +4658,8 @@ function updateChatIndicators() {
 // буква или иконка бота (renderAvatar). Параметр оставлен ради вызовов.
 async function openChat(chatId, roomId, name, avatar, online, isBot) {
     const seq = ++openChatSeq;
+    // Ушли из комнаты с режимом «Не хранить историю» — стираем её ключи на устройстве.
+    if (currentRoomId && Number(currentRoomId) !== Number(roomId)) forgetRoomIfNoHistory(currentRoomId);
     releaseChatResources();
     hideChatItemMenu();
     currentChatId = chatId;
@@ -4411,7 +4697,16 @@ async function openChat(chatId, roomId, name, avatar, online, isBot) {
         await withTimeout(syncE2eeKeyShares(chatId, room), 15000, null);
         // Сессия комнаты (свой ключ новым участникам, ротация после ухода)
         // — в фоне: для показа истории она не нужна, а отправка её дождётся.
-        if (seq === openChatSeq) ensureE2eeRoomSession(chatId, room);
+        if (seq === openChatSeq) ensureE2eeRoomSession(chatId, room, { answerKeyRequests: true });
+        // Срок исчезающих сообщений — хранилищу ключей этого устройства.
+        const roomMeta = findChatMeta(chatId, room);
+        syncRoomKeyPolicy(room, roomMeta ? roomMeta.expiry_seconds : 0);
+        // Режим «Не хранить историю»: значок в шапке и переключатель в меню.
+        loadRoomHistoryMode(room).then(() => {
+            if (seq !== openChatSeq) return;
+            updateChatIndicators();
+            if (!elements.chatMenuModal.classList.contains('hidden')) renderChatMenu();
+        });
     }
     const data = await messagesPromise;
     if (seq !== openChatSeq) return; // пользователь уже открыл другой чат
@@ -4503,7 +4798,9 @@ async function refreshCurrentChat() {
 
 function renderMessages(messages, mode) {
     const fragment = document.createDocumentFragment();
-    messages.forEach(msg => fragment.appendChild(createMessageElement(msg, false)));
+    const items = messages.map(msg => createMessageElement(msg, false));
+    collapseHistoryGaps(items);
+    items.forEach(item => fragment.appendChild(item));
     if (mode === 'prepend') elements.chatMessages.prepend(fragment);
     else elements.chatMessages.replaceChildren(fragment);
     if (messages.length > 0 && (mode !== 'prepend' || oldestSeq === null || Number(messages[0].seq) < oldestSeq)) {
@@ -4515,6 +4812,19 @@ function renderMessages(messages, mode) {
 // ответе POST, и по сокету).
 // Лента упорядочена по seq, а не по порядку прихода: сообщение по сокету
 // может прийти переставленным, и placeMessageElement ставит его на своё место.
+// Серия из двух и более сообщений «недоступно на этом устройстве» подряд: первое
+// превращается в служебную строку, остальные скрываются (остаются в ленте ради порядка,
+// поиска по id и удаления).
+function collapseHistoryGaps(items) {
+    for (const run of historyGapRuns(items.map(el => el._message))) {
+        const first = items[run[0]];
+        first.classList.add('history-gap');
+        const textEl = first.querySelector('.message-text');
+        if (textEl) textEl.replaceChildren(icon('eye-off', { size: 'sm' }), document.createTextNode('Более ранние сообщения не хранятся на этом устройстве'));
+        run.slice(1).forEach(index => items[index].classList.add('hidden'));
+    }
+}
+
 function appendMessage(message, animate) {
     if (findMessageEl(message.id)) return false;
     placeMessageElement(createMessageElement(message, animate));
@@ -5014,7 +5324,7 @@ async function sendText(text, { chatId, roomId, replyToId } = {}) {
             let outgoingText = text;
             if (client) {
                 try {
-                    outgoingText = await client.encryptOutgoing(roomId, text, { messageId: clientMessageId });
+                    outgoingText = await encryptForRoom(client, chatId, roomId, text, { messageId: clientMessageId });
                 } catch (err) {
                     console.error('E2EE: encryptOutgoing failed:', err);
                     encryptFailed = true;
@@ -5038,6 +5348,7 @@ async function sendText(text, { chatId, roomId, replyToId } = {}) {
         return false;
     }
     clearRoomBlock(chatId);
+    checkRoomKeyRotation(chatId, roomId);
     // Показываем сразу из ответа — не зависим от того, успел ли
     // прийти (и пришёл ли вообще) newMessage по сокету.
     if (chatId === currentChatId && data.message) {
@@ -5086,7 +5397,7 @@ async function sendMessage() {
                 if (!client) { showToast('Не удалось зашифровать правку: сквозное шифрование недоступно', 'error'); return; }
                 // mid правки — id редактируемого сообщения (строка), edit:true поднимает ts
                 // выше известной версии: правка при отстающих часах не выглядит старой.
-                try { outgoingText = await client.encryptOutgoing(roomId, text, { messageId: String(messageId), edit: true }); }
+                try { outgoingText = await encryptForRoom(client, chatId, roomId, text, { messageId: String(messageId), edit: true }); }
                 catch { showToast('Не удалось зашифровать правку', 'error'); return; }
             }
             const data = await api(`/api/messages/${messageId}`, {
@@ -5404,7 +5715,7 @@ async function sendOneFile(queue, item, index, total) {
             if (clientMessageId) formData.append('clientMessageId', clientMessageId);
             if (client) {
                 try {
-                    const envelope = await client.encryptOutgoing(roomId, { type: 'file', ...localFile, caption: '' }, { messageId: clientMessageId });
+                    const envelope = await encryptForRoom(client, chatId, roomId, { type: 'file', ...localFile, caption: '' }, { messageId: clientMessageId });
                     formData.append('envelope', envelope);
                 } catch (err) {
                     console.error('E2EE: не удалось зашифровать файл:', err);
@@ -5433,6 +5744,7 @@ async function sendOneFile(queue, item, index, total) {
     const data = outcome.data;
     if (data.aborted || queue.cancelled) return { ok: false };
     if (!data.success) return { ok: false, message: sendFailureText(data, 'Не удалось отправить файл') };
+    checkRoomKeyRotation(chatId, roomId);
     if (chatId === currentChatId && data.message) {
         const message = localFile
             ? { ...data.message, text: '', _file: localFile, _localBytes: clean }

@@ -2731,6 +2731,32 @@ a.file-attachment:hover {
     margin-right: -6px;
 }
 
+/* Свёрнутая серия сообщений, истории которых нет на устройстве («Не хранить историю»):
+   первое сообщение серии превращается в служебную строку, остальные скрыты. */
+.message.history-gap {
+    align-self: stretch;
+    max-width: none;
+    padding: 0;
+    background: none;
+    border: 0;
+    color: var(--text-2);
+    font-size: 12px;
+    line-height: 16px;
+    text-align: center;
+}
+
+.message.history-gap .message-text,
+.message.history-gap .message-text.e2ee-failed {
+    color: var(--text-2);
+}
+
+.message.history-gap .message-meta,
+.message.history-gap .reactions,
+.message.history-gap .reply-to,
+.message.history-gap .edited-label {
+    display: none;
+}
+
 /* Плавающая «вниз». Ставится в .main-content сразу после #chat-messages:
    order держит её над полем ввода, отрицательные поля — поверх ленты без
    сдвига вёрстки. Внутри самой ленты — липкая к низу. */

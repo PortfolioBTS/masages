@@ -101,6 +101,10 @@
                                 <svg class="icon icon-sm" aria-hidden="true"><use href="#i-timer"></use></svg>
                                 <span id="expiry-indicator-text"></span>
                             </span>
+                            <span id="no-history-indicator" class="indicator is-on hidden" title="История не хранится на этом устройстве" aria-label="История не хранится на этом устройстве">
+                                <svg class="icon icon-sm" aria-hidden="true"><use href="#i-eye-off"></use></svg>
+                                <span>без истории</span>
+                            </span>
                             <span id="muted-indicator" class="indicator hidden" title="Без звука" aria-label="Без звука">
                                 <svg class="icon icon-sm" aria-hidden="true"><use href="#i-bell-off"></use></svg>
                             </span>
@@ -247,6 +251,19 @@
                     <label class="radio-row"><input type="radio" name="chat-expiry" value="604800"><span>7 дней</span></label>
                     <p id="expiry-hint" class="field-hint">Срок действует для новых сообщений всех участников. Уже отправленные сообщения не изменятся.</p>
                 </fieldset>
+                <div id="device-settings" class="hidden">
+                    <div class="divider"></div>
+                    <fieldset class="field device-settings">
+                        <legend class="field-label"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-eye-off"></use></svg><span>На этом устройстве</span></legend>
+                        <label class="toggle-row" for="no-history-toggle">
+                            <input type="checkbox" id="no-history-toggle" role="switch">
+                            <span>
+                                <span class="switch-title">Не хранить историю на этом устройстве</span>
+                                <small class="field-hint">Расшифрованные сообщения этой группы не сохраняются в браузере: после перезагрузки более ранние сообщения здесь не откроются.</small>
+                            </span>
+                        </label>
+                    </fieldset>
+                </div>
                 <div class="divider"></div>
                 <button id="delete-chat-btn" class="btn btn-danger btn-block"><svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg><span>Удалить чат</span></button>
             </div>

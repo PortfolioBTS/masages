@@ -126,14 +126,18 @@ function makeFakeDb() {
             return participants.filter(p => p.room_id === roomId).map(p => ({ user_id: p.user_id }));
         }
         if (query.includes('COUNT(*)') && query.includes('FROM e2ee_key_shares')) {
-            const [roomId, recipientIds] = params;
+            // Счётчики очереди после вставки: всего у получателя и от этого отправителя.
+            const [roomId, recipientIds, senderId] = params;
             const counts = new Map();
             for (const s of keyShares) {
                 if (s.room_id === roomId && recipientIds.includes(s.recipient_id)) {
-                    counts.set(s.recipient_id, (counts.get(s.recipient_id) || 0) + 1);
+                    const row = counts.get(s.recipient_id) || { total: 0, from_sender: 0 };
+                    row.total++;
+                    if (s.sender_id === senderId) row.from_sender++;
+                    counts.set(s.recipient_id, row);
                 }
             }
-            return [...counts].map(([recipient_id, cnt]) => ({ recipient_id, cnt }));
+            return [...counts].map(([recipient_id, row]) => ({ recipient_id, total: row.total, from_sender: row.from_sender }));
         }
         if (query.includes('FROM e2ee_key_shares WHERE room_id')) {
             const [roomId, recipientId] = params;
@@ -147,6 +151,18 @@ function makeFakeDb() {
             const [roomId, senderId, recipientId, ciphertext] = params;
             keyShares.push({ id: nextShareId++, room_id: roomId, sender_id: senderId, recipient_id: recipientId, ciphertext });
             return { rowCount: 1 };
+        }
+        if (query.startsWith('DELETE FROM e2ee_key_shares') && query.includes('SELECT id FROM e2ee_key_shares')) {
+            // Вытеснение самых старых строк: оставить последние N (OFFSET) по id.
+            const bySender = query.includes('sender_id = $2');
+            const [roomId, a, b, c] = params;
+            const scope = keyShares.filter(sh => sh.room_id === roomId && (bySender
+                ? sh.sender_id === a && sh.recipient_id === b
+                : sh.recipient_id === a));
+            const offset = bySender ? c : b;
+            const victims = new Set(scope.sort((x, y) => y.id - x.id).slice(offset).map(sh => sh.id));
+            for (let i = keyShares.length - 1; i >= 0; i--) if (victims.has(keyShares[i].id)) keyShares.splice(i, 1);
+            return { rowCount: victims.size };
         }
         if (query.startsWith('DELETE FROM e2ee_key_shares')) {
             const ids = new Set(params);
@@ -671,7 +687,7 @@ async function main() {
         assert.strictEqual(db._keyShares.length, 2);
     });
 
-    await test('POST key-shares: at most 1000 undelivered shares per recipient per room', async () => {
+    await test('POST key-shares: сверх потолка вытесняются самые старые строки, а не отказывается запрос', async () => {
         const { app, db, io } = makeGroupsFixture();
         db._chats.push({ id: 11, user_id: 1, room_id: 100 }, { id: 22, user_id: 2, room_id: 100 }, { id: 33, user_id: 1, room_id: 200 });
         db._participants.push(
@@ -679,33 +695,92 @@ async function main() {
             { room_id: 100, user_id: 3, username: 'carol' },
             { room_id: 200, user_id: 1, username: 'alice' }, { room_id: 200, user_id: 2, username: 'bob' },
         );
+        // 998 старых строк от десяти разных отправителей (потолок на отправителя не задет, общий — рядом).
         for (let i = 0; i < 998; i++) {
-            db._keyShares.push({ id: 10_000 + i, room_id: 100, sender_id: 3, recipient_id: 2, ciphertext: 'junk' });
+            db._keyShares.push({ id: -1000 + i, room_id: 100, sender_id: 100 + (i % 10), recipient_id: 2, ciphertext: 'junk' + i });
         }
         const post = (chatId, shares) => call(app, 'post', '/api/keys/key-shares', { session: { userId: 1 }, body: { chatId, shares } });
 
-        // 998 + 2 = 1000 — ещё можно.
+        // 998 + 2 = 1000: ровно потолок, вытеснять нечего.
         const fill = await post(11, [{ recipientUserId: 2, ciphertext: 'a' }, { recipientUserId: 2, ciphertext: 'b' }]);
         assert.strictEqual(fill.body.success, true);
+        assert.strictEqual(db._keyShares.filter(s => s.room_id === 100 && s.recipient_id === 2).length, 1000);
 
-        // 1001-я запись для bob отклоняется целиком — и carol в том же запросе
-        // тоже ничего не получает (без частичной доставки).
-        const emittedBefore = io._emitted.length;
+        // 1001-я строка: запрос проходит, вытесняется самая старая; carol в том же запросе получает своё.
         const over = await post(11, [{ recipientUserId: 3, ciphertext: 'c' }, { recipientUserId: 2, ciphertext: 'd' }]);
-        assert.strictEqual(over.body.success, false);
-        assert.ok(/недоставленных/.test(over.body.message), over.body.message);
-        assert.strictEqual(db._keyShares.filter(s => s.room_id === 100).length, 1000);
-        assert.strictEqual(io._emitted.length, emittedBefore);
+        assert.strictEqual(over.body.success, true, JSON.stringify(over.body));
+        const queueOfBob = db._keyShares.filter(s => s.room_id === 100 && s.recipient_id === 2);
+        assert.strictEqual(queueOfBob.length, 1000);
+        assert.ok(!queueOfBob.some(s => s.ciphertext === 'junk0'), 'самая старая строка вытеснена');
+        assert.ok(queueOfBob.some(s => s.ciphertext === 'junk1'), 'следующая за ней осталась');
+        assert.ok(queueOfBob.some(s => s.ciphertext === 'a') && queueOfBob.some(s => s.ciphertext === 'd'), 'новые строки на месте');
+        assert.strictEqual(db._keyShares.filter(s => s.recipient_id === 3).length, 1, 'carol получила свой key-share');
+        assert.strictEqual(io._emitted.filter(e => e.event === 'e2eeKeyShare').length, 3, 'каждому получателю в каждом запросе — сигнал');
 
-        // Лимит — на комнату: в другой комнате bob получает key-share как обычно.
+        // Потолок — на комнату: в другой комнате у bob своя очередь.
         const otherRoom = await post(33, [{ recipientUserId: 2, ciphertext: 'e' }]);
         assert.strictEqual(otherRoom.body.success, true);
+        assert.strictEqual(db._keyShares.filter(s => s.room_id === 200).length, 1);
 
-        // Когда bob забрал очередь, отправлять ему снова можно.
+        // Bob забирает то, что осталось.
         const drained = await call(app, 'get', '/api/keys/key-shares/:chatId', { session: { userId: 2 }, params: { chatId: '22' } });
         assert.strictEqual(drained.body.shares.length, 1000);
-        const again = await post(11, [{ recipientUserId: 2, ciphertext: 'f' }]);
-        assert.strictEqual(again.body.success, true);
+    });
+
+    await test('POST key-shares: один отправитель держит у получателя не больше 200 строк, чужие ключи не вытесняет', async () => {
+        const { app, db } = makeGroupsFixture();
+        db._chats.push({ id: 11, user_id: 1, room_id: 100 });
+        db._participants.push(
+            { room_id: 100, user_id: 1, username: 'alice' }, { room_id: 100, user_id: 2, username: 'bob' },
+            { room_id: 100, user_id: 3, username: 'carol' },
+        );
+        for (let i = 0; i < 5; i++) db._keyShares.push({ id: -500 + i, room_id: 100, sender_id: 3, recipient_id: 2, ciphertext: 'carol' + i });
+        for (let i = 0; i < 200; i++) db._keyShares.push({ id: -300 + i, room_id: 100, sender_id: 1, recipient_id: 2, ciphertext: 'alice' + i });
+        const res = await call(app, 'post', '/api/keys/key-shares', { session: { userId: 1 }, body: { chatId: 11, shares: [{ recipientUserId: 2, ciphertext: 'alice-new' }] } });
+        assert.strictEqual(res.body.success, true);
+        const fromAlice = db._keyShares.filter(s => s.sender_id === 1 && s.recipient_id === 2);
+        assert.strictEqual(fromAlice.length, 200);
+        assert.ok(!fromAlice.some(s => s.ciphertext === 'alice0'), 'самая старая строка Alice вытеснена');
+        assert.ok(fromAlice.some(s => s.ciphertext === 'alice-new'));
+        assert.strictEqual(db._keyShares.filter(s => s.sender_id === 3).length, 5, 'строки carol не тронуты');
+    });
+
+    await test('POST key-shares: не больше 30 отправок в час на пару (пользователь, комната); другая комната и другой пользователь считаются отдельно', async () => {
+        const { app, db } = makeGroupsFixture();
+        db._chats.push({ id: 11, user_id: 1, room_id: 100 }, { id: 22, user_id: 2, room_id: 100 }, { id: 33, user_id: 1, room_id: 200 });
+        db._participants.push(
+            { room_id: 100, user_id: 1, username: 'alice' }, { room_id: 100, user_id: 2, username: 'bob' },
+            { room_id: 200, user_id: 1, username: 'alice' }, { room_id: 200, user_id: 2, username: 'bob' },
+        );
+        const post = (userId, chatId) => call(app, 'post', '/api/keys/key-shares', { session: { userId }, body: { chatId, shares: [{ recipientUserId: userId === 1 ? 2 : 1, ciphertext: 'x' }] } });
+        await withFrozenTime(Date.now(), async (advance) => {
+            for (let i = 0; i < 30; i++) assert.strictEqual((await post(1, 11)).body.success, true, 'отправка ' + (i + 1));
+            const limited = await post(1, 11);
+            assert.strictEqual(limited.statusCode, 429);
+            assert.strictEqual(limited.body.success, false);
+            assert.ok(Number(limited.headers['retry-after']) > 0);
+            assert.strictEqual(db._keyShares.length, 30, 'отказанная отправка ничего не записала');
+            assert.strictEqual((await post(1, 33)).body.success, true, 'другая комната — своя квота');
+            assert.strictEqual((await post(2, 22)).body.success, true, 'другой пользователь — своя квота');
+            advance(61 * 60 * 1000);
+            assert.strictEqual((await post(1, 11)).body.success, true, 'через час квота освободилась');
+        });
+    });
+
+    await test('POST key-shares: хранилище лимита недоступно — запрос закрывается (503 busy), ничего не пишется', async () => {
+        const { registerE2eeGroupRoutes } = require('../lib/e2ee-groups.js');
+        const app = makeFakeApp();
+        const db = makeFakeDb();
+        db._chats.push({ id: 11, user_id: 1, room_id: 100 });
+        db._participants.push({ room_id: 100, user_id: 1, username: 'alice' }, { room_id: 100, user_id: 2, username: 'bob' });
+        registerE2eeGroupRoutes(app, {
+            dbGet: db.dbGet, dbAll: db.dbAll, dbRun: db.dbRun, io: makeFakeIo(),
+            keyShareLimiter: { tryConsume: async () => { throw new Error('limits down'); } },
+        });
+        const res = await call(app, 'post', '/api/keys/key-shares', { session: { userId: 1 }, body: { chatId: 11, shares: [{ recipientUserId: 2, ciphertext: 'x' }] } });
+        assert.strictEqual(res.statusCode, 503);
+        assert.strictEqual(res.body.code, 'busy');
+        assert.strictEqual(db._keyShares.length, 0);
     });
 
     console.log('\n' + passed + ' passed, ' + failed + ' failed');

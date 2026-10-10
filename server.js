@@ -1014,6 +1014,9 @@ const pgLimits = createPgLimits({
 });
 const powUsedStore = pgLimits.powUsedStore();
 const bundleLimiter = pgLimits.slidingLimiter('bundle');
+// Отправки key-share (30 в час на пару «пользователь, комната») и запросы ключа (10 в час).
+const keyShareLimiter = pgLimits.slidingLimiter('keyshare');
+const keyRequestLimiter = pgLimits.slidingLimiter('keyreq');
 
 // CSRF-токен привязан к сессии: ключ выводится из SESSION_SECRET (HKDF), так что
 // смена секрета заодно сбрасывает все выданные токены.
@@ -1343,7 +1346,7 @@ app.use('/api/', apiLimiter);
 // Чужие ключи отдаются только при общей комнате — модулю нужна БД.
 registerE2eeKeyRoutes(app, { dbGet, dbAll, bundleLimiter });
 // Групповой E2EE: список участников чата + key-shares (тоже нужна сессия).
-registerE2eeGroupRoutes(app, { dbGet, dbAll, dbRun, io, queryWithRetry, respondIfDeadlock });
+registerE2eeGroupRoutes(app, { dbGet, dbAll, dbRun, io, queryWithRetry, respondIfDeadlock, keyShareLimiter, keyRequestLimiter });
 registerApiRoutes(app, serverContext);
 
 app.get('/uploads/:filename', async (req, res) => {
@@ -2967,6 +2970,7 @@ app.delete('/api/chats/:chatId', async (req, res) => {
                 await client.query('SELECT id FROM rooms WHERE id = $1 FOR UPDATE', [chat.room_id]);
                 await client.query('DELETE FROM room_participants WHERE room_id = $1 AND user_id = $2', [chat.room_id, userId]);
                 await client.query('DELETE FROM e2ee_key_shares WHERE room_id = $1 AND recipient_id = $2', [chat.room_id, userId]);
+                await client.query('DELETE FROM e2ee_key_requests WHERE room_id = $1 AND requester_id = $2', [chat.room_id, userId]);
                 await client.query('DELETE FROM chats WHERE id = $1 AND user_id = $2', [chat.id, userId]);
                 const remaining = await client.query('SELECT 1 FROM room_participants WHERE room_id = $1 LIMIT 1', [chat.room_id]);
                 if (remaining.rows.length === 0) {
@@ -3611,6 +3615,7 @@ async function deleteUserAccount(userId) {
             await client.query('SELECT id FROM rooms WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE', [roomIds]);
         }
         await client.query('DELETE FROM e2ee_key_shares WHERE sender_id = $1 OR recipient_id = $1', [userId]);
+        await client.query('DELETE FROM e2ee_key_requests WHERE requester_id = $1', [userId]);
         await client.query('DELETE FROM room_participants WHERE user_id = $1', [userId]);
         await client.query('DELETE FROM chats WHERE user_id = $1', [userId]);
         const ownMessages = await client.query('DELETE FROM messages WHERE user_id = $1 RETURNING file_url', [userId]);

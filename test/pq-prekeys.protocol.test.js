@@ -528,6 +528,9 @@ async function main() {
         clock.t = replacedAt + 5 * DAY;
         assert.strictEqual((await ctx.bob.syncKeyShares(22, 100)).applied, 1, 'share built from a pre-refresh bundle');
         assert.strictEqual(await ctx.bob._storage.get('pqopk:' + usedOld), null);
+        // Ключ комнаты Alice за 36 суток просрочен: плановая ротация в ensureRoomSession.
+        await ctx.alice.ensureRoomSession(11, 100, ctx.withAlice);
+        await ctx.bob.syncKeyShares(22, 100);
         await assertMessage(ctx.alice, ctx.bob, 1, 'после обновления пула');
     });
 
