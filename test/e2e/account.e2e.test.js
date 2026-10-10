@@ -56,12 +56,13 @@ async function traces(userId) {
         signed_prekeys: await count(suite, 'SELECT 1 FROM signed_prekeys WHERE user_id = $1', id),
         one_time_prekeys: await count(suite, 'SELECT 1 FROM one_time_prekeys WHERE user_id = $1', id),
         signed_pq_prekeys: await count(suite, 'SELECT 1 FROM signed_pq_prekeys WHERE user_id = $1', id),
+        pq_one_time_prekeys: await count(suite, 'SELECT 1 FROM pq_one_time_prekeys WHERE user_id = $1', id),
         session: await count(suite, `SELECT 1 FROM session WHERE sess->>'userId' = $1`, text),
     };
 }
 const NO_TRACES = Object.freeze({
     users: 0, chats: 0, messages: 0, room_participants: 0, join_requests: 0, e2ee_key_shares: 0, reactions: 0,
-    identity_keys: 0, signed_prekeys: 0, one_time_prekeys: 0, signed_pq_prekeys: 0, session: 0,
+    identity_keys: 0, signed_prekeys: 0, one_time_prekeys: 0, signed_pq_prekeys: 0, pq_one_time_prekeys: 0, session: 0,
 });
 
 // Общая часть проверок ответа на удаление: тело, Clear-Site-Data, куки.
@@ -125,6 +126,7 @@ test('удаление стирает всё: сообщения, файлы, к
     await suite.query('INSERT INTO signed_prekeys (user_id, key_id, public_key, signature) VALUES ($1, 1, $2, $3)', [vId, crypto.randomBytes(32), crypto.randomBytes(64)]);
     await suite.query('INSERT INTO signed_pq_prekeys (user_id, key_id, public_key, signature) VALUES ($1, 1, $2, $3)', [vId, crypto.randomBytes(1184), crypto.randomBytes(64)]);
     await suite.query('INSERT INTO one_time_prekeys (user_id, key_id, public_key) VALUES ($1, 1, $2), ($1, 2, $3)', [vId, crypto.randomBytes(32), crypto.randomBytes(32)]);
+    await suite.query('INSERT INTO pq_one_time_prekeys (user_id, key_id, public_key, signature) VALUES ($1, 1, $2, $3), ($1, 2, $4, $5)', [vId, crypto.randomBytes(1184), crypto.randomBytes(64), crypto.randomBytes(1184), crypto.randomBytes(64)]);
     await v.ok(v.post('/api/keys/key-shares', { chatId: shared.ownerChat.id, shares: [{ recipientUserId: friend.user.id, ciphertext: 'c2hhcmUtdjJm' }] }), 'key-share от пользователя');
     await f.ok(f.post('/api/keys/key-shares', { chatId: shared.memberChat.id, shares: [{ recipientUserId: vId, ciphertext: 'c2hhcmUtZjJ2' }] }), 'key-share пользователю');
 

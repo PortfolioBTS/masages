@@ -1297,6 +1297,9 @@ app.use(csrf.middleware);
 // Специальный парсер стоит раньше: общий видит уже разобранное тело и
 // пропускает запрос.
 app.use('/api/keys/key-shares', express.json({ limit: '2mb' }));
+// Пачка одноразовых PQ-prekey: до 50 ключей по ~1,7 КБ в base64 (ключ ML-KEM
+// 1184 байта + подпись 64) — около 90 КБ, впритык к 100 КБ по умолчанию.
+app.use('/api/keys/pq-one-time-prekeys', express.json({ limit: '256kb' }));
 app.use(express.json());
 
 // Лимит на /api/ — ДО регистрации маршрутов из lib/: Express применяет

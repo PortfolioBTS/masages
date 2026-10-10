@@ -285,6 +285,8 @@ async function main() {
             ['put', '/api/keys/signed-prekey'],
             ['put', '/api/keys/pq-prekey'],
             ['post', '/api/keys/one-time-prekeys'],
+            ['post', '/api/keys/pq-one-time-prekeys'],
+            ['delete', '/api/keys/pq-one-time-prekeys'],
             ['get', '/api/keys/one-time-prekeys/count'],
             ['get', '/api/keys/identities'],
             ['get', '/api/keys/bundle/:targetUserId'],
@@ -309,7 +311,7 @@ async function main() {
             const as5 = { session: { userId: 5 } };
             const count = await call(app, 'get', '/api/keys/one-time-prekeys/count', as5);
             assert.strictEqual(count.statusCode, 200);
-            assert.deepStrictEqual(count.body, { count: 2 });
+            assert.deepStrictEqual(count.body, { count: 2, pq_count: 0 });
             // Ошибка ввода — статус и тело хранилища идут клиенту как есть.
             const bad = await call(app, 'put', '/api/keys/identity', { ...as5, body: { identity_signing_key: 'x', identity_dh_key: 'y' } });
             assert.strictEqual(bad.statusCode, 400);
@@ -384,6 +386,7 @@ async function main() {
             identity_dh_key: keys.identity_dh_key,
             signed_prekey: keys.signed_prekey,
             one_time_prekey: oneTimePrekey,
+            pq_one_time_prekey: null,
             pq_prekey: keys.pq_prekey,
         });
         const first = await get();
@@ -395,7 +398,7 @@ async function main() {
         assert.strictEqual(drained.statusCode, 200);
         assert.deepStrictEqual(drained.body, expected(null));
         const left = await call(app, 'get', '/api/keys/one-time-prekeys/count', { session: { userId: 5 } });
-        assert.deepStrictEqual(left.body, { count: 0 });
+        assert.deepStrictEqual(left.body, { count: 0, pq_count: 0 });
     });
 
     await test('bundle: a user without keys -> 404 from the store; a DB error in the store -> 502', async () => {
