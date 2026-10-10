@@ -12,11 +12,11 @@ let editingMessageEncrypted = false; // флаг ИСХОДНОГО сообще
 let menuMessage = null;              // сообщение, для которого открыто контекстное меню
 
 // Состояние открытого чата: история грузится страницами с конца.
-let openChatSeq = 0;          // защита от гонок при быстром переключении чатов
-let oldestMessageId = null;   // самый старый загруженный — курсор для ?before=
+let openChatSeq = 0;          // защита от гонок при быстром переключении чатов (счётчик открытий чата, а не seq сообщений)
+let oldestSeq = null;         // seq самого старого загруженного сообщения — курсор для ?beforeSeq=
 let hasMoreHistory = false;
 let loadingHistory = false;
-let lastSeenMessageId = 0;    // до какого id пользователь уже видел открытый чат
+let lastSeenSeq = 0;          // до какого seq пользователь уже видел открытый чат (seq сравнивается только внутри чата)
 let chatListMode = 'chats';   // 'chats' | 'search' — что сейчас показано в сайдбаре
 let membersChangedTimer = null; // debounce событий roomMembersChanged
 
@@ -530,6 +530,11 @@ function getE2eeClient() {
             e2eeClient = E2EE.createClient({
                 userId: currentUser.id,
                 storage: E2EE.makeIndexedDbStorage('nyxo-e2ee-' + currentUser.id),
+                // Две вкладки одного аккаунта делят IndexedDB с ключами: Web Locks не дают им
+                // выдать одну итерацию Sender Key двум сообщениям (message-ordering.md, 9.7).
+                // Без Web Locks lock = null — работает внутренняя очередь клиента, в консоли предупреждение.
+                lock: NyxoE2eeLock.makeLock(typeof navigator !== 'undefined' ? navigator.locks : null, currentUser.id,
+                    (message) => console.warn(message)),
             });
             e2eeClientUserId = currentUser.id;
         } catch (err) {
@@ -794,8 +799,8 @@ function handleRoomSessionResult(roomId, result) {
 
     // Участники со сменившимся ключом тоже попадают в warnings, но о них
     // говорит баннер — здесь они не "без шифрования".
-    const delivered = newMembers.filter(m => !failedIds.has(Number(m.id)) && !changedIds.has(Number(m.id)));
-    const undelivered = newMembers.filter(m => failedIds.has(Number(m.id)) && !changedIds.has(Number(m.id)));
+    const delivered = newMembers.filter(member => !failedIds.has(Number(member.id)) && !changedIds.has(Number(member.id)));
+    const undelivered = newMembers.filter(member => failedIds.has(Number(member.id)) && !changedIds.has(Number(member.id)));
     if (delivered.length > 0) {
         const text = `В чат вошли: ${joinNames(delivered)}, им передан ключ шифрования`;
         appendSystemNotice(roomId, text, 'key');
@@ -811,7 +816,7 @@ function handleRoomSessionResult(roomId, result) {
         showToast(text, 'info');
     }
 
-    const newIds = new Set(newMembers.map(m => Number(m.id)));
+    const newIds = new Set(newMembers.map(member => Number(member.id)));
     const failedExisting = Array.from(failedIds).filter(id => !newIds.has(id) && !changedIds.has(id));
     const general = warnings.find(w => w && w.userId == null);
     if (general) {
@@ -936,6 +941,12 @@ async function prepareOutgoingE2ee(chatId, roomId) {
 // которой здесь нет, получает общий текст. Новая причина — новая строка.
 const E2EE_FAILURE_TEXTS = {
     replay: 'Повтор старого сообщения (возможна подмена сервером)',
+    // Содержимое привязано к сообщению (message-ordering.md, раздел 9): внутри
+    // шифротекста лежат id сообщения, автор версии и время правки.
+    'id-mismatch': 'Сообщение выдано под чужим номером (возможна подмена сервером)',
+    'sender-mismatch': 'У сообщения сменился автор (возможна подмена сервером)',
+    'stale-edit': 'Старая версия сообщения вместо более новой (возможна подмена сервером)',
+    'no-mid': 'Сообщение старого формата, показать его нельзя',
 };
 const E2EE_FAILURE_DEFAULT_TEXT = 'Не удалось расшифровать';
 
@@ -998,6 +1009,7 @@ async function decryptMessageInPlace(message, roomId) {
             if (res.ok) {
                 message.text = res.text || '';
                 if (res.file) message._file = res.file;
+                message._ts = res.ts; // время отправителя для показа (раздел 9.5)
             } else {
                 message.text = e2eeFailureText(res.reason);
                 message._e2eeFailed = true;
@@ -1634,9 +1646,9 @@ function updateAnonNote() {
 function resetChatView() {
     currentChatId = null;
     currentRoomId = null;
-    oldestMessageId = null;
+    oldestSeq = null;
     hasMoreHistory = false;
-    lastSeenMessageId = 0;
+    lastSeenSeq = 0;
     openChatSeq++;
     releaseChatResources();
     elements.chatHeader.classList.add('hidden');
@@ -1837,9 +1849,12 @@ async function api(url, options = {}, retried = false) {
     try {
         data = await res.json();
     } catch {
-        return { success: false, message: `Ошибка сервера (HTTP ${res.status})` };
+        return { success: false, httpStatus: res.status, message: `Ошибка сервера (HTTP ${res.status})` };
     }
-    if (!data || typeof data !== 'object') return { success: false, message: `Ошибка сервера (HTTP ${res.status})` };
+    if (!data || typeof data !== 'object') return { success: false, httpStatus: res.status, message: `Ошибка сервера (HTTP ${res.status})` };
+    // Статус нужен тем, кто различает исходы (повтор отправки после 5xx и 409,
+    // sendText); тело при этом остаётся прежним.
+    data.httpStatus = res.status;
     // Кука csrf_token живёт сутки; если она истекла, любой GET выдаст новую.
     if (res.status === 403 && !retried && /CSRF/i.test(data.message || '')) {
         await fetch('/api/auth').catch(() => {});
@@ -1860,9 +1875,10 @@ async function postFormData(url, formData, retried = false) {
             body: formData,
         });
     } catch {
-        return { success: false, message: 'Нет соединения с сервером' };
+        return { success: false, networkError: true, message: 'Нет соединения с сервером' };
     }
     const data = await res.json().catch(() => ({ success: false, message: `Ошибка сервера (HTTP ${res.status})` }));
+    if (data && typeof data === 'object') data.httpStatus = res.status;
     if (res.status === 403 && !retried && /CSRF/i.test(data.message || '')) {
         await fetch('/api/auth').catch(() => {});
         return postFormData(url, formData, true);
@@ -1888,7 +1904,7 @@ function postFormDataWithProgress(url, formData, options = {}, retried = false) 
             if (e.lengthComputable && typeof options.onProgress === 'function') options.onProgress(e.loaded / e.total);
         };
         xhr.onabort = () => resolve({ success: false, aborted: true, message: 'Загрузка отменена' });
-        xhr.onerror = () => resolve({ success: false, message: 'Нет соединения с сервером' });
+        xhr.onerror = () => resolve({ success: false, networkError: true, message: 'Нет соединения с сервером' });
         xhr.onload = async () => {
             let data;
             try {
@@ -1896,6 +1912,7 @@ function postFormDataWithProgress(url, formData, options = {}, retried = false) 
             } catch {
                 data = { success: false, message: `Ошибка сервера (HTTP ${xhr.status})` };
             }
+            if (data && typeof data === 'object') data.httpStatus = xhr.status;
             if (xhr.status === 403 && !retried && /CSRF/i.test((data && data.message) || '')) {
                 await fetch('/api/auth').catch(() => {});
                 resolve(postFormDataWithProgress(url, formData, options, true));
@@ -2229,12 +2246,12 @@ function setupSocketListeners() {
     // до какого сообщения; самому читателю событие не шлётся. Раньше
     // проверка reader_id !== currentUser.id отсекала своё же чтение — теперь
     // это делает сервер.
-    socket.on('messagesRead', ({ chat_id, room_id, up_to_id } = {}) => {
+    socket.on('messagesRead', ({ chat_id, room_id, up_to_seq } = {}) => {
         if (!belongsToCurrentChat(chat_id, room_id)) return;
-        const upTo = Number(up_to_id);
+        const upTo = Number(up_to_seq);
         if (!upTo) return;
         elements.chatMessages.querySelectorAll('.message.sent').forEach((el) => {
-            if (Number(el.dataset.messageId) <= upTo) {
+            if (el.dataset.seq !== undefined && Number(el.dataset.seq) <= upTo) {
                 if (el._message) el._message.status = 'read';
                 renderMessageStatus(el);
             }
@@ -4179,10 +4196,10 @@ async function openChat(chatId, roomId, name, avatar, online, isBot) {
     currentChatId = chatId;
     currentRoomId = roomId || null;
     const room = currentRoomId;
-    oldestMessageId = null;
+    oldestSeq = null;
     hasMoreHistory = false;
     loadingHistory = false;
-    lastSeenMessageId = 0;
+    lastSeenSeq = 0;
     cancelEditing();
     clearReply();
     const bot = Boolean(Number(isBot));
@@ -4228,7 +4245,7 @@ async function openChat(chatId, roomId, name, avatar, online, isBot) {
     // и лента ужмётся.
     if (bot) renderBotSuggestions(chatId, data.chat && data.chat.quickReplies);
     hasMoreHistory = Boolean(data.hasMore);
-    lastSeenMessageId = data.messages.length ? data.messages[data.messages.length - 1].id : 0;
+    lastSeenSeq = data.messages.length ? Number(data.messages[data.messages.length - 1].seq) : 0;
     flushSystemNotices();
     scrollToBottom();
 
@@ -4238,12 +4255,12 @@ async function openChat(chatId, roomId, name, avatar, online, isBot) {
 }
 
 async function loadOlderMessages() {
-    if (!hasMoreHistory || loadingHistory || !currentChatId || !oldestMessageId) return;
+    if (!hasMoreHistory || loadingHistory || !currentChatId || oldestSeq === null) return;
     loadingHistory = true;
     const seq = openChatSeq;
     const roomId = currentRoomId;
     try {
-        const data = await api(`/api/messages/${currentChatId}?before=${oldestMessageId}`);
+        const data = await api(`/api/messages/${currentChatId}?beforeSeq=${oldestSeq}`);
         if (seq !== openChatSeq || !data.success) return;
         await decryptMessagesInPlace(data.messages, roomId);
         if (seq !== openChatSeq) return;
@@ -4268,17 +4285,29 @@ async function refreshCurrentChat() {
     if (seq !== openChatSeq || !data.success) return;
     if (roomId) ensureE2eeRoomSession(chatId, roomId);
 
+    // Убираем то, что за время обрыва удалили: на экране сообщение, чей seq
+    // лежит внутри диапазона свежей страницы, а самого id в странице нет.
+    // Сравнение seq — только внутри этого чата; id — строки.
     if (data.messages.length > 0) {
-        const pageIds = new Set(data.messages.map(m => Number(m.id)));
-        const minId = data.hasMore ? Number(data.messages[0].id) : 0;
-        const maxId = Number(data.messages[data.messages.length - 1].id);
-        elements.chatMessages.querySelectorAll('.message[data-message-id]').forEach((el) => {
-            const id = Number(el.dataset.messageId);
-            if (id >= minId && id <= maxId && !pageIds.has(id)) removeMessageElement(id);
+        const pageIds = new Set(data.messages.map(m => String(m.id)));
+        const minSeq = data.hasMore ? Number(data.messages[0].seq) : 0;
+        const maxSeq = Number(data.messages[data.messages.length - 1].seq);
+        elements.chatMessages.querySelectorAll('.message[data-message-id][data-seq]').forEach((el) => {
+            const elSeq = Number(el.dataset.seq);
+            if (elSeq >= minSeq && elSeq <= maxSeq && !pageIds.has(el.dataset.messageId)) removeMessageElement(el.dataset.messageId);
         });
     }
 
-    const fresh = data.messages.filter(m => !elements.chatMessages.querySelector(`[data-message-id="${m.id}"]`));
+    // Новые для ленты — по id; расхождение seq у уже показанного id
+    // игнорируется (раздел 12, строка 18 контракта), в консоль — для отладки.
+    const shown = new Set([...elements.chatMessages.querySelectorAll('.message[data-message-id]')].map(el => el.dataset.messageId));
+    const fresh = NyxoMessageOrder.dedupById(data.messages, shown);
+    for (const m of data.messages) {
+        const el = findMessageEl(m.id);
+        if (el && el.dataset.seq !== undefined && Number(el.dataset.seq) !== Number(m.seq)) {
+            console.warn('Порядок сообщений: seq известного сообщения изменился, игнорируем');
+        }
+    }
     if (fresh.length === 0) return;
     await decryptMessagesInPlace(fresh, roomId);
     if (seq !== openChatSeq) return;
@@ -4286,7 +4315,7 @@ async function refreshCurrentChat() {
     fresh.forEach(m => appendMessage(m, false));
     if (stick) scrollToBottom();
     else fresh.forEach((m) => { if (!isOwnMessage(m)) bumpJumpDown(); });
-    lastSeenMessageId = Math.max(lastSeenMessageId, ...fresh.map(m => m.id));
+    lastSeenSeq = Math.max(lastSeenSeq, ...fresh.map(m => Number(m.seq)));
 }
 
 function renderMessages(messages, mode) {
@@ -4294,18 +4323,38 @@ function renderMessages(messages, mode) {
     messages.forEach(msg => fragment.appendChild(createMessageElement(msg, false)));
     if (mode === 'prepend') elements.chatMessages.prepend(fragment);
     else elements.chatMessages.replaceChildren(fragment);
-    if (messages.length > 0 && (mode !== 'prepend' || oldestMessageId === null || messages[0].id < oldestMessageId)) {
-        oldestMessageId = messages[0].id;
+    if (messages.length > 0 && (mode !== 'prepend' || oldestSeq === null || Number(messages[0].seq) < oldestSeq)) {
+        oldestSeq = Number(messages[0].seq);
     }
 }
 
 // Возвращает false, если сообщение уже на экране (например, пришло и в
 // ответе POST, и по сокету).
+// Лента упорядочена по seq, а не по порядку прихода: сообщение по сокету
+// может прийти переставленным, и placeMessageElement ставит его на своё место.
 function appendMessage(message, animate) {
-    if (elements.chatMessages.querySelector(`[data-message-id="${message.id}"]`)) return false;
-    elements.chatMessages.appendChild(createMessageElement(message, animate));
-    if (oldestMessageId === null) oldestMessageId = message.id;
+    if (findMessageEl(message.id)) return false;
+    placeMessageElement(createMessageElement(message, animate));
+    if (oldestSeq === null || Number(message.seq) < oldestSeq) oldestSeq = Number(message.seq);
     return true;
+}
+
+// Элемент сообщения по id. id — строка из цифр, но через CSS.escape: в
+// селектор не должно попасть ничего лишнего, что бы ни пришло с сервера.
+function findMessageEl(id) {
+    return elements.chatMessages.querySelector(`[data-message-id="${CSS.escape(String(id))}"]`);
+}
+
+// Ставит элемент сообщения на место по seq (двоичный поиск); служебные строки
+// без data-seq пропускаются. Сообщение с наибольшим seq (обычный случай) уходит
+// в конец ленты, как и раньше.
+function placeMessageElement(el) {
+    const container = elements.chatMessages;
+    const items = [...container.children].filter(child => child.dataset && child.dataset.seq !== undefined);
+    const seqs = items.map(child => Number(child.dataset.seq));
+    const index = NyxoMessageOrder.insertionIndex(seqs, Number(el.dataset.seq));
+    if (index >= items.length) container.appendChild(el);
+    else container.insertBefore(el, items[index]);
 }
 
 function formatReplyQuote(reply) {
@@ -4317,7 +4366,7 @@ function formatReplyQuote(reply) {
 function updateReplyQuotes(messageId, update) {
     elements.chatMessages.querySelectorAll('.message').forEach((el) => {
         const m = el._message;
-        if (!m || !m.reply_to || Number(m.reply_to.id) !== Number(messageId)) return;
+        if (!m || !m.reply_to || String(m.reply_to.id) !== String(messageId)) return;
         update(m.reply_to);
         const small = el.querySelector('.reply-to small');
         if (small) small.textContent = formatReplyQuote(m.reply_to);
@@ -4325,7 +4374,7 @@ function updateReplyQuotes(messageId, update) {
 }
 
 function removeMessageElement(messageId) {
-    const el = elements.chatMessages.querySelector(`[data-message-id="${messageId}"]`);
+    const el = findMessageEl(messageId);
     if (el) {
         const box = el.querySelector('.encrypted-attachment');
         if (box && attachmentObserver) attachmentObserver.unobserve(box);
@@ -4342,11 +4391,20 @@ function removeMessageElement(messageId) {
 }
 
 function applyMessageEdit(messageId, displayText, failed = false) {
-    const bubble = elements.chatMessages.querySelector(`[data-message-id="${messageId}"]`);
+    const bubble = findMessageEl(messageId);
     if (bubble) {
         if (bubble._message) {
             bubble._message.text = displayText; // чтобы меню "Ответить/Изменить" видело новый текст
             bubble._message._e2eeFailed = failed;
+            // У правленого сообщения показывается created_at (раздел 9.5): ts в конверте
+            // правки — время правки, а не создания. Метка edited_at нужна только для этого.
+            delete bubble._message._ts;
+            bubble._message.edited_at = bubble._message.edited_at || true;
+            const timeEl = bubble.querySelector('.message-time');
+            if (timeEl) {
+                timeEl.textContent = formatMessageTime(bubble._message);
+                timeEl.removeAttribute('title');
+            }
         }
         const textEl = bubble.querySelector('.message-text');
         if (textEl) setMessageText(textEl, displayText, failed);
@@ -4391,10 +4449,12 @@ function refreshOwnMessageStatuses() {
     elements.chatMessages.querySelectorAll('.message.sent').forEach(renderMessageStatus);
 }
 
-function lastRenderedMessageId() {
+// Последнее показанное сообщение: { id, seq } (служебные строки пропускаются)
+// или null. Лента упорядочена по seq, поэтому последнее в DOM — самое новое.
+function lastRenderedMessage() {
     let el = elements.chatMessages.lastElementChild;
-    while (el && !el.dataset.messageId) el = el.previousElementSibling; // служебные строки пропускаем
-    return el ? Number(el.dataset.messageId) : 0;
+    while (el && el.dataset.seq === undefined) el = el.previousElementSibling;
+    return el ? { id: el.dataset.messageId, seq: Number(el.dataset.seq) } : null;
 }
 
 // Отмечаем прочитанным то, что пользователь реально видит: вкладка
@@ -4402,13 +4462,13 @@ function lastRenderedMessageId() {
 let markReadTimer = null;
 function markVisibleMessagesRead() {
     if (!currentChatId || document.visibilityState !== 'visible' || !isNearBottom()) return;
-    const lastId = lastRenderedMessageId();
-    if (!lastId || lastId <= lastSeenMessageId) return;
-    lastSeenMessageId = lastId;
+    const last = lastRenderedMessage();
+    if (!last || !last.seq || last.seq <= lastSeenSeq) return;
+    lastSeenSeq = last.seq;
     const chatId = currentChatId;
     clearTimeout(markReadTimer);
     markReadTimer = setTimeout(() => {
-        api(`/api/chats/${chatId}/read`, { method: 'POST', body: JSON.stringify({ upToId: lastId }) });
+        api(`/api/chats/${chatId}/read`, { method: 'POST', body: JSON.stringify({ upToSeq: last.seq }) });
     }, 1000);
 }
 
@@ -4479,25 +4539,35 @@ function updatePlaintextMarkers() {
     });
 }
 
-// Время показывается в часовом поясе пользователя (created_at), а не
-// сервера. Для старых сообщений без created_at — прежнее поле time.
+// Время показывается в часовом поясе пользователя (created_at, до минуты),
+// а не сервера: колонки time (HH:MM по часам сервера) больше нет.
+// Что именно показывать — решает NyxoMessageOrder.displayTimeMs (раздел 9.5): у
+// неправленого сообщения ts отправителя из конверта, если он в пределах 10
+// минут от created_at; у правленого и без пригодного ts — created_at.
 function formatMessageTime(message) {
-    if (message.created_at) {
-        const date = new Date(message.created_at);
-        if (!Number.isNaN(date.getTime())) {
-            const hhmm = date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-            if (date.toDateString() === new Date().toDateString()) return hhmm;
-            return `${date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' })} ${hhmm}`;
-        }
-    }
-    return message.time || '';
+    const ms = NyxoMessageOrder.displayTimeMs(message, message._ts);
+    if (ms === null) return '';
+    const date = new Date(ms);
+    const hhmm = date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    if (date.toDateString() === new Date().toDateString()) return hhmm;
+    return `${date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' })} ${hhmm}`;
+}
+
+// Точное время для всплывающей подсказки: только если оно пришло внутри
+// конверта (секунды в базе не хранятся) и показано вместо created_at.
+function formatMessageTimeTitle(message) {
+    if (!Number.isSafeInteger(message._ts)) return '';
+    const ms = NyxoMessageOrder.displayTimeMs(message, message._ts);
+    if (ms !== message._ts) return '';
+    return new Date(ms).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 function createMessageElement(message, animate) {
     const isMine = isOwnMessage(message);
     const div = document.createElement('div');
     div.className = `message ${isMine ? 'sent' : 'received'}${animate ? ' message-new' : ''}`;
-    div.dataset.messageId = message.id;
+    div.dataset.messageId = String(message.id);
+    if (message.seq !== undefined && message.seq !== null) div.dataset.seq = String(message.seq);
     div._message = message;
 
     const contentDiv = document.createElement('div');
@@ -4542,6 +4612,8 @@ function createMessageElement(message, animate) {
     const timeSpan = document.createElement('span');
     timeSpan.className = 'message-time';
     timeSpan.textContent = formatMessageTime(message);
+    const timeTitle = formatMessageTimeTitle(message);
+    if (timeTitle) timeSpan.title = timeTitle;
     metaDiv.appendChild(timeSpan);
     if (isMine) {
         const statusSpan = document.createElement('span');
@@ -4692,6 +4764,64 @@ function cancelEditing() {
 // ничего не делает. Берёт его вызывающий (sendMessage), а не sendText.
 let sending = false;
 
+// ---- Исходы отправки сообщения (message-ordering.md, раздел 6.5) ----
+//
+//   200                              показать сообщение из ответа (дубликат от
+//                                    newMessage отсекается по id);
+//   обрыв сети, таймаут, 5xx         исход неизвестен: тот же запрос с тем же id
+//                                    и тем же конвертом, не больше трёх раз с
+//                                    нарастающей паузой. Повтор идемпотентен;
+//   409 id-conflict                  новый id, содержимое шифруется заново (новый
+//                                    mid и итерация цепочки; старая итерация
+//                                    остаётся пропуском, получатели его терпят),
+//                                    не больше трёх конфликтов подряд;
+//   400 client-outdated              «Обновите страницу», не повторять;
+//   400 bad-message-id               ошибка клиента: не повторять, в консоль.
+const SEND_RETRY_DELAYS_MS = [500, 1500, 4000];
+const MAX_ID_CONFLICTS = 3;
+
+function isUnknownSendOutcome(data) {
+    return !data.success && (data.networkError === true || (Number(data.httpStatus) >= 500));
+}
+
+// buildRequest(clientMessageId) → запрос (шифрует содержимое под этим id) или
+// null, если собрать нельзя; post(запрос) → тело ответа. clientMessageId —
+// только для комнаты, у чата с ботом он null. shouldStop() — отмена между
+// повторами. Возвращает { data }; data.success === false с кодом из тела — отказ.
+async function sendWithOutcomes({ roomId, buildRequest, post, shouldStop = () => false }) {
+    let conflicts = 0;
+    let clientMessageId = roomId ? NyxoMessageOrder.newClientMessageId() : null;
+    for (;;) {
+        const request = await buildRequest(clientMessageId);
+        if (request === null) return { data: { success: false, message: '' } };
+        let data = await post(request);
+        for (let retry = 0; isUnknownSendOutcome(data) && retry < SEND_RETRY_DELAYS_MS.length; retry++) {
+            if (shouldStop()) return { data };
+            await delay(SEND_RETRY_DELAYS_MS[retry]);
+            data = await post(request);
+        }
+        if (data.success) return { data };
+        if (roomId && data.httpStatus === 409 && data.code === 'id-conflict' && ++conflicts < MAX_ID_CONFLICTS) {
+            clientMessageId = NyxoMessageOrder.newClientMessageId();
+            continue;
+        }
+        return { data };
+    }
+}
+
+// Текст для пользователя по отказу сервера. client-outdated — просьба обновить
+// страницу; bad-message-id — ошибка клиента, подробности только в консоль.
+function sendFailureText(data, fallback) {
+    if (data.code === 'client-outdated') return data.message || 'Обновите страницу: эта версия приложения устарела';
+    if (data.code === 'bad-message-id') {
+        console.error('Сервер отклонил идентификатор сообщения (bad-message-id)');
+        return fallback;
+    }
+    if (data.code === 'id-conflict') return 'Не удалось отправить сообщение: идентификатор занят, попробуйте ещё раз';
+    if (data.networkError) return 'Нет соединения с сервером — сообщение не отправлено';
+    return data.message || fallback;
+}
+
 // Отправляет уже готовый текст в ЯВНО указанный чат: шифрует (если для чата
 // включено шифрование), шлёт на сервер и сразу показывает сообщение в ленте.
 // Поле ввода не читает и не очищает — это дело вызывающего, поэтому тем же
@@ -4713,26 +4843,38 @@ async function sendText(text, { chatId, roomId, replyToId } = {}) {
         showToast(err.message, 'error', 6000);
         return false;
     }
-    let outgoingText = text;
-    let encrypted = false;
-    if (client) {
-        try {
-            outgoingText = await client.encryptOutgoing(roomId, text);
-            encrypted = true;
-        } catch (err) {
-            console.error('E2EE: encryptOutgoing failed:', err);
-            showToast('Не удалось зашифровать сообщение — попробуйте ещё раз или выключите шифрование', 'error');
-            return false;
-        }
-    }
-    const payload = { chatId, text: outgoingText, encrypted };
-    if (replyToId) payload.replyToId = replyToId;
-    const data = await api('/api/messages', {
-        method: 'POST',
-        body: JSON.stringify(payload),
+    // Id сообщения комнаты выбирает клиент ДО шифрования и кладёт его внутрь
+    // конверта (mid): сервер не сможет выдать конверт за другое сообщение. Чат с
+    // ботом id не присылает. Исходы отправки — sendWithOutcomes (раздел 6.5).
+    const encrypted = Boolean(client);
+    let encryptFailed = false;
+    const outcome = await sendWithOutcomes({
+        roomId,
+        buildRequest: async (clientMessageId) => {
+            let outgoingText = text;
+            if (client) {
+                try {
+                    outgoingText = await client.encryptOutgoing(roomId, text, { messageId: clientMessageId });
+                } catch (err) {
+                    console.error('E2EE: encryptOutgoing failed:', err);
+                    encryptFailed = true;
+                    return null;
+                }
+            }
+            const payload = { chatId, text: outgoingText, encrypted };
+            if (clientMessageId) payload.clientMessageId = clientMessageId;
+            if (replyToId) payload.replyToId = replyToId;
+            return payload;
+        },
+        post: (payload) => api('/api/messages', { method: 'POST', body: JSON.stringify(payload) }),
     });
+    if (encryptFailed) {
+        showToast('Не удалось зашифровать сообщение — попробуйте ещё раз или выключите шифрование', 'error');
+        return false;
+    }
+    const data = outcome.data;
     if (!data.success) {
-        showToast(data.message || 'Не удалось отправить сообщение', 'error');
+        showToast(sendFailureText(data, 'Не удалось отправить сообщение'), 'error');
         return false;
     }
     // Показываем сразу из ответа — не зависим от того, успел ли
@@ -4780,7 +4922,9 @@ async function sendMessage() {
             if (encryptEdit) {
                 const client = roomId ? await getReadyE2eeClient() : null;
                 if (!client) { showToast('Не удалось зашифровать правку: сквозное шифрование недоступно', 'error'); return; }
-                try { outgoingText = await client.encryptOutgoing(roomId, text); }
+                // mid правки — id редактируемого сообщения (строка), edit:true поднимает ts
+                // выше известной версии: правка при отстающих часах не выглядит старой.
+                try { outgoingText = await client.encryptOutgoing(roomId, text, { messageId: String(messageId), edit: true }); }
                 catch { showToast('Не удалось зашифровать правку', 'error'); return; }
             }
             const data = await api(`/api/messages/${messageId}`, {
@@ -5063,42 +5207,68 @@ async function sendOneFile(queue, item, index, total) {
     }
     if (queue.cancelled) return { ok: false };
 
-    const formData = new FormData();
-    formData.append('chatId', String(chatId));
+    // Шифротекст вложения от id сообщения не зависит: при 409 заново
+    // шифруется только конверт (с новым mid), тот же шифротекст загружается снова.
     let localFile = null;
+    let enc = null;
     if (client) {
         setUploadStatus(`${prefix}шифрование…`, null);
         try {
-            const enc = await client.encryptFile(clean);
-            if (enc.ciphertext.byteLength > MAX_UPLOAD_BYTES) {
-                return { ok: false, message: 'Файл слишком большой для отправки с шифрованием (макс. 50 МБ)' };
-            }
-            localFile = { mime: item.mime, name: encryptedFileName(item.file, item.mime), size: enc.size, key: enc.key, iv: enc.iv };
-            const envelope = await client.encryptOutgoing(roomId, { type: 'file', ...localFile, caption: '' });
-            // Порядок полей важен: сервер читает chatId/encrypted/envelope
-            // до того, как начнёт принимать сам файл.
-            formData.append('encrypted', 'true');
-            formData.append('envelope', envelope);
-            formData.append('file', new Blob([enc.ciphertext], { type: 'application/octet-stream' }), 'blob');
+            enc = await client.encryptFile(clean);
         } catch (err) {
             console.error('E2EE: не удалось зашифровать файл:', err);
             return { ok: false, message: 'Не удалось зашифровать файл' };
         }
-    } else {
-        formData.append('file', new Blob([clean], { type: item.mime }), MimePolicy.anonymousFileName(item.mime));
+        if (enc.ciphertext.byteLength > MAX_UPLOAD_BYTES) {
+            return { ok: false, message: 'Файл слишком большой для отправки с шифрованием (макс. 50 МБ)' };
+        }
+        localFile = { mime: item.mime, name: encryptedFileName(item.file, item.mime), size: enc.size, key: enc.key, iv: enc.iv };
     }
     if (queue.cancelled) return { ok: false };
 
-    setUploadStatus(`${prefix}загрузка…`, 0);
-    const data = await postFormDataWithProgress('/api/messages/file', formData, {
-        onXhr: (xhr) => { queue.xhr = xhr; },
-        onProgress: (p) => {
-            if (!queue.cancelled) setUploadStatus(`${prefix}загрузка ${Math.round(p * 100)}%`, p);
+    let encryptFailed = false;
+    const outcome = await sendWithOutcomes({
+        roomId,
+        shouldStop: () => queue.cancelled,
+        buildRequest: async (clientMessageId) => {
+            const formData = new FormData();
+            // Порядок полей важен: сервер читает chatId/encrypted/clientMessageId/
+            // envelope ДО того, как начнёт принимать сам файл (fileFilter), и проверяет
+            // id раньше, чем файл попадёт на диск. Поле после файла — 400 client-outdated.
+            formData.append('chatId', String(chatId));
+            if (client) formData.append('encrypted', 'true');
+            if (clientMessageId) formData.append('clientMessageId', clientMessageId);
+            if (client) {
+                try {
+                    const envelope = await client.encryptOutgoing(roomId, { type: 'file', ...localFile, caption: '' }, { messageId: clientMessageId });
+                    formData.append('envelope', envelope);
+                } catch (err) {
+                    console.error('E2EE: не удалось зашифровать файл:', err);
+                    encryptFailed = true;
+                    return null;
+                }
+                formData.append('file', new Blob([enc.ciphertext], { type: 'application/octet-stream' }), 'blob');
+            } else {
+                formData.append('file', new Blob([clean], { type: item.mime }), MimePolicy.anonymousFileName(item.mime));
+            }
+            return formData;
+        },
+        post: async (formData) => {
+            setUploadStatus(`${prefix}загрузка…`, 0);
+            const result = await postFormDataWithProgress('/api/messages/file', formData, {
+                onXhr: (xhr) => { queue.xhr = xhr; },
+                onProgress: (p) => {
+                    if (!queue.cancelled) setUploadStatus(`${prefix}загрузка ${Math.round(p * 100)}%`, p);
+                },
+            });
+            queue.xhr = null;
+            return result;
         },
     });
-    queue.xhr = null;
+    if (encryptFailed) return { ok: false, message: 'Не удалось зашифровать файл' };
+    const data = outcome.data;
     if (data.aborted || queue.cancelled) return { ok: false };
-    if (!data.success) return { ok: false, message: data.message || 'Не удалось отправить файл' };
+    if (!data.success) return { ok: false, message: sendFailureText(data, 'Не удалось отправить файл') };
     if (chatId === currentChatId && data.message) {
         const message = localFile
             ? { ...data.message, text: '', _file: localFile, _localBytes: clean }

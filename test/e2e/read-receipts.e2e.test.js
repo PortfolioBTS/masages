@@ -32,10 +32,10 @@ const setReceipts = async (client, value) => {
     assert.deepStrictEqual(res.body, { success: true, readReceipts: value });
 };
 
-// Участник «открыл чат» двумя способами, как это делает клиент: история и явное «показал до id».
+// Участник «открыл чат» двумя способами, как это делает клиент: история и явное «показал до seq».
 const readByHistory = (p) => p.member.messages(p.memberChat.id);
-const readByMarker = async (p, upToId) => {
-    const res = await p.member.post(`/api/chats/${p.memberChat.id}/read`, { upToId });
+const readByMarker = async (p, upToSeq) => {
+    const res = await p.member.post(`/api/chats/${p.memberChat.id}/read`, { upToSeq });
     assert.strictEqual(res.body.success, true, JSON.stringify(res.body));
 };
 
@@ -63,7 +63,7 @@ test('у нового аккаунта отметки выключены вез�
 
     // Второй способ отметить прочитанное — то же самое.
     const second = await p.owner.send(p.ownerChat.id, 'и ещё одно');
-    await readByMarker(p, second.id);
+    await readByMarker(p, second.seq);
     assert.deepStrictEqual(await receiptsAfterBarrier(p), []);
     assert.strictEqual(await status(second.id), 'sent');
     // Личный маркер читателя двигается: непрочитанных у него нет (отметки скрывают его, а не мешают ему читать).
@@ -80,15 +80,15 @@ test('включены у обоих: событие messagesRead приходи
 
     const first = await p.owner.send(p.ownerChat.id, 'первое');
     await readByHistory(p);
-    const event = await p.sock.waitFor('messagesRead', e => e.room_id === p.roomId && e.up_to_id >= first.id);
-    assert.deepStrictEqual(Object.keys(event).sort(), ['chat_id', 'room_id', 'up_to_id'], 'кто именно прочитал, в событии не раскрывается');
+    const event = await p.sock.waitFor('messagesRead', e => e.room_id === p.roomId && e.up_to_seq >= first.seq);
+    assert.deepStrictEqual(Object.keys(event).sort(), ['chat_id', 'room_id', 'up_to_seq'], 'кто именно прочитал, в событии не раскрывается');
     assert.strictEqual(await status(first.id), 'read');
 
-    // Тот же путь через явный маркер «показал до id».
+    // Тот же путь через явный маркер «показал до seq».
     const second = await p.owner.send(p.ownerChat.id, 'второе');
-    await readByMarker(p, second.id);
-    const again = await p.sock.waitFor('messagesRead', e => e.room_id === p.roomId && e.up_to_id >= second.id);
-    assert.ok(again.up_to_id >= second.id);
+    await readByMarker(p, second.seq);
+    const again = await p.sock.waitFor('messagesRead', e => e.room_id === p.roomId && e.up_to_seq >= second.seq);
+    assert.ok(again.up_to_seq >= second.seq);
     assert.strictEqual(await status(second.id), 'read');
     const seen = (await p.owner.messages(p.ownerChat.id)).messages.find(m => m.id === second.id);
     assert.strictEqual(seen.status, 'read', 'автор видит «прочитано» в истории');
@@ -106,8 +106,8 @@ test('решает читатель: у читателя выключено — 
     await setReceipts(p.member, true);
     const visible = await p.owner.send(p.ownerChat.id, 'теперь видно');
     await readByHistory(p);
-    const event = await p.sock.waitFor('messagesRead', e => e.room_id === p.roomId && e.up_to_id >= visible.id);
-    assert.ok(event.up_to_id >= visible.id);
+    const event = await p.sock.waitFor('messagesRead', e => e.room_id === p.roomId && e.up_to_seq >= visible.seq);
+    assert.ok(event.up_to_seq >= visible.seq);
     assert.strictEqual(await status(visible.id), 'read');
     // Скрытое ранее прочтение задним числом не раскрывается: оно было до включения.
     assert.strictEqual(await status(hidden.id), 'sent');

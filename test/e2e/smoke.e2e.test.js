@@ -115,7 +115,7 @@ test('ответ бота приходит по сокету', async () => {
         sock.emit('joinChat', `chat:${bot.id}`);
         const sent = await a.send(bot.id, 'Привет, бот');
         assert.strictEqual(sent.text, 'Привет, бот');
-        const reply = await sock.waitFor('newMessage', m => m.chat_id === bot.id && m.sent === 0 && m.id > sent.id);
+        const reply = await sock.waitFor('newMessage', m => m.chat_id === bot.id && m.sent === 0 && m.seq > sent.seq);
         assert.ok(reply.text.length > 0);
         const { messages } = await a.messages(bot.id);
         assert.ok(messages.some(m => m.id === reply.id && m.text === reply.text));

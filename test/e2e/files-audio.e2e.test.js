@@ -148,7 +148,7 @@ test('обычные вложения по-прежнему принимаютс
     const files = listUploads();
     assert.strictEqual(files.length, accepted.length, files.join(', '));
     assert.ok(files.every(name => !name.includes('-cleaned-')), files.join(', '));
-    assert.ok(files.every(name => /^\d{13}-[0-9a-f]{24}\.[a-z0-9]{3,4}$/.test(name)), files.join(', '));
+    assert.ok(files.every(name => /^[0-9a-f]{32}\.[a-z0-9]{3,4}$/.test(name)), files.join(', '));
 });
 
 test('файл пропал с диска: /uploads отвечает JSON-404, а не «скачиваемым файлом»', async () => {

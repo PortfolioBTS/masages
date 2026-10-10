@@ -34,6 +34,15 @@
 //     использованных ключей (прямая секретность); раз в 7 дней сессия
 //     перезапускается новым PQXDH.
 //   - Повтор конверта под другим messageId распознаётся ('replay').
+//   - Содержимое привязано к сообщению (docs/security/message-ordering.md,
+//     раздел 9): внутри шифротекста лежат mid (id сообщения, который клиент
+//     выбирает ДО шифрования), ts (время отправителя) и признак правки e.
+//     Получатель после расшифровки и проверки подписи, но ДО любой записи в
+//     таблицы seen и edit, проверяет: mid равен id строки ('id-mismatch'), автор
+//     не сменился ('sender-mismatch'), правка не старее показанной версии
+//     ('stale-edit'); сообщение без mid отвергается ('no-mid'). Сервер не может
+//     ни выдать конверт под чужим id, ни перенести правку на другое сообщение,
+//     ни откатить правку у того, кто видел новую.
 //   - Текст дополняется по схеме Padmé (минимум 256 байт); файлы шифруются
 //     AES-256-GCM на клиенте, ключ едет внутри E2EE-сообщения.
 //   - Клиент помнит состав комнаты: новые участники видны (атака
@@ -59,8 +68,13 @@
 //   - Первый контакт — TOFU: пока коды безопасности не сверены, MITM со
 //     стороны сервера на первом контакте не исключён.
 //   - Одно устройство на аккаунт (identity на сервере — одна запись).
-//   - Подмену текста сообщения его же старой правкой (тот же messageId) не
-//     распознать; таблица повторов ограничена 5000 итерациями на ключ.
+//   - Откат правки и подмену автора правки распознаёт только клиент, у которого
+//     есть запись о версии сообщения (edit:<комната>:<mid>, не больше 5000 на
+//     комнату; вытесняется запись с наименьшим ts): первое появление сообщения,
+//     очищенное хранилище или вытеснение дают принять любую версию, прошедшую
+//     проверки mid и ts. Таблица повторов ограничена 5000 итерациями на ключ.
+//   - Порядок и пропажу сообщений не проверяем: сервер может переставить,
+//     задержать или скрыть сообщение (раздел 9.6 контракта).
 
 (function (root, factory) {
     if (typeof module !== 'undefined' && module.exports) {
@@ -97,6 +111,8 @@
     const MAX_PW_SKIP = 1000;
     const MAX_ARCHIVED_KEYS = 3;
     const MAX_SEEN_PER_KEY = 5000;
+    // Записей о версиях сообщений (mid → автор, ts, ключ, итерация) на комнату.
+    const MAX_EDIT_ENTRIES = 5000;
     const MAX_SEEN_EPHEMERAL = 64;
     const MAX_PENDING_SHARES = 50;
 
@@ -142,10 +158,11 @@
     //   protocol    — ответ не того формата или ключ неверной длины.
     const ERROR_CODES = Object.freeze(['unsupported', 'storage', 'network', 'server', 'protocol']);
 
-    // Заготовка: пока нигде не бросается. init() и транспорт перейдут на неё
-    // вместе с типизацией ошибок инициализации; класс и коды уже входят в API
-    // модуля, чтобы script.js и тесты могли на них ссылаться. status — HTTP-
-    // статус для network/server, у остальных кодов его нет.
+    // Пока бросается encryptOutgoing без корректного messageId (protocol).
+    // init() и транспорт перейдут на неё вместе с типизацией ошибок
+    // инициализации; класс и коды уже входят в API модуля, чтобы script.js и
+    // тесты могли на них ссылаться. status — HTTP-статус для network/server, у
+    // остальных кодов его нет.
     class E2eeError extends Error {
         constructor(code, message, { status, cause } = {}) {
             super(message || ('E2EE: ' + code), cause === undefined ? undefined : { cause });
@@ -489,27 +506,52 @@
         return { mime, name, size, key, iv };
     }
 
-    function encodeContent(content) {
-        if (typeof content === 'string') return { t: 'text', b: content };
+    // Формат содержимого (message-ordering.md, раздел 9.1):
+    //   { t:'text', b, mid, ts, e?:1 }
+    //   { t:'file', mime, name, size, key, iv, caption, mid, ts }
+    // mid — String(id сообщения), ts — время отправителя в мс, e:1 — правка
+    // (правятся только текстовые сообщения).
+    function encodeContent(content, { mid, ts, edit = false }) {
+        if (typeof content === 'string') {
+            const text = { t: 'text', b: content, mid, ts };
+            if (edit) text.e = 1;
+            return text;
+        }
         if (content && typeof content === 'object' && content.type === 'file') {
+            if (edit) throw new Error('E2EE: правятся только текстовые сообщения');
             const file = normalizeFileDescriptor(content);
             if (!file) throw new Error('E2EE: некорректное описание файла');
             const caption = content.caption === undefined || content.caption === null ? '' : content.caption;
             if (typeof caption !== 'string') throw new Error('E2EE: подпись к файлу должна быть строкой');
-            return { t: 'file', mime: file.mime, name: file.name, size: file.size, key: file.key, iv: file.iv, caption };
+            return { t: 'file', mime: file.mime, name: file.name, size: file.size, key: file.key, iv: file.iv, caption, mid, ts };
         }
         throw new Error('E2EE: неподдерживаемое содержимое сообщения');
     }
 
+    // Разбор формы содержимого. mid и ts здесь не проверяются: это делает
+    // decryptIncoming по порядку раздела 9.4 (сначала 'no-mid', потом
+    // 'id-mismatch', потом 'bad-plaintext' для ts). Признак правки допустим
+    // только у текста.
     function decodeContent(obj) {
         if (!obj || typeof obj !== 'object') return null;
-        if (obj.t === 'text' && typeof obj.b === 'string') return { text: obj.b };
-        if (obj.t === 'file') {
+        let content;
+        if (obj.t === 'text' && typeof obj.b === 'string') {
+            content = { text: obj.b, edit: obj.e === 1 };
+        } else if (obj.t === 'file') {
             const file = normalizeFileDescriptor(obj);
-            if (!file || typeof obj.caption !== 'string') return null;
-            return { text: obj.caption, file };
+            if (!file || typeof obj.caption !== 'string' || obj.e !== undefined) return null;
+            content = { text: obj.caption, file, edit: false };
+        } else {
+            return null;
         }
-        return null;
+        content.mid = obj.mid;
+        content.ts = obj.ts;
+        return content;
+    }
+
+    // Id сообщения (раздел 6.1): строка ^[1-9]\d{6,9}$, не больше 2^31-1.
+    function isValidMessageId(value) {
+        return typeof value === 'string' && /^[1-9]\d{6,9}$/.test(value) && Number(value) <= 2147483647;
     }
 
     // ===================== Файлы =====================
@@ -645,7 +687,10 @@
                 const db = await openDb();
                 return new Promise((resolve, reject) => {
                     const out = [];
-                    const req = db.transaction('kv', 'readonly').objectStore('kv').openCursor();
+                    // Диапазон по префиксу: курсор не обходит всё хранилище (записи о
+                    // версиях сообщений edit:<комната>:<mid> — тысячи ключей).
+                    const range = IDBKeyRange.bound(prefix, prefix + '\uffff');
+                    const req = db.transaction('kv', 'readonly').objectStore('kv').openCursor(range);
                     req.onsuccess = () => {
                         const cursor = req.result;
                         if (!cursor) return resolve(out);
@@ -1891,9 +1936,61 @@
 
         // ---- Шифрование/расшифровка сообщений чата ----
 
-        async function encryptOutgoing(roomId, content) {
+        // ---- Записи о версиях сообщений (раздел 9.3 контракта) ----
+        //
+        // edit:<комната>:<mid> = { author, ts, keyId, it } — последняя принятая
+        // версия сообщения с этим mid: автор (числовой id пользователя), ts,
+        // senderKeyId и итерация конверта. Запись создаётся при первой принятой
+        // расшифровке сообщения (оригинала или правки), а не только правок: иначе
+        // первая правка не с чем было бы сверять. По записи на mid — запись одной
+        // версии не переписывает всю карту. Предел MAX_EDIT_ENTRIES на комнату,
+        // вытесняется запись с наименьшим ts: вытесненный mid теряет защиту от
+        // отката и подмены автора. Функции *Locked — только внутри withLock.
+        const editPrefix = (roomId) => 'edit:' + roomId + ':';
+        const editName = (roomId, mid) => editPrefix(roomId) + mid;
+        // Сколько записей в комнате было при последнем пересчёте. Чужая вкладка
+        // может дописать своих — тогда при достижении предела пересчитаем по хранилищу.
+        const editCounts = new Map();
+
+        async function writeEditEntryLocked(roomId, mid, entry) {
+            await storage.set(editName(roomId, mid), entry);
+            let count = editCounts.has(roomId) ? editCounts.get(roomId) + 1 : (await storage.keys(editPrefix(roomId))).length;
+            if (count > MAX_EDIT_ENTRIES) {
+                const names = await storage.keys(editPrefix(roomId));
+                count = names.length;
+                if (count > MAX_EDIT_ENTRIES) {
+                    const entries = [];
+                    for (const name of names) {
+                        const item = await storage.get(name);
+                        entries.push({ name, ts: item && Number.isFinite(item.ts) ? item.ts : -1 });
+                    }
+                    entries.sort((a, b) => a.ts - b.ts);
+                    for (const victim of entries.slice(0, count - MAX_EDIT_ENTRIES)) await storage.delete(victim.name);
+                    count = MAX_EDIT_ENTRIES;
+                }
+            }
+            editCounts.set(roomId, count);
+        }
+
+        // options: { messageId, edit? }. messageId обязателен (строка по формату
+        // 6.1: id сообщения, который клиент выбрал ДО шифрования и отправит на
+        // сервер как clientMessageId), иначе E2eeError('protocol'): содержимое
+        // без mid получатель всё равно отвергнет ('no-mid'). ts = now() для нового
+        // сообщения; для правки (edit:true) — max(now(), ts известной версии + 1),
+        // чтобы правка при отстающих часах не выглядела старой ('stale-edit').
+        async function encryptOutgoing(roomId, content, options = {}) {
+            const messageId = options ? options.messageId : undefined;
+            if (!isValidMessageId(messageId)) {
+                throw new E2eeError('protocol', 'E2EE: не указан идентификатор сообщения (messageId)');
+            }
+            const edit = Boolean(options.edit);
             await ensureLocal();
-            const padded = padMessage(utf8encode(JSON.stringify(encodeContent(content))));
+            let ts = Math.max(0, Math.trunc(now()));
+            if (edit) {
+                const known = await withLock(() => storage.get(editName(roomId, messageId)));
+                if (known && Number.isSafeInteger(known.ts)) ts = Math.max(ts, known.ts + 1);
+            }
+            const padded = padMessage(utf8encode(JSON.stringify(encodeContent(content, { mid: messageId, ts, edit }))));
             const { state, iteration, messageKey } = await withLock(async () => {
                 const st = await loadOwnSenderKeyLocked(roomId);
                 if (!st) throw new Error('E2EE: для этой комнаты ещё не создан Sender Key — вызовите ensureRoomSession()');
@@ -1922,10 +2019,23 @@
             return envelope;
         }
 
-        // messageId (id сообщения на сервере) нужен для защиты от повтора:
-        // пара (senderKeyId, iteration) привязывается к первому messageId, с
-        // которым её расшифровали, и под другим id конверт не принимается.
+        // messageId (id сообщения на сервере, строка) нужен для защиты от повтора
+        // и подмены: пара (senderKeyId, iteration) привязывается к первому
+        // messageId, с которым её расшифровали, и под другим id конверт не
+        // принимается; mid внутри содержимого обязан равняться messageId.
         // Правка — новая итерация для того же messageId, это легально.
+        //
+        // Порядок проверок раздела 9.4 после расшифровки и проверки подписи, ДО
+        // любой записи в seen и в записи о версиях (иначе сервер «отравил» бы эти
+        // таблицы конвертом, который потом не пройдёт проверку):
+        //   1. нет mid                                    → 'no-mid'
+        //   2. mid не равен messageId                     → 'id-mismatch'
+        //   3. ts не безопасное целое ≥ 0                 → 'bad-plaintext'
+        //   4. запись о версии: нет — принять; другой автор — 'sender-mismatch';
+        //      та же версия — принять; правка — 'stale-edit', если ts не больше
+        //      известного; оригинал с другой итерацией — 'id-mismatch'
+        //   5. запись seen, затем записи о версии.
+        // Результат: { ok:true, text, file?, senderId, ts, edit } или { ok:false, reason }.
         async function decryptIncoming(roomId, senderId, text, messageId) {
             const bad = { ok: false, reason: 'bad-envelope' };
             let envelope;
@@ -1991,7 +2101,7 @@
                 }
                 if (!messageKey) return { ok: false, reason: 'no-message-key' };
 
-                let result;
+                let content;
                 try {
                     if (version === 2) {
                         const aesKey = await hkdf(messageKey, ZERO32, 'nyxo-e2ee-msgkey-v2', 32);
@@ -2002,23 +2112,50 @@
                             try { decoded = decodeContent(JSON.parse(utf8decode(body))); } catch { decoded = null; }
                         }
                         if (!decoded) return { ok: false, reason: 'bad-plaintext' };
-                        result = decoded.file
-                            ? { ok: true, text: decoded.text, file: decoded.file }
-                            : { ok: true, text: decoded.text };
+                        content = decoded;
                     } else {
                         const aesKey = await hkdf(messageKey, ZERO32, 'nyxo-e2ee-msgkey-v1', 32);
                         const pt = await aesGcmDecrypt(aesKey, iv, ct, msgAadV1(roomId, senderId, envelope.senderKeyId));
-                        result = { ok: true, text: utf8decode(pt) };
+                        // Конверт прежнего формата не несёт mid: сообщений без mid нет (R0).
+                        content = { text: utf8decode(pt), mid: undefined, ts: undefined, edit: false };
                     }
                 } catch {
                     return { ok: false, reason: 'decrypt-failed' };
                 }
 
-                if (boundId !== null && bound === undefined) {
+                // ---- Проверки получателя 9.4: до любой записи в seen и в записи о версии ----
+                if (content.mid === undefined || content.mid === null) return { ok: false, reason: 'no-mid' };
+                if (boundId === null || String(content.mid) !== boundId) return { ok: false, reason: 'id-mismatch' };
+                if (!Number.isSafeInteger(content.ts) || content.ts < 0) return { ok: false, reason: 'bad-plaintext' };
+                const author = Number(senderId);
+                const entryName = editName(roomId, boundId);
+                const known = await storage.get(entryName);
+                let newEntry = null;
+                if (!known) {
+                    newEntry = { author, ts: content.ts, keyId: envelope.senderKeyId, it: iteration };
+                } else if (Number(known.author) !== author) {
+                    return { ok: false, reason: 'sender-mismatch' };
+                } else if (known.keyId === envelope.senderKeyId && known.it === iteration) {
+                    // Повторный показ той же версии: запись не меняется.
+                } else if (content.edit) {
+                    if (!(content.ts > known.ts)) return { ok: false, reason: 'stale-edit' };
+                    newEntry = { author, ts: content.ts, keyId: envelope.senderKeyId, it: iteration };
+                } else {
+                    return { ok: false, reason: 'id-mismatch' };
+                }
+
+                // ---- Запись: seen (как раньше), затем запись о версии ----
+                if (bound === undefined) {
                     seen[iteration] = boundId;
                     trimNumericMap(seen, MAX_SEEN_PER_KEY);
                     await storage.set(seenName, seen);
                 }
+                if (newEntry) await writeEditEntryLocked(roomId, boundId, newEntry);
+                const result = { ok: true, text: content.text };
+                if (content.file) result.file = content.file;
+                result.senderId = author;
+                result.ts = content.ts;
+                result.edit = content.edit;
                 return result;
             });
         }
@@ -2064,7 +2201,7 @@
         // Очистка локальных данных (выход с удалением данных, удаление аккаунта)
         deleteLocalData,
 
-        // Ошибки (заготовка: пока нигде не бросаются)
+        // Ошибки (пока бросает только encryptOutgoing: 'protocol' без messageId)
         E2eeError,
         ERROR_CODES,
 
@@ -2087,6 +2224,7 @@
             // Пределы и сроки
             MAX_SKIP,
             MAX_PW_SKIP,
+            MAX_EDIT_ENTRIES,
             PREKEY_ROTATE_MS,
             PREKEY_RETAIN_MS,
 

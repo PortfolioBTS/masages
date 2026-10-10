@@ -32,9 +32,12 @@ function makeFakeServer() {
     const userChats = new Map(); // userId -> Map<chatId, roomId>
     const keyShares = []; // {id, roomId, senderId, recipientId, ciphertext}
     const deliveredKeyShares = []; // всё, что уже забрали получатели (для повторов)
-    const messages = new Map(); // id -> {id, roomId, senderId, text}
+    const messages = new Map(); // id (строка) -> {id, roomId, senderId, text}
     let nextShareId = 1;
-    let nextMessageId = 1;
+    // Id сообщений как у настоящего сервера (message-ordering.md, 6.1): строка из
+    // 7-10 цифр. Клиент выбирает id ДО шифрования (mid внутри содержимого), сервер
+    // кладёт сообщение под присланным id.
+    let nextMessageId = 1000001;
 
     // Подмены злонамеренного сервера.
     const impersonations = new Map(); // victimId -> attackerId (чьи ключи отдаются вместо victim)
@@ -212,20 +215,25 @@ function makeFakeServer() {
     }
 
     // Простейшее хранилище сообщений комнаты — ради сценариев повтора.
-    function postMessage(roomId, senderId, text) {
-        const id = nextMessageId++;
+    function newMessageId() {
+        return String(nextMessageId++);
+    }
+
+    function postMessage(roomId, senderId, text, id = newMessageId()) {
+        id = String(id);
+        if (messages.has(id)) throw new Error('id занят: ' + id);
         messages.set(id, { id, roomId, senderId, text });
         return id;
     }
 
     function editMessage(id, text) {
-        const m = messages.get(id);
+        const m = messages.get(String(id));
         if (!m) throw new Error('no message ' + id);
         m.text = text;
     }
 
     function getMessage(id) {
-        const m = messages.get(id);
+        const m = messages.get(String(id));
         return m ? Object.assign({}, m) : null;
     }
 
@@ -255,7 +263,7 @@ function makeFakeServer() {
         },
         // Повтор конверта: тот же текст под новым id сообщения.
         replayMessage(id) {
-            const m = messages.get(id);
+            const m = messages.get(String(id));
             if (!m) throw new Error('no message ' + id);
             return postMessage(m.roomId, m.senderId, m.text);
         },
@@ -270,7 +278,7 @@ function makeFakeServer() {
         // как userId, но не перезаписывает зарегистрированные ключи жертвы.
         shadowTransportFor(userId) { return transportFor(userId, { shadow: true }); },
         addParticipant, removeParticipant, participantsOf,
-        postMessage, editMessage, getMessage,
+        newMessageId, postMessage, editMessage, getMessage,
         evil,
         _rooms: rooms,
         _keyShares: keyShares,

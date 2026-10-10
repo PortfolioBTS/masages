@@ -91,6 +91,14 @@ function createTimeHelpers(db) {
             ), `сообщение ${messageId}`);
         },
 
+        // Надгробие id удалённого сообщения (message_tombstones) — на ms раньше:
+        // 31 сутки назад id освобождается, очистка надгробий уберёт строку.
+        async rewindTombstone(messageId, ms) {
+            assertUpdated(await db.query(
+                `UPDATE message_tombstones SET expires_at = expires_at - ${SHIFT('$2')} WHERE id = $1`, [messageId, ms]
+            ), `надгробие ${messageId}`);
+        },
+
         // Срок исчезающего сообщения уже вышел: его удалит очистка сервера
         // (CLEANUP_INTERVAL_MS, в тестах 500 мс). Колонка без часового пояса —
         // время считается в самом Postgres, как у сервера.
