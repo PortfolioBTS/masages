@@ -60,7 +60,8 @@ test('GET /: страница, CSP и Permissions-Policy с microphone=()', asyn
     const csp = res.headers.get('content-security-policy');
     assert.ok(csp, 'нет Content-Security-Policy');
     assert.match(csp, /default-src 'self'/);
-    assert.match(csp, /script-src 'self' 'nonce-[A-Za-z0-9+/=]+'/);
+    assert.match(csp, /script-src 'self'(;|$)/, 'script-src — только self: без nonce и strict-dynamic');
+    assert.doesNotMatch(csp, /nonce-|strict-dynamic|unsafe-inline/);
     assert.match(csp, /object-src 'none'/);
     assert.match(res.headers.get('permissions-policy'), /microphone=\(\)/);
 });

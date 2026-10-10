@@ -1217,15 +1217,15 @@ app.use((req, res, next) => {
     res.set('Expires', '0');
     res.set('Surrogate-Control', 'no-store');
     res.set('X-Robots-Tag', 'noindex, nofollow');
-    const nonce = crypto.randomBytes(16).toString('base64');
-    res.locals.cspNonce = nonce;
     // Политика — buildContentSecurityPolicy (lib/security-utils.js). Без
-    // 'unsafe-inline' в style-src и без "ws: wss:" (любой хост) в
-    // connect-src: только WebSocket своего хоста. Схема ws/wss — по тому,
-    // как страница открыта: onion-сервис отдаётся по http (TLS там даёт сам
-    // Tor), хотя onionMiddleware и помечает такой запрос защищённым.
+    // 'unsafe-inline' в script-src и style-src (инлайн-кода в index.html нет,
+    // поэтому nonce не нужен — а значит, нет и шаблонизации страницы: она
+    // отдаётся статикой байт-в-байт, и её хэш из манифеста клиента сверяется
+    // с релизом) и без "ws: wss:" (любой хост) в connect-src: только
+    // WebSocket своего хоста. Схема ws/wss — по тому, как страница открыта:
+    // onion-сервис отдаётся по http (TLS там даёт сам Tor), хотя
+    // onionMiddleware и помечает такой запрос защищённым.
     res.set('Content-Security-Policy', buildContentSecurityPolicy({
-        nonce,
         host: req.headers.host,
         secure: req.secure && !req.isOnion,
     }));
@@ -1268,6 +1268,13 @@ function setRevalidateCacheHeaders(res, isPrivate) {
 app.use(express.static(path.join(__dirname, 'public'), {
     setHeaders: (res) => setRevalidateCacheHeaders(res, false),
 }));
+
+// /link.my раньше отдавал index.html со вставленным nonce. Теперь страница
+// всегда статическая, один адрес — «/»; старые закладки уходят туда 301.
+// Относительный Location: адрес хоста из запроса в ответ не попадает.
+app.get('/link.my', (req, res) => {
+    res.redirect(301, '/');
+});
 
 // Маршруты из lib/routes/ (см. lib/routes/index.js): здесь — те, которым
 // сессия не нужна; ниже, после лимитера /api/, — обычные маршруты API.
@@ -1365,24 +1372,6 @@ app.get('/uploads/:filename', async (req, res) => {
         }
     });
 });
-
-app.get('/link.my', (req, res) => {
-    serveIndexWithNonce(req, res);
-});
-
-function serveIndexWithNonce(req, res) {
-    const nonce = res.locals.cspNonce || '';
-    const indexPath = path.join(__dirname, 'public', 'index.html');
-    fs.readFile(indexPath, 'utf8', (err, html) => {
-        if (err) return res.status(500).send('Server error');
-        const injected = html
-            .replace(/<script(?![^>]*\bnonce=)/g, `<script nonce="${nonce}"`)
-            .replace(/<style(?![^>]*\bnonce=)/g, `<style nonce="${nonce}"`)
-            .replace(/<link([^>]*rel=["']stylesheet["'][^>]*)(?![^>]*\bnonce=)>/g, `<link$1 nonce="${nonce}">`);
-        res.setHeader('Content-Type', 'text/html');
-        res.send(injected);
-    });
-}
 
 // ---- Текст сообщения в БД: шифрование at rest с AAD ----
 //
@@ -3814,7 +3803,7 @@ function onServerListening() {
     console.log('  + Очистка метаданных и обезличенные имена вложений');
     console.log('  + Исчезающие сообщения, физическое удаление');
     console.log('  + Шифрование текста сообщений в БД (AES-256-GCM с привязкой к комнате)');
-    console.log('  + CSP с nonce, заголовки приватности' + (IS_PRODUCTION ? ', HSTS по https' : ''));
+    console.log('  + CSP без inline-кода, заголовки приватности' + (IS_PRODUCTION ? ', HSTS по https' : ''));
     console.log('  + E2EE: ключи во встроенном хранилище (эта же база)');
     if (ONION_ADDRESS && ONION_PORT) console.log(`  + Onion-сервис: http://${ONION_ADDRESS} (внутренний порт ${ONION_PORT})`);
     console.log(`\n${'='.repeat(60)}\n`);
