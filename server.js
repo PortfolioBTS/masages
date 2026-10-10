@@ -770,7 +770,11 @@ async function initDatabase() {
             -- порядок задаёт seq, точное время лежит только внутри E2EE-конверта
             created_at TIMESTAMPTZ NOT NULL DEFAULT date_trunc('minute', now()),
             -- размер вложения — для квоты UPLOAD_QUOTA_MB
-            file_size BIGINT
+            file_size BIGINT,
+            -- В комнате только E2EE-конверты (roadmap R7). Маршруты это уже
+            -- проверяют (lib/e2ee-envelope.js); ограничение — второй рубеж на
+            -- случай ошибки в коде: открытый текст комнаты не ляжет в базу вовсе.
+            CONSTRAINT messages_room_e2ee CHECK (room_id IS NULL OR encrypted)
         )
     `);
 

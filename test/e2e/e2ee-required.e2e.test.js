@@ -237,20 +237,16 @@ test('правка: новый конверт правильной формы п
     const history = (await p.member.messages(p.memberChat.id)).messages.find(m => m.id === sent.id);
     assert.strictEqual(history.text, fakeEnvelope('вторая версия'));
 
-    // Открытое сообщение в комнате: в базе его быть не должно (R0), но если оно есть, править его нельзя.
-    const legacyId = '7654321';
-    await suite.query(
-        `INSERT INTO messages (id, chat_id, room_id, user_id, text, sent, status, encrypted)
-         VALUES ($1, $2, $3, $4, $5, 1, 'sent', FALSE)`,
-        [legacyId, p.ownerChat.id, p.roomId, p.owner.user.id, 'открытый текст']
+    // Открытое сообщение в комнате не ляжет в базу даже в обход маршрутов:
+    // CHECK messages_room_e2ee (второй рубеж к проверкам маршрутов).
+    await assert.rejects(
+        suite.query(
+            `INSERT INTO messages (id, chat_id, room_id, user_id, text, sent, status, encrypted)
+             VALUES ($1, $2, $3, $4, $5, 1, 'sent', FALSE)`,
+            ['7654321', p.ownerChat.id, p.roomId, p.owner.user.id, 'открытый текст']
+        ),
+        (err) => err.code === '23514' && err.constraint === 'messages_room_e2ee'
     );
-    const legacy = await p.owner.put(`/api/messages/${legacyId}`, { text: fakeEnvelope('превращаю в шифрованное') });
-    assert.strictEqual(legacy.status, 400);
-    assert.strictEqual(legacy.body.code, 'e2ee-required');
-    const legacyPlain = await p.owner.put(`/api/messages/${legacyId}`, { text: 'открытая правка' });
-    assert.strictEqual(legacyPlain.status, 400);
-    assert.strictEqual(legacyPlain.body.code, 'e2ee-required');
-    assert.strictEqual((await suite.query('SELECT edited_at FROM messages WHERE id = $1', [legacyId])).rows[0].edited_at, null);
 });
 
 // ---------- чат с ботом ----------
