@@ -621,7 +621,9 @@ async function main() {
         assert.strictEqual(env.v, 2);
         assert.strictEqual(env.init.type, 'x3dh-init');
         assert.strictEqual(unb64(env.init.pqCiphertext).length, 1088);
-        assert.strictEqual(env.init.usedPqPrekeyId, ctx.server._pqPrekeys.get(2).key_id);
+        // Пока у Bob есть одноразовые PQ-prekey, Alice берёт один из них, а не запасной.
+        assert.strictEqual(env.init.pqOneTime, true);
+        assert.notStrictEqual(env.init.usedPqPrekeyId, ctx.server._pqPrekeys.get(2).key_id);
         const aliceIdentity = await getStored(ctx.alice, 'identity');
         assert.strictEqual(env.init.senderIdentitySignPub, aliceIdentity.signPub);
         assert.strictEqual(env.init.senderIdentityDhPub, aliceIdentity.dhPub);
@@ -684,6 +686,8 @@ async function main() {
 
     await test('PQXDH: forged PQ-prekey signature in bundle is refused', async () => {
         const ctx = await setupPair();
+        // Запасной (last-resort) ключ используется, когда одноразовых нет.
+        ctx.server.evil.stripPqOneTime(2);
         const t = ctx.server.transportFor(1);
         const realGetBundle = t.getBundle;
         t.getBundle = async (id) => {

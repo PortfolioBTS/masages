@@ -438,7 +438,7 @@ E2EE.createClient({ storage, userId, lock });
 | `users.last_active_at` | шаг 5 минут | **вверх** | T1.1 (R2) |
 | `message_expiry.expires_at` | минуты | **вверх**: `date_trunc('minute', now() + срок) + interval '1 minute'`. Таймер в памяти точный, после перезапуска удаление не позже чем на минуту позже | T2.1 |
 | строки `session` | огрублено | `NyxoPgStore` огрубляет `expire` и `originalMaxAge`, `createdAt` не хранит | T1.1 (R2) |
-| `identity_keys`, `signed_prekeys`, `signed_pq_prekeys`, `one_time_prekeys` `.created_at/.updated_at` | день, либо колонка удаляется | вниз | T3.2 |
+| `identity_keys`, `signed_prekeys`, `signed_pq_prekeys`, `one_time_prekeys`, `pq_one_time_prekeys` | столбцов времени нет вовсе (убраны в T3.2: срок жизни prekey решает клиент, серверу время не нужно) | — | T3.2 |
 | `message_tombstones.expires_at` | сутки | вверх (31 сутки от дня удаления) | T2.1 |
 | имена загруженных файлов | без времени | случайное имя без `Date.now()` | T2.1 |
 | `mtime` и `atime` файлов вложений | час | вниз (`fs.utimes`); уборщик файлов-сирот учитывает округление: порог возраста не меньше двух часов | T2.1 |

@@ -28,6 +28,12 @@
 //   - PQXDH: к X3DH добавлен ML-KEM-768 по PQ-prekey, подписанному identity —
 //     защита от "перехватить сейчас, расшифровать потом". Отката на
 //     классический X3DH нет, поэтому сервер не может понизить версию.
+//     Каждому инициатору сервер отдаёт одноразовый PQ-prekey (подпись identity
+//     с меткой домена и key_id), получатель удаляет его секрет после первого
+//     же применённого share — перехваченный позже share расшифровать нечем.
+//     Когда одноразовые кончились, берётся запасной подписанный PQ-prekey
+//     (он живёт до ротации, раз в 7 дней). Пул одноразовых ключей пополняется
+//     при init() и целиком заменяется раз в 30 дней.
 //   - AD ключевого обмена включает identity-ключи обеих сторон.
 //   - SPK и PQ-prekey ротируются раз в 7 дней (старые приватные живут ещё
 //     14). Канал key-share — симметричная KDF-цепочка с удалением
@@ -56,6 +62,10 @@
 //     ключи, класс размера сообщения/файла (после Padmé), состав комнат.
 //   - Состав комнаты задаёт сервер; клиент лишь делает изменения видимыми
 //     (newMembers/removedMembers), решение остаётся за пользователем.
+//   - Сервер может "сжечь" одноразовые prekey без использования (выдать bundle
+//     и не доставить share) или вовсе не выдавать их: тогда инициаторы берут
+//     запасной PQ-prekey, у которого нет одноразовости, — не хуже, чем было до
+//     одноразовых ключей. Секреты, выданные вхолостую, стираются при замене пула.
 //   - Нет post-compromise security для Sender Keys: утёкший ключ цепочки
 //     читает всё будущее до ротации (ротация — при уходе участника или
 //     вручную через rotateRoomKey()).
@@ -139,6 +149,14 @@
 
     const LOW_WATER_OPK = 10;
     const TOPUP_OPK = 30;
+    // Одноразовые PQ-prekey: пополнение, когда на сервере осталось меньше
+    // LOW_WATER_PQ_OPK, до TOPUP_PQ_OPK штук, пачками по PQ_OPK_BATCH (около
+    // 17 КБ JSON). Раз в PQ_OPK_REFRESH_MS пул заменяется целиком: ключи,
+    // которые сервер «сжёг» без использования, не копятся в хранилище.
+    const LOW_WATER_PQ_OPK = 5;
+    const TOPUP_PQ_OPK = 20;
+    const PQ_OPK_BATCH = 10;
+    const PQ_OPK_REFRESH_MS = 30 * DAY_MS;
     const SCHEMA_VERSION = 2;
 
     // ---- Причины отказа в обмене ключами (тексты для интерфейса) ----
@@ -306,6 +324,11 @@
 
     function u32le(n) {
         return new Uint8Array([n & 0xff, (n >>> 8) & 0xff, (n >>> 16) & 0xff, (n >>> 24) & 0xff]);
+    }
+
+    // Целое до 2^53 в восемь байт, старшие первыми: u32be(n div 2^32) ‖ u32be(n mod 2^32).
+    function u64be(n) {
+        return concatBytes(u32be(Math.floor(n / 0x100000000)), u32be(n >>> 0));
     }
 
     function toBytes(data) {
@@ -824,6 +847,8 @@
             async putSignedPrekey(body) { return call('/api/keys/signed-prekey', 'PUT', body); },
             async putPqPrekey(body) { return call('/api/keys/pq-prekey', 'PUT', body); },
             async postOneTimePrekeys(body) { return call('/api/keys/one-time-prekeys', 'POST', body); },
+            async postPqOneTimePrekeys(body) { return call('/api/keys/pq-one-time-prekeys', 'POST', body); },
+            async deletePqOneTimePrekeys() { return call('/api/keys/pq-one-time-prekeys', 'DELETE'); },
             async getOneTimePrekeyCount() { return call('/api/keys/one-time-prekeys/count', 'GET'); },
             async getBundle(targetUserId) { return call('/api/keys/bundle/' + encodeURIComponent(targetUserId), 'GET'); },
             async getIdentities(ids) {
@@ -852,6 +877,16 @@
     }
 
     // ===================== Форматы конвертов =====================
+
+    // Подпись одноразового PQ-prekey: Ed25519(IK, метка ‖ u64be(key_id) ‖ pk).
+    // Метка и привязка к key_id отличают её от подписи SPK (32 байта) и PQ
+    // last-resort («сырые» 1184 байта): сервер не может выдать один вид ключа
+    // за другой, а подпись нельзя перенести на другой key_id. Все части
+    // фиксированной длины (14 + 8 + 1184).
+    const PQ_OPK_LABEL = utf8encode('nyxo-pqopk-v1\0');
+    function pqOneTimeSigInput(keyId, publicKey) {
+        return concatBytes(PQ_OPK_LABEL, u64be(keyId), publicKey);
+    }
 
     function sigInputV1(iv, ct, iteration) {
         // v1 подписывал iteration в порядке байт платформы (Uint32Array) —
@@ -906,9 +941,14 @@
         const pqCt = decodeFixed(h.pqCiphertext, PQ_CIPHERTEXT_BYTES);
         if (!signPub || !dhPub || !eph || !pqCt) return null;
         if (!isKeyId(h.usedSignedPrekeyId) || !isKeyId(h.usedPqPrekeyId) || (opkId !== null && !isKeyId(opkId))) return null;
+        // pqOneTime: true — usedPqPrekeyId указывает на одноразовый PQ-prekey
+        // (pqopk:<id>), иначе на запасной (pqpk). Поле в заголовок не
+        // подписано, но подмена безвредна: с ключом не той роли общий секрет
+        // ML-KEM не сойдётся (implicit rejection) и AEAD отвергнет share.
+        const pqOneTime = h.pqOneTime === true;
         return {
             n: env.n, iv, ct,
-            init: { signPub, dhPub, eph, spkId: h.usedSignedPrekeyId, opkId, pqId: h.usedPqPrekeyId, pqCt },
+            init: { signPub, dhPub, eph, spkId: h.usedSignedPrekeyId, opkId, pqId: h.usedPqPrekeyId, pqOneTime, pqCt },
         };
     }
 
@@ -1143,7 +1183,10 @@
         // Секретный ключ ML-KEM восстанавливается из 64-байтового seed
         // детерминированно; держим пару последних в памяти.
         const pqSecretCache = new Map();
-        async function pqSecretKey(seedB64) {
+        // cache: false — для одноразовых ключей: секретный ключ не должен
+        // пережить декапсуляцию в памяти (вызывающий затирает его fill(0)).
+        async function pqSecretKey(seedB64, { cache = true } = {}) {
+            if (!cache) return (await getKem().keygen(b64decode(seedB64))).secretKey;
             let sk = pqSecretCache.get(seedB64);
             if (!sk) {
                 sk = (await getKem().keygen(b64decode(seedB64))).secretKey;
@@ -1243,6 +1286,11 @@
                     try { await transport.deleteKeys(); } catch { /* best effort */ }
                 }
                 await putIdentity(identity);
+                // Секретные части одноразовых ключей прошлой установки тоже
+                // бесполезны (на сервере их публичные половины стёрты), а
+                // лежать в хранилище им незачем. До записи up:identity: если
+                // вкладку закроют посреди, следующий init повторит всё сначала.
+                await withLock(wipeOneTimeSecretsLocked);
                 await storage.set('up:identity', idTag);
                 await storage.delete('up:spk');
                 await storage.delete('up:pq');
@@ -1278,9 +1326,135 @@
             if (keys.length > 0) await transport.postOneTimePrekeys({ keys });
         }
 
+        // ---- Пул одноразовых PQ-prekey ----
+        //
+        // Секрет каждого ключа — 64-байтовое семя ML-KEM в
+        // pqopk:<keyId> = { seed, createdAt, retiredAt? }; публичная часть и
+        // подпись уходят на сервер, который отдаёт каждый ключ ровно одному
+        // инициатору. После использования (commit() в openShareLocked) семя
+        // удаляется. pqopk:refreshedAt — время последней замены пула целиком.
+        // Все функции *Locked вызываются только внутри withLock.
+
+        const PQ_OPK_REFRESHED = 'pqopk:refreshedAt';
+        const PQ_OPK_NAME = /^pqopk:\d+$/;
+
+        async function pqOneTimeNamesLocked() {
+            return (await storage.keys('pqopk:')).filter(name => PQ_OPK_NAME.test(name));
+        }
+
+        // Секретные части классических и PQ одноразовых ключей (новая identity).
+        async function wipeOneTimeSecretsLocked() {
+            for (const prefix of ['opk:', 'pqopk:']) {
+                for (const name of await storage.keys(prefix)) await storage.delete(name);
+            }
+        }
+
+        // Семена, отставленные при замене пула, живут ещё PREKEY_RETAIN_MS:
+        // key-share, собранные по bundle до замены, ещё могут прийти.
+        async function prunePqOneTimeLocked(t) {
+            for (const name of await pqOneTimeNamesLocked()) {
+                const rec = await storage.get(name);
+                if (!rec || (typeof rec.retiredAt === 'number' && t - rec.retiredAt > PREKEY_RETAIN_MS)) await storage.delete(name);
+            }
+        }
+
+        // Создаёт n ключей и сразу сохраняет семена: если вкладку закроют
+        // посреди загрузки, а сервер ключи успел принять, расшифровать share
+        // по ним всё равно будет чем. Возвращает то, что уйдёт на сервер.
+        async function generatePqOneTimeLocked(identity, n, t) {
+            const out = [];
+            for (let i = 0; i < n; i++) {
+                const seed = randomBytes(PQ_SEED_BYTES);
+                const { publicKey } = await getKem().keygen(seed);
+                if (!publicKey || publicKey.length !== PQ_PUBLIC_KEY_BYTES) throw new Error('E2EE: ML-KEM вернул ключ неверной длины');
+                const keyId = await nextKeyId();
+                const sig = await sign(identity.signPriv, pqOneTimeSigInput(keyId, publicKey));
+                await storage.set('pqopk:' + keyId, { seed: b64encode(seed), createdAt: t });
+                out.push({ key_id: keyId, public_key: b64encode(publicKey), signature: b64encode(sig) });
+            }
+            return out;
+        }
+
+        // Загрузка пачками вне блокировки. Явный отказ сервера (success !==
+        // true) — этих ключей у него нет, их семена удаляются (вместе с семенами
+        // непринятых пачек). Сетевое исключение — семена остаются: сервер мог
+        // принять пачку, а ответ потерялся.
+        async function uploadPqOneTime(keys) {
+            for (let i = 0; i < keys.length; i += PQ_OPK_BATCH) {
+                const res = await transport.postPqOneTimePrekeys({ keys: keys.slice(i, i + PQ_OPK_BATCH) });
+                if (!res || !res.data || res.data.success !== true) {
+                    await withLock(async () => {
+                        for (const key of keys.slice(i)) await storage.delete('pqopk:' + key.key_id);
+                    });
+                    throw keyServerError('одноразовые PQ-prekey', res);
+                }
+            }
+        }
+
+        async function maintainPqOneTime() {
+            const t = now();
+            // Локальная часть: убрать просроченные отставленные семена и
+            // завести отметку времени пула (нет отметки — пул считается
+            // созданным сейчас, иначе замена не наступила бы никогда).
+            const refreshedAt = await withLock(async () => {
+                await prunePqOneTimeLocked(t);
+                const value = await storage.get(PQ_OPK_REFRESHED);
+                if (typeof value === 'number') return value;
+                await storage.set(PQ_OPK_REFRESHED, t);
+                return t;
+            });
+
+            const countRes = await transport.getOneTimePrekeyCount();
+            const data = countRes && countRes.data;
+            // Сервер без пула (нет поля) — работаем с запасным ключом.
+            if (!data || typeof data.pq_count !== 'number') return;
+            let have = data.pq_count;
+
+            // Замена раз в 30 дней: стереть пул на сервере, отставить старые
+            // семена (они ещё пригодятся для уже собранных key-share), загрузить
+            // новый пул. Так локальное хранилище ограничено, даже если сервер
+            // раздавал ключи вхолостую.
+            const due = t - refreshedAt >= PQ_OPK_REFRESH_MS;
+            if (due) {
+                const res = await transport.deletePqOneTimePrekeys();
+                if (!res || !res.data || res.data.success !== true) throw keyServerError('очистку пула одноразовых PQ-prekey', res);
+                have = 0;
+            } else if (have >= LOW_WATER_PQ_OPK) {
+                return;
+            }
+
+            const keys = await withLock(async () => {
+                const identity = await loadIdentityLocked();
+                if (due) {
+                    for (const name of await pqOneTimeNamesLocked()) {
+                        const rec = await storage.get(name);
+                        if (rec && typeof rec.retiredAt !== 'number') await storage.set(name, Object.assign({}, rec, { retiredAt: t }));
+                    }
+                    await storage.set(PQ_OPK_REFRESHED, t);
+                }
+                return generatePqOneTimeLocked(identity, TOPUP_PQ_OPK - have, t);
+            });
+            await uploadPqOneTime(keys);
+        }
+
+        // Пул — оптимизация, а не условие работы: без него остаётся запасной
+        // ключ. Поэтому сбой пополнения init() не роняет, а только
+        // предупреждает в консоли (иначе временная ошибка сети или старый сервер
+        // отключали бы E2EE целиком).
+        async function topUpPqOneTimePrekeysIfNeeded() {
+            if (typeof transport.postPqOneTimePrekeys !== 'function' || typeof transport.deletePqOneTimePrekeys !== 'function') return;
+            try {
+                await maintainPqOneTime();
+            } catch (err) {
+                if (typeof console !== 'undefined' && console.warn) {
+                    console.warn('E2EE: пул одноразовых PQ-prekey не пополнен, пока работает запасной ключ:', err && err.message);
+                }
+            }
+        }
+
         // Инициализация: сгенерировать (или загрузить и мигрировать) ключи
         // устройства, ротировать просроченные SPK/PQ-prekey, загрузить
-        // публичные части на сервер, пополнить пул OPK. Идемпотентна —
+        // публичные части на сервер, пополнить пулы одноразовых ключей. Идемпотентна —
         // можно вызывать повторно (например, раз в сутки), чтобы ротация
         // срабатывала и без перезагрузки страницы.
         //
@@ -1309,6 +1483,7 @@
             try {
                 await uploadKeysIfNeeded();
                 await topUpOneTimePreKeysIfNeeded();
+                await topUpPqOneTimePrekeysIfNeeded();
             } catch (err) {
                 throw asInitError(err, 'protocol');
             }
@@ -1549,15 +1724,25 @@
                 return { error: 'неверная подпись Signed PreKey у пользователя ' + peerId + ' — возможная подмена ключа' };
             }
 
-            // Без PQ-prekey не откатываемся на классический X3DH: иначе
-            // сервер, просто убрав его из bundle, понижал бы защиту.
-            const pqInfo = bundle.pq_prekey;
+            // Постквантовая часть. Если сервер выдал одноразовый PQ-prekey, берём
+            // его: он достаётся ровно одному инициатору, а получатель удаляет
+            // секретную часть после использования. Подпись у него другая (с
+            // меткой и key_id, см. pqOneTimeSigInput), поэтому «сырую» подпись
+            // запасного ключа на его месте сервер подсунуть не может, как и
+            // наоборот. Подпись не сошлась — отказ, а не тихий переход на
+            // запасной ключ: иначе сервер, портя подпись, выбирал бы, каким
+            // ключом нас защищать. Одноразового нет — запасной (last-resort).
+            // Без PQ-части не откатываемся на классический X3DH: иначе сервер,
+            // просто убрав её из bundle, понижал бы защиту.
+            const pqOneInfo = bundle.pq_one_time_prekey || null;
+            const pqInfo = pqOneInfo || bundle.pq_prekey;
             if (!pqInfo) return { error: REASON_OUTDATED };
+            const pqKind = pqOneInfo ? 'одноразового PQ-prekey' : 'PQ-prekey';
             const pqPub = decodeFixed(pqInfo.public_key, PQ_PUBLIC_KEY_BYTES);
             const pqSig = decodeFixed(pqInfo.signature, 64);
-            if (!pqPub || !pqSig || !isKeyId(pqInfo.key_id)) return { error: 'некорректный PQ-prekey собеседника' };
-            if (!(await verify(b64decode(signPub), pqSig, pqPub))) {
-                return { error: 'неверная подпись PQ-prekey у пользователя ' + peerId + ' — возможная подмена ключа' };
+            if (!pqPub || !pqSig || !isKeyId(pqInfo.key_id)) return { error: 'некорректный ' + (pqOneInfo ? 'одноразовый ' : '') + 'PQ-prekey собеседника' };
+            if (!(await verify(b64decode(signPub), pqSig, pqOneInfo ? pqOneTimeSigInput(pqInfo.key_id, pqPub) : pqPub))) {
+                return { error: 'неверная подпись ' + pqKind + ' у пользователя ' + peerId + ' — возможная подмена ключа' };
             }
 
             const otpk = bundle.one_time_prekey || null;
@@ -1604,6 +1789,8 @@
                     usedOneTimePrekeyId: otpk ? otpk.key_id : null,
                     pqCiphertext: b64encode(pqCiphertext),
                     usedPqPrekeyId: pqInfo.key_id,
+                    // Поле только у одноразового ключа: оно решает, где получатель ищет секрет.
+                    ...(pqOneInfo ? { pqOneTime: true } : {}),
                 },
                 peerSignPub: signPub,
                 peerDhPub: dhPub,
@@ -1700,13 +1887,23 @@
                 }
                 if (!spkPriv) return null; // SPK давно ротирован — расшифровать нечем
 
+                // Одноразовый PQ-prekey ищется только среди pqopk:<id>, запасной —
+                // только среди pqpk/pqpkOld: ключ одной роли на место другой не
+                // подставляется. Записи pqopk нет — ключ уже использован (повтор
+                // или второй инициатор на тот же ключ), расшифровывать нечем.
                 let pqSeed = null;
-                const pq = await storage.get('pqpk');
-                if (pq && pq.keyId === h.pqId) {
-                    pqSeed = pq.seed;
+                if (h.pqOneTime) {
+                    const rec = await storage.get('pqopk:' + h.pqId);
+                    if (rec && typeof rec.seed === 'string'
+                        && (typeof rec.retiredAt !== 'number' || t - rec.retiredAt <= PREKEY_RETAIN_MS)) pqSeed = rec.seed;
                 } else {
-                    const old = await storage.get('pqpkOld:' + h.pqId);
-                    if (old && t - old.retiredAt <= PREKEY_RETAIN_MS) pqSeed = old.seed;
+                    const pq = await storage.get('pqpk');
+                    if (pq && pq.keyId === h.pqId) {
+                        pqSeed = pq.seed;
+                    } else {
+                        const old = await storage.get('pqpkOld:' + h.pqId);
+                        if (old && t - old.retiredAt <= PREKEY_RETAIN_MS) pqSeed = old.seed;
+                    }
                 }
                 if (!pqSeed) return null;
 
@@ -1727,7 +1924,15 @@
                 const dh4 = opkPriv ? await dh(opkPriv, eph) : new Uint8Array(0);
                 // Неверный шифротекст ML-KEM правильной длины не бросает
                 // (implicit rejection) — ошибка проявится на AEAD.
-                const ss = toBytes(await getKem().decapsulate(await pqSecretKey(pqSeed), h.pqCt));
+                // Одноразовый секретный ключ в кэш не попадает и после
+                // декапсуляции затирается: в памяти он живёт ровно один вызов.
+                const pqSecret = await pqSecretKey(pqSeed, { cache: !h.pqOneTime });
+                let ss;
+                try {
+                    ss = toBytes(await getKem().decapsulate(pqSecret, h.pqCt));
+                } finally {
+                    if (h.pqOneTime && pqSecret && typeof pqSecret.fill === 'function') pqSecret.fill(0);
+                }
                 if (ss.length !== 32) return null;
                 return await hkdf(concatBytes(FF32, dh1, dh2, dh3, dh4, ss), ZERO32, 'nyxo-e2ee-pqxdh-v1', 32);
             } catch {
@@ -1783,6 +1988,10 @@
                         if (seen.length > MAX_SEEN_EPHEMERAL) seen.splice(0, seen.length - MAX_SEEN_EPHEMERAL);
                         await storage.set('pw2Seen:' + senderId, seen);
                         if (h.opkId !== null) await storage.delete('opk:' + h.opkId); // одноразовый — использован
+                        // Одноразовый PQ-prekey тоже: после этого перехваченный
+                        // позже key-share расшифровать нечем. Поддельный share сюда
+                        // не доходит (AEAD в openShareLocked), и ключ не сгорает.
+                        if (h.pqOneTime) await storage.delete('pqopk:' + h.pqId);
                     }
                 },
             };
@@ -2365,6 +2574,10 @@
             MAX_EDIT_ENTRIES,
             PREKEY_ROTATE_MS,
             PREKEY_RETAIN_MS,
+            LOW_WATER_PQ_OPK,
+            TOPUP_PQ_OPK,
+            PQ_OPK_BATCH,
+            PQ_OPK_REFRESH_MS,
 
             // Размеры
             MSG_PAD_MIN,

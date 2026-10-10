@@ -1540,6 +1540,7 @@ function enterApp(user) {
     if (socket.connected) socket.disconnect();
     socket.connect();
     startKeepalive();
+    startE2eeMaintenance();
     loadChats();
     updateAnonNote();
     // Ответ регистрации мог прийти без настроек и срока — их знает /api/auth.
@@ -1628,6 +1629,45 @@ function keepaliveOnVisible() {
     if (document.visibilityState !== 'visible' || !currentUser) return;
     if (Date.now() - lastAuthAt > KEEPALIVE_VISIBLE_GAP_MS) pingSession();
 }
+
+// >>> e2ee-maintenance
+// Плановое обслуживание ключей устройства. init() идемпотентен и делает всё
+// нужное: ротирует просроченные SPK и PQ-prekey, пополняет пулы одноразовых
+// ключей, раз в 30 дней заменяет пул одноразовых PQ-prekey. Вкладка живёт
+// днями, а запас одноразовых ключей тратится, пока собеседники открывают чаты
+// с нами, — поэтому init() повторяется раз в 6 часов и при возвращении на
+// вкладку, если прошло больше 6 часов (фоновые таймеры браузер замедляет).
+// Сбой на состояние E2EE не влияет: ключи устройства остаются рабочими.
+const E2EE_MAINTENANCE_MS = 6 * 60 * 60 * 1000;
+const E2EE_MAINTENANCE_TICK_MS = 30 * 60 * 1000;
+let e2eeMaintainedAt = 0;
+let e2eeMaintaining = false;
+let e2eeMaintenanceTimer = null;
+
+function startE2eeMaintenance() {
+    stopE2eeMaintenance();
+    e2eeMaintainedAt = Date.now(); // первый init() делает initE2eeForCurrentUser
+    e2eeMaintenanceTimer = setInterval(maintainE2eeKeys, E2EE_MAINTENANCE_TICK_MS);
+}
+
+function stopE2eeMaintenance() {
+    clearInterval(e2eeMaintenanceTimer);
+    e2eeMaintenanceTimer = null;
+}
+
+function maintainE2eeKeys() {
+    if (!currentUser || e2eeState !== 'ready' || e2eeMaintaining) return;
+    if (Date.now() - e2eeMaintainedAt < E2EE_MAINTENANCE_MS) return;
+    const client = getE2eeClient();
+    if (!client) return;
+    e2eeMaintaining = true;
+    Promise.resolve()
+        .then(() => client.init())
+        .then(() => { e2eeMaintainedAt = Date.now(); })
+        .catch((err) => { console.warn('E2EE: плановое обслуживание ключей не удалось:', err); })
+        .finally(() => { e2eeMaintaining = false; });
+}
+// <<< e2ee-maintenance
 
 // Сервер сам закрыл сокет ('io server disconnect'): socket.io в этом случае
 // не переподключается. Проверяем вход; если сессия жива — подключаемся
@@ -1787,6 +1827,7 @@ function leaveApp(message) {
     leavingApp = true;
     const user = currentUser;
     stopKeepalive();
+    stopE2eeMaintenance();
     socket.disconnect();
     currentUser = null;
     e2eeClient = null;
@@ -2305,6 +2346,7 @@ function setupFeedListeners() {
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') markVisibleMessagesRead();
         keepaliveOnVisible();
+        maintainE2eeKeys();
     });
 
     // Ссылка-приглашение, вставленная в уже открытую вкладку.
