@@ -132,6 +132,15 @@ const {
     BAD_SEQ,
 } = require('./lib/message-ids');
 
+// Форма E2EE-конверта и тела отказов 400 для комнат и бота (R7).
+const {
+    MAX_ENVELOPE_LENGTH,
+    isE2eeEnvelopeShape,
+    E2EE_REQUIRED,
+    BAD_ENVELOPE,
+    E2EE_NOT_ALLOWED,
+} = require('./lib/e2ee-envelope');
+
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 // HSTS preload включает только владелец домена: HSTS_PRELOAD=yes (см. lib/privacy.js).
 const HSTS_PRELOAD = process.env.HSTS_PRELOAD === 'yes';
@@ -143,8 +152,6 @@ const HSTS_PRELOAD = process.env.HSTS_PRELOAD === 'yes';
 // Лимит на суммарный объём вложений одного пользователя: без него один
 // аккаунт мог забить весь volume (по 50 МБ за запрос, без ограничений).
 const UPLOAD_QUOTA_BYTES = Math.floor(positiveNumberOr(process.env.UPLOAD_QUOTA_MB, 500) * 1024 * 1024);
-// Длина E2EE-конверта (текст сообщения или описание зашифрованного файла).
-const MAX_ENVELOPE_LENGTH = 12000;
 
 // '.svg' явно в блок-листе как доп. защита (defense-in-depth, п.7 аудита):
 // image/svg+xml и так не входит в ALLOWED_MIME_TYPES, но SVG может нести
@@ -274,7 +281,12 @@ async function checkUploadBeforeStore(session, body, file) {
     const userId = session && session.userId;
     if (!userId) throw new EarlyResponse(401, { success: false, message: 'Не авторизован' });
     const chat = toPositiveInt(body.chatId) ? await getOwnChat(body.chatId, userId) : null;
-    if (chat && !chat.room_id) return;
+    if (chat && !chat.room_id) {
+        // Чат с ботом: шифротекст читать некому — отказ до записи файла на диск.
+        const violation = e2eePolicyViolation(chat, body.encrypted === 'true', null);
+        if (violation) throw new EarlyResponse(400, violation);
+        return;
+    }
     const raw = body.clientMessageId;
     if (raw === undefined || raw === null || raw === '') {
         // Чат назван, но такого нет: ответит обработчик («Чат не найден»).
@@ -284,6 +296,9 @@ async function checkUploadBeforeStore(session, body, file) {
     const id = parseClientMessageId(raw);
     if (id === null) throw new EarlyResponse(400, BAD_MESSAGE_ID);
     if (!chat) return;
+    // Открытое вложение в комнате и неверный конверт — тоже до записи файла.
+    const violation = e2eePolicyViolation(chat, body.encrypted === 'true', typeof body.envelope === 'string' ? body.envelope.trim() : '');
+    if (violation) throw new EarlyResponse(400, violation);
     const expectedText = expectedFileMessageText(body, file.mimetype);
     const use = await describeMessageIdUse({ id, roomId: chat.room_id, userId, expectedText, file: true });
     if (use.status === 'duplicate') {
@@ -2265,6 +2280,17 @@ async function newMessageExpirySeconds(chat, requestedSeconds = null) {
     return effectiveMessageExpiry(requestedSeconds, await getDefaultExpirySeconds(chat)) || null;
 }
 
+// Правило R7: в комнате принимается только E2EE-конверт правильной формы, в чате с
+// ботом — только открытый текст (расшифровать конверт там некому). null — запрос
+// допустим, иначе тело ответа 400 { success:false, code, message }. Проверка
+// формы не заменяет проверки подписи на стороне получателей, но не даёт
+// «шифрованным» назвать открытый текст или произвольные данные.
+function e2eePolicyViolation(chat, encrypted, envelope) {
+    if (!chat.room_id) return encrypted ? E2EE_NOT_ALLOWED : null;
+    if (!encrypted) return E2EE_REQUIRED;
+    return isE2eeEnvelopeShape(envelope) ? null : BAD_ENVELOPE;
+}
+
 // Текст сообщения-вложения, как он хранится в messages.text: для E2EE — конверт,
 // иначе подпись или обезличенное имя по типу. null — конверта нет (так сравнить
 // с сохранённой строкой нечем).
@@ -2346,6 +2372,12 @@ app.post('/api/messages', async (req, res) => {
             if (clientId === null) return res.status(400).json(BAD_MESSAGE_ID);
         }
 
+        // Комната — только конверт правильной формы, бот — только открытый текст
+        // (старая вкладка, не знающая про обязательное шифрование, получит
+        // просьбу обновить страницу).
+        const violation = e2eePolicyViolation(chat, encrypted, text.trim());
+        if (violation) return res.status(400).json(violation);
+
         // Для E2EE-конверта sanitizeText не нужен и вреден по смыслу: это
         // не человеческий текст, а base64/JSON, который клиент должен
         // получить обратно байт-в-байт для расшифровки.
@@ -2417,9 +2449,8 @@ app.post('/api/messages', async (req, res) => {
         res.json({ success: true, message });
 
         if (roomId) unarchiveForRecipients(chat, userId);
-        // Чат с ботом ходит открытым текстом. Конверт E2EE сюда слать незачем, а
-        // если он всё же пришёл, прочитать его бот не может — ответит подсказкой.
-        if (chat.is_bot) scheduleBotReply(chat, encrypted ? '' : safeText);
+        // Чат с ботом ходит открытым текстом: конверт сюда не принимается (выше).
+        if (chat.is_bot) scheduleBotReply(chat, safeText);
     } catch (error) {
         if (respondIfDeadlock(res, error)) return;
         console.error('Send message error:', error);
@@ -2992,9 +3023,15 @@ app.put('/api/messages/:messageId', async (req, res) => {
         );
         if (!message) return res.json({ success: false, message: 'Сообщение не найдено' });
         if (message.file_url) return res.json({ success: false, message: 'Сообщение с вложением нельзя изменить' });
-        // Правка E2EE-сообщения — это новый конверт того же (по флагу)
-        // типа: клиент сам шифрует новый текст перед PUT, флаг при
-        // редактировании не меняется (encrypted не пришло — просто он же).
+        // Правка E2EE-сообщения — это новый конверт: клиент сам шифрует новый
+        // текст перед PUT, флаг encrypted при редактировании не меняется.
+        // Сообщение комнаты без шифрования (в базе его быть не должно) править
+        // нельзя, а новый конверт обязан иметь правильную форму — иначе правкой
+        // можно было бы подменить шифротекст открытым текстом.
+        if (message.room_id) {
+            const violation = e2eePolicyViolation({ room_id: message.room_id }, Boolean(message.encrypted), text.trim());
+            if (violation) return res.status(400).json(violation);
+        }
         const maxLen = message.encrypted ? MAX_ENVELOPE_LENGTH : 4000;
         if (text.length > maxLen) return res.json({ success: false, message: `Сообщение не может быть длиннее ${maxLen} символов` });
 
@@ -3106,11 +3143,13 @@ async function exceedsUploadQuota(userId, incomingBytes) {
 }
 
 // Два вида вложений:
-//   * обычное — проверка сигнатуры, снятие метаданных (все типы, fail
-//     closed), имя по типу вместо исходного (anonymizedFileName);
-//   * E2EE (encrypted=true, только в комнатах) — сервер получает лишь
-//     шифротекст (.bin) и E2EE-конверт с типом, именем и ключом файла;
+//   * обычное — только в чате с ботом: проверка сигнатуры, снятие метаданных
+//     (все типы, fail closed), имя по типу вместо исходного (anonymizedFileName);
+//   * E2EE (encrypted=true) — единственный вид в комнатах (R7): сервер получает
+//     лишь шифротекст (.bin) и E2EE-конверт с типом, именем и ключом файла;
 //     сигнатуры и метаданные тут проверять не у чего — это случайные байты.
+//     Открытое вложение в комнате и конверт неверной формы — 400
+//     (e2ee-required, bad-envelope), шифротекст в чате с ботом — 400 e2ee-not-allowed.
 // Сообщение комнаты несёт clientMessageId (раздел 6 контракта порядка сообщений):
 // его формат и занятость проверяет fileFilter ещё до приёма файла
 // (acceptUpload), здесь — повторно и для случая, когда chatId пришёл позже
@@ -3134,10 +3173,8 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
     let caption = '';
     let envelope = null;
     if (encrypted) {
+        // Форму конверта проверяет e2eePolicyViolation, когда известен чат.
         envelope = typeof body.envelope === 'string' ? body.envelope.trim() : '';
-        if (!envelope || envelope.length > MAX_ENVELOPE_LENGTH) {
-            return rejectUpload(res, file, 400, 'Некорректный E2EE-конверт вложения');
-        }
     } else {
         caption = typeof body.text === 'string' ? sanitizeText(body.text.trim()) : '';
         if (caption.length > 4000) return rejectUpload(res, file, 400, 'Подпись слишком длинная');
@@ -3153,14 +3190,17 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
     try {
         chat = await getOwnChat(body.chatId, userId);
         if (!chat) return rejectUpload(res, file, 404, 'Чат не найден');
-        if (encrypted && !chat.room_id) {
-            return rejectUpload(res, file, 400, 'Зашифрованные вложения доступны только в групповых чатах');
-        }
         if (chat.room_id) {
             const raw = body.clientMessageId;
             if (raw === undefined || raw === null || raw === '') return rejectUploadWith(res, file, 400, CLIENT_OUTDATED);
             clientId = parseClientMessageId(raw);
             if (clientId === null) return rejectUploadWith(res, file, 400, BAD_MESSAGE_ID);
+        }
+        // Открытое вложение в комнате, неверный конверт и шифротекст в чате с
+        // ботом (то же правило, что в fileFilter: поля могли прийти после файла).
+        const violation = e2eePolicyViolation(chat, encrypted, envelope);
+        if (violation) return rejectUploadWith(res, file, 400, violation);
+        if (chat.room_id) {
             const use = await describeMessageIdUse({ id: clientId, roomId: chat.room_id, userId, expectedText: messageText, file: true });
             if (use.status === 'duplicate') {
                 cleanupUploadedFile(file);

@@ -18,6 +18,7 @@ const { CookieJar } = require('./cookies');
 const { connectSocket } = require('./socket');
 const { REPO_ROOT } = require('./env');
 const { solve } = require(path.join(REPO_ROOT, 'public', 'pow-worker.js'));
+const { fakeEnvelope } = require('./envelope');
 
 const UNSAFE = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 let clientCounter = 0;
@@ -55,6 +56,7 @@ class TestClient {
         this.name = name || `клиент ${xff}`;
         this.jar = new CookieJar({ secureContext });
         this.user = null;
+        this.roomChats = new Map();   // id чата -> Promise<boolean>: комната ли это (см. isRoomChat)
     }
 
     get baseUrl() { return this.server.baseUrl; }
@@ -175,21 +177,43 @@ class TestClient {
 
     // ---- Сообщения и файлы ----
 
-    // Id сообщения комнаты выбирает клиент (message-ordering.md, раздел 6): helper
-    // подставляет случайный clientMessageId, если тест не задал свой (в том числе
-    // `clientMessageId: undefined` — «поле не присылать»). Для чата с ботом поле
-    // сервер игнорирует.
-    async send(chatId, text, extra = {}) {
-        const body = { chatId, text, clientMessageId: newClientMessageId(), ...extra };
+    // Комната ли чат (у чата с ботом room_id нет). Список чатов запрашивается один
+    // раз на чат; чужой или неизвестный id считается обычным чатом: сервер ответит
+    // «Чат не найден».
+    isRoomChat(chatId) {
+        const key = String(chatId);
+        if (!this.roomChats.has(key)) {
+            this.roomChats.set(key, this.chats().then(list => list.some(c => String(c.id) === key && Boolean(c.room_id))));
+        }
+        return this.roomChats.get(key);
+    }
+
+    // Тело POST /api/messages. Id сообщения комнаты выбирает клиент
+    // (message-ordering.md, раздел 6): helper подставляет случайный clientMessageId,
+    // если тест не задал свой (в том числе `clientMessageId: undefined` — «поле не
+    // присылать»). Для чата с ботом поле сервер игнорирует.
+    //
+    // В комнате сервер принимает только E2EE-конверт правильной формы (R7), поэтому
+    // текст теста превращается в fakeEnvelope(текст) и уходит с encrypted: true.
+    // extra.raw: true — отправить text и поля как есть (негативные проверки).
+    async messageBody(chatId, text, extra) {
+        const { raw, ...rest } = extra;
+        const body = { chatId, text, clientMessageId: newClientMessageId(), ...rest };
+        if (!raw && body.encrypted === undefined && await this.isRoomChat(chatId)) {
+            body.text = fakeEnvelope(text);
+            body.encrypted = true;
+        }
         if (body.clientMessageId === undefined) delete body.clientMessageId;
-        return (await this.ok(this.post('/api/messages', body), 'отправка сообщения')).message;
+        return body;
+    }
+
+    async send(chatId, text, extra = {}) {
+        return (await this.ok(this.post('/api/messages', await this.messageBody(chatId, text, extra)), 'отправка сообщения')).message;
     }
 
     // Сырой ответ: негативные проверки кодов 400/409.
-    sendRaw(chatId, text, extra = {}) {
-        const body = { chatId, text, clientMessageId: newClientMessageId(), ...extra };
-        if (body.clientMessageId === undefined) delete body.clientMessageId;
-        return this.post('/api/messages', body);
+    async sendRaw(chatId, text, extra = {}) {
+        return this.post('/api/messages', await this.messageBody(chatId, text, extra));
     }
 
     async messages(chatId, query = '') {
@@ -211,6 +235,18 @@ class TestClient {
         if (envelope !== undefined) form.append('envelope', envelope);
         form.append('file', new Blob([bytes], { type: mime }), filename);
         return this.request('POST', '/api/messages/file', { body: form });
+    }
+
+    // Вложение в комнату: шифротекст (случайные байты) и конверт-метка. Открытых
+    // вложений в комнатах нет (R7). label — что положить в конверт (по умолчанию имя файла).
+    uploadCipherRaw(chatId, { bytes = crypto.randomBytes(300), label = 'file', ...opts } = {}) {
+        return this.uploadRaw(chatId, bytes, 'application/octet-stream', {
+            encrypted: true, envelope: fakeEnvelope(label), ...opts,
+        });
+    }
+
+    async uploadCipher(chatId, opts) {
+        return (await this.ok(this.uploadCipherRaw(chatId, opts), 'загрузка шифротекста')).message;
     }
 
     async upload(chatId, bytes, mime, opts) {

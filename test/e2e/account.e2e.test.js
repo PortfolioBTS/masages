@@ -106,14 +106,15 @@ test('удаление стирает всё: сообщения, файлы, к
     assert.strictEqual(victimPending.pending, true);
 
     // Сообщения и файлы: бот, одинокая комната, общая комната; у друга — свои.
+    // В комнатах — только шифротекст и конверты (R7), в чате с ботом — открытые.
     const bot = await v.botChat();
     await v.send(bot.id, 'вопрос боту');
     const botFile = await v.upload(bot.id, PNG, 'image/png', { filename: 'bot.png' });
     await v.send(solo.id, 'сообщение в одинокой комнате');
-    const sharedFile = await v.upload(shared.ownerChat.id, PNG, 'image/png', { filename: 'shared.png' });
+    const sharedFile = await v.uploadCipher(shared.ownerChat.id, { label: 'shared.png' });
     const victimSharedMessage = await v.send(shared.ownerChat.id, 'сообщение пользователя в общей комнате');
     const friendMessage = await f.send(shared.memberChat.id, 'сообщение друга');
-    const friendFile = await f.upload(shared.memberChat.id, PNG, 'image/png', { filename: 'friend.png' });
+    const friendFile = await f.uploadCipher(shared.memberChat.id, { label: 'friend.png' });
     // Реакции в обе стороны (прямой вставкой: набор проверяет удаление, а не API реакций).
     await suite.query(`INSERT INTO reactions (message_id, user_id, emoji) VALUES ($1, $2, 'like'), ($3, $4, 'like')`,
         [friendMessage.id, vId, victimSharedMessage.id, friend.user.id]);

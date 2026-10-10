@@ -59,7 +59,8 @@ test('/uploads — только участникам комнаты: чужом�
     await stranger.registerAnon();
     const { ownerChat, memberChat } = await roomWithMember(owner, member);
 
-    const message = await owner.upload(ownerChat.id, await jpegWithExif(), 'image/jpeg', { filename: 'room.jpg' });
+    // В комнате вложение только зашифрованное (R7): сервер видит шифротекст и конверт.
+    const message = await owner.uploadCipher(ownerChat.id, { label: 'room.jpg' });
     assert.strictEqual((await owner.download(message.file_url)).status, 200);
     assert.strictEqual((await member.download(message.file_url)).status, 200);
     assert.ok((await member.messages(memberChat.id)).messages.some(m => m.file_url === message.file_url));
