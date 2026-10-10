@@ -113,6 +113,9 @@ const elements = {
     expiryIndicator: document.getElementById('expiry-indicator'),
     expiryIndicatorText: document.getElementById('expiry-indicator-text'),
     mutedIndicator: document.getElementById('muted-indicator'),
+    noHistoryIndicator: document.getElementById('no-history-indicator'),
+    deviceSettings: document.getElementById('device-settings'),
+    noHistoryToggle: document.getElementById('no-history-toggle'),
     getChatCodeBtn: document.getElementById('get-chat-code-btn'),
     chatMenuBtn: document.getElementById('chat-menu-btn'),
     chatSearchBtn: document.getElementById('chat-search-btn'),
@@ -1108,6 +1111,7 @@ function safeDisplayName(name) {
 
 // Текст цитаты/превью для результата decryptIncoming.
 function decryptedSummary(res) {
+    if (!res.ok && res.reason === 'history-not-kept') return 'Сообщение недоступно на этом устройстве';
     if (!res.ok) return e2eeFailureText(res.reason);
     if (res.file) return `Файл: ${res.text || safeDisplayName(res.file.name)}`;
     return res.text;
@@ -1162,6 +1166,8 @@ async function decryptMessageInPlace(message, roomId) {
             } else {
                 message.text = e2eeFailureText(res.reason);
                 message._e2eeFailed = true;
+                // Серия таких сообщений сворачивается в одну служебную строку (renderMessages).
+                if (res.reason === 'history-not-kept') message._historyNotKept = true;
             }
         } else {
             message.text = 'Зашифрованное сообщение';
@@ -1318,6 +1324,85 @@ function stopRoomKeysMaintenance() {
     roomKeysFirstRunTimer = null;
     roomKeysMaintenanceTimer = null;
     clearPendingKeyRequests();
+}
+// ---- «Не хранить историю на этом устройстве» (план криптографии, раздел 6) ----
+//
+// Настройка личная и живёт в хранилище ключей устройства. Пока она включена, ключи
+// сообщений комнаты стираются, когда комнату перестают смотреть: уход в другой чат,
+// закрытие или скрытие вкладки (дольше 5 минут). Страховка на случай упавшей вкладки —
+// клиент забывает такие комнаты при первом init() следующего запуска.
+
+const HISTORY_HIDDEN_FORGET_MS = 5 * 60 * 1000;
+const roomHistoryModes = new Map();   // roomId → 'keep' | 'none' (что вкладка знает о комнатах)
+let hiddenForgetTimer = null;
+
+function roomHistoryMode(roomId) {
+    return roomId ? (roomHistoryModes.get(Number(roomId)) || 'keep') : 'keep';
+}
+
+// Читает режим комнаты из хранилища ключей и запоминает его.
+async function loadRoomHistoryMode(roomId) {
+    if (!roomId) return 'keep';
+    try {
+        const client = await getSettledE2eeClient();
+        if (client) roomHistoryModes.set(Number(roomId), await client.getRoomHistoryMode(roomId));
+    } catch (err) {
+        console.warn('E2EE: не удалось прочитать режим хранения истории:', err);
+    }
+    return roomHistoryMode(roomId);
+}
+
+// Включает или выключает режим. Включение забывает историю сразу (клиент), выключение
+// удалённое не возвращает. Бросает ошибку, если сохранить настройку не удалось.
+async function applyRoomHistoryMode(roomId, mode) {
+    const client = await getSettledE2eeClient();
+    if (!client) throw new Error('сквозное шифрование недоступно');
+    const saved = await client.setRoomHistoryMode(roomId, mode);
+    roomHistoryModes.set(Number(roomId), saved);
+    return saved;
+}
+
+// Забывает историю комнаты на этом устройстве, если для неё включено «не хранить».
+async function forgetRoomIfNoHistory(roomId) {
+    if (!roomId || roomHistoryMode(roomId) !== 'none') return false;
+    try {
+        const client = await getSettledE2eeClient();
+        if (!client) return false;
+        await client.forgetRoomHistory(roomId);
+        return true;
+    } catch (err) {
+        console.warn('E2EE: не удалось забыть историю комнаты:', err);
+        return false;
+    }
+}
+
+// Вкладка скрыта дольше 5 минут — забываем историю открытой комнаты; вернулись — отсчёт сброшен.
+function onHistoryVisibilityChange(hidden) {
+    clearTimeout(hiddenForgetTimer);
+    hiddenForgetTimer = null;
+    if (!hidden) return;
+    hiddenForgetTimer = setTimeout(() => { forgetRoomIfNoHistory(currentRoomId); }, HISTORY_HIDDEN_FORGET_MS);
+}
+
+// Закрытие страницы (pagehide). Запись в IndexedDB на выгрузке не гарантирована, поэтому
+// есть страховка: init() следующего запуска забывает такие комнаты.
+function forgetOpenRoomOnPageHide() {
+    forgetRoomIfNoHistory(currentRoomId);
+}
+
+// Подряд идущие сообщения с историей, которой нет на устройстве, сворачиваются в одну
+// служебную строку вместо десятков серых пузырей: возвращает группы индексов (по две и
+// более подряд). Одиночное сообщение остаётся обычным пузырём.
+function historyGapRuns(messages) {
+    const runs = [];
+    let run = [];
+    const close = () => { if (run.length >= 2) runs.push(run); run = []; };
+    messages.forEach((message, index) => {
+        if (message && message._historyNotKept) run.push(index);
+        else close();
+    });
+    close();
+    return runs;
 }
 // <<< e2ee-room-keys
 
@@ -1925,6 +2010,7 @@ function updateAnonNote() {
 }
 
 function resetChatView() {
+    forgetRoomIfNoHistory(currentRoomId);
     currentChatId = null;
     currentRoomId = null;
     oldestSeq = null;
@@ -2326,6 +2412,7 @@ function setupChatMenuListeners() {
 function setupE2eeListeners() {
     elements.e2eeIndicator.addEventListener('click', openMembersModal);
     elements.membersKeysBtn.addEventListener('click', openMembersModal);
+    elements.noHistoryToggle.addEventListener('change', onNoHistoryToggle);
     elements.e2eeBannerBtn.addEventListener('click', openMembersModal);
     elements.composerStatusRetry.addEventListener('click', () => retryE2ee());
 }
@@ -2501,7 +2588,9 @@ function setupFeedListeners() {
         if (document.visibilityState === 'visible') markVisibleMessagesRead();
         keepaliveOnVisible();
         maintainE2eeKeys();
+        onHistoryVisibilityChange(document.visibilityState === 'hidden');
     });
+    window.addEventListener('pagehide', forgetOpenRoomOnPageHide);
 
     // Ссылка-приглашение, вставленная в уже открытую вкладку.
     window.addEventListener('hashchange', consumeJoinFragment);
@@ -4455,6 +4544,44 @@ function renderChatMenu() {
         ? 'Срок действует для новых сообщений всех участников группы. Уже отправленные сообщения не изменятся.'
         : 'Срок действует для новых сообщений этого чата. Уже отправленные сообщения не изменятся.';
     syncExpiryRadios();
+    // «На этом устройстве» — только для групп: у чата с ботом нет ключей комнаты.
+    elements.deviceSettings.classList.toggle('hidden', !currentRoomId);
+    elements.noHistoryToggle.checked = roomHistoryMode(currentRoomId) === 'none';
+}
+
+// Включение «Не хранить историю» необратимо для уже прочитанного, поэтому требует
+// подтверждения; выключение — без него. Что именно меняется и чего это не делает,
+// сказано в окне (раздел 6 плана криптографии).
+const NO_HISTORY_CONFIRM = 'Включить «Не хранить историю на этом устройстве»?\n\n'
+    + 'Расшифрованные сообщения этой группы будут стираться из браузера, когда вы закроете чат или вкладку. '
+    + 'Более ранние сообщения здесь больше не откроются, вернуть их нельзя.\n\n'
+    + 'Это касается только этого устройства: у других участников и на сервере сообщения остаются, '
+    + 'а чтобы они исчезли у всех, включите исчезающие сообщения. Другие участники об этой настройке не узнают.\n\n'
+    + 'Браузер не гарантирует, что данные сразу будут затёрты на диске.';
+
+async function onNoHistoryToggle() {
+    const roomId = currentRoomId;
+    const toggle = elements.noHistoryToggle;
+    if (!roomId) return;
+    const wantNone = toggle.checked;
+    if (wantNone && !confirm(NO_HISTORY_CONFIRM)) {
+        toggle.checked = false;
+        return;
+    }
+    toggle.disabled = true;
+    try {
+        await applyRoomHistoryMode(roomId, wantNone ? 'none' : 'keep');
+        showToast(wantNone
+            ? 'История не хранится на этом устройстве'
+            : 'История снова хранится на этом устройстве. Стёртое не возвращается', 'success');
+    } catch (err) {
+        console.error('E2EE: не удалось изменить режим хранения истории:', err);
+        toggle.checked = !wantNone;
+        showToast('Не удалось изменить настройку', 'error');
+    } finally {
+        toggle.disabled = false;
+        if (roomId === currentRoomId) updateChatIndicators();
+    }
 }
 
 function syncExpiryRadios() {
@@ -4522,6 +4649,7 @@ function updateChatIndicators() {
     if (title) elements.expiryIndicator.setAttribute('aria-label', title);
     else elements.expiryIndicator.removeAttribute('aria-label');
     elements.mutedIndicator.classList.toggle('hidden', !meta.muted);
+    elements.noHistoryIndicator.classList.toggle('hidden', !(currentRoomId && roomHistoryMode(currentRoomId) === 'none'));
 }
 
 // ==================== Открытый чат ====================
@@ -4530,6 +4658,8 @@ function updateChatIndicators() {
 // буква или иконка бота (renderAvatar). Параметр оставлен ради вызовов.
 async function openChat(chatId, roomId, name, avatar, online, isBot) {
     const seq = ++openChatSeq;
+    // Ушли из комнаты с режимом «Не хранить историю» — стираем её ключи на устройстве.
+    if (currentRoomId && Number(currentRoomId) !== Number(roomId)) forgetRoomIfNoHistory(currentRoomId);
     releaseChatResources();
     hideChatItemMenu();
     currentChatId = chatId;
@@ -4571,6 +4701,12 @@ async function openChat(chatId, roomId, name, avatar, online, isBot) {
         // Срок исчезающих сообщений — хранилищу ключей этого устройства.
         const roomMeta = findChatMeta(chatId, room);
         syncRoomKeyPolicy(room, roomMeta ? roomMeta.expiry_seconds : 0);
+        // Режим «Не хранить историю»: значок в шапке и переключатель в меню.
+        loadRoomHistoryMode(room).then(() => {
+            if (seq !== openChatSeq) return;
+            updateChatIndicators();
+            if (!elements.chatMenuModal.classList.contains('hidden')) renderChatMenu();
+        });
     }
     const data = await messagesPromise;
     if (seq !== openChatSeq) return; // пользователь уже открыл другой чат
@@ -4662,7 +4798,9 @@ async function refreshCurrentChat() {
 
 function renderMessages(messages, mode) {
     const fragment = document.createDocumentFragment();
-    messages.forEach(msg => fragment.appendChild(createMessageElement(msg, false)));
+    const items = messages.map(msg => createMessageElement(msg, false));
+    collapseHistoryGaps(items);
+    items.forEach(item => fragment.appendChild(item));
     if (mode === 'prepend') elements.chatMessages.prepend(fragment);
     else elements.chatMessages.replaceChildren(fragment);
     if (messages.length > 0 && (mode !== 'prepend' || oldestSeq === null || Number(messages[0].seq) < oldestSeq)) {
@@ -4674,6 +4812,19 @@ function renderMessages(messages, mode) {
 // ответе POST, и по сокету).
 // Лента упорядочена по seq, а не по порядку прихода: сообщение по сокету
 // может прийти переставленным, и placeMessageElement ставит его на своё место.
+// Серия из двух и более сообщений «недоступно на этом устройстве» подряд: первое
+// превращается в служебную строку, остальные скрываются (остаются в ленте ради порядка,
+// поиска по id и удаления).
+function collapseHistoryGaps(items) {
+    for (const run of historyGapRuns(items.map(el => el._message))) {
+        const first = items[run[0]];
+        first.classList.add('history-gap');
+        const textEl = first.querySelector('.message-text');
+        if (textEl) textEl.replaceChildren(icon('eye-off', { size: 'sm' }), document.createTextNode('Более ранние сообщения не хранятся на этом устройстве'));
+        run.slice(1).forEach(index => items[index].classList.add('hidden'));
+    }
+}
+
 function appendMessage(message, animate) {
     if (findMessageEl(message.id)) return false;
     placeMessageElement(createMessageElement(message, animate));

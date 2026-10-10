@@ -39,7 +39,7 @@ function makeSandbox(overrides = {}) {
     const state = {
         calls: [], ensured: [], timers: [], intervals: [], warnings: [],
         encryptFailures: [],       // что бросать на следующих вызовах encryptOutgoing
-        due: false, answer: { resend: [] }, clientMissing: false,
+        due: false, answer: { resend: [] }, clientMissing: false, modes: {},
     };
     // Данные из песочницы клонируются: объекты другого контекста vm не равны «своим» по deepStrictEqual.
     const rec = (...entry) => state.calls.push(JSON.parse(JSON.stringify(entry)));
@@ -54,6 +54,9 @@ function makeSandbox(overrides = {}) {
         answerKeyRequests: async (chatId, roomId, requests) => { rec('answerKeyRequests', chatId, roomId, requests); return state.answer; },
         setRoomPolicy: async (roomId, patch) => { rec('setRoomPolicy', roomId, patch); return patch; },
         maintainRoomKeys: async (roomId) => { rec('maintainRoomKeys', roomId); return {}; },
+        getRoomHistoryMode: async (roomId) => { rec('getRoomHistoryMode', roomId); return state.modes[roomId] || 'keep'; },
+        setRoomHistoryMode: async (roomId, mode) => { rec('setRoomHistoryMode', roomId, mode); state.modes[roomId] = mode; return mode; },
+        forgetRoomHistory: async (roomId) => { rec('forgetRoomHistory', roomId); return {}; },
     };
     const context = {
         currentUser: { id: 1 },
@@ -67,6 +70,7 @@ function makeSandbox(overrides = {}) {
         ],
         getReadyE2eeClient: async () => (state.clientMissing ? null : client),
         getE2eeClient: () => client,
+        getSettledE2eeClient: async () => (state.clientMissing ? null : client),
         ensureE2eeRoomSession: async (chatId, roomId) => { state.ensured.push(JSON.parse(JSON.stringify([chatId, roomId]))); return { ok: true }; },
         findChatMeta: (chatId, roomId) => context.chatListData.find(c => c.room_id != null && Number(c.room_id) === Number(roomId)) || null,
         normalizeExpiry: (value) => { const n = Math.floor(Number(value) || 0); return n > 0 ? n : 0; },
@@ -81,7 +85,9 @@ function makeSandbox(overrides = {}) {
     vm.runInContext(block + `
         this.api = { encryptForRoom, checkRoomKeyRotation, requestMissingRoomKey, flushKeyRequest, clearPendingKeyRequests,
             handleKeyRequestEvent, syncRoomKeyPolicy, maintainAllRoomKeys, startRoomKeysMaintenance, stopRoomKeysMaintenance,
-            KEY_REQUEST_DEBOUNCE_MS, ROOM_KEYS_MAINTENANCE_MS };`, context);
+            KEY_REQUEST_DEBOUNCE_MS, ROOM_KEYS_MAINTENANCE_MS,
+            roomHistoryMode, loadRoomHistoryMode, applyRoomHistoryMode, forgetRoomIfNoHistory,
+            onHistoryVisibilityChange, forgetOpenRoomOnPageHide, historyGapRuns, HISTORY_HIDDEN_FORGET_MS };`, context);
     return { state, client, context, api: context.api };
 }
 
@@ -217,6 +223,74 @@ const needsSession = () => Object.assign(new Error('нужна ротация'),
         await api.maintainAllRoomKeys();
         assert.ok(state.calls.some(c => c[0] === 'maintainRoomKeys' && c[1] === 300), 'вторая комната обслужена');
         assert.ok(state.warnings.some(w => /обслуживание ключей комнаты/.test(w)));
+    });
+
+    // ===================== «Не хранить историю» =====================
+
+    await test('режим истории: по умолчанию keep; загрузка и включение запоминаются; клиента нет — keep', async () => {
+        const { state, api } = makeSandbox();
+        assert.strictEqual(api.roomHistoryMode(100), 'keep');
+        assert.strictEqual(api.roomHistoryMode(null), 'keep');
+        state.modes[100] = 'none';
+        assert.strictEqual(await api.loadRoomHistoryMode(100), 'none');
+        assert.strictEqual(api.roomHistoryMode(100), 'none');
+        assert.strictEqual(await api.applyRoomHistoryMode(300, 'none'), 'none');
+        assert.strictEqual(api.roomHistoryMode(300), 'none');
+        assert.strictEqual(await api.applyRoomHistoryMode(300, 'keep'), 'keep');
+        assert.strictEqual(api.roomHistoryMode(300), 'keep');
+        const missing = makeSandbox();
+        missing.state.clientMissing = true;
+        assert.strictEqual(await missing.api.loadRoomHistoryMode(100), 'keep');
+        await assert.rejects(missing.api.applyRoomHistoryMode(100, 'none'), /недоступно/);
+    });
+
+    await test('forgetRoomIfNoHistory: забывает только комнату в режиме none, без комнаты и в режиме keep — ничего', async () => {
+        const { state, api } = makeSandbox();
+        assert.strictEqual(await api.forgetRoomIfNoHistory(100), false);
+        assert.strictEqual(await api.forgetRoomIfNoHistory(null), false);
+        await api.applyRoomHistoryMode(100, 'none');
+        state.calls.length = 0;
+        assert.strictEqual(await api.forgetRoomIfNoHistory(100), true);
+        assert.deepStrictEqual(state.calls, [['forgetRoomHistory', 100]]);
+        assert.strictEqual(await api.forgetRoomIfNoHistory(300), false, 'другая комната не затронута');
+    });
+
+    await test('скрытая вкладка: через 5 минут забывается открытая комната в режиме none; вернулись раньше — отсчёт сброшен', async () => {
+        const { state, api } = makeSandbox();
+        await api.applyRoomHistoryMode(100, 'none');
+        state.calls.length = 0;
+        api.onHistoryVisibilityChange(true);
+        assert.strictEqual(state.timers.at(-1).ms, 5 * 60 * 1000);
+        assert.strictEqual(api.HISTORY_HIDDEN_FORGET_MS, 5 * 60 * 1000);
+        api.onHistoryVisibilityChange(false);
+        assert.ok(state.timers.at(-1).cleared, 'вернулись раньше срока');
+        api.onHistoryVisibilityChange(true);
+        state.timers.at(-1).fn();
+        await settle();
+        assert.deepStrictEqual(state.calls, [['forgetRoomHistory', 100]]);
+    });
+
+    await test('закрытие страницы: забывается открытая комната в режиме none, в режиме keep — нет', async () => {
+        const keep = makeSandbox();
+        keep.api.forgetOpenRoomOnPageHide();
+        await settle();
+        assert.deepStrictEqual(keep.state.calls, []);
+        const none = makeSandbox();
+        await none.api.applyRoomHistoryMode(100, 'none');
+        none.state.calls.length = 0;
+        none.api.forgetOpenRoomOnPageHide();
+        await settle();
+        assert.deepStrictEqual(none.state.calls, [['forgetRoomHistory', 100]]);
+    });
+
+    await test('свёртка серий: две и более подряд недоступных сообщения — одна серия, одиночное остаётся пузырём', async () => {
+        const { api } = makeSandbox();
+        const gap = { _historyNotKept: true };
+        const ok = {};
+        assert.deepStrictEqual(JSON.parse(JSON.stringify(api.historyGapRuns([gap, gap, gap, ok, gap, ok, gap, gap]))), [[0, 1, 2], [6, 7]]);
+        assert.deepStrictEqual(api.historyGapRuns([gap]).length, 0);
+        assert.deepStrictEqual(api.historyGapRuns([]).length, 0);
+        assert.deepStrictEqual(api.historyGapRuns([null, undefined, gap, gap]).length, 1);
     });
 
     console.log('\n' + passed + ' passed, ' + failed + ' failed');
