@@ -30,6 +30,10 @@ const CLIENT_METHODS = [
     'hasRoomKey',
     'rotateRoomKey',
 
+    // Комнаты: хранение ключей на устройстве (архив, срок, бюджет)
+    'maintainRoomKeys',
+    'setRoomPolicy',
+
     // Сообщения и файлы
     'encryptOutgoing',
     'decryptIncoming',

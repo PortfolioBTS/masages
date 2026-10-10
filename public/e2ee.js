@@ -103,14 +103,40 @@
 
     // ---- Время: ротация prekey и возраст сессий ----
 
-    const DAY_MS = 24 * 60 * 60 * 1000;
+    const HOUR_MS = 60 * 60 * 1000;
+    const DAY_MS = 24 * HOUR_MS;
     const PREKEY_ROTATE_MS = 7 * DAY_MS;   // SPK и PQ-prekey
     const PREKEY_RETAIN_MS = 14 * DAY_MS;  // сколько держим приватную часть после ротации
     const PAIRWISE_SESSION_MAX_AGE_MS = 7 * DAY_MS;
 
+    // ---- Время: ротация Sender Key и хранение ключей сообщений ----
+
+    // Мягкий порог: после него roomKeyDue() сообщает, что ключ пора менять, а
+    // ensureRoomSession ротирует его до рассылки. Жёсткий порог страхует границу,
+    // если фоновая ротация не состоялась: encryptOutgoing перестаёт шифровать
+    // (needs-room-session), пока ключ не сменят.
+    const ROTATE_AFTER_MESSAGES = 100;
+    const ROTATE_AFTER_MS = 7 * DAY_MS;
+    const FORCE_ROTATE_AFTER_MESSAGES = 200;
+    const FORCE_ROTATE_AFTER_MS = 8 * DAY_MS;
+    // Цепочка архивного ключа отправителя, не приславшего prev.final, живёт
+    // столько после архивации, потом chainKey удаляется.
+    const ARCHIVE_CHAIN_MAX_AGE_MS = 7 * DAY_MS;
+    // Запас к таймеру комнаты: ключ удаляется не раньше, чем через T + 1 час
+    // после своего вывода (сообщение на сервере к этому времени уже исчезло).
+    const KEY_EXPIRY_GRACE_MS = HOUR_MS;
+    // Запрос ключа у владельца (requestRoomKeys) и повторная выдача по запросу.
+    const KEY_REQUEST_COOLDOWN_MS = HOUR_MS;
+    const KEY_RESEND_COOLDOWN_MS = 10 * 60 * 1000;
+    const KEY_REQUEST_RETENTION_MS = 7 * DAY_MS;
+    const MAX_KEY_REQUEST_IDS = 20;
+
     // ---- Пределы состояния: кэши ключей, пропуски цепочек, таблицы повторов ----
 
-    const MAX_CACHED_KEYS = 2000;
+    // Ключей сообщений в одной цепочке (текущей или архивной). Это защита от
+    // раздувания записи, а не бюджет истории: при обрезке запоминается
+    // expiredBelow, и расшифровка выдаёт 'key-expired', а не немое 'no-message-key'.
+    const MAX_KEYS_PER_CHAIN = 5000;
     // Насколько далеко вперёд по цепочке Sender Key можно "перескочить" за
     // одно сообщение. Без предела конверт с iteration = 10^9 (его может
     // подписать любой участник комнаты) заставлял клиента получателя
@@ -119,7 +145,17 @@
     // То же для попарной цепочки key-share: передач ключей на порядки
     // меньше, чем сообщений.
     const MAX_PW_SKIP = 1000;
-    const MAX_ARCHIVED_KEYS = 3;
+    // Бюджет истории комнаты: ключей сообщений во всех цепочках (текущих и
+    // архивных) всех отправителей, около 1,2 МБ. Сверх бюджета удаляются самые
+    // старые архивы (maintainRoomKeysLocked).
+    const MAX_KEYS_PER_ROOM = 20000;
+    // Индекс архива в основной записи ключа: подробные записи у последних
+    // MAX_ARCHIVE_INDEX архивов, у более старых остаётся только id («надгробие»:
+    // старый ключ из повторного key-share обратно не ставится). Надгробий не
+    // больше MAX_ARCHIVE_TOMBSTONES; повтор очень старого key-share всё равно
+    // не пройдёт попарный канал, это страховка второго рубежа.
+    const MAX_ARCHIVE_INDEX = 500;
+    const MAX_ARCHIVE_TOMBSTONES = 2000;
     const MAX_SEEN_PER_KEY = 5000;
     // Записей о версиях сообщений (mid → автор, ts, ключ, итерация) на комнату.
     const MAX_EDIT_ENTRIES = 5000;
@@ -464,23 +500,28 @@
 
     // Возвращает messageKey для нужной iteration, продвигая цепочку и
     // кэшируя "пропущенные" (и уже использованные — см. шапку файла про
-    // историю чата) ключи по пути.
-    async function getOrDeriveMessageKey(state, targetIteration) {
+    // историю чата) ключи по пути. hour — часовой индекс «сейчас»: он
+    // записывается в keyTimes для каждого выведенного ключа и нужен таймеру
+    // комнаты (maintainRoomKeysLocked).
+    async function getOrDeriveMessageKey(state, targetIteration, hour) {
         if (targetIteration < state.nextIteration) {
             const cached = state.cachedKeys[targetIteration];
-            if (!cached) return null; // ключ не сохранён (обрезан по MAX_CACHED_KEYS) или никогда не существовал
+            if (!cached) return null; // ключ удалён (таймер, бюджет, «не хранить историю») или не сохранялся
             return b64decode(cached);
         }
         let chainKey = b64decode(state.chainKey);
+        if (!state.keyTimes) state.keyTimes = {};
         for (let it = state.nextIteration; it <= targetIteration; it++) {
             const { messageKey, nextChainKey } = await chainStep(chainKey);
             state.cachedKeys[it] = b64encode(messageKey);
+            state.keyTimes[it] = hour;
             chainKey = nextChainKey;
         }
         state.chainKey = b64encode(chainKey);
         state.nextIteration = targetIteration + 1;
-        trimCache(state);
-        return b64decode(state.cachedKeys[targetIteration]);
+        trimChain(state);
+        const key = state.cachedKeys[targetIteration];
+        return key ? b64decode(key) : null;
     }
 
     function trimNumericMap(map, max) {
@@ -491,8 +532,48 @@
             .forEach(k => { delete map[k]; });
     }
 
-    function trimCache(state) {
-        trimNumericMap(state.cachedKeys, MAX_CACHED_KEYS);
+    // Удаляет ключи сообщений, для которых shouldDrop(итерация) истинно, и
+    // запоминает в expiredBelow, что на этой цепочке ключи удаляли намеренно:
+    // отсутствие ключа ниже этой границы — не «никогда не было», а «удалён»
+    // ('key-expired'). Возвращает число удалённых ключей.
+    function dropKeys(rec, shouldDrop) {
+        let dropped = 0;
+        let highest = -1;
+        for (const name of Object.keys(rec.cachedKeys)) {
+            const it = Number(name);
+            if (!shouldDrop(it)) continue;
+            delete rec.cachedKeys[name];
+            if (rec.keyTimes) delete rec.keyTimes[name];
+            dropped++;
+            if (it > highest) highest = it;
+        }
+        if (dropped > 0) rec.expiredBelow = Math.max(rec.expiredBelow || 0, highest + 1);
+        return dropped;
+    }
+
+    // Предел ключей в одной цепочке: самые старые уходят первыми.
+    function trimChain(rec) {
+        const names = Object.keys(rec.cachedKeys);
+        if (names.length <= MAX_KEYS_PER_CHAIN) return;
+        const sorted = names.map(Number).sort((a, b) => a - b);
+        const boundary = sorted[names.length - MAX_KEYS_PER_CHAIN];
+        dropKeys(rec, it => it < boundary);
+    }
+
+    // Закрывает архивную цепочку чужого ключа по prev.final: выводит оставшиеся
+    // ключи до final включительно (не больше MAX_SKIP — абсурдный final не
+    // заставит считать миллиарды HMAC), кэширует их и стирает chainKey: больше
+    // эта цепочка ничего не даёт. false — цепочки нет или final меньше уже
+    // прочитанного (противоречие: не трогаем). final при обрезке по MAX_SKIP
+    // записывается обрезанным: что дальше, прочитать всё равно нельзя.
+    async function closeChain(rec, final, hour) {
+        if (!rec.chainKey || !Number.isInteger(rec.nextIteration)) return false;
+        if (final < rec.nextIteration - 1) return false;
+        const last = Math.min(final, rec.nextIteration + MAX_SKIP - 1);
+        if (last >= rec.nextIteration) await getOrDeriveMessageKey(rec, last, hour);
+        delete rec.chainKey;
+        rec.final = last;
+        return true;
     }
 
     // Ключ сообщения n попарной цепочки. В отличие от Sender Key здесь
@@ -952,49 +1033,102 @@
         };
     }
 
+    // Поле ext в SKDM (roadmap R9): расширяемый словарь внутри AEAD key-share,
+    // то есть под защитой попарного канала. Сегодня в нём одно известное поле:
+    //   prev: { id, final } — прежний ключ отправителя в этой комнате и последняя
+    //                         использованная им итерация (5.2). Получатель
+    //                         выводит оставшиеся ключи до final и стирает chainKey
+    //                         старой цепочки. Дальше сюда лягут view (5.4) и голова
+    //                         журнала ключей (5.6).
+    // Правила разбора: известное поле обязано быть корректным, иначе SKDM
+    // отвергается целиком (испорченный ext — признак сбоя или подделки, молча
+    // принять половину нельзя); неизвестные поля игнорируются и наружу не
+    // отдаются, чтобы будущая версия могла добавлять поля, а старая — работать.
+    const MAX_EXT_CHARS = 2048;
+
+    function parseSkdmExt(raw) {
+        if (raw === undefined) return {};
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+        let json;
+        try { json = JSON.stringify(raw); } catch { return null; }
+        if (json.length > MAX_EXT_CHARS) return null;
+        const ext = {};
+        if (raw.prev !== undefined) {
+            const prev = raw.prev;
+            if (!prev || typeof prev !== 'object' || Array.isArray(prev)) return null;
+            if (!isCanonicalKeyId(prev.id)) return null;
+            if (!Number.isInteger(prev.final) || prev.final < 0 || prev.final > 0xFFFFFFFF) return null;
+            ext.prev = { id: prev.id, final: prev.final };
+        }
+        return ext;
+    }
+
+    // senderKeyId попадает в имена записей хранилища (skArchive:…, seen:…):
+    // только каноническое base64 ровно 16 байт, без посторонних символов.
+    function isCanonicalKeyId(value) {
+        if (typeof value !== 'string') return false;
+        const bytes = decodeFixed(value, 16);
+        return Boolean(bytes) && b64encode(bytes) === value;
+    }
+
     function parseSkdm(pt, roomId) {
         let skdm;
         try { skdm = JSON.parse(utf8decode(pt)); } catch { return null; }
         if (!skdm || skdm.v !== 2 || skdm.type !== 'skdm' || Number(skdm.roomId) !== Number(roomId)) return null;
-        if (typeof skdm.senderKeyId !== 'string' || !decodeFixed(skdm.senderKeyId, 16)) return null;
+        if (!isCanonicalKeyId(skdm.senderKeyId)) return null;
         if (!decodeFixed(skdm.chainKey, 32)) return null;
         if (!Number.isInteger(skdm.iteration) || skdm.iteration < 0 || skdm.iteration > 0xFFFFFFFF) return null;
         const signingPublicKey = canonicalPubKey(skdm.signingPublicKey);
         if (!signingPublicKey) return null;
+        const ext = parseSkdmExt(skdm.ext);
+        if (!ext) return null;
         return {
             senderKeyId: skdm.senderKeyId,
             chainKey: skdm.chainKey,
             iteration: skdm.iteration,
             signingPublicKey,
+            ext,
         };
     }
 
-    // При ротации Sender Key (новый senderKeyId для того же room+sender)
-    // старое состояние не выбрасывается, а переносится в archived — иначе
-    // после ротации переставали бы открываться уже показанные сообщения.
-    // Подписывающий приватный ключ в архив не попадает. У ЧУЖОГО ключа
-    // сохраняется и позиция цепочки (keepChain): ротация теперь происходит
-    // автоматически при уходе участника, и сообщения, отправленные до неё,
-    // но ещё не открытые получателем, иначе стали бы нечитаемыми. Новых
-    // сообщений старым ключом отправитель уже не шлёт, а подписать их за
-    // него никто другой не может. Свои сообщения кэшируются при отправке,
-    // поэтому свою цепочку в архиве не держим. Возвращает id вытесненных из
-    // архива ключей (их таблицы повторов больше не нужны).
-    function archiveIfRotated(state, incomingSenderKeyId, keepChain) {
-        if (!state.senderKeyId || state.senderKeyId === incomingSenderKeyId) return [];
-        if (!state.archived) state.archived = [];
-        const entry = {
-            senderKeyId: state.senderKeyId,
-            signingPublicKey: state.signingPublicKey,
-            cachedKeys: state.cachedKeys,
+    // SKDM к отправке. ext пишется только когда в нём есть поля: ключ без
+    // истории (первый в комнате) уходит ровно в прежнем виде.
+    function buildSkdm(roomId, key, ext) {
+        const skdm = {
+            v: 2, type: 'skdm', roomId,
+            senderKeyId: key.senderKeyId,
+            chainKey: key.chainKey,
+            iteration: key.iteration,
+            signingPublicKey: key.signingPublicKey,
         };
-        if (keepChain) {
-            entry.chainKey = state.chainKey;
-            entry.nextIteration = state.nextIteration;
-        }
-        state.archived.unshift(entry);
-        const dropped = state.archived.length > MAX_ARCHIVED_KEYS ? state.archived.splice(MAX_ARCHIVED_KEYS) : [];
-        return dropped.map(a => a.senderKeyId);
+        if (ext && Object.keys(ext).length > 0) skdm.ext = ext;
+        return skdm;
+    }
+
+    // ---- Записи ключей: индекс архива, часы вывода ----
+
+    const hourOf = (t) => Math.floor(t / HOUR_MS);
+    const archiveEntryId = (entry) => (typeof entry === 'string' ? entry : entry && entry.id);
+    const archiveHas = (state, keyId) => (state.archive || []).some(entry => archiveEntryId(entry) === keyId);
+
+    // Почему нет ключа сообщения, которое ниже позиции цепочки (раздел 5 и 6
+    // плана криптографии): удалено режимом «не хранить историю», удалено по
+    // сроку или бюджету, либо ключа не было вовсе (цепочка началась позже).
+    function missingKeyReason(rec, iteration) {
+        if (iteration < (rec.forgottenBelow || 0)) return 'history-not-kept';
+        if (iteration < (rec.expiredBelow || 0)) return 'key-expired';
+        return 'no-message-key';
+    }
+
+    // Политика комнаты на устройстве (roomPolicy:<комната>): режим истории и
+    // срок исчезающих сообщений. Любой мусор в записи сводится к значениям по умолчанию.
+    function normalizePolicy(raw) {
+        const p = raw && typeof raw === 'object' ? raw : {};
+        return {
+            historyMode: p.historyMode === 'none' ? 'none' : 'keep',
+            expirySeconds: Number.isSafeInteger(p.expirySeconds) && p.expirySeconds > 0 ? p.expirySeconds : null,
+            updatedAt: Number.isFinite(p.updatedAt) ? p.updatedAt : 0,
+        };
     }
 
     function normalizeIds(list) {
@@ -1127,19 +1261,344 @@
             return opk;
         }
 
+        // ---- Sender Key: записи хранилища (план криптографии, раздел 5) ----
+        //
+        //   senderKey:<комната>:<отправитель> — ТЕКУЩИЙ ключ отправителя:
+        //     { senderKeyId, signingPublicKey, [signingPrivateKey у своего], chainKey,
+        //       nextIteration, startIteration (с какой итерации у нас есть цепочка),
+        //       cachedKeys { итерация: ключ }, keyTimes { итерация: часовой индекс вывода },
+        //       createdAt, installedBy { eph, n } (у чужого), expiredBelow?, forgottenBelow?,
+        //       archive [ { id, archivedAt, final } …, затем «надгробия» — просто id ] }
+        //   skArchive:<комната>:<отправитель>:<senderKeyId> — по записи на каждый
+        //     старый ключ: { signingPublicKey, cachedKeys, keyTimes, startIteration,
+        //     [chainKey, nextIteration — пока цепочка чужого ключа не закрыта], final,
+        //     archivedAt }. Архив не раздувает основную запись, которую клиент
+        //     переписывает на каждое сообщение, а нужный старый ключ читается
+        //     одним обращением по senderKeyId из конверта.
+        //   seen:<комната>:<отправитель>:<senderKeyId> — таблица повторов, живёт
+        //     и умирает вместе со своим ключом.
+        //   roomPolicy:<комната> — { historyMode, expirySeconds, updatedAt }.
+
+        const stateName = (roomId, senderId) => 'senderKey:' + roomId + ':' + senderId;
+        const archiveName = (roomId, senderId, keyId) => 'skArchive:' + roomId + ':' + senderId + ':' + keyId;
+        const seenName = (roomId, senderId, keyId) => 'seen:' + roomId + ':' + senderId + ':' + keyId;
+        const archivePrefix = (roomId) => 'skArchive:' + roomId + ':';
+
         function ownKeyName(roomId) {
-            return 'senderKey:' + roomId + ':' + userId;
+            return stateName(roomId, userId);
+        }
+
+        // Читает текущий ключ отправителя и доводит запись до нынешнего формата:
+        // поля, которых не было у прежних версий, и встроенный archived: […]
+        // (по записи на старый ключ в skArchive:…). Правка сохраняется сразу.
+        async function readStateLocked(roomId, senderId) {
+            const name = stateName(roomId, senderId);
+            const state = await storage.get(name);
+            if (!state) return null;
+            if (await upgradeStateLocked(roomId, senderId, state)) await storage.set(name, state);
+            return state;
+        }
+
+        async function upgradeStateLocked(roomId, senderId, state) {
+            let changed = false;
+            const hour = hourOf(now());
+            if (!state.cachedKeys || typeof state.cachedKeys !== 'object') { state.cachedKeys = {}; changed = true; }
+            if (!state.keyTimes || typeof state.keyTimes !== 'object') {
+                // Время вывода прежних ключей неизвестно: считаем его нынешним —
+                // таймер комнаты удалит их не раньше срока от сегодняшнего дня.
+                state.keyTimes = {};
+                for (const it of Object.keys(state.cachedKeys)) state.keyTimes[it] = hour;
+                changed = true;
+            }
+            if (!Number.isInteger(state.startIteration)) {
+                let lowest = Infinity;
+                for (const it of Object.keys(state.cachedKeys)) lowest = Math.min(lowest, Number(it));
+                state.startIteration = lowest === Infinity ? (Number.isInteger(state.nextIteration) ? state.nextIteration : 0) : lowest;
+                changed = true;
+            }
+            if (!Array.isArray(state.archive)) { state.archive = []; changed = true; }
+            if (Array.isArray(state.archived)) {
+                // Встроенный архив прежней версии раскладывается по записям.
+                // Записи пишутся до правки основной: оборвавшаяся миграция
+                // повторится и перепишет те же записи.
+                const migrated = [];
+                for (const old of state.archived) {
+                    if (!old || !isCanonicalKeyId(old.senderKeyId) || archiveHas({ archive: migrated }, old.senderKeyId)) continue;
+                    const cachedKeys = old.cachedKeys && typeof old.cachedKeys === 'object' ? old.cachedKeys : {};
+                    const keyTimes = {};
+                    for (const it of Object.keys(cachedKeys)) keyTimes[it] = hour;
+                    let lowest = Infinity;
+                    for (const it of Object.keys(cachedKeys)) lowest = Math.min(lowest, Number(it));
+                    const rec = {
+                        signingPublicKey: old.signingPublicKey,
+                        cachedKeys, keyTimes,
+                        startIteration: lowest === Infinity ? 0 : lowest,
+                        final: null,
+                        archivedAt: now(),
+                    };
+                    if (old.chainKey && Number.isInteger(old.nextIteration)) {
+                        rec.chainKey = old.chainKey;
+                        rec.nextIteration = old.nextIteration;
+                    }
+                    await storage.set(archiveName(roomId, senderId, old.senderKeyId), rec);
+                    migrated.push({ id: old.senderKeyId, archivedAt: rec.archivedAt, final: null });
+                }
+                state.archive = migrated.concat(state.archive.filter(entry => !archiveHas({ archive: migrated }, archiveEntryId(entry))));
+                delete state.archived;
+                await dropArchivesLocked(roomId, senderId, trimArchiveIndex(state));
+                changed = true;
+            }
+            return changed;
         }
 
         async function loadOwnSenderKeyLocked(roomId) {
             const name = ownKeyName(roomId);
-            const state = await storage.get(name);
+            const state = await readStateLocked(roomId, userId);
             if (!state) return null;
             if (state.signingPrivateKey && !isCryptoKey(state.signingPrivateKey)) {
                 state.signingPrivateKey = await toPrivateKey(state.signingPrivateKey, 'Ed25519', ['sign']);
                 await storage.set(name, state);
             }
             return state;
+        }
+
+        // Сжимает индекс архива: подробные записи только у последних
+        // MAX_ARCHIVE_INDEX архивов, у более старых остаётся id («надгробие»),
+        // самые старые надгробия забываются. Возвращает id архивов, чьи записи
+        // теперь надо удалить (dropArchivesLocked).
+        function trimArchiveIndex(state) {
+            const list = state.archive;
+            const evicted = [];
+            let detailed = 0;
+            for (let i = 0; i < list.length; i++) {
+                if (typeof list[i] === 'string') continue;
+                if (++detailed > MAX_ARCHIVE_INDEX) {
+                    evicted.push(list[i].id);
+                    list[i] = list[i].id;
+                }
+            }
+            if (list.length > MAX_ARCHIVE_INDEX + MAX_ARCHIVE_TOMBSTONES) list.length = MAX_ARCHIVE_INDEX + MAX_ARCHIVE_TOMBSTONES;
+            return evicted;
+        }
+
+        // Удаляет записи архива и их таблицы повторов. В индексе (state.archive)
+        // эти id остаются надгробиями — меняет его вызывающий.
+        async function dropArchivesLocked(roomId, senderId, keyIds) {
+            for (const id of keyIds) {
+                await storage.delete(archiveName(roomId, senderId, id));
+                await storage.delete(seenName(roomId, senderId, id));
+            }
+        }
+
+        // Переносит ключ, вытесненный ротацией, в отдельную запись архива и
+        // дописывает его в индекс state.archive (основную запись потом сохраняет
+        // вызывающий). Возвращает id архивов, вытесненных из индекса.
+        //   * Свой ключ (own): все ключи сообщений уже в cachedKeys, а цепочка
+        //     дальше не нужна, поэтому final = последняя использованная итерация.
+        //   * Чужой ключ: сохраняется позиция цепочки (chainKey), и сообщения,
+        //     отправленные до ротации, но ещё не открытые, останутся читаемыми.
+        //     Если отправитель сообщил final (prev в SKDM), цепочка сразу
+        //     закрывается: оставшиеся ключи выводятся и кэшируются, chainKey
+        //     стирается. Без final chainKey живёт ARCHIVE_CHAIN_MAX_AGE_MS
+        //     (maintainRoomKeysLocked).
+        // Подписывающий приватный ключ в архив не попадает.
+        async function moveToArchiveLocked(roomId, senderId, state, { own = false, final = null } = {}) {
+            const t = now();
+            const rec = {
+                signingPublicKey: state.signingPublicKey,
+                cachedKeys: state.cachedKeys || {},
+                keyTimes: state.keyTimes || {},
+                startIteration: Number.isInteger(state.startIteration) ? state.startIteration : 0,
+                final: null,
+                archivedAt: t,
+            };
+            if (state.expiredBelow) rec.expiredBelow = state.expiredBelow;
+            if (state.forgottenBelow) rec.forgottenBelow = state.forgottenBelow;
+            if (own) {
+                rec.final = (Number.isInteger(state.nextIteration) ? state.nextIteration : 0) - 1;
+            } else if (state.chainKey && Number.isInteger(state.nextIteration)) {
+                rec.chainKey = state.chainKey;
+                rec.nextIteration = state.nextIteration;
+                if (final !== null) await closeChain(rec, final, hourOf(t));
+            }
+            await storage.set(archiveName(roomId, senderId, state.senderKeyId), rec);
+            if (!Array.isArray(state.archive)) state.archive = [];
+            state.archive.unshift({ id: state.senderKeyId, archivedAt: t, final: rec.final });
+            return trimArchiveIndex(state);
+        }
+
+        // ---- Политика комнаты на устройстве и хранение ключей ----
+
+        async function readPolicyLocked(roomId) {
+            return normalizePolicy(await storage.get('roomPolicy:' + roomId));
+        }
+
+        // Почему ключа архивного сообщения нет, хотя id в индексе остался.
+        async function goneKeyReasonLocked(roomId) {
+            return (await readPolicyLocked(roomId)).historyMode === 'none' ? 'history-not-kept' : 'key-expired';
+        }
+
+        // В индексе архива запись превращается в надгробие (просто id): ключ
+        // удалён, но заменённый ротацией ключ обратно уже не поставить.
+        function tombstoneArchive(state, keyId) {
+            const list = state.archive || [];
+            const i = list.findIndex(entry => archiveEntryId(entry) === keyId);
+            if (i >= 0 && typeof list[i] !== 'string') list[i] = keyId;
+        }
+
+        // Убирает из таблицы повторов итерации ниже границы: их ключи удалены, а
+        // повторно показать такое сообщение всё равно нечем.
+        async function pruneSeenLocked(roomId, senderId, keyId, boundary) {
+            const name = seenName(roomId, senderId, keyId);
+            const seen = await storage.get(name);
+            if (!seen) return;
+            let changed = false;
+            for (const it of Object.keys(seen)) {
+                if (Number(it) < boundary) { delete seen[it]; changed = true; }
+            }
+            if (!changed) return;
+            if (Object.keys(seen).length === 0) await storage.delete(name);
+            else await storage.set(name, seen);
+        }
+
+        // Хранение ключей комнаты (раздел 5 плана): вызывается при открытии
+        // комнаты, после пачек расшифровки и раз в час (script.js).
+        //   1. Таймер комнаты T (roomPolicy.expirySeconds): удаляются ключи,
+        //      выведенные раньше, чем T + 1 час назад, и архивы старше этого
+        //      срока вместе с таблицами повторов. keyTimes — ЛОКАЛЬНОЕ время
+        //      вывода ключа, а не created_at от сервера: сервер влияет на
+        //      удаление только значением таймера.
+        //   2. Цепочка архивного чужого ключа без prev.final живёт не дольше
+        //      ARCHIVE_CHAIN_MAX_AGE_MS после архивации.
+        //   3. Бюджет MAX_KEYS_PER_ROOM ключей на комнату: сначала удаляются
+        //      самые старые архивы, затем самые старые ключи самой большой
+        //      цепочки. Расшифровка удалённого — 'key-expired'.
+        // Свой архив подчиняется тем же правилам. Возвращает счётчики для тестов.
+        async function maintainRoomKeysLocked(roomId) {
+            const t = now();
+            const policy = await readPolicyLocked(roomId);
+            const cutoff = policy.expirySeconds ? t - policy.expirySeconds * 1000 - KEY_EXPIRY_GRACE_MS : null;
+            const cutoffHour = cutoff === null ? null : hourOf(cutoff);
+            const tooOld = (rec) => (it) => cutoffHour !== null && Number.isInteger(rec.keyTimes && rec.keyTimes[it]) && rec.keyTimes[it] < cutoffHour;
+            const stats = { expiredKeys: 0, removedArchives: 0 };
+
+            const states = new Map();   // отправитель → текущая запись
+            for (const name of await storage.keys('senderKey:' + roomId + ':')) {
+                const parts = name.split(':');
+                if (parts.length !== 3) continue;
+                const senderId = Number(parts[2]);
+                const state = await readStateLocked(roomId, senderId);
+                if (state) states.set(senderId, state);
+            }
+            const dirty = new Set();    // отправители с изменённой основной записью
+
+            if (cutoffHour !== null) {
+                for (const [senderId, state] of states) {
+                    const dropped = dropKeys(state, tooOld(state));
+                    if (dropped === 0) continue;
+                    stats.expiredKeys += dropped;
+                    dirty.add(senderId);
+                    await pruneSeenLocked(roomId, senderId, state.senderKeyId, state.expiredBelow);
+                }
+            }
+
+            const removeArchive = async (senderId, keyId) => {
+                await dropArchivesLocked(roomId, senderId, [keyId]);
+                const owner = states.get(senderId);
+                if (owner) { tombstoneArchive(owner, keyId); dirty.add(senderId); }
+                stats.removedArchives++;
+            };
+
+            const archives = [];
+            for (const name of await storage.keys(archivePrefix(roomId))) {
+                const parts = name.split(':');
+                if (parts.length !== 4) continue;
+                const senderId = Number(parts[2]);
+                const keyId = parts[3];
+                const rec = await storage.get(name);
+                if (!rec) continue;
+                // Архив без текущей записи отправителя недостижим (расшифровка
+                // начинается с неё), а ключевой материал на диске не нужен.
+                if (!states.has(senderId)) { await removeArchive(senderId, keyId); continue; }
+                if (cutoff !== null && rec.archivedAt < cutoff) { await removeArchive(senderId, keyId); continue; }
+                let changed = false;
+                const dropped = dropKeys(rec, tooOld(rec));
+                if (dropped > 0) {
+                    stats.expiredKeys += dropped;
+                    changed = true;
+                    await pruneSeenLocked(roomId, senderId, keyId, rec.expiredBelow);
+                }
+                if (rec.chainKey && (rec.final === null || rec.final === undefined) && t - rec.archivedAt >= ARCHIVE_CHAIN_MAX_AGE_MS) {
+                    rec.final = (Number.isInteger(rec.nextIteration) ? rec.nextIteration : 0) - 1;
+                    delete rec.chainKey;
+                    changed = true;
+                }
+                if (changed) await storage.set(name, rec);
+                archives.push({ senderId, keyId, archivedAt: rec.archivedAt, keys: Object.keys(rec.cachedKeys).length });
+            }
+
+            let total = archives.reduce((sum, a) => sum + a.keys, 0);
+            for (const state of states.values()) total += Object.keys(state.cachedKeys).length;
+            if (total > MAX_KEYS_PER_ROOM) {
+                archives.sort((a, b) => a.archivedAt - b.archivedAt);
+                while (total > MAX_KEYS_PER_ROOM && archives.length > 0) {
+                    const oldest = archives.shift();
+                    await removeArchive(oldest.senderId, oldest.keyId);
+                    total -= oldest.keys;
+                }
+                // Одни текущие цепочки: режем самую большую с начала.
+                const chains = Array.from(states.entries())
+                    .map(([senderId, state]) => ({ senderId, state, keys: Object.keys(state.cachedKeys).length }))
+                    .sort((a, b) => b.keys - a.keys);
+                for (const chain of chains) {
+                    if (total <= MAX_KEYS_PER_ROOM) break;
+                    const cut = Math.min(chain.keys, total - MAX_KEYS_PER_ROOM);
+                    const iterations = Object.keys(chain.state.cachedKeys).map(Number).sort((a, b) => a - b);
+                    const boundary = cut >= iterations.length ? Infinity : iterations[cut];
+                    const dropped = dropKeys(chain.state, it => it < boundary);
+                    stats.expiredKeys += dropped;
+                    total -= dropped;
+                    if (dropped > 0) {
+                        dirty.add(chain.senderId);
+                        await pruneSeenLocked(roomId, chain.senderId, chain.state.senderKeyId, chain.state.expiredBelow);
+                    }
+                }
+            }
+
+            for (const senderId of dirty) await storage.set(stateName(roomId, senderId), states.get(senderId));
+            return stats;
+        }
+
+        async function maintainRoomKeys(roomId) {
+            await ensureLocal();
+            return withLock(() => maintainRoomKeysLocked(roomId));
+        }
+
+        // Политика комнаты на этом устройстве. Сейчас меняется только срок
+        // исчезающих сообщений: expirySeconds — число секунд или 0/null (нет
+        // срока). Смена срока сразу применяется к ключам комнаты.
+        async function setRoomPolicy(roomId, patch) {
+            if (!patch || typeof patch !== 'object') throw new TypeError('E2EE: setRoomPolicy ждёт объект с настройками');
+            await ensureLocal();
+            return withLock(async () => {
+                const name = 'roomPolicy:' + roomId;
+                const current = await readPolicyLocked(roomId);
+                const next = Object.assign({}, current);
+                if (patch.expirySeconds !== undefined) {
+                    const seconds = patch.expirySeconds;
+                    if (seconds === null || seconds === 0) next.expirySeconds = null;
+                    else if (Number.isSafeInteger(seconds) && seconds > 0) next.expirySeconds = seconds;
+                    else throw new TypeError('E2EE: expirySeconds — целое число секунд, 0 или null');
+                }
+                const changed = next.expirySeconds !== current.expirySeconds;
+                if (changed) {
+                    next.updatedAt = now();
+                    if (next.expirySeconds === null && next.historyMode === 'keep') await storage.delete(name);
+                    else await storage.set(name, next);
+                    await maintainRoomKeysLocked(roomId);
+                }
+                return next;
+            });
         }
 
         // Разовая миграция хранилища прежней версии: JWK → неизвлекаемые
@@ -1849,13 +2308,12 @@
                 session.n = n + 1;
                 await storage.set('pw2Send:' + peerId, session);
 
-                const skdm = {
-                    v: 2, type: 'skdm', roomId,
+                const skdm = buildSkdm(roomId, {
                     senderKeyId: own.senderKeyId,
                     chainKey: own.chainKey,
                     iteration: own.nextIteration,
                     signingPublicKey: own.signingPublicKey,
-                };
+                });
                 const aesKey = await hkdf(messageKey, ZERO32, 'nyxo-e2ee-skdm-v2', 32);
                 const aad = skdmAadV2(roomId, userId, peerId, identity.signPub, identity.dhPub, session.peerSignPub, session.peerDhPub);
                 const { iv, ct } = await aesGcmEncrypt(aesKey, utf8encode(JSON.stringify(skdm)), aad);
@@ -1997,33 +2455,53 @@
             };
         }
 
-        async function dropSeenTablesLocked(roomId, senderId, senderKeyIds) {
-            for (const id of senderKeyIds) await storage.delete('seen:' + roomId + ':' + senderId + ':' + id);
-        }
-
         // order = { eph, n } — позиция key-share в попарной сессии.
         async function installSenderKeyLocked(roomId, senderId, skdm, order) {
-            const name = 'senderKey:' + roomId + ':' + senderId;
-            const existing = await storage.get(name);
+            const name = stateName(roomId, senderId);
+            const existing = await readStateLocked(roomId, senderId);
             if (existing && existing.senderKeyId === skdm.senderKeyId) return; // уже есть, не откатываем состояние
             // Ключ, который уже был заменён ротацией, обратно не ставим: иначе
             // повтор старого key-share возвращал бы в оборот старый ключ.
-            if (existing && (existing.archived || []).some(a => a.senderKeyId === skdm.senderKeyId)) return;
-            // Более ранняя передача той же сессии, пришедшая позже более
-            // поздней, несёт более старый ключ — текущий ею не заменяем.
-            if (existing && existing.installedBy && existing.installedBy.eph === order.eph && order.n < existing.installedBy.n) return;
-            let dropped = [];
-            if (existing) dropped = archiveIfRotated(existing, skdm.senderKeyId, true);
-            await storage.set(name, {
+            if (existing && archiveHas(existing, skdm.senderKeyId)) return;
+            const t = now();
+            if (existing && existing.installedBy && existing.installedBy.eph === order.eph && order.n < existing.installedBy.n) {
+                // Более ранняя передача той же сессии, пришедшая позже более
+                // поздней, несёт более старый ключ: текущий ею не заменяем, но и
+                // не выбрасываем — старый ключ уходит прямо в архив, и сообщения,
+                // отправленные им, остаются читаемыми.
+                await storage.set(archiveName(roomId, senderId, skdm.senderKeyId), {
+                    signingPublicKey: skdm.signingPublicKey,
+                    cachedKeys: {}, keyTimes: {},
+                    startIteration: skdm.iteration,
+                    chainKey: skdm.chainKey, nextIteration: skdm.iteration,
+                    final: null,
+                    archivedAt: t,
+                });
+                existing.archive.unshift({ id: skdm.senderKeyId, archivedAt: t, final: null });
+                const evicted = trimArchiveIndex(existing);
+                await storage.set(name, existing);
+                await dropArchivesLocked(roomId, senderId, evicted);
+                return;
+            }
+            const next = {
                 senderKeyId: skdm.senderKeyId,
                 signingPublicKey: skdm.signingPublicKey,
                 chainKey: skdm.chainKey,
                 nextIteration: skdm.iteration,
+                startIteration: skdm.iteration,
                 cachedKeys: {},
-                archived: existing ? existing.archived : [],
+                keyTimes: {},
+                createdAt: t,
+                archive: [],
                 installedBy: { eph: order.eph, n: order.n },
-            });
-            await dropSeenTablesLocked(roomId, senderId, dropped);
+            };
+            let evicted = [];
+            if (existing) {
+                evicted = await moveToArchiveLocked(roomId, senderId, existing);
+                next.archive = existing.archive;
+            }
+            await storage.set(name, next);
+            await dropArchivesLocked(roomId, senderId, evicted);
         }
 
         async function queuePendingShareLocked(senderId, roomId, ciphertext) {
@@ -2090,7 +2568,7 @@
 
         // ---- Sender Key: моё состояние в комнате ----
 
-        async function newOwnSenderKeyState(archived) {
+        async function newOwnSenderKeyState() {
             const signKp = await generateEd25519();
             return {
                 senderKeyId: b64encode(randomBytes(16)),
@@ -2098,21 +2576,24 @@
                 signingPrivateKey: signKp.priv,
                 chainKey: b64encode(randomBytes(32)),
                 nextIteration: 0,
+                startIteration: 0,
                 cachedKeys: {},
-                archived: archived || [],
+                keyTimes: {},
+                createdAt: now(),
+                archive: [],
             };
         }
 
         // Ротация собственного Sender Key: новый chainKey и новая
-        // подписывающая пара, старое состояние архивируется, чтобы уже
+        // подписывающая пара, старое состояние уходит в архив, чтобы уже
         // отправленные сообщения остались читаемыми для нас самих.
         async function rotateRoomKeyLocked(roomId) {
             const existing = await loadOwnSenderKeyLocked(roomId);
-            const next = await newOwnSenderKeyState(existing ? existing.archived || [] : []);
+            const next = await newOwnSenderKeyState();
             if (existing) {
-                const dropped = archiveIfRotated(existing, next.senderKeyId, false);
-                next.archived = existing.archived;
-                await dropSeenTablesLocked(roomId, userId, dropped);
+                const evicted = await moveToArchiveLocked(roomId, userId, existing, { own: true });
+                next.archive = existing.archive;
+                await dropArchivesLocked(roomId, userId, evicted);
                 // Отметки рассылки старого ключа больше ни к чему.
                 for (const name of await storage.keys('sharedWith2:' + roomId + ':' + existing.senderKeyId + ':')) {
                     await storage.delete(name);
@@ -2156,7 +2637,7 @@
                 let own = await loadOwnSenderKeyLocked(roomId);
                 let rotated = false;
                 if (!own) {
-                    own = await newOwnSenderKeyState([]);
+                    own = await newOwnSenderKeyState();
                     await storage.set(ownKeyName(roomId), own);
                 } else if (!own.signingPrivateKey) {
                     // Состояние из очень старой версии без ключа подписи.
@@ -2344,9 +2825,10 @@
                 const it = st.nextIteration;
                 const step = await chainStep(b64decode(st.chainKey));
                 st.cachedKeys[it] = b64encode(step.messageKey); // сохраняем и для собственного отображения истории
+                st.keyTimes[it] = hourOf(now());
                 st.chainKey = b64encode(step.nextChainKey);
                 st.nextIteration = it + 1;
-                trimCache(st);
+                trimChain(st);
                 await storage.set(ownKeyName(roomId), st);
                 return { state: st, iteration: it, messageKey: step.messageKey };
             });
@@ -2397,8 +2879,7 @@
 
             await ensureLocal();
             return withLock(async () => {
-                const stateName = 'senderKey:' + roomId + ':' + senderId;
-                const state = await storage.get(stateName);
+                const state = await readStateLocked(roomId, senderId);
                 if (!state) return { ok: false, reason: 'no-sender-key' };
 
                 const iv = decodeFixed(envelope.iv, 12);
@@ -2406,46 +2887,54 @@
                 const ct = typeof envelope.ct === 'string' ? b64decode(envelope.ct) : null;
                 if (!iv || !sig || !ct || ct.length < 16) return bad;
                 const iteration = envelope.iteration;
+                const keyId = envelope.senderKeyId;
                 const sigInput = version === 2
-                    ? sigInputV2(iv, ct, iteration, envelope.senderKeyId)
+                    ? sigInputV2(iv, ct, iteration, keyId)
                     : sigInputV1(iv, ct, iteration);
 
-                const seenName = 'seen:' + roomId + ':' + senderId + ':' + envelope.senderKeyId;
-                const seen = (await storage.get(seenName)) || {};
+                // Какая запись отвечает за ключ из конверта: текущая или, если
+                // сообщение отправлено ДО ротации, запись архива (одно
+                // обращение по senderKeyId, независимо от числа архивов).
+                let rec;
+                let saveRec;
+                if (state.senderKeyId === keyId) {
+                    rec = state;
+                    saveRec = () => storage.set(stateName(roomId, senderId), state);
+                } else {
+                    const archiveKey = archiveName(roomId, senderId, keyId);
+                    rec = await storage.get(archiveKey);
+                    if (!rec) {
+                        // В индексе есть, а записи нет — ключ удалён намеренно
+                        // (режим «не хранить историю», таймер комнаты, бюджет).
+                        if (archiveHas(state, keyId)) return { ok: false, reason: await goneKeyReasonLocked(roomId) };
+                        return { ok: false, reason: 'stale-sender-key' };
+                    }
+                    saveRec = () => storage.set(archiveKey, rec);
+                }
+
+                const seenKey = seenName(roomId, senderId, keyId);
+                const seen = (await storage.get(seenKey)) || {};
                 const bound = Object.prototype.hasOwnProperty.call(seen, iteration) ? seen[iteration] : undefined;
 
-                let messageKey;
-                if (state.senderKeyId === envelope.senderKeyId) {
-                    if (!(await verify(b64decode(state.signingPublicKey), sig, sigInput))) return { ok: false, reason: 'bad-signature' };
-                    if (iteration - state.nextIteration > MAX_SKIP) return { ok: false, reason: 'too-far-ahead' };
-                    if (boundId !== null && bound !== undefined && bound !== boundId) return { ok: false, reason: 'replay' };
-                    // Цепочка продвигается (и состояние сохраняется) только для
+                if (!(await verify(b64decode(rec.signingPublicKey), sig, sigInput))) return { ok: false, reason: 'bad-signature' };
+                // Закрытая цепочка (отправитель сообщил final): дальше этой
+                // итерации ключ не использовался, такой конверт — не от него.
+                if (rec.final !== undefined && rec.final !== null && iteration > rec.final) return { ok: false, reason: 'stale-sender-key' };
+                const hasChain = Boolean(rec.chainKey) && Number.isInteger(rec.nextIteration);
+                if (hasChain && iteration - rec.nextIteration > MAX_SKIP) return { ok: false, reason: 'too-far-ahead' };
+                if (boundId !== null && bound !== undefined && bound !== boundId) return { ok: false, reason: 'replay' };
+
+                let messageKey = null;
+                if (hasChain && iteration >= rec.nextIteration) {
+                    // Цепочка продвигается (и запись сохраняется) только для
                     // новых итераций — при простом повторном показе истории
                     // хранилище не переписывается.
-                    const advances = iteration >= state.nextIteration;
-                    messageKey = await getOrDeriveMessageKey(state, iteration);
-                    if (advances) await storage.set(stateName, state);
-                } else {
-                    // Не текущий ключ отправителя — возможно, сообщение
-                    // отправлено ДО его ротации: ищем среди архивных состояний
-                    // (см. archiveIfRotated). Если позиция цепочки архивного
-                    // ключа сохранена, ещё не открытые итерации выводятся с тем
-                    // же пределом MAX_SKIP; иначе — только закэшированные.
-                    const archived = (state.archived || []).find(a => a.senderKeyId === envelope.senderKeyId);
-                    if (!archived) return { ok: false, reason: 'stale-sender-key' };
-                    if (!(await verify(b64decode(archived.signingPublicKey), sig, sigInput))) return { ok: false, reason: 'bad-signature' };
-                    if (boundId !== null && bound !== undefined && bound !== boundId) return { ok: false, reason: 'replay' };
-                    if (archived.chainKey && Number.isInteger(archived.nextIteration)) {
-                        if (iteration - archived.nextIteration > MAX_SKIP) return { ok: false, reason: 'too-far-ahead' };
-                        const advances = iteration >= archived.nextIteration;
-                        messageKey = await getOrDeriveMessageKey(archived, iteration);
-                        if (advances) await storage.set(stateName, state);
-                    } else {
-                        const cached = archived.cachedKeys[iteration];
-                        messageKey = cached ? b64decode(cached) : null;
-                    }
+                    messageKey = await getOrDeriveMessageKey(rec, iteration, hourOf(now()));
+                    await saveRec();
+                } else if (rec.cachedKeys[iteration]) {
+                    messageKey = b64decode(rec.cachedKeys[iteration]);
                 }
-                if (!messageKey) return { ok: false, reason: 'no-message-key' };
+                if (!messageKey) return { ok: false, reason: missingKeyReason(rec, iteration) };
 
                 let content;
                 try {
@@ -2494,7 +2983,7 @@
                 if (bound === undefined) {
                     seen[iteration] = boundId;
                     trimNumericMap(seen, MAX_SEEN_PER_KEY);
-                    await storage.set(seenName, seen);
+                    await storage.set(seenKey, seen);
                 }
                 if (newEntry) await writeEditEntryLocked(roomId, boundId, newEntry);
                 const result = { ok: true, text: content.text };
@@ -2519,6 +3008,10 @@
             syncKeyShares,
             hasRoomKey,
             rotateRoomKey,
+
+            // Комнаты: хранение ключей на устройстве (архив, срок, бюджет)
+            maintainRoomKeys,
+            setRoomPolicy,
 
             // Сообщения и файлы
             encryptOutgoing,
@@ -2568,10 +3061,26 @@
             // Код безопасности
             computeSafetyNumber,
 
+            // Разбор SKDM (поле ext)
+            parseSkdm,
+            parseSkdmExt,
+            buildSkdm,
+            MAX_EXT_CHARS,
+
             // Пределы и сроки
             MAX_SKIP,
             MAX_PW_SKIP,
             MAX_EDIT_ENTRIES,
+            MAX_KEYS_PER_CHAIN,
+            MAX_KEYS_PER_ROOM,
+            MAX_ARCHIVE_INDEX,
+            MAX_ARCHIVE_TOMBSTONES,
+            ROTATE_AFTER_MESSAGES,
+            ROTATE_AFTER_MS,
+            FORCE_ROTATE_AFTER_MESSAGES,
+            FORCE_ROTATE_AFTER_MS,
+            ARCHIVE_CHAIN_MAX_AGE_MS,
+            KEY_EXPIRY_GRACE_MS,
             PREKEY_ROTATE_MS,
             PREKEY_RETAIN_MS,
             LOW_WATER_PQ_OPK,
