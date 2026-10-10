@@ -1,0 +1,137 @@
+# Релиз клиента (6.1/6.3, roadmap R10): на тег v* собирает манифест клиента и
+# публикует GitHub Release с аттестацией. «Сборка» клиента — это сами файлы
+# public/ (минификации нет), поэтому манифест воспроизводится из исходников:
+# git checkout <тег> && npm ci && node scripts/release-manifest.js. Как сверять
+# продакшен с релизом — docs/VERIFY.md, как устроен релиз — docs/dev/ci.md.
+#
+# Все `uses:` закреплены полным SHA коммита, версия — в комментарии (зачем — в
+# ci.yml). Обновляет их Dependabot.
+#
+# Ручной запуск (workflow_dispatch) — репетиция: всё собирается и сравнивается,
+# но Release не создаётся и аттестация не пишется (это только на теге).
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# Токен только на чтение; права на запись есть лишь у job `release` (ниже).
+permissions:
+  contents: read
+
+concurrency:
+  # Один релиз на тег; повторный запуск не отменяет идущий.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Юнит-тесты и манифест на двух ОС. Манифест не должен зависеть от ОС (LF,
+  # сортировка по кодовым единицам): job `release` сравнивает результаты через cmp.
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - name: Получить код
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Установить Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Установить зависимости
+        run: npm ci
+      - name: Юнит-тесты
+        run: npm test
+      # commit берётся из GITHUB_SHA, время — из коммита (SOURCE_DATE_EPOCH не
+      # нужен): два прогона одного коммита дают одни и те же файлы.
+      - name: Манифест клиента и файлы релиза
+        run: node scripts/release-manifest.js --out release-out
+      - name: Сохранить файлы релиза
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.os }}
+          path: release-out/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # contents: write — создать Release; id-token и attestations — подписать
+      # аттестацию происхождения (sigstore через OIDC GitHub).
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Скачать файлы релиза обеих ОС
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: release-*
+          path: artifacts
+      # release.json содержит версию Node, а setup-node берёт «последнюю 24.x»:
+      # на двух ОС она может оказаться разной. Поэтому сравниваются файлы,
+      # которые от ОС зависеть не должны, а release.json берётся с Ubuntu.
+      - name: Манифест и суммы одинаковы на Ubuntu и Windows
+        run: |
+          set -euo pipefail
+          for name in client-manifest.json SHA256SUMS; do
+            cmp "artifacts/release-ubuntu-latest/$name" "artifacts/release-windows-latest/$name"
+          done
+          cmp <(jq -S 'del(.node)' artifacts/release-ubuntu-latest/release.json) \
+              <(jq -S 'del(.node)' artifacts/release-windows-latest/release.json)
+          mkdir release
+          cp artifacts/release-ubuntu-latest/client-manifest.json artifacts/release-ubuntu-latest/release.json artifacts/release-ubuntu-latest/SHA256SUMS release/
+      - name: Тег совпадает с версией и commit релиза
+        if: ${{ github.ref_type == 'tag' }}
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=$(jq -r .version release/release.json)
+          commit=$(jq -r .commit release/release.json)
+          if [[ "$TAG" != "v$version" && "$TAG" != "v$version-"* ]]; then
+            echo "Тег $TAG не соответствует версии $version из package.json (ожидается v$version или v$version-суффикс)" >&2
+            exit 1
+          fi
+          if [[ "$commit" != "$GITHUB_SHA" ]]; then
+            echo "commit в release.json ($commit) не совпадает с коммитом тега ($GITHUB_SHA)" >&2
+            exit 1
+          fi
+      - name: Аттестация происхождения файлов релиза
+        if: ${{ github.ref_type == 'tag' }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release/client-manifest.json
+            release/release.json
+            release/SHA256SUMS
+      - name: Создать GitHub Release
+        if: ${{ github.ref_type == 'tag' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version=$(jq -r .version release/release.json)
+          commit=$(jq -r .commit release/release.json)
+          manifest_sha=$(jq -r .manifest.sha256 release/release.json)
+          {
+            echo "Клиент Nyxo $version, коммит \`$commit\`."
+            echo
+            echo "SHA-256 манифеста client-manifest.json: \`$manifest_sha\`"
+            echo
+            echo "Файлы релиза подтверждены аттестацией GitHub: \`gh attestation verify client-manifest.json --repo $REPO\`."
+            echo "Как сверить работающий сайт с этим релизом (скрипт, sha256sum, PowerShell) — docs/VERIFY.md."
+          } > release-notes.md
+          gh release create "$TAG" --repo "$REPO" --verify-tag --title "$TAG" --notes-file release-notes.md \
+            release/client-manifest.json release/release.json release/SHA256SUMS

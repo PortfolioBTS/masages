@@ -1,6 +1,6 @@
 # CI: что проверяется и как это повторить локально
 
-Конфигурация лежит в `.github/`: `workflows/ci.yml`, `workflows/codeql.yml`, `dependabot.yml`. Политика зависимостей — `scripts/audit-check.js` и `audit-allowlist.json`. Версии действий и образов в этом документе не перечисляются: они устаревают с каждым PR Dependabot, актуальные значения — в самих файлах.
+Конфигурация лежит в `.github/`: `workflows/ci.yml`, `workflows/codeql.yml`, `workflows/release.yml`, `workflows/watchdog.yml`, `dependabot.yml`. Политика зависимостей — `scripts/audit-check.js` и `audit-allowlist.json`. Версии действий и образов в этом документе не перечисляются: они устаревают с каждым PR Dependabot, актуальные значения — в самих файлах.
 
 ## Что запускается и когда
 
@@ -11,6 +11,8 @@
 | `audit` | ci.yml | `npm ci --ignore-scripts`, затем `node scripts/audit-check.js` (политика уязвимостей) и `npm audit signatures` (подписи реестра). Вторая проверка выполняется, даже если упала первая | `npm run audit:check`, `npm audit signatures` |
 | `workflows-lint` | ci.yml | actionlint: синтаксис workflow, выражения `${{ }}`, входы действий, shellcheck блоков `run` | см. ниже |
 | `analyze (javascript-typescript)`, `analyze (actions)` | codeql.yml | CodeQL, запросы `security-extended`, `build-mode: none`. `actions` анализирует сами workflow. Результаты — Security → Code scanning | отдельно локально не повторяется |
+| `build (ubuntu-latest)`, `build (windows-latest)`, `release` | release.yml | Только на теге `v*` (и вручную как репетиция): `npm ci`, `npm test`, манифест клиента на двух ОС, сравнение через `cmp`, аттестация и GitHub Release. В защиту `main` не входят | `node scripts/release-manifest.js` |
+| `verify` | watchdog.yml | Раз в сутки сверяет продакшен с манифестом последнего релиза. Выключен, пока не задана переменная репозитория `WATCHDOG_URL`. В защиту `main` не входит | `node scripts/verify-deployment.js <url> --manifest client-manifest.json` |
 
 Расписание: `ci.yml` — push в `main`, любой `pull_request`, ручной запуск и понедельник 03:17 UTC (ловит новые уязвимости без единого коммита); `codeql.yml` — push и PR в `main` и среда 04:41 UTC (GitHub пополняет запросы CodeQL); Dependabot — понедельник 05:00 UTC. Прогоны по расписанию GitHub запускает только на ветке по умолчанию, а в публичном репозитории отключает их после 60 дней без активности: если расписание «замолчало», сделайте любой коммит или включите workflow вручную на вкладке Actions.
 
@@ -149,6 +151,24 @@ docker run --rm -v "${PWD}:/repo:ro" -w /repo $img -color
 - `e2e` делайте обязательной только когда в `main` есть `npm run test:e2e` и каталог `test/e2e/` (набор сквозных тестов добавляет отдельная задача): до этого job падает на «Missing script».
 - `audit` обязателен намеренно: новая уязвимость, опубликованная между созданием PR и слиянием, остановит и несвязанный PR, пока зависимость не обновлена или не добавлено исключение. Красный `audit` в прогоне по расписанию — сигнал обновить зависимости.
 - Имена jobs — часть контракта: переименование молча снимет проверку с защиты. Это охраняет `test/workflows.test.js`.
+
+## Релиз и сторож клиента
+
+Что именно сверяется и как это делает пользователь — `docs/VERIFY.md`; здесь — как устроены workflow.
+
+**Релиз (`release.yml`).** Запускается на тег `v*`; ручной запуск (`workflow_dispatch`) — репетиция без публикации. «Сборка» клиента — сами файлы `public/` (минификации нет), поэтому артефакты воспроизводимы из исходников.
+
+1. Job `build` на Ubuntu и Windows: `npm ci`, `npm test`, `node scripts/release-manifest.js --out release-out`. Три файла: `client-manifest.json` (тот же, что отдаёт сервер по `/client-manifest.json`, без commit и времени), `release.json` (версия, commit, время коммита, версия Node, хэш манифеста), `SHA256SUMS` (формат `sha256sum`).
+2. Job `release` скачивает результаты обеих ОС и сравнивает `client-manifest.json` и `SHA256SUMS` через `cmp`: если Windows и Linux дали разные байты, релиза нет (причина обычно в окончаниях строк или порядке файлов). `release.json` сравнивается без поля `node`: `setup-node` берёт последнюю 24.x, и на двух ОС она может отличаться.
+3. На теге: проверка, что тег равен `v<версия из package.json>` (допустим суффикс `-rc.1`) и commit в `release.json` — коммит тега; `actions/attest-build-provenance` по трём файлам (права `id-token: write`, `attestations: write`); `gh release create --verify-tag` с тремя файлами и хэшем манифеста в описании. Права на запись есть только у job `release`; охраняет `test/release-workflows.test.js`.
+
+Выпуск: поднять `version` в `package.json`, слить в `main`, затем `git tag vX.Y.Z && git push origin vX.Y.Z`. Проверить без публикации: Actions → Release → Run workflow на любой ветке.
+
+**Сторож (`watchdog.yml`).** Раз в сутки (05:41 UTC) на раннере GitHub — то есть вне проверяемого сервера — скачивает манифест последнего релиза, проверяет его аттестацию (`gh attestation verify`) и запускает `scripts/verify-deployment.js` против продакшена. Код 1 (расхождение) — открывает issue «Сторож: клиент на продакшене не совпадает с последним релизом» или дополняет уже открытый, и запуск красный; код 2 (проверить не удалось: сайт недоступен, эталон не читается) — красный запуск без issue. Закрывать issue нужно вручную.
+
+- **Включение:** Settings → Secrets and variables → Actions → Variables → `WATCHDOG_URL` = адрес продакшена (`https://chat.example.com`). Пока переменной нет, job пропускается: сторож выключен по умолчанию.
+- **Что он не ловит:** адресную подмену (другой код отдают только отдельным людям) и подмену на уровне самого GitHub. Сразу после выпуска, пока продакшен не обновлён, он покажет расхождение: версию выкаченного кода видно в `release.json`.
+- Скрипт сверки берётся из ветки по умолчанию, эталон — из релиза.
 
 ## Типовые ситуации
 

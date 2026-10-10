@@ -303,13 +303,13 @@ async function main() {
 
     // ---- CSP ----
 
-    await test('CSP: K6 directives, nonce and same-host WebSocket', () => {
-        const csp = utils.buildContentSecurityPolicy({ nonce: 'abc+/=', host: 'Chat.Example.com', secure: true });
+    await test('CSP: K6 directives, no nonce and same-host WebSocket', () => {
+        const csp = utils.buildContentSecurityPolicy({ host: 'Chat.Example.com', secure: true });
         const directives = Object.fromEntries(csp.split('; ').map(d => {
             const [name, ...rest] = d.split(' ');
             return [name, rest.join(' ')];
         }));
-        assert.strictEqual(directives['script-src'], "'self' 'nonce-abc+/='");
+        assert.strictEqual(directives['script-src'], "'self'");
         assert.strictEqual(directives['style-src'], "'self'");
         assert.strictEqual(directives['connect-src'], "'self' wss://chat.example.com");
         assert.strictEqual(directives['img-src'], "'self' data: blob:");
@@ -320,15 +320,18 @@ async function main() {
         assert.strictEqual(directives['form-action'], "'self'");
         assert.strictEqual(directives['base-uri'], "'self'");
         assert.ok(!csp.includes('unsafe-inline'));
+        assert.ok(!csp.includes('nonce'), 'nonce в CSP больше нет (R10)');
+        assert.ok(!csp.includes('strict-dynamic'));
+        // Даже если старый вызывающий код всё ещё передаёт nonce, в политику он не попадает.
+        assert.strictEqual(utils.buildContentSecurityPolicy({ nonce: 'abc', host: 'Chat.Example.com', secure: true }), csp);
     });
 
     await test('CSP: plain http (onion) gets ws://, a hostile Host is not injected', () => {
-        assert.ok(utils.buildContentSecurityPolicy({ nonce: 'n', host: `${onion}`, secure: false }).includes(`connect-src 'self' ws://${onion};`));
-        assert.ok(utils.buildContentSecurityPolicy({ nonce: 'n', host: 'localhost:3000', secure: false }).includes("connect-src 'self' ws://localhost:3000;"));
-        const hostile = utils.buildContentSecurityPolicy({ nonce: 'n', host: "a.com; script-src 'unsafe-inline'", secure: true });
+        assert.ok(utils.buildContentSecurityPolicy({ host: `${onion}`, secure: false }).includes(`connect-src 'self' ws://${onion};`));
+        assert.ok(utils.buildContentSecurityPolicy({ host: 'localhost:3000', secure: false }).includes("connect-src 'self' ws://localhost:3000;"));
+        const hostile = utils.buildContentSecurityPolicy({ host: "a.com; script-src 'unsafe-inline'", secure: true });
         assert.ok(hostile.includes("connect-src 'self';"));
         assert.ok(!hostile.includes('unsafe-inline'));
-        assert.throws(() => utils.buildContentSecurityPolicy({ nonce: "x' 'unsafe-inline", host: 'a.com' }), TypeError);
     });
 
     // ---- TLS до Postgres ----
