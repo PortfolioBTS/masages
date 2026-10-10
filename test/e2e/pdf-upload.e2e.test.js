@@ -14,7 +14,6 @@ const { XMP, assertOffsetsValid, streamData, sample } = require('../pdf-fixtures
 
 const suite = createSuite('pdf-upload');
 
-const REJECT = { success: false, message: 'Не удалось проверить содержимое файла' };
 
 async function uploadsCount() { return fs.readdirSync(suite.server.uploadsDir).length; }
 
@@ -26,7 +25,10 @@ test('PDF с Info внутри сжатого object stream отклоняетс
 
     const res = await a.uploadRaw(bot.id, sample({ info: 'compressed' }), 'application/pdf', { filename: 'report.pdf' });
     assert.strictEqual(res.status, 400);
-    assert.deepStrictEqual(res.body, REJECT);
+    // Причина понятна пользователю (userFacing санитайзера) и с советом, что делать.
+    assert.strictEqual(res.body.success, false);
+    assert.match(res.body.message, /^PDF содержит сжатые метаданные/);
+    assert.match(res.body.message, /Сохранить как PDF/);
     const rows = await suite.query('SELECT count(*)::int AS n FROM messages WHERE user_id = $1 AND file_url IS NOT NULL', [a.user.id]);
     assert.strictEqual(rows.rows[0].n, 0);
     await waitUntil(async () => (await uploadsCount()) === before, { what: 'отклонённый PDF удалён с диска' });
@@ -38,7 +40,8 @@ test('зашифрованный PDF отклоняется', async () => {
     const bot = await a.botChat();
     const res = await a.uploadRaw(bot.id, sample({ info: 'none', extra: '/Encrypt 9 0 R' }), 'application/pdf', { filename: 'locked.pdf' });
     assert.strictEqual(res.status, 400);
-    assert.deepStrictEqual(res.body, REJECT);
+    assert.strictEqual(res.body.success, false);
+    assert.match(res.body.message, /^PDF зашифрован/);
 });
 
 test('PDF со сжатым XMP и object stream без метаданных принимается: XMP затёрт, длина и смещения xref те же, /ID новый', async () => {

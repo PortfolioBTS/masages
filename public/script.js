@@ -5203,7 +5203,9 @@ async function sendOneFile(queue, item, index, total) {
         clean = MediaSanitizer.sanitize(new Uint8Array(await item.file.arrayBuffer()), item.mime);
     } catch (err) {
         console.warn('MediaSanitizer: файл отклонён:', err);
-        return { ok: false, message: 'Файл повреждён или его формат не поддерживается' };
+        // userFacing — отказ с понятной пользователю причиной и советом (например,
+        // PDF со сжатыми метаданными: «Печать → Сохранить как PDF»).
+        return { ok: false, message: err && err.userFacing ? err.message : 'Файл повреждён или его формат не поддерживается' };
     }
     if (queue.cancelled) return { ok: false };
 

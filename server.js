@@ -3193,7 +3193,9 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
             // проходил дальше — теоретическая лазейка мимо проверки типа файла.
             // Теперь любая ошибка проверки = отказ (fail closed), а не fail open.
             console.error('Upload processing error:', magicErr.message);
-            return rejectUpload(res, file, 400, 'Не удалось проверить содержимое файла');
+            // Отказ санитайзера с понятной причиной (userFacing) отдаётся как есть:
+            // в нём нет данных файла, только что сделать пользователю.
+            return rejectUpload(res, file, 400, magicErr && magicErr.userFacing ? magicErr.message : 'Не удалось проверить содержимое файла');
         }
     }
     await coarsenFileTimes(uploadedFilePath);
