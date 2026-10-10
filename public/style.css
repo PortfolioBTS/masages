@@ -94,7 +94,6 @@
     --mask-alert: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3'/%3E%3Cpath d='M12 9v4'/%3E%3Cpath d='M12 17h.01'/%3E%3C/svg%3E");
     --mask-info: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='M12 16v-4'/%3E%3Cpath d='M12 8h.01'/%3E%3C/svg%3E");
     --mask-check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E");
-    --mask-unlock: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect width='18' height='11' x='3' y='11' rx='2'/%3E%3Cpath d='M7 11V7a5 5 0 0 1 9.9-1'/%3E%3C/svg%3E");
     --mask-upload: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3v12'/%3E%3Cpath d='m17 8-5-5-5 5'/%3E%3Cpath d='M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'/%3E%3C/svg%3E");
 }
 
@@ -610,24 +609,16 @@ svg.icon.icon-xl {
 }
 
 .icon-btn.is-active,
-.icon-btn[aria-pressed="true"],
-.icon-btn.e2ee-active {
+.icon-btn[aria-pressed="true"] {
     background: var(--accent);
     border-color: var(--accent);
     color: var(--accent-fg);
 }
 
 .icon-btn.is-active:hover,
-.icon-btn[aria-pressed="true"]:hover,
-.icon-btn.e2ee-active:hover {
+.icon-btn[aria-pressed="true"]:hover {
     background: color-mix(in srgb, var(--accent) 86%, var(--bg));
     color: var(--accent-fg);
-}
-
-/* Шифрование недоступно — пунктир: «что-то не так», без цвета. */
-.icon-btn.e2ee-unavailable {
-    border: 1px dashed var(--text-2);
-    color: var(--text);
 }
 
 .icon-btn:disabled,
@@ -2480,40 +2471,6 @@ button.reply-to:hover {
     color: var(--text);
 }
 
-/* «Без сквозного шифрования» — рамка вокруг метки, иконка открытого замка. */
-.plaintext-label {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    height: 16px;
-    padding: 0 4px;
-    border: 1px solid currentColor;
-    border-radius: 3px;
-    color: var(--text-2);
-    font-size: 10px;
-    line-height: 14px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    white-space: nowrap;
-}
-
-.plaintext-label svg.icon {
-    width: 10px;
-    height: 10px;
-    stroke-width: 2.5;
-}
-
-.plaintext-label:not(:has(> .icon))::before {
-    content: "";
-    flex: none;
-    width: 10px;
-    height: 10px;
-    background-color: currentColor;
-    -webkit-mask: var(--mask-unlock) center / contain no-repeat;
-    mask: var(--mask-unlock) center / contain no-repeat;
-}
-
 /* Реакции: иконка + число. Моя реакция — инверсия. */
 .reactions {
     display: flex;
@@ -3195,6 +3152,40 @@ a.file-attachment:hover {
     border-color: var(--surface-3);
     color: var(--text-3);
     opacity: 1;
+}
+
+/* Состояние шифрования под полем ввода: что защищено, чего не хватает и что делать.
+   Проблема (отправка недоступна или отклонена) выделяется цветом текста и жирностью,
+   а не цветом-сигналом: палитра монохромная. */
+.composer-status {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    min-height: 20px;
+    margin-top: 8px;
+    color: var(--text-2);
+    font-size: 12px;
+    line-height: 16px;
+}
+
+.composer-status.is-problem {
+    color: var(--text);
+}
+
+.composer-status-icon {
+    display: inline-flex;
+    flex: none;
+}
+
+.composer-status-text {
+    flex: 1 1 200px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.composer-status .btn {
+    flex: none;
 }
 
 /* Статус загрузки: подпись + полоса прогресса (ширина — el.style.width). */

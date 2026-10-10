@@ -95,6 +95,7 @@
                         <h3 id="chat-name"></h3>
                         <span id="chat-status" class="status"></span>
                         <span id="chat-indicators" class="chat-indicators">
+                            <button id="e2ee-indicator" class="indicator hidden" type="button" title="Участники и ключи" aria-label="Участники и ключи"></button>
                             <span id="expiry-indicator" class="indicator is-on hidden">
                                 <svg class="icon icon-sm" aria-hidden="true"><use href="#i-timer"></use></svg>
                                 <span id="expiry-indicator-text"></span>
@@ -106,7 +107,6 @@
                     </div>
                 </div>
                 <div class="chat-actions">
-                    <button id="e2ee-toggle-btn" class="icon-btn hidden" title="Сквозное шифрование" aria-label="Сквозное шифрование" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-lock"></use></svg></button>
                     <button id="members-keys-btn" class="icon-btn hidden" title="Участники и ключи" aria-label="Участники и ключи"><svg class="icon" aria-hidden="true"><use href="#i-key"></use></svg></button>
                     <button id="get-chat-code-btn" class="icon-btn hidden" title="Пригласить" aria-label="Пригласить в группу"><svg class="icon" aria-hidden="true"><use href="#i-user-plus"></use></svg></button>
                     <button id="chat-menu-btn" class="icon-btn" title="Меню" aria-label="Меню чата"><svg class="icon" aria-hidden="true"><use href="#i-more-vertical"></use></svg></button>
@@ -152,6 +152,11 @@
                     <button id="attach-btn" class="icon-btn" title="Прикрепить файлы" aria-label="Прикрепить файлы"><svg class="icon" aria-hidden="true"><use href="#i-paperclip"></use></svg></button>
                     <input type="text" id="message-input" placeholder="Введите сообщение..." maxlength="4000" aria-label="Текст сообщения">
                     <button id="send-btn" class="icon-btn" title="Отправить" aria-label="Отправить"><svg class="icon" aria-hidden="true"><use href="#i-send"></use></svg></button>
+                </div>
+                <div id="composer-status" class="composer-status" role="status">
+                    <span id="composer-status-icon" class="composer-status-icon" aria-hidden="true"></span>
+                    <span id="composer-status-text" class="composer-status-text"></span>
+                    <button id="composer-status-retry" class="btn btn-sm btn-secondary hidden" type="button">Повторить</button>
                 </div>
                 <input type="file" id="file-input" class="hidden" multiple accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/quicktime,video/webm,application/pdf,text/plain,.pdf,.txt">
             </div>
@@ -485,6 +490,7 @@
     <script src="lib/lifetime.js"></script>
     <script src="lib/message-order.js"></script>
     <script src="lib/e2ee-lock.js"></script>
+    <script src="lib/e2ee-policy.js"></script>
     <script src="script.js"></script>
 </body>
 </html>

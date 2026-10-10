@@ -8,7 +8,6 @@ let currentRoomId = null;
 let currentUser = null;
 let replyToMessageId = null;
 let editingMessageId = null;
-let editingMessageEncrypted = false; // флаг ИСХОДНОГО сообщения — при правке шифруем/не шифруем так же, а не по текущему тумблеру чата
 let menuMessage = null;              // сообщение, для которого открыто контекстное меню
 
 // Состояние открытого чата: история грузится страницами с конца.
@@ -27,7 +26,8 @@ const ANON_IDS_KEY = 'nyxo-anon-ids';
 const FLASH_NOTICE_KEY = 'nyxo-notice';
 const NOTIFY_PREF_PREFIX = 'nyxo-notify:';
 const BOT_CHAT_PREFIX = 'nyxo-bot-chat:';
-const E2EE_PREF_PREFIX = 'e2ee-enabled:';
+// Выключатель шифрования удалён (R7): флаги прежних версий стираются при старте.
+const LEGACY_E2EE_PREF_PREFIX = 'e2ee-enabled:';
 const E2EE_DB_PREFIX = 'nyxo-e2ee-';
 const SESSION_CHANNEL = 'nyxo-session';
 
@@ -116,8 +116,8 @@ const elements = {
     getChatCodeBtn: document.getElementById('get-chat-code-btn'),
     chatMenuBtn: document.getElementById('chat-menu-btn'),
 
-    // ---- Сквозное шифрование: выключатель и баннер ----
-    e2eeToggleBtn: document.getElementById('e2ee-toggle-btn'),
+    // ---- Сквозное шифрование: значок в шапке и баннер ----
+    e2eeIndicator: document.getElementById('e2ee-indicator'),
     e2eeBanner: document.getElementById('e2ee-banner'),
     e2eeBannerText: document.getElementById('e2ee-banner-text'),
     e2eeBannerBtn: document.getElementById('e2ee-banner-btn'),
@@ -148,6 +148,10 @@ const elements = {
     attachBtn: document.getElementById('attach-btn'),
     messageInput: document.getElementById('message-input'),
     sendBtn: document.getElementById('send-btn'),
+    composerStatus: document.getElementById('composer-status'),
+    composerStatusIcon: document.getElementById('composer-status-icon'),
+    composerStatusText: document.getElementById('composer-status-text'),
+    composerStatusRetry: document.getElementById('composer-status-retry'),
     fileInput: document.getElementById('file-input'),
 
     // ---- Подсказки в чате с ботом ----
@@ -385,20 +389,27 @@ function forgetIdForWipe(userId) {
     writeAnonIds(readAnonIds().filter(id => id !== Number(userId)));
 }
 
-// Локальные флаги пользователя: тумблеры шифрования по чатам, согласие на
-// уведомления и id чата с ботом. Тема оформления — настройка устройства, а
-// не аккаунта, её не трогаем.
+// Локальные флаги пользователя: согласие на уведомления и id чата с ботом.
+// Тема оформления — настройка устройства, а не аккаунта, её не трогаем.
 function removeLocalUserPrefs(userId) {
     try {
-        const prefix = `${E2EE_PREF_PREFIX}${userId}:`;
+        localStorage.removeItem(NOTIFY_PREF_PREFIX + userId);
+        localStorage.removeItem(BOT_CHAT_PREFIX + userId);
+    } catch { /* хранилище недоступно */ }
+}
+
+// Флаги e2ee-enabled:<пользователь>:<чат> остались от выключателя шифрования,
+// которого больше нет: они ничего не значат и никому не нужны. Стираются все,
+// любых пользователей, один раз при старте страницы.
+function sweepLegacyPrefs() {
+    try {
         const doomed = [];
         for (let i = 0; i < localStorage.length; i++) {
             const key = localStorage.key(i);
-            if (key && key.startsWith(prefix)) doomed.push(key);
+            if (key && key.startsWith(LEGACY_E2EE_PREF_PREFIX)) doomed.push(key);
         }
-        doomed.push(NOTIFY_PREF_PREFIX + userId, BOT_CHAT_PREFIX + userId);
         doomed.forEach(key => localStorage.removeItem(key));
-    } catch { /* хранилище недоступно */ }
+    } catch { /* хранилище недоступно — стирать нечего */ }
 }
 
 // id чата с ботом (приходит в ответе регистрации) нужен клиенту волны 2;
@@ -430,14 +441,14 @@ function wipeLocalUserData(userId, timeoutMs = 3000) {
 }
 
 // Чьи следы лежат на устройстве: id из списка на стирание, из ключей
-// localStorage (уведомления, чат с ботом, тумблеры шифрования) и из имён баз
+// localStorage (уведомления, чат с ботом) и из имён баз
 // IndexedDB nyxo-e2ee-<id>. Список баз знает indexedDB.databases(); где его
 // нет (старый Firefox), остаётся список nyxo-anon-ids.
 async function listLocalUserIds() {
     const ids = new Set(readAnonIds());
     try {
-        // Ключ вида <префикс><id> или <префикс><id>:<хвост> (тумблеры шифрования).
-        const prefixes = [NOTIFY_PREF_PREFIX, BOT_CHAT_PREFIX, E2EE_PREF_PREFIX];
+        // Ключ вида <префикс><id>.
+        const prefixes = [NOTIFY_PREF_PREFIX, BOT_CHAT_PREFIX];
         for (let i = 0; i < localStorage.length; i++) {
             const key = localStorage.key(i);
             const prefix = key && prefixes.find(p => key.startsWith(p));
@@ -510,18 +521,28 @@ function takeFlashNotice() {
 // разными аккаунтами на одном браузере (общий компьютер, тест-логины).
 // Подробности протокола и честные ограничения — см. public/e2ee.js.
 //
-// В комнатах шифрование включено по умолчанию: выключить его можно только
-// явно (в localStorage тогда '0'). Если ключи устройства не удалось
-// инициализировать (например, сервер ключей ответил ошибкой),
-// шифрование недоступно: пользователь один раз видит предупреждение,
-// тумблер показывает "недоступно", сообщения уходят открыто. Чат с ботом
-// (без комнаты) никогда не шифруется — там некому передать ключ.
+// Шифрование в комнатах обязательно, выключателя нет (R7): сервер всё равно
+// принимает в комнату только конверт правильной формы. Если ключи устройства
+// не удалось подготовить, поле ввода комнаты отключается, а под ним — причина
+// по коду E2eeError и «Повторить» (плюс автоповтор, пока комната открыта).
+// Открытым текстом уходят только сообщения в чат с ботом, номер которого
+// запомнен при регистрации (NyxoE2eePolicy.plaintextAllowed), а не любой чат,
+// который сервер назвал ботом. Что показать в каждом состоянии, решает чистая
+// функция NyxoE2eePolicy.composerView (public/lib/e2ee-policy.js).
 
 let e2eeClient = null;
 let e2eeClientUserId = null;
 let e2eeInitPromise = null;       // Promise<boolean>: true — ключи устройства готовы
 let e2eeState = 'off';            // 'off' | 'pending' | 'ready' | 'unavailable'
+let e2eeInitError = null;         // ошибка последней неудачной инициализации (E2eeError с code)
 let e2eeUnavailableWarned = false;
+let e2eeRetryTimer = null;        // автоповтор инициализации
+let e2eeRetryStep = 0;            // сколько автоповторов уже было
+let roomBlock = null;             // { chatId, text } — почему отправка в комнату только что отклонена
+
+// Паузы автоповтора после неудачной инициализации (сеть или сервер ключей):
+// 10 с, 30 с, 2 мин. Дальше — только кнопка «Повторить».
+const E2EE_AUTO_RETRY_MS = [10 * 1000, 30 * 1000, 2 * 60 * 1000];
 
 function getE2eeClient() {
     if (!currentUser || typeof E2EE === 'undefined') return null;
@@ -546,45 +567,28 @@ function getE2eeClient() {
     return e2eeClient;
 }
 
-// Причина — чтобы было понятно, что делать: обновить браузер, открыть
-// Nyxo не в окне инкогнито или ждать, пока починят сервер.
-function describeE2eeInitError(err) {
-    const name = err && err.name;
-    const message = String((err && err.message) || '');
-    if (err && err.code === 'key-server') {
-        return err.status === 503 || err.status === 404
-            ? 'Сквозное шифрование не настроено на сервере'
-            : 'Сервер ключей шифрования сейчас не отвечает';
-    }
-    if (name === 'NotSupportedError' || /X25519|Ed25519|ML-KEM|mlkem|not supported|Unrecognized/i.test(message)) {
-        return 'Этот браузер не поддерживает нужные алгоритмы шифрования (X25519/Ed25519) — обновите его';
-    }
-    if (name === 'InvalidStateError' || name === 'QuotaExceededError' || name === 'UnknownError' || /indexedDB/i.test(message)) {
-        return 'Браузер не разрешает сохранить ключи шифрования (окно инкогнито или запрет хранилища)';
-    }
-    if (err instanceof TypeError && /fetch|network/i.test(message)) {
-        return 'Нет связи с сервером ключей шифрования';
-    }
-    return 'Не удалось подготовить ключи шифрования';
-}
-
+// Один тост на вход: потом то же самое видно под полем ввода комнаты.
 function warnE2eeUnavailable(err) {
     if (e2eeUnavailableWarned) return;
     e2eeUnavailableWarned = true;
-    showToast(`Сквозное шифрование недоступно: ${describeE2eeInitError(err).replace(/^./, c => c.toLowerCase())}. Сообщения будут отправляться без него`, 'error', 8000);
+    showToast(`Сквозное шифрование недоступно: ${NyxoE2eePolicy.initErrorReason(err)}. В группы сообщения не отправляются, пока оно не заработает`, 'error', 8000);
 }
 
 function initE2eeForCurrentUser() {
     const userId = currentUser ? currentUser.id : null;
     const client = getE2eeClient();
     if (!client) {
+        // Нет модуля шифрования или клиент не создался: повторять нечего.
+        e2eeInitError = { code: 'unsupported' };
         e2eeState = 'unavailable';
         e2eeInitPromise = Promise.resolve(false);
-        warnE2eeUnavailable();
+        warnE2eeUnavailable(e2eeInitError);
         refreshE2eeUi();
         return e2eeInitPromise;
     }
     e2eeState = 'pending';
+    e2eeInitError = null;
+    refreshE2eeUi();
     // Показ приложения генерацией/загрузкой ключей не блокируется: кому
     // нужны ключи (отправка, расшифровка), тот дожидается этого promise.
     e2eeInitPromise = Promise.resolve()
@@ -592,14 +596,18 @@ function initE2eeForCurrentUser() {
         .then(() => {
             if (!currentUser || currentUser.id !== userId) return false;
             e2eeState = 'ready';
+            e2eeRetryStep = 0;
+            clearTimeout(e2eeRetryTimer);
             refreshE2eeUi();
             return true;
         }, (err) => {
             console.error('E2EE: инициализация ключей устройства не удалась:', err);
             if (!currentUser || currentUser.id !== userId) return false;
             e2eeState = 'unavailable';
+            e2eeInitError = err;
             warnE2eeUnavailable(err);
             refreshE2eeUi();
+            scheduleE2eeAutoRetry();
             return false;
         });
     return e2eeInitPromise;
@@ -621,67 +629,147 @@ async function getSettledE2eeClient() {
     return getE2eeClient();
 }
 
-function e2eePrefKey(chatId) {
-    return `${E2EE_PREF_PREFIX}${currentUser ? currentUser.id : '0'}:${chatId}`;
+// Автоповтор: пока причина может пройти сама (сеть, сервер ключей), комната
+// открыта и вкладка видна — новая попытка через 10 с, 30 с, 2 мин. Если условия
+// не выполнены, проверка повторяется через ту же паузу, а счётчик не растёт.
+function scheduleE2eeAutoRetry() {
+    clearTimeout(e2eeRetryTimer);
+    if (e2eeState !== 'unavailable' || !NyxoE2eePolicy.initErrorRetryable(e2eeInitError)) return;
+    if (e2eeRetryStep >= E2EE_AUTO_RETRY_MS.length) return;
+    e2eeRetryTimer = setTimeout(() => {
+        if (!currentUser || e2eeState !== 'unavailable') return;
+        if (!currentRoomId || document.visibilityState !== 'visible') {
+            scheduleE2eeAutoRetry();
+            return;
+        }
+        e2eeRetryStep++;
+        retryE2ee({ silent: true });
+    }, E2EE_AUTO_RETRY_MS[e2eeRetryStep]);
 }
 
-// Выбор пользователя: отсутствие ключа = "включено".
-function isE2eePreferred(chatId) {
+// Номер чата с ботом, запомненный при регистрации (ответ botChatId).
+function readRememberedBotChatId(userId) {
     try {
-        return localStorage.getItem(e2eePrefKey(chatId)) !== '0';
+        return localStorage.getItem(BOT_CHAT_PREFIX + userId);
     } catch {
-        return true;
+        return null;
     }
 }
 
-function setE2eePreferred(chatId, enabled) {
-    try {
-        localStorage.setItem(e2eePrefKey(chatId), enabled ? '1' : '0');
-    } catch { /* окно инкогнито без localStorage — выбор не запомнится */ }
+// Открытый текст можно отправить только в чат с ботом, номер которого запомнен
+// на этом устройстве; признак is_bot от сервера для этого не используется.
+function plaintextAllowedForChat(chatId, roomId) {
+    return Boolean(currentUser) && NyxoE2eePolicy.plaintextAllowed(readRememberedBotChatId(currentUser.id), chatId, roomId);
 }
 
-// Фактическое состояние: выбрано и доступно на этом устройстве.
-function isE2eeActiveForChat(chatId) {
-    return e2eeState !== 'unavailable' && e2eeState !== 'off' && isE2eePreferred(chatId);
+function currentRoomBlock() {
+    return roomBlock && roomBlock.chatId === currentChatId ? roomBlock : null;
 }
 
-function updateE2eeToggleUI(chatId, roomId) {
-    const btn = elements.e2eeToggleBtn;
-    const inRoom = Boolean(roomId);
-    // Боту/одиночному чату групповое E2EE не подходит — прячем тумблер,
-    // чтобы не обещать шифрование там, где его некому подтвердить.
-    btn.classList.toggle('hidden', !inRoom);
+// Причина по тексту: отправка отклонена, пока ключ комнаты не дошёл до участников.
+function setRoomBlock(chatId, text) {
+    roomBlock = { chatId, text };
+    if (chatId === currentChatId) updateComposerForChat();
+}
+
+function clearRoomBlock(chatId) {
+    if (!roomBlock || (chatId !== undefined && roomBlock.chatId !== chatId)) return;
+    roomBlock = null;
+    updateComposerForChat();
+}
+
+// Причина, по которой поле ввода сейчас отключено (пусто — доступно): ею же
+// отвечают перетаскивание файлов и подсказки кнопок.
+let composerDisabledReason = '';
+
+function setComposerDisabled(disabled, reason) {
+    composerDisabledReason = disabled ? reason : '';
+    elements.messageInput.disabled = disabled;
+    elements.sendBtn.disabled = disabled;
+    elements.attachBtn.disabled = disabled || Boolean(uploadQueue);
+    elements.sendBtn.title = disabled ? reason : 'Отправить';
+    elements.attachBtn.title = disabled ? reason : 'Прикрепить файлы';
+}
+
+// Шапка и поле ввода открытого чата: значок шифрования, строка состояния под
+// полем, подсказка в поле, доступность отправки и вложений.
+function updateComposerForChat() {
+    if (!currentChatId) return;
+    const inRoom = Boolean(currentRoomId);
+    const block = currentRoomBlock();
+    const view = NyxoE2eePolicy.composerView({
+        inRoom,
+        plaintextOk: plaintextAllowedForChat(currentChatId, currentRoomId),
+        e2ee: e2eeState,
+        initError: e2eeInitError,
+        block,
+    });
     elements.membersKeysBtn.classList.toggle('hidden', !inRoom);
     elements.getChatCodeBtn.classList.toggle('hidden', !inRoom);
-    btn.classList.remove('e2ee-active', 'e2ee-unavailable', 'is-active');
-    if (!inRoom) {
-        elements.messageInput.placeholder = currentChatIsBot() ? BOT_INPUT_PLACEHOLDER : 'Сообщение...';
-        return;
+
+    const indicator = elements.e2eeIndicator;
+    indicator.classList.toggle('hidden', !view.indicator.show);
+    indicator.classList.toggle('is-on', view.indicator.ok);
+    if (view.indicator.show) {
+        setIconLabel(indicator, view.indicator.ok ? 'lock' : 'alert-triangle', view.indicator.text, { size: 'sm' });
+        indicator.title = view.indicator.title;
+        indicator.setAttribute('aria-label', view.indicator.title);
     }
-    let label;
-    if (e2eeState === 'unavailable') {
-        btn.replaceChildren(icon('alert-triangle'));
-        btn.classList.add('e2ee-unavailable');
-        btn.setAttribute('aria-pressed', 'false');
-        label = 'Сквозное шифрование недоступно — нажмите, чтобы повторить попытку';
-        elements.messageInput.placeholder = 'Сообщение (без шифрования)...';
-    } else {
-        const enabled = isE2eePreferred(chatId);
-        btn.replaceChildren(icon(enabled ? 'lock' : 'unlock'));
-        btn.classList.toggle('e2ee-active', enabled);
-        btn.classList.toggle('is-active', enabled);
-        btn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
-        label = enabled ? 'Сквозное шифрование включено — нажмите, чтобы выключить' : 'Сквозное шифрование выключено — нажмите, чтобы включить';
-        elements.messageInput.placeholder = enabled ? 'Зашифрованное сообщение...' : 'Сообщение (без шифрования)...';
-    }
-    btn.title = label;
-    btn.setAttribute('aria-label', label);
+
+    const status = elements.composerStatus;
+    status.classList.toggle('is-problem', view.kind === 'unavailable' || view.kind === 'blocked' || view.kind === 'unknown');
+    // Недоступность объявляется как alert (один раз при появлении), остальное — вежливо.
+    status.setAttribute('role', view.kind === 'unavailable' ? 'alert' : 'status');
+    elements.composerStatusIcon.replaceChildren(icon(view.icon, view.spin ? { size: 'sm', className: 'spin' } : { size: 'sm' }));
+    elements.composerStatusText.textContent = view.text;
+    elements.composerStatusRetry.classList.toggle('hidden', !view.retry);
+
+    elements.messageInput.placeholder = view.placeholder;
+    setComposerDisabled(view.disabled, view.text);
 }
 
 function refreshE2eeUi() {
     if (!currentChatId) return;
-    updateE2eeToggleUI(currentChatId, currentRoomId);
-    updatePlaintextMarkers();
+    updateComposerForChat();
+}
+
+// «Повторить»: заново подготовить ключи устройства (если они недоступны) и ключ
+// открытой комнаты. silent — автоповтор: об отказе молчим, видно и так.
+async function retryE2ee({ silent = false } = {}) {
+    if (!currentUser) return;
+    const chatId = currentChatId;
+    const roomId = currentRoomId;
+    clearTimeout(e2eeRetryTimer);
+    if (!silent) e2eeRetryStep = 0;
+    const wasBlocked = Boolean(currentRoomBlock());
+    const retryBtn = elements.composerStatusRetry;
+    retryBtn.disabled = true;
+    try {
+        if (e2eeState === 'unavailable') {
+            const ok = await initE2eeForCurrentUser();
+            if (!ok) {
+                if (!silent) showToast(`Сквозное шифрование по-прежнему недоступно: ${NyxoE2eePolicy.initErrorReason(e2eeInitError)}`, 'error');
+                return;
+            }
+            showToast('Сквозное шифрование снова доступно', 'success');
+        }
+        roomBlock = null;
+        if (chatId && roomId && chatId === currentChatId) {
+            await syncE2eeKeyShares(chatId, roomId);
+            const session = await ensureE2eeRoomSession(chatId, roomId);
+            if (chatId !== currentChatId) return;
+            const block = NyxoE2eePolicy.sessionBlock(session);
+            if (block) {
+                setRoomBlock(chatId, block.text);
+                if (!silent) showToast(block.text, 'error', 6000);
+            } else if (wasBlocked) {
+                showToast('Ключ шифрования передан, можно отправлять', 'success');
+            }
+        }
+    } finally {
+        retryBtn.disabled = false;
+        updateComposerForChat();
+    }
 }
 
 // ---- Участники комнаты, ключи, служебные строки ----
@@ -866,7 +954,7 @@ let lastRoomSession = null;   // { roomId, promise } — последний за
 
 async function runRoomSession(chatId, roomId) {
     const client = await getReadyE2eeClient();
-    if (!client || !isE2eeActiveForChat(chatId)) return null;
+    if (!client) return null;
     const part = await api(`/api/chats/${chatId}/participants`);
     if (!part.success || !part.roomId || Number(part.roomId) !== Number(roomId)) return null;
     rememberRoomParticipants(roomId, part.participants);
@@ -914,27 +1002,58 @@ function scheduleRoomMembersRefresh(roomId) {
     }, 300);
 }
 
-// Вызывается перед отправкой. Возвращает клиент, если сообщение нужно
-// шифровать, null — если отправлять открыто (чат без комнаты, шифрование
-// выключено пользователем или недоступно на устройстве). Бросает Error с
-// текстом для пользователя, если отправку нужно прервать.
-async function prepareOutgoingE2ee(chatId, roomId) {
-    if (!roomId || !isE2eePreferred(chatId) || e2eeState === 'unavailable') return null;
-    const wasPending = e2eeState === 'pending';
+// Отправка прервана, и причина понятна пользователю. code:
+//   'unavailable'        — ключи устройства не готовы (причина в e2eeInitError);
+//   'session-failed',
+//   'keys-not-delivered' — см. NyxoE2eePolicy.sessionBlock;
+//   'not-bot'            — чат не комната и не запомненный чат с ботом.
+class E2eeBlockedError extends Error {
+    constructor(code, message) {
+        super(message);
+        this.name = 'E2eeBlockedError';
+        this.code = code;
+    }
+
+    // Причина относится к ключу комнаты: её показывают под полем ввода с «Повторить».
+    get showsRetry() {
+        return this.code === 'session-failed' || this.code === 'keys-not-delivered';
+    }
+}
+
+// Вызывается перед отправкой в чат. Возвращает клиент E2EE для комнаты и null
+// ТОЛЬКО для чата с ботом (открытый текст разрешён по запомненному номеру). В
+// комнате null не бывает: либо клиент, либо E2eeBlockedError с текстом для
+// пользователя — тихо отправить комнате открытым текстом нельзя.
+//
+// Правило блокировки (план криптографии, раздел 3): если после подготовки
+// сессии комнаты ключ не дошёл ни до одного участника, а другие участники есть,
+// отправка прерывается. Если не дошёл лишь до части — отправляем, а о части
+// один раз предупреждает handleRoomSessionResult.
+async function prepareOutgoing(chatId, roomId) {
+    if (!roomId) {
+        if (plaintextAllowedForChat(chatId, roomId)) return null;
+        throw new E2eeBlockedError('not-bot', 'Сообщение не отправлено: открытый текст разрешён только в чате с ботом, а этот чат им не подтверждён');
+    }
     const client = await getReadyE2eeClient();
     if (!client) {
-        // Пользователь набирал сообщение, рассчитывая на шифрование, а оно
-        // только что оказалось недоступным. Молча отправлять открытым
-        // текстом нельзя — пусть отправит ещё раз, уже зная об этом.
-        if (wasPending) throw new Error('Сквозное шифрование недоступно — сообщение не отправлено. Отправьте ещё раз, чтобы отправить без шифрования');
-        return null;
+        throw new E2eeBlockedError('unavailable',
+            `Сквозное шифрование недоступно: ${NyxoE2eePolicy.initErrorReason(e2eeInitError)}. Сообщение не отправлено`);
     }
     // Sender Key комнаты должен быть создан и разослан участникам до
     // первого конверта; если последний запуск не удался — пробуем снова.
     let session = null;
     if (lastRoomSession && lastRoomSession.roomId === roomId) session = await lastRoomSession.promise;
-    if (!session || session.ok === false) await ensureE2eeRoomSession(chatId, roomId);
+    if (!session || session.ok === false) session = await ensureE2eeRoomSession(chatId, roomId);
+    const block = NyxoE2eePolicy.sessionBlock(session);
+    if (block) throw new E2eeBlockedError(block.code, block.text);
     return client;
+}
+
+// Показывает причину отклонённой отправки: тост и, для ключа комнаты, строка
+// под полем ввода с «Повторить».
+function reportBlockedSend(err, chatId, roomId) {
+    showToast(err.message, 'error', 6000);
+    if (roomId && err.showsRetry) setRoomBlock(chatId, err.message);
 }
 
 // Тексты для причин отказа decryptIncoming (res.reason из e2ee.js). Причина,
@@ -947,6 +1066,9 @@ const E2EE_FAILURE_TEXTS = {
     'sender-mismatch': 'У сообщения сменился автор (возможна подмена сервером)',
     'stale-edit': 'Старая версия сообщения вместо более новой (возможна подмена сервером)',
     'no-mid': 'Сообщение старого формата, показать его нельзя',
+    // Открытых сообщений в комнатах нет: сервер их не принимает. Пришло такое — его
+    // прислал не клиент участника; показывать его текст как сообщение нельзя.
+    'not-encrypted': 'Сообщение пришло без шифрования — так не должно быть (возможна подмена сервером), поэтому оно не показано',
 };
 const E2EE_FAILURE_DEFAULT_TEXT = 'Не удалось расшифровать';
 
@@ -1003,7 +1125,14 @@ async function decryptEnvelope(roomId, senderId, text, messageId) {
 }
 
 async function decryptMessageInPlace(message, roomId) {
-    if (message.encrypted) {
+    if (roomId && !message.encrypted) {
+        // Без метки «без шифрования» (её больше нет) подложенное сервером открытое
+        // сообщение выглядело бы как настоящее сообщение участника.
+        message.text = e2eeFailureText('not-encrypted');
+        message._e2eeFailed = true;
+        message.file_url = null;
+        message.file_name = null;
+    } else if (message.encrypted) {
         if (roomId) {
             const res = await decryptEnvelope(roomId, message.user_id, message.text, message.id);
             if (res.ok) {
@@ -1019,11 +1148,15 @@ async function decryptMessageInPlace(message, roomId) {
             message._e2eeFailed = true;
         }
     }
-    if (message.reply_to && message.reply_to.encrypted && !message.reply_to.deleted) {
-        const replyRes = roomId
-            ? await decryptEnvelope(roomId, message.reply_to.sender_id, message.reply_to.text, message.reply_to.id)
-            : { ok: false };
-        message.reply_to.text = decryptedSummary(replyRes);
+    if (message.reply_to && !message.reply_to.deleted) {
+        if (roomId && !message.reply_to.encrypted) {
+            message.reply_to.text = e2eeFailureText('not-encrypted');
+        } else if (message.reply_to.encrypted) {
+            const replyRes = roomId
+                ? await decryptEnvelope(roomId, message.reply_to.sender_id, message.reply_to.text, message.reply_to.id)
+                : { ok: false };
+            message.reply_to.text = decryptedSummary(replyRes);
+        }
     }
     return message;
 }
@@ -1031,57 +1164,6 @@ async function decryptMessageInPlace(message, roomId) {
 async function decryptMessagesInPlace(messages, roomId) {
     for (const m of messages) await decryptMessageInPlace(m, roomId);
     return messages;
-}
-
-async function onE2eeToggleClick() {
-    if (!currentChatId || !currentRoomId) return;
-    const chatId = currentChatId;
-    const roomId = currentRoomId;
-    const btn = elements.e2eeToggleBtn;
-
-    if (e2eeState === 'unavailable') {
-        // Повторная попытка: сервер ключей мог просто перезапускаться.
-        btn.disabled = true;
-        btn.replaceChildren(icon('loader', { className: 'spin' }));
-        const ok = await initE2eeForCurrentUser();
-        btn.disabled = false;
-        refreshE2eeUi();
-        if (!ok) {
-            showToast('Сквозное шифрование по-прежнему недоступно: сервер ключей не отвечает', 'error');
-            return;
-        }
-        showToast('Сквозное шифрование снова доступно', 'success');
-        if (chatId === currentChatId) {
-            await syncE2eeKeyShares(chatId, roomId);
-            ensureE2eeRoomSession(chatId, roomId);
-        }
-        return;
-    }
-
-    const enabling = !isE2eePreferred(chatId);
-    if (!enabling) {
-        setE2eePreferred(chatId, false);
-        refreshE2eeUi();
-        showToast('Шифрование выключено: новые сообщения этого чата будут видны серверу', 'info', 5000);
-        return;
-    }
-
-    setE2eePreferred(chatId, true);
-    btn.disabled = true;
-    btn.replaceChildren(icon('loader', { className: 'spin' }));
-    const result = await ensureE2eeRoomSession(chatId, roomId);
-    btn.disabled = false;
-    if (chatId !== currentChatId) return; // пользователь уже ушёл в другой чат
-    if (!result || result.ok === false) {
-        // Ключ не удалось даже создать/разослать — не обещаем шифрование,
-        // которого собеседники не смогут прочитать.
-        setE2eePreferred(chatId, false);
-        refreshE2eeUi();
-        showToast('Не удалось включить шифрование: не получилось подготовить ключи', 'error');
-        return;
-    }
-    refreshE2eeUi();
-    showToast('Шифрование включено для этого чата', 'success');
 }
 
 // ==================== Файлы: белый список, очистка, шифрование ====================
@@ -1350,6 +1432,7 @@ async function postWithPow(url, body, purpose, btn, { isCancelled } = {}) {
 // ==================== Сессия и сокет ====================
 
 function init() {
+    sweepLegacyPrefs();
     // До проверки входа: фрагмент #join=… стирается из адресной строки
     // сразу, даже если пользователь ещё не вошёл (см. consumeJoinFragment).
     consumeJoinFragment();
@@ -1440,6 +1523,8 @@ function enterApp(user) {
     rememberIdForWipe(user.id);
     purgeForeignLocalData();
     e2eeUnavailableWarned = false;
+    e2eeRetryStep = 0;
+    roomBlock = null;
     warnedRooms.clear();
     initE2eeForCurrentUser();
     showApp();
@@ -1658,7 +1743,6 @@ function resetChatView() {
     elements.sidebar.classList.remove('hidden-mobile');
     clearReply();
     editingMessageId = null;
-    editingMessageEncrypted = false;
     setActiveChatItem(null, null);
 }
 
@@ -1700,6 +1784,9 @@ function leaveApp(message) {
     e2eeClientUserId = null;
     e2eeInitPromise = null;
     e2eeState = 'off';
+    e2eeInitError = null;
+    roomBlock = null;
+    clearTimeout(e2eeRetryTimer);
     clearTimeout(markReadTimer);
     clearTimeout(loadChatsTimer);
     cancelUploadQueue();
@@ -2029,12 +2116,14 @@ function setupChatMenuListeners() {
     elements.ctxArchiveBtn.addEventListener('click', () => onChatItemMenuAction('archived'));
 }
 
-// Сквозное шифрование в шапке чата: выключатель, окно «Участники и ключи»,
-// баннер о смене ключа собеседника.
+// Сквозное шифрование в шапке чата: значок шифрования и кнопка открывают окно
+// «Участники и ключи», баннер о смене ключа собеседника; «Повторить» под полем
+// ввода. Выключателя нет.
 function setupE2eeListeners() {
-    elements.e2eeToggleBtn.addEventListener('click', onE2eeToggleClick);
+    elements.e2eeIndicator.addEventListener('click', openMembersModal);
     elements.membersKeysBtn.addEventListener('click', openMembersModal);
     elements.e2eeBannerBtn.addEventListener('click', openMembersModal);
+    elements.composerStatusRetry.addEventListener('click', () => retryE2ee());
 }
 
 // Приглашения в группу (код, ссылка, QR) и заявки на вступление.
@@ -2124,7 +2213,6 @@ function setupMessageMenuListeners() {
         hideMessageMenu();
         if (!message) return;
         editingMessageId = message.id;
-        editingMessageEncrypted = Boolean(message.encrypted);
         elements.messageInput.value = message.text || '';
         elements.messageInput.focus();
     });
@@ -2225,7 +2313,11 @@ function setupSocketListeners() {
         const seq = openChatSeq;
         let displayText = text;
         let failed = false;
-        if (encrypted) {
+        if (roomId && !encrypted) {
+            // Правка без шифрования в комнате: так не бывает, текст не показываем.
+            displayText = e2eeFailureText('not-encrypted');
+            failed = true;
+        } else if (encrypted) {
             const res = await decryptEnvelope(roomId, user_id, text, id);
             displayText = decryptedSummary(res);
             failed = !res.ok;
@@ -3250,8 +3342,8 @@ async function previewJoin() {
 // иначе участники получат roomMembersChanged, пока identity новичка ещё
 // не опубликована, запишут «у собеседника не настроен E2EE» и не отправят
 // ему Sender Key. Ждём не дольше JOIN_KEYS_WAIT_MS: недоступное шифрование
-// (e2eeInitPromise → false) вступление не блокирует — как и отправка
-// сообщений, оно работает без него.
+// (e2eeInitPromise → false) вступление не блокирует: ключи устройства
+// догонятся при повторе, а сообщения в группы до тех пор не отправляются.
 async function waitForE2eeKeysBeforeJoin() {
     if (e2eeState !== 'pending' || !e2eeInitPromise) return;
     setJoinStatus(JOIN_KEYS_STATUS);
@@ -3716,13 +3808,13 @@ function belongsToCurrentChat(chatId, roomId) {
 // Подпись последнего сообщения: { icon, text } — замок для E2EE,
 // скрепка для файла (иконка отдельным элементом, не символом в тексте).
 function messagePreview(message) {
-    if (message.encrypted) return { icon: 'lock', text: 'Зашифрованное сообщение' };
+    if (message.encrypted || message.room_id) return { icon: 'lock', text: 'Зашифрованное сообщение' };
     const text = message.text || message.last_message || '';
     return message.file_url ? { icon: 'paperclip', text: text || 'Файл' } : { icon: null, text };
 }
 
 function chatLastPreview(chat) {
-    if (chat.last_message_encrypted) return { icon: 'lock', text: 'Зашифрованное сообщение' };
+    if (chat.last_message_encrypted || (chat.room_id && chat.last_message_id)) return { icon: 'lock', text: 'Зашифрованное сообщение' };
     if (!chat.last_message_id) return { icon: null, text: 'Нет сообщений' };
     const isFile = Boolean(chat.last_message_type) && chat.last_message_type !== 'text';
     return { icon: isFile ? 'paperclip' : null, text: chat.last_message || (isFile ? 'Файл' : '') };
@@ -4008,7 +4100,7 @@ function updateChatListOnMessage(message, isCurrent) {
     if (!meta) return scheduleLoadChats(); // новый для нас чат
     meta.last_message_id = message.id;
     meta.last_message_encrypted = Boolean(message.encrypted);
-    meta.last_message = message.encrypted ? null : (message.text || '');
+    meta.last_message = message.encrypted || message.room_id ? null : (message.text || '');
     meta.last_message_type = message.file_url ? (message.message_type || 'file') : 'text';
     if (!isCurrent && !isOwnMessage(message)) meta.unread = (Number(meta.unread) || 0) + 1;
     const index = chatListData.indexOf(meta);
@@ -4214,7 +4306,7 @@ async function openChat(chatId, roomId, name, avatar, online, isBot) {
     elements.chatMessages.replaceChildren();
     elements.sidebar.classList.add('hidden-mobile');
     setActiveChatItem(chatId, room);
-    updateE2eeToggleUI(chatId, room);
+    updateComposerForChat();
     updateChatIndicators();
     if (room) loadJoinRequestsCount();
 
@@ -4513,32 +4605,6 @@ function createAttachmentElement(message) {
     return message._file ? createEncryptedAttachmentElement(message) : null;
 }
 
-function createPlaintextLabel() {
-    const label = iconText('span', 'plaintext-label', 'unlock', 'без сквозного шифрования', { size: 'sm' });
-    label.title = 'Это сообщение отправлено без сквозного шифрования — его содержимое видно серверу';
-    return label;
-}
-
-// В комнате с включённым у меня E2EE чужие открытые сообщения помечаются:
-// их содержимое видел сервер, и это не должно выглядеть как обычная переписка.
-function shouldMarkPlaintext(message) {
-    return Boolean(currentRoomId) && !message.encrypted && !isOwnMessage(message) && isE2eeActiveForChat(currentChatId);
-}
-
-function updatePlaintextMarkers() {
-    elements.chatMessages.querySelectorAll('.message.received').forEach((el) => {
-        if (!el._message) return;
-        const need = shouldMarkPlaintext(el._message);
-        const label = el.querySelector('.plaintext-label');
-        if (need && !label) {
-            const meta = el.querySelector('.message-meta');
-            if (meta) meta.prepend(createPlaintextLabel());
-        } else if (!need && label) {
-            label.remove();
-        }
-    });
-}
-
 // Время показывается в часовом поясе пользователя (created_at, до минуты),
 // а не сервера: колонки time (HH:MM по часам сервера) больше нет.
 // Что именно показывать — решает NyxoMessageOrder.displayTimeMs (раздел 9.5): у
@@ -4601,7 +4667,6 @@ function createMessageElement(message, animate) {
 
     const metaDiv = document.createElement('div');
     metaDiv.className = 'message-meta';
-    if (shouldMarkPlaintext(message)) metaDiv.appendChild(createPlaintextLabel());
     if (message.encrypted) {
         const lockSpan = document.createElement('span');
         lockSpan.className = 'message-lock';
@@ -4755,7 +4820,6 @@ function clearReply() {
 function cancelEditing() {
     if (editingMessageId) elements.messageInput.value = '';
     editingMessageId = null;
-    editingMessageEncrypted = false;
 }
 
 // ==================== Отправка ====================
@@ -4822,8 +4886,9 @@ function sendFailureText(data, fallback) {
     return data.message || fallback;
 }
 
-// Отправляет уже готовый текст в ЯВНО указанный чат: шифрует (если для чата
-// включено шифрование), шлёт на сервер и сразу показывает сообщение в ленте.
+// Отправляет уже готовый текст в ЯВНО указанный чат: в комнате шифрует всегда
+// (открытым текстом уходит только сообщение в чат с ботом), шлёт на сервер и
+// сразу показывает сообщение в ленте.
 // Поле ввода не читает и не очищает — это дело вызывающего, поэтому тем же
 // путём можно отправить текст из другого источника, не трогая черновик.
 //
@@ -4838,9 +4903,10 @@ async function sendText(text, { chatId, roomId, replyToId } = {}) {
     if (!chatId) throw new Error('sendText: не указан чат');
     let client;
     try {
-        client = await prepareOutgoingE2ee(chatId, roomId);
+        client = await prepareOutgoing(chatId, roomId);
     } catch (err) {
-        showToast(err.message, 'error', 6000);
+        if (!(err instanceof E2eeBlockedError)) throw err;
+        reportBlockedSend(err, chatId, roomId);
         return false;
     }
     // Id сообщения комнаты выбирает клиент ДО шифрования и кладёт его внутрь
@@ -4869,7 +4935,7 @@ async function sendText(text, { chatId, roomId, replyToId } = {}) {
         post: (payload) => api('/api/messages', { method: 'POST', body: JSON.stringify(payload) }),
     });
     if (encryptFailed) {
-        showToast('Не удалось зашифровать сообщение — попробуйте ещё раз или выключите шифрование', 'error');
+        showToast('Не удалось зашифровать сообщение — попробуйте ещё раз', 'error');
         return false;
     }
     const data = outcome.data;
@@ -4877,6 +4943,7 @@ async function sendText(text, { chatId, roomId, replyToId } = {}) {
         showToast(sendFailureText(data, 'Не удалось отправить сообщение'), 'error');
         return false;
     }
+    clearRoomBlock(chatId);
     // Показываем сразу из ответа — не зависим от того, успел ли
     // прийти (и пришёл ли вообще) newMessage по сокету.
     if (chatId === currentChatId && data.message) {
@@ -4911,16 +4978,17 @@ async function sendMessage() {
     setSending(true); // двойной Enter/клик не отправляет сообщение дважды
     try {
         if (editingMessageId) {
-            // Шифруем правку так же, как было зашифровано исходное
-            // сообщение — независимо от текущего состояния тумблера чата
-            // (см. editingMessageEncrypted): сервер не принимает флаг
-            // encrypted при редактировании, он фиксирован с момента
-            // создания сообщения.
+            // Правка в комнате шифруется всегда: сервер принимает в комнату только
+            // конверт правильной формы. Правка сообщения в чате с ботом — открытый текст.
             const messageId = editingMessageId;
-            const encryptEdit = editingMessageEncrypted;
+            const encryptEdit = Boolean(roomId);
             let outgoingText = text;
+            if (!encryptEdit && !plaintextAllowedForChat(chatId, roomId)) {
+                showToast('Правка не отправлена: открытый текст разрешён только в чате с ботом', 'error');
+                return;
+            }
             if (encryptEdit) {
-                const client = roomId ? await getReadyE2eeClient() : null;
+                const client = await getReadyE2eeClient();
                 if (!client) { showToast('Не удалось зашифровать правку: сквозное шифрование недоступно', 'error'); return; }
                 // mid правки — id редактируемого сообщения (строка), edit:true поднимает ts
                 // выше известной версии: правка при отстающих часах не выглядит старой.
@@ -4940,7 +5008,6 @@ async function sendMessage() {
             if (chatId === currentChatId) applyMessageEdit(messageId, encryptEdit ? text : (data.text || text));
             if (String(editingMessageId) === String(messageId)) {
                 editingMessageId = null;
-                editingMessageEncrypted = false;
             }
         } else {
             const sent = await sendText(text, { chatId, roomId, replyToId: replyToMessageId });
@@ -4967,13 +5034,8 @@ async function sendMessage() {
 
 const MAX_BOT_SUGGESTIONS = 6;         // больше кнопок на экране не поместится
 const MAX_BOT_SUGGESTION_LENGTH = 60;  // подпись длиннее — уже не подсказка
-const BOT_INPUT_PLACEHOLDER = 'Спросите бота или выберите тему';
 
 let botSuggestionsChatId = null;       // чат, для которого нарисованы кнопки: нажатие уходит только в него
-
-function currentChatIsBot() {
-    return Boolean(Number(getCurrentChatMeta().is_bot));
-}
 
 function clearBotSuggestions() {
     botSuggestionsChatId = null;
@@ -5069,6 +5131,10 @@ function outgoingFileName(file, mime, encrypted) {
 
 function onFilesChosen(files) {
     if (!currentChatId || files.length === 0) return;
+    if (composerDisabledReason) {
+        showToast(composerDisabledReason, 'error', 6000);
+        return;
+    }
     if (uploadQueue) {
         showToast('Дождитесь окончания загрузки', 'info');
         return;
@@ -5086,7 +5152,7 @@ function onFilesChosen(files) {
 
 function renderSendFilesList() {
     const target = chosenFilesChat;
-    const encrypted = Boolean(target && target.roomId) && isE2eeActiveForChat(target.chatId);
+    const encrypted = Boolean(target && target.roomId);
     const valid = chosenFiles.filter(f => !f.error).length;
     elements.sendFilesTitle.textContent = valid > 0
         ? `Отправить ${valid} ${plural(valid, ['файл', 'файла', 'файлов'])}`
@@ -5170,7 +5236,7 @@ async function runUploadQueue(chatId, roomId, items) {
         }
     } finally {
         if (uploadQueue === queue) uploadQueue = null;
-        elements.attachBtn.disabled = false;
+        updateComposerForChat();
         hideUploadStatus();
     }
     const total = items.length;
@@ -5191,8 +5257,10 @@ async function sendOneFile(queue, item, index, total) {
     setUploadStatus(`${prefix}подготовка…`, null);
     let client;
     try {
-        client = await prepareOutgoingE2ee(chatId, roomId);
+        client = await prepareOutgoing(chatId, roomId);
     } catch (err) {
+        if (!(err instanceof E2eeBlockedError)) throw err;
+        if (roomId && err.showsRetry) setRoomBlock(chatId, err.message);
         return { ok: false, fatal: true, message: err.message };
     }
     if (queue.cancelled) return { ok: false };
