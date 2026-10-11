@@ -474,7 +474,9 @@ BEGIN
   DELETE FROM room_participants WHERE room_id AND user_id = я
   DELETE FROM e2ee_key_shares   WHERE room_id AND recipient_id = я
   DELETE FROM chats             WHERE id = моя строка
-  DELETE FROM room_member_certs WHERE room_id AND (subject_id = я OR actor_id = я)   // signed-membership.md §7.1; если я — автор приглашения комнаты, invite_cert → NULL
+  DELETE FROM room_member_certs WHERE room_id AND (subject_id = я OR actor_id = я)   // signed-membership.md §7.1
+  UPDATE rooms SET invite_cert = NULL, invite_snap = NULL, invite_actor_id = NULL    // если я — автор приглашения комнаты (invite_actor_id = я): обнуляются все три поля,
+         WHERE id = room AND invite_actor_id = я                                     // код остаётся и принимает только заявки (signed-membership.md §5.6)
   последний участник → DELETE messages (RETURNING file_url), join_requests, rooms     // user_left_rooms уходит каскадом
   иначе:
     tags = tagsForAccount(room, я, users.created_at, now)
@@ -495,7 +497,8 @@ BEGIN
   rooms = текущие (room_participants) ∪ покинутые (user_left_rooms)
   rooms FOR UPDATE ORDER BY id
   DELETE room_participants, chats                       // я
-  DELETE room_member_certs (subject_id или actor_id = я), user_left_rooms     // я; invite_cert → NULL там, где я автор приглашения
+  DELETE room_member_certs (subject_id или actor_id = я), user_left_rooms     // я
+  UPDATE rooms SET invite_cert = NULL, invite_snap = NULL, invite_actor_id = NULL WHERE invite_actor_id = я    // комнаты уже заблокированы выше; обнуляются все три поля
   DELETE FROM upload_quota WHERE qkey = ANY($qkeys)     // qkey по текущему и всем …_PREVIOUS ключам (раздел 13)
   DELETE FROM messages m USING UNNEST($rooms::int[], $tags::bytea[]) AS t(room_id, tag)
          WHERE m.room_id = t.room_id AND m.author_tag = t.tag RETURNING m.file_url   // по парам (комната, тег)
@@ -627,7 +630,7 @@ RETURNING 1;
 | 10 | Убрать `sender_id`/`recipient_id` из очереди key-share (отправителя получатель мог бы определять по identity-ключу из заголовка) | вне охвата R8; описать как остаточную утечку | К |
 | 11 | Общий `qkey` на пользователя во всех комнатах и окнах (утечка 7): можно сделать псевдоним зависящим от номера окна, но тогда строку квоты нельзя найти без знания окна — понадобится перебор окон или смещение границ на календарные месяцы | оставить `qkey = HMAC(K_quota, u32be(user_id))`, как решил интегратор (С3); изменение формы окна — только если криптограф сочтёт связь файловых сообщений между комнатами существенной (по ревью, С3) | К |
 | 12 | Принять ли сильные корреляции У1–У3 (раздел 3) без смягчения или ослабить: У1 — считать непрочитанное с исключением тегов читателя вместо сдвига маркера; У2 — огрублять `last_active_at` сильнее | принять как есть и честно описать в политике приватности (T5.1); смягчения усложняют горячий путь и счётчики (по ревью, С3) | В, К |
-| 13 | Метка `nyxo-skid-v1` входит в SHA-256 без нулевого байта (поля фиксированной длины, как у `nyxo-memkey-v1`), а метка HMAC тега — с нулевым байтом | оставить так: правило «метка плюс `\0`» относится к подписям identity-ключом | К |
+| 13 | Метка `nyxo-skid-v1` входит в SHA-256 без нулевого байта (поля фиксированной длины, как у `nyxo-memkey-v2` и `nyxo-snap-v1` из [signed-membership.md](signed-membership.md)), а метка HMAC тега — с нулевым байтом | оставить так: правило «метка плюс `\0`» относится к подписям identity-ключом | К |
 | 14 | Пользователь, вышедший и вернувшийся, не может удалить свои старые сообщения до удаления аккаунта (8.2, условие видимости) | принять; отдельную кнопку «удалить мои сообщения за прошлое» не делать (по ревью, С6) | И |
 
 ## Приложение: что менять в коде
@@ -653,3 +656,4 @@ RETURNING 1;
 |---|---|
 | 2026-10-09 | Черновик на ревью криптографа (T1.6) |
 | 2026-10-10 | Правки по ревью криптографа (T4.0): С1 — надгробия `gone` в `skIndex` и порядок причин отказа; С2 — `senderKeyId` привязан к отправителю, кандидаты и `keyConflicts` убраны; С3 — Ц1 переформулирована, сильные корреляции У1–У3, квота в `upload_quota` под `qkey`; С4 — транзакция отправки 8.5; С5 — `mine` только косметика, `senderkey-v1` убрана; С6 — условие видимости в 8.2; С7 — тег в AAD `enc:v3`; С8 — `ikm` после `parseKey`, ключ `K_enc3`; С9 — процедура перетегирования 14.1; С10 — `except` отправителя; С11 — заметка для T5.1; общий `proto: 4`, порядок блокировок message-ordering.md §8.1 |
+| 2026-10-11 | Согласование с повторным ревью signed-membership.md (T4.0b): §12.1 и §12.2 — выход и удаление аккаунта автора приглашения обнуляют все три поля `invite_cert`, `invite_snap`, `invite_actor_id` (раньше упоминался только `invite_cert`); вопрос 13 — ссылка на `nyxo-memkey-v1` заменена на `nyxo-memkey-v2` |
