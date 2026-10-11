@@ -403,19 +403,32 @@ COMMIT
 
 - **Транзакции вступления `approve` и `join`** (повторное ревью 13): те же правила блокировок и проверки **после** взятия блокировки комнаты, а не до неё: значения, прочитанные раньше, к моменту блокировки могли устареть.
 
+`approve` (порядок как у вступления в [message-ordering.md](message-ordering.md) §8.2):
+
 ```
-approve:                                                            join:
-BEGIN                                                               BEGIN
-  users(я)  FOR KEY SHARE                                             users(я)  FOR KEY SHARE
-  rooms     FOR NO KEY UPDATE                                         rooms     FOR NO KEY UPDATE
-  SELECT … FROM room_participants WHERE user_id = actorId             SELECT invite_cert, invite_snap, code_expires_at, лимит участников
-         // actorId обязан быть участником ПОСЛЕ блокировки,                 FROM rooms          // читается здесь, в той же транзакции, что и
-         // иначе 404 not-participant: подписавший мог выйти                 //  addRoomMember: поворот и выключение приглашения не успеют
-         // между проверкой подписи и вставкой — сертификат                  //  между чтением и вставкой
-         // остался бы навсегда                                        проверка joinCert по прочитанным значениям (ref, подписи, время)
-  заявка существует и не обработана                                   addRoomMember; INSERT room_member_certs (join, aux = invite_cert)
-  addRoomMember(заявитель); INSERT room_member_certs (vouch, snap)    ответ: { …, inviteSnap = invite_snap }
-COMMIT                                                              COMMIT
+BEGIN
+  users(заявитель) FOR KEY SHARE                                    // как в addRoomMember; подписавший (сессия) отдельной блокировки users не берёт
+  rooms            FOR NO KEY UPDATE
+  SELECT 1 FROM room_participants WHERE room_id = $r AND user_id = actorId
+         // actorId обязан быть участником ПОСЛЕ блокировки комнаты, иначе 404 not-participant: подписавший мог выйти между
+         // проверкой подписи и вставкой, и сертификат с несуществующим подписавшим остался бы навсегда (выход удаляет строки только своих)
+  заявка существует и не обработана
+  addRoomMember(заявитель); INSERT room_member_certs (vouch, snap)
+COMMIT
+```
+
+`join`:
+
+```
+BEGIN
+  users(я)  FOR KEY SHARE                                           // я = входящий = сессия
+  rooms     FOR NO KEY UPDATE
+  читаются rooms.invite_cert, invite_snap, code_expires_at и лимит участников — здесь, под блокировкой, в той же транзакции, что и
+         addRoomMember: поворот или выключение приглашения не успеют между проверкой joinCert и вставкой
+  проверка joinCert по прочитанным значениям (ref, подписи, время)
+  addRoomMember; INSERT room_member_certs (join, aux = invite_cert)
+COMMIT
+ответ: { …, inviteSnap = прочитанный invite_snap }
 ```
 
 - Таблица создаётся в `initDatabase`; столбцы `invite_*` — в `CREATE TABLE rooms`.
