@@ -3348,7 +3348,14 @@ app.put('/api/messages/:messageId', async (req, res) => {
         // AAD — от исходной строки: комната, id и тег (у бота - чат и владелец) при
         // правке не меняются, тег берётся ИЗ строки, а не пересчитывается по
         // текущей неделе (правка на границе недели - тот же тег).
-        await dbRun('UPDATE messages SET text = $1, edited_at = $2 WHERE id = $3', [writeMessageText(newText, message), editedAt, messageId]);
+        //
+        // Запись условна по тегу строки: пока шла правка, scripts/retag-messages.js мог
+        // перетегировать строку (смена MESSAGE_ENCRYPTION_KEY, 14.1), и текст с AAD старого
+        // тега под новым тегом не читался бы. Тогда правку нужно повторить.
+        const written = message.room_id
+            ? await dbRun('UPDATE messages SET text = $1, edited_at = $2 WHERE id = $3 AND author_tag = $4', [writeMessageText(newText, message), editedAt, messageId, message.author_tag])
+            : await dbRun('UPDATE messages SET text = $1, edited_at = $2 WHERE id = $3', [writeMessageText(newText, message), editedAt, messageId]);
+        if (written.rowCount === 0) return res.json({ success: false, message: 'Сообщение изменилось, попробуйте ещё раз' });
 
         if (message.room_id) {
             // Тем, кто вступил в комнату после этого сообщения, новый текст не
