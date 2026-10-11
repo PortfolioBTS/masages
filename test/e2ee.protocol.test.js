@@ -509,14 +509,15 @@ async function main() {
 
     // ===================== Совместимость с историей =====================
 
-    await test('legacy v1 envelope (old format, assembled by hand) carries no mid: "no-mid", nothing written, chain stays usable', async () => {
+    await test('legacy v1 envelope (old format, assembled by hand) is a bad envelope: the senderkey-v1 branch is gone, nothing written, chain stays usable', async () => {
         const ctx = await setupPair();
         await connectPair(ctx);
         const v1 = await legacyEncryptV1(ctx.alice._storage, ctx.roomId, 1, 'старое сообщение');
         assert.strictEqual(JSON.parse(v1).alg, 'senderkey-v1');
-        // Сообщений без mid нет (R0): конверт прежнего формата не показывается.
-        assert.deepStrictEqual(await ctx.bob.decryptIncoming(ctx.roomId, 1, v1, '1000001'), { ok: false, reason: 'no-mid' });
-        assert.deepStrictEqual(await ctx.alice.decryptIncoming(ctx.roomId, 1, v1, '1000001'), { ok: false, reason: 'no-mid' });
+        // Конвертов прежнего формата нет (R0): ветка senderkey-v1 удалена целиком.
+        assert.deepStrictEqual(await ctx.bob.decryptIncoming(ctx.roomId, 1, v1, '1000001'), { ok: false, reason: 'bad-envelope' });
+        assert.deepStrictEqual(await ctx.alice.decryptIncoming(ctx.roomId, 1, v1, '1000001'), { ok: false, reason: 'bad-envelope' });
+        assert.deepStrictEqual(await ctx.bob.decryptIncoming(ctx.roomId, null, v1, '1000001'), { ok: false, reason: 'bad-envelope' }, 'и без подсказки отправителя');
         assert.deepStrictEqual(await ctx.bob._storage.keys('edit:'), [], 'отказ ничего не записал в записи о версиях');
         // v1 и v2 живут на одной цепочке: следующий v2 идёт со следующей итерации.
         const v2 = await ctx.alice.encryptOutgoing(ctx.roomId, 'новое');
@@ -578,19 +579,24 @@ async function main() {
         assert.ok(await getStored(alice, 'spkOld:' + legacyA.spkId));
         assert.ok(server._pqPrekeys.get(1) && server._pqPrekeys.get(2), 'PQ-prekey загружены при миграции');
 
-        // Ключи мигрированы и цепочка читается: подпись и AEAD старых конвертов
-        // проходят, а показаны они не будут — у конверта прежнего формата нет mid (R0).
-        assert.deepStrictEqual(await bob.decryptIncoming(roomId, 1, history1, '1000001'), { ok: false, reason: 'no-mid' });
-        assert.deepStrictEqual(await bob.decryptIncoming(roomId, 1, history2, '1000002'), { ok: false, reason: 'no-mid' });
-        assert.deepStrictEqual(await alice.decryptIncoming(roomId, 1, history1, '1000001'), { ok: false, reason: 'no-mid' });
+        // Конвертов прежнего формата нет (R0): ветка senderkey-v1 удалена, такой конверт не читается.
+        assert.deepStrictEqual(await bob.decryptIncoming(roomId, 1, history1, '1000001'), { ok: false, reason: 'bad-envelope' });
+        assert.deepStrictEqual(await bob.decryptIncoming(roomId, 1, history2, '1000002'), { ok: false, reason: 'bad-envelope' });
+        assert.deepStrictEqual(await alice.decryptIncoming(roomId, 1, history1, '1000001'), { ok: false, reason: 'bad-envelope' });
 
-        // Ключ переразослан по новому каналу; у Боба он уже был — просто подтверждение.
+        // Ключ Алисы с идентификатором, не выведенным из отправителя (создан до
+        // sealed sender), получатели не примут: ensureRoomSession меняет его
+        // (ротация 'upgrade') и рассылает новый по новому каналу.
+        const staleKeyId = own.senderKeyId;
         await alice.ensureRoomSession(11, roomId, [{ id: 1 }, { id: 2 }]);
+        const migrated = await getStored(alice, 'senderKey:' + roomId + ':1');
+        assert.notStrictEqual(migrated.senderKeyId, staleKeyId, 'ключ с невыведенным идентификатором заменён');
+        assert.strictEqual(migrated.senderKeyId, await E2EE._internal.deriveSenderKeyId(roomId, 1, migrated.signingPublicKey));
+        assert.ok(await getStored(alice, 'skIndex:' + roomId + ':' + staleKeyId), 'прежний ключ остаётся в индексе отправителей: свои старые сообщения читаются');
         const synced = await bob.syncKeyShares(22, roomId);
         assert.strictEqual(synced.applied, 1);
         const fresh = await alice.encryptOutgoing(roomId, 'после миграции');
-        assert.strictEqual((await bob.decryptIncoming(roomId, 1, fresh, 3)).text, 'после миграции');
-        assert.strictEqual((await bob.decryptIncoming(roomId, 1, history1, '1000001')).reason, 'no-mid');
+        assert.strictEqual((await bob.decryptIncoming(roomId, null, fresh, 3)).text, 'после миграции');
     });
 
     // ===================== Неизвлекаемые ключи =====================
@@ -1023,7 +1029,8 @@ async function main() {
         assert.strictEqual((await bob.decryptIncoming(roomId, 1, late, 2)).text, 'без Кэрол');
         const carolRes = await carol.decryptIncoming(roomId, 1, late, 2);
         assert.strictEqual(carolRes.ok, false);
-        assert.strictEqual(carolRes.reason, 'stale-sender-key');
+        // Нового ключа у Кэрол нет и в индексе отправителей: ей неизвестен сам keyId.
+        assert.strictEqual(carolRes.reason, 'no-sender-key');
         // Боб не открывал это сообщение до автоматической ротации — оно всё
         // равно читается по сохранённой позиции архивной цепочки.
         assert.strictEqual((await bob.decryptIncoming(roomId, 1, early, 1)).text, 'все трое', 'история после ротации читается');

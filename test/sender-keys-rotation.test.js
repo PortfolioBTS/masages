@@ -89,7 +89,7 @@ async function connect(ctx, ids = [2, 3]) {
         const late = await send(ctx.alice, ROOM, 'после ухода');
         assert.strictEqual((await read(ctx.bob, ROOM, early)).text, 'до ухода');
         assert.strictEqual((await read(ctx.bob, ROOM, late)).text, 'после ухода');
-        assert.strictEqual((await read(ctx.carol, ROOM, late)).reason, 'stale-sender-key', 'ушедший нового ключа не получил');
+        assert.strictEqual((await read(ctx.carol, ROOM, late)).reason, 'no-sender-key', 'ушедший нового ключа не получил: в его индексе отправителей этого keyId нет');
     });
 
     await test('жёсткая граница: на 200-м сообщении без ensureRoomSession — needs-room-session, после ensureRoomSession шифрует', async () => {
@@ -261,7 +261,7 @@ async function connect(ctx, ids = [2, 3]) {
         // prev ключа 3 указывает на ключ 2 (Бобу неизвестный): архив ключа 1 остаётся с открытой цепочкой.
         assert.ok((await stored(ctx.bob, 'skArchive:' + ROOM + ':1:' + id1)).chainKey);
         assert.strictEqual((await read(ctx.bob, ROOM, m1)).text, 'ключ 1');
-        assert.strictEqual((await read(ctx.bob, ROOM, m2)).reason, 'stale-sender-key');
+        assert.strictEqual((await read(ctx.bob, ROOM, m2)).reason, 'no-sender-key', 'ключ 2 устройство никогда не видело: его нет в индексе отправителей');
     });
 
     // ===================== Выдача «с начала эпохи» =====================

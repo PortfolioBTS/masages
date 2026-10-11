@@ -49,6 +49,16 @@
 //     ('stale-edit'); сообщение без mid отвергается ('no-mid'). Сервер не может
 //     ни выдать конверт под чужим id, ни перенести правку на другое сообщение,
 //     ни откатить правку у того, кто видел новую.
+//   - Sealed sender на хранении (docs/security/sealed-sender.md): в строке сообщения
+//     комнаты нет автора, его определяет клиент. senderKeyId ПРИВЯЗАН к отправителю:
+//     SHA-256("nyxo-skid-v1" ‖ комната ‖ отправитель ‖ открытый ключ подписи)[0..16].
+//     При установке чужого ключа пересчитанный идентификатор обязан совпасть с
+//     заявленным (отправитель — из AAD key-share, не из ответа сервера), иначе SKDM
+//     не устанавливается: занять чужой keyId нельзя. Индекс skIndex:<комната>:<keyId>
+//     хранит отправителя; удалённые ключи остаются надгробиями (gone), чтобы отказ
+//     назывался 'key-expired' / 'history-not-kept', а не 'no-sender-key'.
+//     decryptIncoming находит автора по индексу и ничего не пишет, пока не прошли
+//     подпись, AEAD с id отправителя в AAD и проверки mid/ts/версии.
 //   - Текст дополняется по схеме Padmé (минимум 256 байт); файлы шифруются
 //     AES-256-GCM на клиенте, ключ едет внутри E2EE-сообщения.
 //   - Клиент помнит состав комнаты: новые участники видны (атака
@@ -224,6 +234,7 @@
     const REASON_NOT_READY = 'у собеседника ещё не настроен E2EE';
     const REASON_OUTDATED = 'у собеседника устаревшая версия E2EE';
     const REASON_IDENTITY_CHANGED = 'ключ безопасности собеседника изменился — нужно подтверждение';
+    const REASON_KEY_UNBOUND = 'ключ участника не принят: идентификатор не выведен из отправителя';
 
     // ===================== Ошибки =====================
 
@@ -380,10 +391,6 @@
 
     function u32be(n) {
         return new Uint8Array([(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff]);
-    }
-
-    function u32le(n) {
-        return new Uint8Array([n & 0xff, (n >>> 8) & 0xff, (n >>> 16) & 0xff, (n >>> 24) & 0xff]);
     }
 
     // Целое до 2^53 в восемь байт, старшие первыми: u32be(n div 2^32) ‖ u32be(n mod 2^32).
@@ -997,18 +1004,8 @@
         return concatBytes(PQ_OPK_LABEL, u64be(keyId), publicKey);
     }
 
-    function sigInputV1(iv, ct, iteration) {
-        // v1 подписывал iteration в порядке байт платформы (Uint32Array) —
-        // на всех реальных платформах это little-endian; воспроизводим явно.
-        return concatBytes(iv, ct, u32le(iteration));
-    }
-
     function sigInputV2(iv, ct, iteration, senderKeyId) {
         return concatBytes(iv, ct, u32be(iteration), utf8encode(senderKeyId));
-    }
-
-    function msgAadV1(roomId, senderId, senderKeyId) {
-        return utf8encode('senderkey:' + roomId + ':' + senderId + ':' + senderKeyId);
     }
 
     function msgAadV2(roomId, senderId, senderKeyId) {
@@ -1024,6 +1021,29 @@
             b64decode(senderSignPub), b64decode(senderDhPub),
             b64decode(recipientSignPub), b64decode(recipientDhPub)
         );
+    }
+
+    // Идентификатор ключа отправителя ПРИВЯЗАН к отправителю (sealed-sender.md, 9.2):
+    //   senderKeyId = base64( SHA-256( "nyxo-skid-v1" ‖ u32be(roomId) ‖ u32be(senderId) ‖ signingPublicKey[32] )[0..16] )
+    // Вход — 52 байта: метка (12 байт, без нулевого) и поля фиксированной длины.
+    // Формат значения тот же, что у прежнего случайного идентификатора (16 байт в
+    // каноническом base64). Занять чужой идентификатор нельзя: для этого нужен
+    // прообраз SHA-256 по 128 битам, а не просто знание чужих keyId и открытого
+    // ключа из конвертов. Поэтому на один keyId в комнате приходится ровно один
+    // отправитель, и индекс отправителей (skIndex) не знает «кандидатов».
+    const SKID_LABEL = utf8encode('nyxo-skid-v1');
+
+    function isU32(n) {
+        return Number.isInteger(n) && n >= 0 && n <= 0xFFFFFFFF;
+    }
+
+    async function deriveSenderKeyId(roomId, senderId, signingPublicKey) {
+        const room = Number(roomId);
+        const sender = Number(senderId);
+        const pub = typeof signingPublicKey === 'string' ? decodeFixed(signingPublicKey, 32) : null;
+        if (!isU32(room) || !isU32(sender) || !pub) throw new TypeError('E2EE: не из чего вывести идентификатор ключа отправителя');
+        const digest = new Uint8Array(await subtle.digest('SHA-256', concatBytes(SKID_LABEL, u32be(room), u32be(sender), pub)));
+        return b64encode(digest.subarray(0, 16));
     }
 
     // Конверт key-share v2: { v:2, type:'skdm', n, iv, ct, init:{...} }.
@@ -1311,9 +1331,47 @@
         const archiveName = (roomId, senderId, keyId) => 'skArchive:' + roomId + ':' + senderId + ':' + keyId;
         const seenName = (roomId, senderId, keyId) => 'seen:' + roomId + ':' + senderId + ':' + keyId;
         const archivePrefix = (roomId) => 'skArchive:' + roomId + ':';
+        // Индекс отправителей (sealed-sender.md, 9.2): keyId → отправитель. В строке
+        // сообщения комнаты автора нет, автора находит клиент по keyId из конверта.
+        //   skIndex:<комната>:<senderKeyId> = { v:1, sender }              — ключ есть
+        //   skIndex:<комната>:<senderKeyId> = { v:1, sender, gone:true }   — ключ удалён намеренно
+        // Надгробие нужно, чтобы удалённый ключ давал причину 'key-expired' /
+        // 'history-not-kept', а не 'no-sender-key' (иначе интерфейс счёл бы ключ
+        // потерянным и слал лишние запросы ключа). Флаг unverifiedSender в индексе
+        // НЕ хранится: он считается при каждой расшифровке по текущему составу.
+        const skIndexName = (roomId, keyId) => 'skIndex:' + roomId + ':' + keyId;
+        const skIndexPrefix = (roomId) => 'skIndex:' + roomId + ':';
 
         function ownKeyName(roomId) {
             return stateName(roomId, userId);
+        }
+
+        async function readIndexLocked(roomId, keyId) {
+            const entry = await storage.get(skIndexName(roomId, keyId));
+            if (!entry || typeof entry !== 'object' || entry.v !== 1) return null;
+            const sender = Number(entry.sender);
+            if (!Number.isSafeInteger(sender) || sender <= 0) return null;
+            return entry.gone === true ? { sender, gone: true } : { sender, gone: false };
+        }
+
+        // Записывает отправителя ключа. Повтор идемпотентен и надгробие обратно в
+        // «ключ есть» не превращает. false — для этого keyId уже записан ДРУГОЙ
+        // отправитель (возможно только при коллизии SHA-256 по 128 битам): запись
+        // не меняется, вызывающий отвергает SKDM.
+        async function writeIndexLocked(roomId, keyId, senderId) {
+            const sender = Number(senderId);
+            const current = await readIndexLocked(roomId, keyId);
+            if (current) return current.sender === sender;
+            await storage.set(skIndexName(roomId, keyId), { v: 1, sender });
+            return true;
+        }
+
+        // Ключ удалён намеренно (срок, бюджет, «Не хранить историю»): запись
+        // становится надгробием. Записи, которой не было, надгробие не создаётся.
+        async function tombstoneIndexLocked(roomId, keyId) {
+            const current = await readIndexLocked(roomId, keyId);
+            if (!current || current.gone) return;
+            await storage.set(skIndexName(roomId, keyId), { v: 1, sender: current.sender, gone: true });
         }
 
         // Читает текущий ключ отправителя и доводит запись до нынешнего формата:
@@ -1373,7 +1431,7 @@
                 }
                 state.archive = migrated.concat(state.archive.filter(entry => !archiveHas({ archive: migrated }, archiveEntryId(entry))));
                 delete state.archived;
-                await dropArchivesLocked(roomId, senderId, trimArchiveIndex(state));
+                await dropArchivesLocked(roomId, senderId, await trimArchiveIndex(roomId, senderId, state));
                 changed = true;
             }
             return changed;
@@ -1392,9 +1450,11 @@
 
         // Сжимает индекс архива: подробные записи только у последних
         // MAX_ARCHIVE_INDEX архивов, у более старых остаётся id («надгробие»),
-        // самые старые надгробия забываются. Возвращает id архивов, чьи записи
-        // теперь надо удалить (dropArchivesLocked).
-        function trimArchiveIndex(state) {
+        // самые старые надгробия забываются; вместе с забытым надгробием
+        // исчезает и запись индекса отправителей (дальше 'no-sender-key', как для
+        // ключа, которого устройство никогда не видело). Возвращает id архивов,
+        // чьи записи теперь надо удалить (dropArchivesLocked).
+        async function trimArchiveIndex(roomId, senderId, state) {
             const list = state.archive;
             const evicted = [];
             let detailed = 0;
@@ -1405,16 +1465,24 @@
                     list[i] = list[i].id;
                 }
             }
-            if (list.length > MAX_ARCHIVE_INDEX + MAX_ARCHIVE_TOMBSTONES) list.length = MAX_ARCHIVE_INDEX + MAX_ARCHIVE_TOMBSTONES;
+            if (list.length > MAX_ARCHIVE_INDEX + MAX_ARCHIVE_TOMBSTONES) {
+                const forgotten = list.splice(MAX_ARCHIVE_INDEX + MAX_ARCHIVE_TOMBSTONES);
+                for (const entry of forgotten) {
+                    const id = archiveEntryId(entry);
+                    if (id) await storage.delete(skIndexName(roomId, id));
+                }
+            }
             return evicted;
         }
 
-        // Удаляет записи архива и их таблицы повторов. В индексе (state.archive)
+        // Удаляет записи архива и их таблицы повторов, а запись индекса
+        // отправителей превращает в надгробие. В индексе архива (state.archive)
         // эти id остаются надгробиями — меняет его вызывающий.
         async function dropArchivesLocked(roomId, senderId, keyIds) {
             for (const id of keyIds) {
                 await storage.delete(archiveName(roomId, senderId, id));
                 await storage.delete(seenName(roomId, senderId, id));
+                await tombstoneIndexLocked(roomId, id);
             }
         }
 
@@ -1452,7 +1520,7 @@
             await storage.set(archiveName(roomId, senderId, state.senderKeyId), rec);
             if (!Array.isArray(state.archive)) state.archive = [];
             state.archive.unshift({ id: state.senderKeyId, archivedAt: t, final: rec.final });
-            return trimArchiveIndex(state);
+            return trimArchiveIndex(roomId, senderId, state);
         }
 
         // ---- Политика комнаты на устройстве и хранение ключей ----
@@ -1689,6 +1757,8 @@
                 forgotten.senders++;
             }
             for (const name of await storage.keys(archivePrefix(roomId))) {
+                const parts = name.split(':');
+                if (parts.length === 4) await tombstoneIndexLocked(roomId, parts[3]);
                 await storage.delete(name);
                 forgotten.archives++;
             }
@@ -1732,6 +1802,32 @@
         async function getRoomHistoryMode(roomId) {
             await ensureLocal();
             return withLock(async () => (await readPolicyLocked(roomId)).historyMode);
+        }
+
+        // Локальная очистка комнаты при выходе из неё (sealed-sender.md, 9.2): ключи
+        // отправителей, архив, таблицы повторов, записи о версиях, ИНДЕКС
+        // ОТПРАВИТЕЛЕЙ (вместе с надгробиями), отметки рассылки, запросы ключа,
+        // состав и настройки комнаты. Попарные сессии с участниками не комнатные
+        // и остаются. Вернувшийся в комнату начинает с чистого листа.
+        async function forgetRoomLocked(roomId) {
+            const prefixes = [
+                'senderKey:' + roomId + ':', archivePrefix(roomId), 'seen:' + roomId + ':', skIndexPrefix(roomId),
+                editPrefix(roomId), 'keyReq:' + roomId + ':', 'keyServed:' + roomId + ':', 'sharedWith2:' + roomId + ':',
+            ];
+            let removed = 0;
+            for (const prefix of prefixes) {
+                for (const name of await storage.keys(prefix)) { await storage.delete(name); removed++; }
+            }
+            for (const name of ['members:' + roomId, 'roomPolicy:' + roomId]) {
+                if ((await storage.get(name)) !== null) { await storage.delete(name); removed++; }
+            }
+            editCounts.delete(roomId);
+            return { removed };
+        }
+
+        async function forgetRoom(roomId) {
+            await ensureLocal();
+            return withLock(() => forgetRoomLocked(roomId));
         }
 
         // Разовая миграция хранилища прежней версии: JWK → неизвлекаемые
@@ -2650,9 +2746,25 @@
             return true;
         }
 
+        // Можно ли заносить этот SKDM в индекс отправителей (sealed-sender.md, 9.2):
+        // senderId берётся из AAD key-share (проверенного AEAD), а не из поля ответа
+        // сервера; пересчитанный идентификатор обязан совпасть с заявленным, и в
+        // индексе под этим keyId не должно стоять другого отправителя (возможно
+        // только при коллизии SHA-256 по 128 битам). Ничего не пишет.
+        async function skdmBindingHoldsLocked(roomId, senderId, skdm) {
+            let derived;
+            try { derived = await deriveSenderKeyId(roomId, senderId, skdm.signingPublicKey); } catch { return false; }
+            if (derived !== skdm.senderKeyId) return false;
+            const entry = await readIndexLocked(roomId, skdm.senderKeyId);
+            return !entry || entry.sender === Number(senderId);
+        }
+
         // order = { eph, n } — позиция key-share в попарной сессии. Возвращает
-        // senderKeyId ключа, который теперь есть у нас (новый или уже имевшийся).
+        // senderKeyId ключа, который теперь есть у нас (новый или уже имевшийся), либо
+        // null: идентификатор не выведен из отправителя — SKDM не устанавливается,
+        // состояние и индекс не меняются (проверка ДО любой записи).
         async function installSenderKeyLocked(roomId, senderId, skdm, order) {
+            if (!(await skdmBindingHoldsLocked(roomId, senderId, skdm))) return null;
             const name = stateName(roomId, senderId);
             const existing = await readStateLocked(roomId, senderId);
             const t = now();
@@ -2670,6 +2782,7 @@
                 }
                 if (await applyPrevLocked(roomId, senderId, existing, prev)) changed = true;
                 if (changed) await storage.set(name, existing);
+                await writeIndexLocked(roomId, skdm.senderKeyId, senderId);
                 return skdm.senderKeyId;
             }
             // Ключ, который уже был заменён ротацией, обратно не ставим: иначе
@@ -2689,9 +2802,10 @@
                     archivedAt: t,
                 });
                 existing.archive.unshift({ id: skdm.senderKeyId, archivedAt: t, final: null });
-                const evicted = trimArchiveIndex(existing);
+                const evicted = await trimArchiveIndex(roomId, senderId, existing);
                 await applyPrevLocked(roomId, senderId, existing, prev);
                 await storage.set(name, existing);
+                await writeIndexLocked(roomId, skdm.senderKeyId, senderId);
                 await dropArchivesLocked(roomId, senderId, evicted);
                 return skdm.senderKeyId;
             }
@@ -2717,6 +2831,7 @@
                 await applyPrevLocked(roomId, senderId, next, prev);
             }
             await storage.set(name, next);
+            await writeIndexLocked(roomId, skdm.senderKeyId, senderId);
             await dropArchivesLocked(roomId, senderId, evicted);
             return skdm.senderKeyId;
         }
@@ -2730,7 +2845,8 @@
             await storage.set(name, list);
         }
 
-        // Обрабатывает один key-share → 'applied' | 'failed' | 'changed'.
+        // Обрабатывает один key-share → 'applied' | 'failed' | 'changed' | 'unbound'
+        // (идентификатор ключа не выведен из отправителя, раздел 9.2).
         // onInstalled(senderKeyId) — вызывается для применённого ключа: syncKeyShares
         // по нему снимает собственные запросы этого ключа.
         async function applyShare(roomId, senderId, ciphertext, onInstalled) {
@@ -2778,9 +2894,18 @@
 
                 const opened = await openShareLocked(roomId, senderId, env, identity);
                 if (!opened) return 'failed';
+                // Привязка senderKeyId к отправителю — до любой записи (в том числе до
+                // фиксации попарной сессии и сжигания одноразовых ключей): SKDM с
+                // чужим или случайным идентификатором не меняет ничего на устройстве.
+                if (!(await skdmBindingHoldsLocked(roomId, senderId, opened.skdm))) {
+                    console.warn('E2EE: SKDM отвергнут: senderKeyId не выведен из (комната, отправитель, ключ подписи)',
+                        { roomId, senderId, senderKeyId: opened.skdm.senderKeyId });
+                    return 'unbound';
+                }
                 if (!pin) await storage.set('peer:' + senderId, { signPub: h.signPub, dhPub: h.dhPub, verified: false, firstSeenAt: now() });
                 await opened.commit();
                 const keyId = await installSenderKeyLocked(roomId, senderId, opened.skdm, { eph: h.eph, n: env.n });
+                if (keyId === null) return 'unbound';
                 if (onInstalled) onInstalled(keyId);
                 return 'applied';
             });
@@ -2788,15 +2913,19 @@
 
         // ---- Sender Key: моё состояние в комнате ----
 
+        // roomId — комната: senderKeyId выводится из (комната, я, открытый ключ
+        // подписи) и потому порождается ПОСЛЕ пары Ed25519 (раздел 9.2). Каждая
+        // ротация даёт новую пару и новый идентификатор.
         // entitled — участники (id), которые были в комнате при создании ключа:
         // им ключ выдаётся с начала эпохи (prepareShareForPeer). prev — { id, final }
         // прежнего ключа: уходит в ext каждого SKDM нового ключа.
-        async function newOwnSenderKeyState({ entitled = [], prev = null } = {}) {
+        async function newOwnSenderKeyState({ roomId, entitled = [], prev = null } = {}) {
             const signKp = await generateEd25519();
             const chainKey = b64encode(randomBytes(32));
+            const signingPublicKey = b64encode(signKp.pub);
             const state = {
-                senderKeyId: b64encode(randomBytes(16)),
-                signingPublicKey: b64encode(signKp.pub),
+                senderKeyId: await deriveSenderKeyId(roomId, userId, signingPublicKey),
+                signingPublicKey,
                 signingPrivateKey: signKp.priv,
                 chainKey,
                 nextIteration: 0,
@@ -2829,6 +2958,11 @@
             return sent >= FORCE_ROTATE_AFTER_MESSAGES || now() - state.createdAt >= FORCE_ROTATE_AFTER_MS;
         }
 
+        // Идентификатор своего ключа выведен из (комната, я, ключ подписи)?
+        async function ownKeyBoundLocked(roomId, own) {
+            try { return (await deriveSenderKeyId(roomId, userId, own.signingPublicKey)) === own.senderKeyId; } catch { return false; }
+        }
+
         // Участники, которым новый ключ выдаётся с начала эпохи: весь известный
         // состав комнаты, кроме меня (members:<комната> ведёт ensureRoomSession).
         async function knownMemberIdsLocked(roomId) {
@@ -2846,8 +2980,12 @@
             const existing = await loadOwnSenderKeyLocked(roomId);
             const ids = entitled || await knownMemberIdsLocked(roomId);
             const prev = existing && existing.nextIteration > 0 ? { id: existing.senderKeyId, final: existing.nextIteration - 1 } : null;
-            const next = await newOwnSenderKeyState({ entitled: ids, prev });
+            const next = await newOwnSenderKeyState({ roomId, entitled: ids, prev });
             if (existing) {
+                // Свой прежний ключ всегда в индексе: на устройстве с ключом, созданным
+                // до привязки идентификатора, он мог быть не записан, а свои старые
+                // сообщения должны читаться.
+                await writeIndexLocked(roomId, existing.senderKeyId, userId);
                 const evicted = await moveToArchiveLocked(roomId, userId, existing, { own: true });
                 next.archive = existing.archive;
                 await dropArchivesLocked(roomId, userId, evicted);
@@ -2860,6 +2998,7 @@
                 }
             }
             await storage.set(ownKeyName(roomId), next);
+            await writeIndexLocked(roomId, next.senderKeyId, userId);
             return next;
         }
 
@@ -2910,10 +3049,14 @@
                 let rotated = false;
                 let rotationReason = null;
                 if (!own) {
-                    own = await newOwnSenderKeyState({ entitled: entitledNow });
+                    own = await newOwnSenderKeyState({ roomId, entitled: entitledNow });
                     await storage.set(ownKeyName(roomId), own);
-                } else if (!own.signingPrivateKey) {
-                    // Состояние из очень старой версии без ключа подписи.
+                    // Свой ключ в индексе отправителей — до первой отправки.
+                    await writeIndexLocked(roomId, own.senderKeyId, userId);
+                } else if (!own.signingPrivateKey || !(await ownKeyBoundLocked(roomId, own))) {
+                    // Состояние из очень старой версии без ключа подписи либо ключ, чей
+                    // идентификатор не выведен из отправителя (создан до sealed sender):
+                    // получатели такой SKDM не примут, поэтому ключ меняется.
                     await rotateRoomKeyLocked(roomId, entitledNow);
                     rotated = true;
                     rotationReason = 'upgrade';
@@ -3033,6 +3176,7 @@
             const list = res && res.data && Array.isArray(res.data.shares) ? res.data.shares : [];
             let applied = 0, failed = 0;
             const changes = [];
+            const warnings = [];
             const installed = new Set();
             for (const item of list) {
                 const senderId = Number(item && item.senderId);
@@ -3042,10 +3186,16 @@
                 } catch { result = 'failed'; }
                 if (result === 'applied') applied++;
                 else if (result === 'changed') { if (!changes.includes(senderId)) changes.push(senderId); }
-                else failed++;
+                else {
+                    failed++;
+                    if (result === 'unbound') warnings.push({ userId: senderId, reason: REASON_KEY_UNBOUND });
+                }
             }
             await settleKeyRequests(chatId, roomId, Array.from(installed));
-            return { applied, failed, identityChanges: changes };
+            const result = { applied, failed, identityChanges: changes };
+            // Предупреждения — только когда есть о чём предупреждать.
+            if (warnings.length > 0) result.warnings = warnings;
+            return result;
         }
 
         // ---- Запрос ключа (план криптографии, раздел 5) ----
@@ -3251,50 +3401,64 @@
             return envelope;
         }
 
+        // Расшифровка сообщения комнаты (sealed-sender.md, 9.3). Автора в строке
+        // сообщения нет: его находит клиент по senderKeyId из конверта через
+        // индекс отправителей skIndex, пополняемый только из key-share, принятых по
+        // попарному каналу (applyShare). senderKeyId привязан к отправителю, поэтому
+        // кандидат всегда один; подсказка сервера об авторе в расшифровку не
+        // попадает — production-код передаёт senderIdHint = null, непустую подсказку
+        // используют только юнит-тесты (не равна найденному отправителю — 'sender-mismatch').
+        //
         // messageId (id сообщения на сервере, строка) нужен для защиты от повтора
         // и подмены: пара (senderKeyId, iteration) привязывается к первому
         // messageId, с которым её расшифровали, и под другим id конверт не
         // принимается; mid внутри содержимого обязан равняться messageId.
         // Правка — новая итерация для того же messageId, это легально.
         //
-        // Порядок проверок раздела 9.4 после расшифровки и проверки подписи, ДО
-        // любой записи в seen и в записи о версиях (иначе сервер «отравил» бы эти
-        // таблицы конвертом, который потом не пройдёт проверку):
-        //   1. нет mid                                    → 'no-mid'
-        //   2. mid не равен messageId                     → 'id-mismatch'
-        //   3. ts не безопасное целое ≥ 0                 → 'bad-plaintext'
-        //   4. запись о версии: нет — принять; другой автор — 'sender-mismatch';
-        //      та же версия — принять; правка — 'stale-edit', если ts не больше
-        //      известного; оригинал с другой итерацией — 'id-mismatch'
-        //   5. запись seen, затем записи о версии.
+        // Порядок проверок (все до любой записи в хранилище):
+        //   1. форма конверта (v2, senderkey-v2; senderkey-v1 больше нет)  → 'bad-envelope'
+        //   2. запись skIndex                                              → 'no-sender-key'
+        //   3. подсказка ≠ отправителю                                     → 'sender-mismatch';
+        //      надгробие (ключ удалён)                                     → 'history-not-kept' | 'key-expired'
+        //   4. запись ключа (текущая или архив)                            → 'stale-sender-key';
+        //      подпись                                                     → 'bad-signature';
+        //      цепочка закрыта (final)                                     → 'stale-sender-key';
+        //      далеко вперёд (MAX_SKIP)                                    → 'too-far-ahead';
+        //      итерация уже привязана к другому id                         → 'replay';
+        //      ключ сообщения выводится на КОПИИ состояния                 → 'history-not-kept' | 'key-expired' | 'no-message-key';
+        //      AEAD с AAD отправителя                                      → 'decrypt-failed'; дополнение/разбор → 'bad-plaintext'
+        //   5. раздел 9.4 контракта порядка: нет mid — 'no-mid'; mid ≠ id — 'id-mismatch'; ts — 'bad-plaintext';
+        //      запись о версии: другой автор — 'sender-mismatch'; правка — 'stale-edit', если ts не больше известного;
+        //      оригинал с другой итерацией — 'id-mismatch'
+        //   6. только теперь запись: продвинутая цепочка, seen, запись о версии.
         // Результат: { ok:true, text, file?, senderId, ts, edit } или { ok:false, reason }.
-        async function decryptIncoming(roomId, senderId, text, messageId) {
+        async function decryptIncoming(roomId, senderIdHint, text, messageId) {
             const bad = { ok: false, reason: 'bad-envelope' };
             let envelope;
             try { envelope = JSON.parse(text); } catch { return bad; }
             if (!envelope || typeof envelope !== 'object') return bad;
-            let version;
-            if (envelope.v === 2 && envelope.alg === 'senderkey-v2') version = 2;
-            else if (envelope.alg === 'senderkey-v1') version = 1;
-            else return bad;
+            if (envelope.v !== 2 || envelope.alg !== 'senderkey-v2') return bad;
             if (!Number.isInteger(envelope.iteration) || envelope.iteration < 0 || envelope.iteration > 0xFFFFFFFF) return bad;
-            if (typeof envelope.senderKeyId !== 'string' || !envelope.senderKeyId) return bad;
+            if (!isCanonicalKeyId(envelope.senderKeyId)) return bad;
+            const iv = decodeFixed(envelope.iv, 12);
+            const sig = decodeFixed(envelope.sig, 64);
+            const ct = typeof envelope.ct === 'string' ? b64decode(envelope.ct) : null;
+            if (!iv || !sig || !ct || ct.length < 16) return bad;
+            const iteration = envelope.iteration;
+            const keyId = envelope.senderKeyId;
+            const sigInput = sigInputV2(iv, ct, iteration, keyId);
             const boundId = messageId === undefined || messageId === null ? null : String(messageId);
+            const hint = senderIdHint === undefined || senderIdHint === null ? null : Number(senderIdHint);
 
             await ensureLocal();
             return withLock(async () => {
+                const entry = await readIndexLocked(roomId, keyId);
+                if (!entry) return { ok: false, reason: 'no-sender-key' };
+                const senderId = entry.sender;
+                if (hint !== null && hint !== senderId) return { ok: false, reason: 'sender-mismatch' };
                 const state = await readStateLocked(roomId, senderId);
+                if (entry.gone) return { ok: false, reason: await goneKeyReasonLocked(roomId, state) };
                 if (!state) return { ok: false, reason: 'no-sender-key' };
-
-                const iv = decodeFixed(envelope.iv, 12);
-                const sig = decodeFixed(envelope.sig, 64);
-                const ct = typeof envelope.ct === 'string' ? b64decode(envelope.ct) : null;
-                if (!iv || !sig || !ct || ct.length < 16) return bad;
-                const iteration = envelope.iteration;
-                const keyId = envelope.senderKeyId;
-                const sigInput = version === 2
-                    ? sigInputV2(iv, ct, iteration, keyId)
-                    : sigInputV1(iv, ct, iteration);
 
                 // Какая запись отвечает за ключ из конверта: текущая или, если
                 // сообщение отправлено ДО ротации, запись архива (одно
@@ -3303,22 +3467,18 @@
                 let saveRec;
                 if (state.senderKeyId === keyId) {
                     rec = state;
-                    saveRec = () => storage.set(stateName(roomId, senderId), state);
+                    saveRec = (next) => storage.set(stateName(roomId, senderId), next);
                 } else {
                     const archiveKey = archiveName(roomId, senderId, keyId);
                     rec = await storage.get(archiveKey);
                     if (!rec) {
-                        // В индексе есть, а записи нет — ключ удалён намеренно
+                        // В индексе архива есть, а записи нет — ключ удалён намеренно
                         // (режим «не хранить историю», таймер комнаты, бюджет).
                         if (archiveHas(state, keyId)) return { ok: false, reason: await goneKeyReasonLocked(roomId, state) };
                         return { ok: false, reason: 'stale-sender-key' };
                     }
-                    saveRec = () => storage.set(archiveKey, rec);
+                    saveRec = (next) => storage.set(archiveKey, next);
                 }
-
-                const seenKey = seenName(roomId, senderId, keyId);
-                const seen = (await storage.get(seenKey)) || {};
-                const bound = Object.prototype.hasOwnProperty.call(seen, iteration) ? seen[iteration] : undefined;
 
                 if (!(await verify(b64decode(rec.signingPublicKey), sig, sigInput))) return { ok: false, reason: 'bad-signature' };
                 // Закрытая цепочка (отправитель сообщил final): дальше этой
@@ -3326,15 +3486,22 @@
                 if (rec.final !== undefined && rec.final !== null && iteration > rec.final) return { ok: false, reason: 'stale-sender-key' };
                 const hasChain = Boolean(rec.chainKey) && Number.isInteger(rec.nextIteration);
                 if (hasChain && iteration - rec.nextIteration > MAX_SKIP) return { ok: false, reason: 'too-far-ahead' };
+
+                const seenKey = seenName(roomId, senderId, keyId);
+                const seen = (await storage.get(seenKey)) || {};
+                const bound = Object.prototype.hasOwnProperty.call(seen, iteration) ? seen[iteration] : undefined;
                 if (boundId !== null && bound !== undefined && bound !== boundId) return { ok: false, reason: 'replay' };
 
+                // Ключ сообщения выводится на КОПИИ записи: пока конверт не прошёл
+                // AEAD и проверки 9.4, хранилище не пишется (иначе сервер мог бы
+                // двигать чужую цепочку конвертами, которые потом не пройдут).
+                // Цепочка продвигается только для новых итераций — при простом
+                // повторном показе истории хранилище не переписывается.
                 let messageKey = null;
+                let advanced = null;
                 if (hasChain && iteration >= rec.nextIteration) {
-                    // Цепочка продвигается (и запись сохраняется) только для
-                    // новых итераций — при простом повторном показе истории
-                    // хранилище не переписывается.
-                    messageKey = await getOrDeriveMessageKey(rec, iteration, hourOf(now()));
-                    await saveRec();
+                    advanced = Object.assign({}, rec, { cachedKeys: Object.assign({}, rec.cachedKeys), keyTimes: Object.assign({}, rec.keyTimes || {}) });
+                    messageKey = await getOrDeriveMessageKey(advanced, iteration, hourOf(now()));
                 } else if (rec.cachedKeys[iteration]) {
                     messageKey = b64decode(rec.cachedKeys[iteration]);
                 }
@@ -3342,48 +3509,41 @@
 
                 let content;
                 try {
-                    if (version === 2) {
-                        const aesKey = await hkdf(messageKey, ZERO32, 'nyxo-e2ee-msgkey-v2', 32);
-                        const pt = await aesGcmDecrypt(aesKey, iv, ct, msgAadV2(roomId, senderId, envelope.senderKeyId));
-                        const body = unpadMessage(pt);
-                        let decoded = null;
-                        if (body) {
-                            try { decoded = decodeContent(JSON.parse(utf8decode(body))); } catch { decoded = null; }
-                        }
-                        if (!decoded) return { ok: false, reason: 'bad-plaintext' };
-                        content = decoded;
-                    } else {
-                        const aesKey = await hkdf(messageKey, ZERO32, 'nyxo-e2ee-msgkey-v1', 32);
-                        const pt = await aesGcmDecrypt(aesKey, iv, ct, msgAadV1(roomId, senderId, envelope.senderKeyId));
-                        // Конверт прежнего формата не несёт mid: сообщений без mid нет (R0).
-                        content = { text: utf8decode(pt), mid: undefined, ts: undefined, edit: false };
+                    const aesKey = await hkdf(messageKey, ZERO32, 'nyxo-e2ee-msgkey-v2', 32);
+                    const pt = await aesGcmDecrypt(aesKey, iv, ct, msgAadV2(roomId, senderId, keyId));
+                    const body = unpadMessage(pt);
+                    let decoded = null;
+                    if (body) {
+                        try { decoded = decodeContent(JSON.parse(utf8decode(body))); } catch { decoded = null; }
                     }
+                    if (!decoded) return { ok: false, reason: 'bad-plaintext' };
+                    content = decoded;
                 } catch {
                     return { ok: false, reason: 'decrypt-failed' };
                 }
 
-                // ---- Проверки получателя 9.4: до любой записи в seen и в записи о версии ----
+                // ---- Проверки получателя 9.4: до любой записи ----
                 if (content.mid === undefined || content.mid === null) return { ok: false, reason: 'no-mid' };
                 if (boundId === null || String(content.mid) !== boundId) return { ok: false, reason: 'id-mismatch' };
                 if (!Number.isSafeInteger(content.ts) || content.ts < 0) return { ok: false, reason: 'bad-plaintext' };
-                const author = Number(senderId);
                 const entryName = editName(roomId, boundId);
                 const known = await storage.get(entryName);
                 let newEntry = null;
                 if (!known) {
-                    newEntry = { author, ts: content.ts, keyId: envelope.senderKeyId, it: iteration };
-                } else if (Number(known.author) !== author) {
+                    newEntry = { author: senderId, ts: content.ts, keyId, it: iteration };
+                } else if (Number(known.author) !== senderId) {
                     return { ok: false, reason: 'sender-mismatch' };
-                } else if (known.keyId === envelope.senderKeyId && known.it === iteration) {
+                } else if (known.keyId === keyId && known.it === iteration) {
                     // Повторный показ той же версии: запись не меняется.
                 } else if (content.edit) {
                     if (!(content.ts > known.ts)) return { ok: false, reason: 'stale-edit' };
-                    newEntry = { author, ts: content.ts, keyId: envelope.senderKeyId, it: iteration };
+                    newEntry = { author: senderId, ts: content.ts, keyId, it: iteration };
                 } else {
                     return { ok: false, reason: 'id-mismatch' };
                 }
 
-                // ---- Запись: seen (как раньше), затем запись о версии ----
+                // ---- Запись: продвинутая цепочка, seen (как раньше), запись о версии ----
+                if (advanced) await saveRec(advanced);
                 if (bound === undefined) {
                     seen[iteration] = boundId;
                     trimNumericMap(seen, MAX_SEEN_PER_KEY);
@@ -3392,7 +3552,7 @@
                 if (newEntry) await writeEditEntryLocked(roomId, boundId, newEntry);
                 const result = { ok: true, text: content.text };
                 if (content.file) result.file = content.file;
-                result.senderId = author;
+                result.senderId = senderId;
                 result.ts = content.ts;
                 result.edit = content.edit;
                 return result;
@@ -3427,6 +3587,9 @@
             getRoomHistoryMode,
             forgetRoomHistory,
             forgetAllNoHistoryRooms,
+
+            // Комнаты: локальная очистка при выходе
+            forgetRoom,
 
             // Сообщения и файлы
             encryptOutgoing,
@@ -3475,6 +3638,9 @@
 
             // Код безопасности
             computeSafetyNumber,
+
+            // Идентификатор ключа отправителя (привязан к комнате, отправителю и ключу подписи)
+            deriveSenderKeyId,
 
             // Разбор SKDM (поле ext)
             parseSkdm,
