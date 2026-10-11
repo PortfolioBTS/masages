@@ -486,6 +486,24 @@ const tweak = (envelope, patch) => JSON.stringify(Object.assign(JSON.parse(envel
         assert.deepStrictEqual(await stored(ctx.alice, indexName(fresh.senderKeyId)), { v: 1, sender: 1 });
     });
 
+    await test('имена участников (9.5): карта пополняется при ensureRoomSession, ушедшие в ней остаются, forgetRoom и режим «без истории» её стирают', async () => {
+        const ctx = await trio();
+        await share(ctx, 'alice');
+        assert.deepStrictEqual(await ctx.alice.getRoomMemberNames(ROOM), { 1: 'user1', 2: 'user2', 3: 'user3' });
+        // Мэллори вышла: в списке участников её нет, а имя в карте осталось.
+        ctx.server.removeParticipant(ROOM, 3);
+        await ctx.alice.ensureRoomSession(chatOf(1), ROOM, participantsOf(ctx.server, ROOM));
+        assert.deepStrictEqual((await stored(ctx.alice, 'members:' + ROOM)).map(p => p.id), [1, 2]);
+        assert.deepStrictEqual(await ctx.alice.getRoomMemberNames(ROOM), { 1: 'user1', 2: 'user2', 3: 'user3' });
+        assert.deepStrictEqual(await ctx.alice.getRoomMemberNames(OTHER_ROOM), {}, 'у другой комнаты своей карты нет');
+        await ctx.alice.setRoomHistoryMode(ROOM, 'none');
+        assert.deepStrictEqual(await ctx.alice.getRoomMemberNames(ROOM), {}, 'карта живёт вместе с историей комнаты');
+        await ctx.alice.ensureRoomSession(chatOf(1), ROOM, participantsOf(ctx.server, ROOM));
+        assert.ok(Object.keys(await ctx.alice.getRoomMemberNames(ROOM)).length > 0, 'и пополняется заново');
+        await ctx.alice.forgetRoom(ROOM);
+        assert.deepStrictEqual(await ctx.alice.getRoomMemberNames(ROOM), {});
+    });
+
     finish();
 })().catch((err) => {
     console.error(err);

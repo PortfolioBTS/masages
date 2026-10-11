@@ -1765,6 +1765,8 @@
             for (const prefix of ['seen:' + roomId + ':', editPrefix(roomId), 'keyReq:' + roomId + ':', 'keyServed:' + roomId + ':']) {
                 for (const name of await storage.keys(prefix)) await storage.delete(name);
             }
+            // Карта имён участников живёт вместе с историей комнаты (sealed-sender.md, 9.5).
+            await storage.delete('memberNames:' + roomId);
             editCounts.delete(roomId);
             return forgotten;
         }
@@ -1818,7 +1820,7 @@
             for (const prefix of prefixes) {
                 for (const name of await storage.keys(prefix)) { await storage.delete(name); removed++; }
             }
-            for (const name of ['members:' + roomId, 'roomPolicy:' + roomId]) {
+            for (const name of ['members:' + roomId, 'memberNames:' + roomId, 'roomPolicy:' + roomId]) {
                 if ((await storage.get(name)) !== null) { await storage.delete(name); removed++; }
             }
             editCounts.delete(roomId);
@@ -2958,6 +2960,33 @@
             return sent >= FORCE_ROTATE_AFTER_MESSAGES || now() - state.createdAt >= FORCE_ROTATE_AFTER_MS;
         }
 
+        // memberNames:<комната> = { <id>: <имя> } — имена всех, кто когда-либо был в
+        // комнате на этом устройстве. Предел защищает хранилище от разрастания.
+        const MAX_MEMBER_NAMES = 2000;
+        async function rememberMemberNamesLocked(roomId, participants) {
+            const name = 'memberNames:' + roomId;
+            const stored = await storage.get(name);
+            const names = stored && typeof stored === 'object' && !Array.isArray(stored) ? stored : {};
+            let changed = false;
+            for (const p of participants) {
+                if (!p.username || names[p.id] === p.username) continue;
+                if (!(p.id in names) && Object.keys(names).length >= MAX_MEMBER_NAMES) continue;
+                names[p.id] = p.username;
+                changed = true;
+            }
+            if (changed || stored === null) await storage.set(name, names);
+        }
+
+        async function getRoomMemberNames(roomId) {
+            await ensureLocal();
+            const stored = await withLock(() => storage.get('memberNames:' + roomId));
+            const out = {};
+            if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
+                for (const [id, value] of Object.entries(stored)) if (typeof value === 'string') out[id] = value;
+            }
+            return out;
+        }
+
         // Идентификатор своего ключа выведен из (комната, я, ключ подписи)?
         async function ownKeyBoundLocked(roomId, own) {
             try { return (await deriveSenderKeyId(roomId, userId, own.signingPublicKey)) === own.senderKeyId; } catch { return false; }
@@ -3090,6 +3119,11 @@
                     rotationReason = 'scheduled';
                 }
                 await storage.set('members:' + roomId, current);
+                // Имена для сообщений вышедших участников (sealed-sender.md, 9.5):
+                // карта пополняется при каждом проходе и ушедших не теряет. Автора
+                // сообщения сервер не называет, а список участников хранит только
+                // текущих.
+                await rememberMemberNamesLocked(roomId, current);
                 return { newMembers, removedMembers, rotated, rotationReason };
             });
 
@@ -3588,8 +3622,9 @@
             forgetRoomHistory,
             forgetAllNoHistoryRooms,
 
-            // Комнаты: локальная очистка при выходе
+            // Комнаты: локальная очистка при выходе и имена участников
             forgetRoom,
+            getRoomMemberNames,
 
             // Сообщения и файлы
             encryptOutgoing,
