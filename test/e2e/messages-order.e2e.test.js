@@ -13,6 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const { createSuite, roomWithMember, waitUntil } = require('./helpers/scenarios');
 const { fakeEnvelope } = require('./helpers/envelope');
+const { createAuthorTags } = require('../../lib/author-tag');
 
 const suite = createSuite('messages-order');
 
@@ -328,7 +329,7 @@ test('id сообщения комнаты — тот, что выбрал кл�
     const res = await p.owner.sendRaw(p.ownerChat.id, 'мой id', { clientMessageId: id });
     assert.strictEqual(res.status, 200);
     assert.strictEqual(res.body.message.id, id);
-    const row = (await suite.query('SELECT id, seq, room_id, user_id FROM messages WHERE id = $1', [id])).rows[0];
+    const row = (await suite.query('SELECT id, seq, room_id FROM messages WHERE id = $1', [id])).rows[0];
     assert.strictEqual(String(row.id), id);
     assert.strictEqual(row.seq, res.body.message.seq);
     // Игнорируется и seq, присланный клиентом: его выдаёт только триггер.
@@ -398,9 +399,10 @@ test('конфликт id: чужое сообщение, другой текс�
     assert.strictEqual(foreign.status, 409);
     assert.deepStrictEqual(foreign.body, ID_CONFLICT_BODY);
 
-    const row = (await suite.query('SELECT room_id, user_id FROM messages WHERE id = $1', [id])).rows[0];
+    const row = (await suite.query('SELECT room_id, user_id, author_tag, created_at FROM messages WHERE id = $1', [id])).rows[0];
     assert.strictEqual(row.room_id, p.roomId);
-    assert.strictEqual(row.user_id, p.owner.user.id);
+    assert.strictEqual(row.user_id, null, 'у строки комнаты автора в user_id нет');
+    assert.ok(row.author_tag.equals(tagsLib().tagFor(p.roomId, p.owner.user.id, row.created_at)), 'автор строки - владелец (по тегу)');
     const history = (await p.member.messages(p.memberChat.id)).messages;
     assert.strictEqual(history.find(m => m.id === id).text, fakeEnvelope('настоящее'), 'чужое сообщение не изменилось');
     assert.strictEqual(history.find(m => m.id === id).seq, original.seq);
@@ -500,9 +502,10 @@ const dirFiles = () => (fs.existsSync(suite.server.uploadsDir) ? fs.readdirSync(
 const ENVELOPE = fakeEnvelope('вложение');
 const cipherBytes = () => crypto.randomBytes(300);
 
-function uploadForm(fields, order = ['chatId', 'encrypted', 'clientMessageId', 'envelope']) {
+function uploadForm(fields, order = ['proto', 'chatId', 'encrypted', 'clientMessageId', 'envelope']) {
     const form = new FormData();
-    for (const key of order) if (fields[key] !== undefined) form.append(key, String(fields[key]));
+    const all = { proto: 4, ...fields };   // признак версии клиента (14.1) - первым полем, до файла
+    for (const key of order) if (all[key] !== undefined) form.append(key, String(all[key]));
     form.append('file', new Blob([cipherBytes()], { type: 'application/octet-stream' }), 'file.bin');
     return form;
 }
@@ -537,6 +540,7 @@ test('вложение в комнату без clientMessageId или с ним
     assert.strictEqual(missing.body.code, 'client-outdated');
     // Поле после файла: при проверке перед приёмом файла его ещё нет.
     const form = new FormData();
+    form.append('proto', '4');
     form.append('chatId', String(p.ownerChat.id));
     form.append('encrypted', 'true');
     form.append('envelope', ENVELOPE);
@@ -606,7 +610,7 @@ test('вложение с id из надгробия — 409, файл не со
 test('время в базе огрублено: created_at и edited_at кратны минуте, в API правка — ISO-8601 UTC с нулевыми секундами', async () => {
     const p = await pair();
     const sent = await p.owner.send(p.ownerChat.id, 'для правки');
-    const edit = await p.owner.put(`/api/messages/${sent.id}`, { text: fakeEnvelope('исправлено') });
+    const edit = await p.owner.put(`/api/messages/${sent.id}`, { text: fakeEnvelope('исправлено'), proto: 4 });
     assert.strictEqual(edit.body.success, true);
     assert.match(edit.body.edited_at, /^\d{4}-\d\d-\d\dT\d\d:\d\d:00\.000Z$/, edit.body.edited_at);
     const history = (await p.member.messages(p.memberChat.id)).messages.find(m => m.id === sent.id);
@@ -678,6 +682,13 @@ const LOCK_ROUNDS = 12;
 const RETRY_LOG = /Взаимная блокировка \(40P01\), транзакция повторяется/;
 const FAILED_LOG = /Взаимная блокировка повторилась|Send message error|Bot error|Delete chat error|Join chat error|Approve join request error|Add reaction error/;
 
+const tagsLib = () => createAuthorTags([Buffer.from(suite.secrets.MESSAGE_ENCRYPTION_KEY, 'base64')]);
+// Теги пользователя в комнате за все недели с создания аккаунта (до удаления аккаунта).
+async function tagsInRoom(userId, roomId) {
+    const created = (await suite.query('SELECT created_at FROM users WHERE id = $1', [userId])).rows[0].created_at;
+    return tagsLib().tagsForAccount(roomId, userId, created, Date.now());
+}
+
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // Запуск операции со сдвигом: по кругам сдвиг разный, чтобы запросы пересекались в разных
@@ -711,6 +722,7 @@ test('отправка против удаления своего аккаунт
     for (let round = 0; round < LOCK_ROUNDS; round++) {
         const p = await pair({ name: `Отправка и удаление ${round}` });
         const memberId = p.member.user.id;
+        const memberTags = await tagsInRoom(memberId, p.roomId);
         const responses = await allResponses([
             p.member.sendRaw(p.memberChat.id, 'раз'),
             p.member.sendRaw(p.memberChat.id, 'два'),
@@ -720,8 +732,8 @@ test('отправка против удаления своего аккаунт
         ]);
         const user = (await suite.query('SELECT 1 FROM users WHERE id = $1', [memberId])).rows;
         assert.strictEqual(user.length, 0, 'аккаунт удалён');
-        const left = (await suite.query('SELECT 1 FROM messages WHERE user_id = $1', [memberId])).rows;
-        assert.strictEqual(left.length, 0, 'ни одного сообщения удалённого аккаунта');
+        const left = (await suite.query('SELECT 1 FROM messages WHERE author_tag = ANY($1::bytea[])', [memberTags])).rows;
+        assert.strictEqual(left.length, 0, 'ни одного сообщения удалённого аккаунта (по тегам автора)');
         assertNoLockFailures(`круг ${round}`, responses, mark);
     }
     t.diagnostic(`повторов при 40P01: ${retriesSince(mark)} за ${LOCK_ROUNDS} кругов`);

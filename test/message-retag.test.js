@@ -82,7 +82,7 @@ async function main() {
         assert.strictEqual(decision.status, 'retag');
         assert.ok(decision.author_tag.equals(after.deps.authorTags.tagFor(ROOM, 11, CREATED)), 'тег - от нового ключа, владельца и недели created_at');
         assert.ok(!decision.author_tag.equals(row.author_tag));
-        assert.strictEqual(after.retag.recordKid(decision.text), after.deps.currentKid);
+        assert.strictEqual(after.retag.storedKid(decision.text), after.deps.currentKid);
         const aad = after.messageCrypto.messageAadV3({ room_id: ROOM, id: 1000001, author_tag: decision.author_tag });
         assert.strictEqual(after.messageCrypto.decryptRoomText(decision.text, aad), 'конверт-один');
         // Со старым тегом в AAD новая запись не читается (тег входит в AAD).
@@ -116,7 +116,7 @@ async function main() {
         const oldTag = before.deps.authorTags.tagFor(ROOM, 11, CREATED);
         const aad = after.messageCrypto.messageAadV3({ room_id: ROOM, id: 1000021, author_tag: oldTag });
         const row = { id: 1000021, room_id: ROOM, author_tag: oldTag, created_at: CREATED, text: after.messageCrypto.encryptRoomText('правка', aad) };
-        assert.strictEqual(after.retag.recordKid(row.text), after.deps.currentKid);
+        assert.strictEqual(after.retag.storedKid(row.text), after.deps.currentKid);
         const decision = after.retag.retagRow(row, owners(after), after.deps);
         assert.strictEqual(decision.status, 'retag');
         assert.ok(decision.author_tag.equals(after.deps.authorTags.tagFor(ROOM, 11, CREATED)));
@@ -188,7 +188,7 @@ async function main() {
         for (const row of data.slice(0, 7)) {
             const aad = after.messageCrypto.messageAadV3({ room_id: ROOM, id: row.id, author_tag: row.author_tag });
             assert.match(after.messageCrypto.decryptRoomText(row.text, aad), /^сообщение \d$/);
-            assert.strictEqual(after.retag.recordKid(row.text), after.deps.currentKid);
+            assert.strictEqual(after.retag.storedKid(row.text), after.deps.currentKid);
         }
         assert.strictEqual(data[7].text, rows[7].text);
         // Идемпотентность: второй прогон не находит работы (кроме того же сироту).

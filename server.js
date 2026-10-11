@@ -3959,6 +3959,15 @@ async function deleteUserAccount(userId) {
         await client.query('DELETE FROM e2ee_key_shares WHERE sender_id = $1 OR recipient_id = $1', [userId]);
         await client.query('DELETE FROM e2ee_key_requests WHERE requester_id = $1', [userId]);
         await client.query('DELETE FROM room_participants WHERE user_id = $1', [userId]);
+        // Сообщения бота уходят каскадом от своей строки chats (messages.chat_id ON DELETE
+        // CASCADE), и RETURNING у явного DELETE ниже уже ничего не вернул бы: адреса
+        // файлов снимаются ДО удаления чатов. Пока users заблокирована FOR UPDATE, новые
+        // сообщения бота с файлами вставить некому.
+        const botFiles = await client.query(
+            'SELECT file_url FROM messages WHERE room_id IS NULL AND user_id = $1 AND file_url IS NOT NULL',
+            [userId]
+        );
+        result.fileUrls.push(...botFiles.rows.map(r => r.file_url));
         await client.query('DELETE FROM chats WHERE user_id = $1', [userId]);
         await client.query('DELETE FROM user_left_rooms WHERE user_id = $1', [userId]);
         // Окна квоты - по псевдонимам от текущего и всех прежних ключей сообщений.
@@ -3975,7 +3984,8 @@ async function deleteUserAccount(userId) {
             );
             result.fileUrls.push(...roomMessages.rows.map(r => r.file_url));
         }
-        // Чат с ботом: сообщения владельца (в том числе ответы бота).
+        // Чат с ботом: сообщения владельца (в том числе ответы бота) каскадом уже ушли вместе
+        // с чатом; это страховка на случай строки без чата.
         const botMessages = await client.query('DELETE FROM messages WHERE room_id IS NULL AND user_id = $1 RETURNING file_url', [userId]);
         result.fileUrls.push(...botMessages.rows.map(r => r.file_url));
         await client.query('DELETE FROM reactions WHERE user_id = $1', [userId]);
