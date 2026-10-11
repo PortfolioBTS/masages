@@ -461,6 +461,7 @@ async function main() {
         await t.settle();
         assert.ok(t.lastView().status.includes(core.formatFingerprint(sha('a'))));
         assert.strictEqual(t.sent.length, 0, 'писать некому');
+        assert.doesNotMatch(t.lastView().status, /не отвечает/, 'автоматическая проверка молчит, пока SW не активен');
     });
 
     console.log('\n' + passed + ' passed, ' + failed + ' failed');

@@ -296,19 +296,23 @@
             });
         }
 
-        async function checkNow(force) {
-            checkText = 'Проверяю…';
-            render();
+        // silent — автоматическая проверка (при загрузке и раз в час): результат в профиле не пишем,
+        // иначе на первом визите, пока SW ещё устанавливается, там появилось бы «служба не отвечает».
+        async function checkNow(force, { silent = false } = {}) {
+            if (!silent) {
+                checkText = 'Проверяю…';
+                render();
+            }
             try {
                 const reply = await ask({ type: Core.MSG.CHECK, force: Boolean(force) }, CHECK_TIMEOUT_MS);
                 if (reply && reply.ok) {
                     state = reply.state;
-                    checkText = RESULT_TEXT[reply.result && reply.result.action] || '';
-                } else {
+                    if (!silent) checkText = RESULT_TEXT[reply.result && reply.result.action] || '';
+                } else if (!silent) {
                     checkText = 'Проверка не удалась' + (reply && reply.message ? ': ' + reply.message : '.');
                 }
             } catch {
-                checkText = 'Служба проверки кода не отвечает.';
+                if (!silent) checkText = 'Служба проверки кода не отвечает.';
             }
             render();
         }
@@ -358,10 +362,10 @@
             watchController();
             if (!(await registerWorker())) return;
             await refreshAndRender();
-            checkNow(false);
+            checkNow(false, { silent: true });
             timers.setInterval(() => {
                 if (registration) registration.update().catch(() => {});
-                checkNow(false);
+                checkNow(false, { silent: true });
             }, CHECK_EVERY_MS);
         }
 
