@@ -3179,9 +3179,16 @@ app.delete('/api/join-requests/:id', async (req, res) => {
     }
 });
 
+// Выход из комнаты или удаление чата с ботом. Для комнаты сообщения выходящего
+// остаются (тег автора на них сохраняется), а комната записывается в
+// user_left_rooms, если у него там есть сообщения: удаление аккаунта удалит их во
+// всех таких комнатах (sealed-sender.md, 12.1). ?deleteMessages=1 - удалить свои
+// сообщения сразу (параметр строки запроса: тело у DELETE клиентская функция
+// api() не отправляет); для чата с ботом параметр ничего не значит.
 app.delete('/api/chats/:chatId', async (req, res) => {
     const userId = req.session.userId;
     if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    const deleteOwnMessages = req.query.deleteMessages === '1';
     try {
         const chat = await getOwnChat(req.params.chatId, userId);
         if (!chat) return res.json({ success: false, message: 'Чат не найден' });
@@ -3189,19 +3196,21 @@ app.delete('/api/chats/:chatId', async (req, res) => {
         // Всё удаление — одной транзакцией (раньше — серия независимых
         // запросов: сбой посередине оставлял полуудалённый чат), файлы
         // удаляемых сообщений убираются с диска после COMMIT. Порядок
-        // блокировок users → rooms → room_participants → chats → messages
-        // (message-ordering.md, раздел 8): сначала строка выходящего, потом
-        // комната, потому что одновременно идут отправки (users → rooms),
+        // блокировок users → rooms → room_participants → chats → user_left_rooms →
+        // messages (message-ordering.md, раздел 8.1): сначала строка выходящего,
+        // потом комната, потому что одновременно идут отправки (users → rooms),
         // вступления и удаление аккаунта. При взаимной блокировке (40P01)
         // транзакция повторяется один раз.
         const outcome = await withTransactionRetry(async (client) => {
-            const me = await client.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE', [userId]);
+            const me = await client.query('SELECT id, created_at FROM users WHERE id = $1 FOR KEY SHARE', [userId]);
             if (me.rows.length === 0) return null; // аккаунт удалён между проверкой сессии и этим запросом
-            const state = { fileUrls: [], roomSurvived: false, droppedRequests: [] };
+            const state = { fileUrls: [], roomSurvived: false, droppedRequests: [], deletedIds: [] };
             if (chat.room_id) {
                 // Блокировка комнаты: два последних участника, выходящих
                 // одновременно, иначе оба видели бы "остался ещё один" и
-                // комната оставалась бы в БД навсегда.
+                // комната оставалась бы в БД навсегда. Она же упорядочивает выход
+                // с отправкой (8.5): отправка проверяет членство под
+                // rooms FOR NO KEY UPDATE.
                 await client.query('SELECT id FROM rooms WHERE id = $1 FOR UPDATE', [chat.room_id]);
                 await client.query('DELETE FROM room_participants WHERE room_id = $1 AND user_id = $2', [chat.room_id, userId]);
                 await client.query('DELETE FROM e2ee_key_shares WHERE room_id = $1 AND recipient_id = $2', [chat.room_id, userId]);
@@ -3209,7 +3218,8 @@ app.delete('/api/chats/:chatId', async (req, res) => {
                 await client.query('DELETE FROM chats WHERE id = $1 AND user_id = $2', [chat.id, userId]);
                 const remaining = await client.query('SELECT 1 FROM room_participants WHERE room_id = $1 LIMIT 1', [chat.room_id]);
                 if (remaining.rows.length === 0) {
-                    // Последний участник вышел — сносим комнату целиком.
+                    // Последний участник вышел — сносим комнату целиком (запись
+                    // user_left_rooms уходит каскадом от rooms).
                     // Заявки ушли бы и каскадом, но заявителям надо сказать,
                     // что рассматривать их больше некому.
                     const deleted = await client.query('DELETE FROM messages WHERE room_id = $1 RETURNING file_url', [chat.room_id]);
@@ -3219,10 +3229,34 @@ app.delete('/api/chats/:chatId', async (req, res) => {
                     await client.query('DELETE FROM rooms WHERE id = $1', [chat.room_id]);
                 } else {
                     state.roomSurvived = true;
+                    const tags = authorTags.tagsForAccount(chat.room_id, userId, me.rows[0].created_at, Date.now());
+                    if (deleteOwnMessages) {
+                        const deleted = await client.query(
+                            'DELETE FROM messages WHERE room_id = $1 AND author_tag = ANY($2::bytea[]) RETURNING id, file_url',
+                            [chat.room_id, tags]
+                        );
+                        state.fileUrls = deleted.rows.map(r => r.file_url);
+                        state.deletedIds = deleted.rows.map(r => r.id);
+                        await client.query('DELETE FROM user_left_rooms WHERE user_id = $1 AND room_id = $2', [userId, chat.room_id]);
+                    } else {
+                        const own = await client.query(
+                            'SELECT 1 FROM messages WHERE room_id = $1 AND author_tag = ANY($2::bytea[]) LIMIT 1',
+                            [chat.room_id, tags]
+                        );
+                        if (own.rows.length > 0) {
+                            await client.query(
+                                'INSERT INTO user_left_rooms (user_id, room_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+                                [userId, chat.room_id]
+                            );
+                        } else {
+                            // Сообщений нет (в том числе после срока): отслеживать нечего.
+                            await client.query('DELETE FROM user_left_rooms WHERE user_id = $1 AND room_id = $2', [userId, chat.room_id]);
+                        }
+                    }
                 }
-                // Если участники остались — историю не трогаем, она у них
-                // по-прежнему доступна по room_id (chat_id этого сообщения,
-                // если оно было отправлено уходящим, просто станет NULL).
+                // Если участники остались — история остаётся у них: сообщения
+                // выходящего хранятся под тегом, а удалить их он вправе только
+                // сейчас (?deleteMessages=1) или вместе с аккаунтом.
             } else {
                 // Строка чата с ботом блокируется раньше его сообщений (как у
                 // ответа бота и отправки): chats → messages.
@@ -3236,6 +3270,10 @@ app.delete('/api/chats/:chatId', async (req, res) => {
         if (!outcome) return res.json({ success: false, message: 'Не авторизован' });
         removeUploadedFiles(outcome.fileUrls);
         unsubscribeUserFromChat(userId, chat.id, chat.room_id);
+        // Удалённые при выходе сообщения исчезают у остальных сразу.
+        for (const id of outcome.deletedIds) {
+            io.to(getSocketRoomKey(null, chat.room_id)).emit('messageDeleted', { id: String(id), room_id: chat.room_id });
+        }
         if (outcome.roomSurvived) notifyRoomMembersChanged(chat.room_id);
         for (const request of outcome.droppedRequests) notifyJoinRequestDecided(request.user_id, { requestId: request.id, approved: false });
         notifyChatListChanged(userId);
@@ -3247,9 +3285,39 @@ app.delete('/api/chats/:chatId', async (req, res) => {
     }
 });
 
+// Сообщение, которое пользователь вправе менять или удалять (sealed-sender.md,
+// 8.2). В комнате автора в строке нет, поэтому: пользователь - ТЕКУЩИЙ участник
+// комнаты, сообщение для него ВИДНО (seq > visible_from_seq) и тег строки входит
+// в его теги за неделю created_at строки. Вышедший и вернувшийся участник со
+// своими старыми сообщениями под границей видимости их не меняет и не удаляет
+// (он удалит их вместе с аккаунтом). Нет строки, граница, чужой тег - один и тот же
+// ответ null: чужое, невидимое и несуществующее неразличимы. В чате с ботом -
+// по user_id, как раньше. Выбираются поля для AAD (writeMessageText).
+async function findOwnMessage(messageId, userId, { sentOnly = false } = {}) {
+    const inRoom = await dbGet(
+        `SELECT m.id, m.seq, m.room_id, m.author_tag, m.created_at, m.encrypted, m.file_url, m.sent
+         FROM messages m
+         JOIN room_participants rp ON rp.room_id = m.room_id AND rp.user_id = $2
+         WHERE m.id = $1 AND m.room_id IS NOT NULL AND m.seq > rp.visible_from_seq`,
+        [messageId, userId]
+    );
+    if (inRoom) {
+        const mine = authorTags.ownsTag(inRoom.author_tag, authorTags.tagsForRow(inRoom.room_id, userId, inRoom.created_at));
+        return mine && (!sentOnly || Number(inRoom.sent) === 1) ? inRoom : null;
+    }
+    const inBotChat = await dbGet(
+        `SELECT id, seq, chat_id, room_id, user_id, encrypted, file_url, sent
+         FROM messages WHERE id = $1 AND room_id IS NULL AND user_id = $2`,
+        [messageId, userId]
+    );
+    return inBotChat && (!sentOnly || Number(inBotChat.sent) === 1) ? inBotChat : null;
+}
+
 app.put('/api/messages/:messageId', async (req, res) => {
     const userId = req.session.userId;
     if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    // Общий признак версии клиента (message-ordering.md, 14.1) - первая проверка.
+    if (isOutdatedProto(req.body?.proto)) return res.status(400).json(CLIENT_OUTDATED);
     const messageId = toPositiveInt(req.params.messageId);
     const { text } = req.body || {};
     if (!messageId || !isNonEmptyString(text)) return res.json({ success: false, message: 'Текст не может быть пустым' });
@@ -3257,10 +3325,7 @@ app.put('/api/messages/:messageId', async (req, res) => {
     try {
         // Правятся только текстовые сообщения: у вложения подпись внутри
         // E2EE-конверта (или имя файла), и менять её задним числом нельзя.
-        const message = await dbGet(
-            'SELECT id, seq, chat_id, room_id, user_id, encrypted, file_url FROM messages WHERE id = $1 AND user_id = $2 AND sent = 1',
-            [messageId, userId]
-        );
+        const message = await findOwnMessage(messageId, userId, { sentOnly: true });
         if (!message) return res.json({ success: false, message: 'Сообщение не найдено' });
         if (message.file_url) return res.json({ success: false, message: 'Сообщение с вложением нельзя изменить' });
         // Правка E2EE-сообщения — это новый конверт: клиент сам шифрует новый
@@ -3280,25 +3345,28 @@ app.put('/api/messages/:messageId', async (req, res) => {
         if (!newText) return res.json({ success: false, message: 'Текст не может быть пустым' });
         // Время правки хранится с точностью до минуты (вниз), в API — ISO-8601 UTC.
         const editedAt = floorToMinute(new Date()).toISOString();
-        // AAD — от исходной строки: комната/чат и автор при правке не меняются.
+        // AAD — от исходной строки: комната, id и тег (у бота - чат и владелец) при
+        // правке не меняются, тег берётся ИЗ строки, а не пересчитывается по
+        // текущей неделе (правка на границе недели - тот же тег).
         await dbRun('UPDATE messages SET text = $1, edited_at = $2 WHERE id = $3', [writeMessageText(newText, message), editedAt, messageId]);
 
-        // Раньше правки не рассылались по сокету — у остальных участников
-        // комнаты изменение не появлялось без перезагрузки (см. "Мелочи").
-        // Тем, кто вступил в комнату после этого сообщения, новый текст не
-        // уходит: для них этого сообщения нет (visible_from_seq >= seq).
-        let target = io.to(getSocketRoomKey(message.chat_id, message.room_id));
         if (message.room_id) {
+            // Тем, кто вступил в комнату после этого сообщения, новый текст не
+            // уходит: для них этого сообщения нет (visible_from_seq >= seq).
             const hidden = await dbAll(
                 'SELECT user_id FROM room_participants WHERE room_id = $1 AND visible_from_seq >= $2',
                 [message.room_id, message.seq]
             );
-            for (const row of hidden) target = target.except('user:' + row.user_id);
+            emitRoomMessageEvent('messageEdited', message.room_id, userId, {
+                id: String(messageId), seq: Number(message.seq), text: newText, edited_at: editedAt,
+                room_id: message.room_id, encrypted: message.encrypted,
+            }, { hiddenUserIds: hidden.map(row => row.user_id) });
+        } else {
+            io.to(getSocketRoomKey(message.chat_id, null)).emit('messageEdited', {
+                id: String(messageId), seq: Number(message.seq), text: newText, edited_at: editedAt,
+                chat_id: message.chat_id, room_id: null, encrypted: message.encrypted, user_id: message.user_id
+            });
         }
-        target.emit('messageEdited', {
-            id: String(messageId), seq: Number(message.seq), text: newText, edited_at: editedAt,
-            chat_id: message.chat_id, room_id: message.room_id, encrypted: message.encrypted, user_id: message.user_id
-        });
 
         res.json({ success: true, edited_at: editedAt, text: newText });
     } catch (error) {
@@ -3313,13 +3381,14 @@ app.delete('/api/messages/:messageId', async (req, res) => {
     const messageId = toPositiveInt(req.params.messageId);
     if (!messageId) return res.json({ success: false, message: 'Сообщение не найдено' });
     try {
-        const message = await dbGet('SELECT id FROM messages WHERE id = $1 AND user_id = $2', [messageId, userId]);
+        const message = await findOwnMessage(messageId, userId);
         if (!message) return res.json({ success: false, message: 'Сообщение не найдено' });
         // Тот же путь, что и у disappearing messages: строка удаляется из БД
         // физически (триггер оставляет надгробие id), вложение — с диска (раньше
         // файл удалённого сообщения оставался доступен по прямой ссылке),
-        // участникам уходит 'messageDeleted'. Пустой результат — ошибка БД (она
-        // уже в логе).
+        // участникам уходит 'messageDeleted' (в комнате - одно событие всем сокетам
+        // комнаты, включая вкладки автора, и без chat_id). Пустой результат — ошибка
+        // БД (она уже в логе).
         const deleted = await disappearingMessagesManager.deleteMessages([messageId]);
         if (deleted.length === 0) return res.json({ success: false, message: 'Ошибка удаления' });
         res.json({ success: true });
@@ -3676,9 +3745,9 @@ app.post('/api/messages/:messageId/set-expiry', async (req, res) => {
     if (!messageId) return res.json({ success: false, message: 'Неверные параметры' });
 
     try {
-        // Проверка доступа к сообщению
-        const message = await dbGet('SELECT user_id, room_id, chat_id FROM messages WHERE id = $1', [messageId]);
-        if (!message || message.user_id !== req.session.userId) {
+        // Проверка доступа к сообщению: свои, видимые, по тегу автора (8.2)
+        const message = await findOwnMessage(messageId, req.session.userId);
+        if (!message) {
             return res.json({ success: false, message: 'Сообщение не найдено или нет доступа' });
         }
 
@@ -3840,20 +3909,23 @@ app.use((err, req, res, next) => {
 });
 
 // Полное удаление пользователя (POST /api/account/delete и его псевдоним
-// /api/logout, чистка по сроку): его сообщения (и их файлы), реакции, E2EE
-// key-shares, участие в комнатах, его заявки на вступление, опустевшие
-// комнаты со всей историей и заявками в них,
+// /api/logout, чистка по сроку): его сообщения (и их файлы) во ВСЕХ комнатах,
+// где он состоит, и в тех, откуда вышел, оставив там сообщения (user_left_rooms),
+// реакции, E2EE key-shares, участие в комнатах, его заявки на вступление,
+// опустевшие комнаты со всей историей и заявками в них, окна квоты вложений,
 // chats (chat_settings — каскадом), unread, сама строка users;
-// message_expiry и реакции на его сообщения уходят каскадом. Одной
+// message_expiry и реакции на его сообщения уходят каскадом. Сообщения комнат
+// находятся по тегам автора (sealed-sender.md, 12.2): для каждой комнаты - теги
+// пользователя за все недели с создания аккаунта, по всем ключам сообщений. Одной
 // транзакцией — раньше это была серия отдельных DELETE, и первая же ошибка
 // FK (например, из e2ee_key_shares, который ссылается на users без каскада)
 // оставляла пользователя в БД навсегда. После COMMIT — файлы с диска,
 // сессии на всех устройствах, сокеты, публичные E2EE-ключи (встроенное
 // хранилище) и уведомление оставшимся участникам комнат.
 //
-// Порядок блокировок users → rooms → room_participants → chats → messages
-// (message-ordering.md, раздел 8) — тот же, что у отправки, вступления и
-// выхода из комнаты. При взаимной блокировке (40P01) транзакция повторяется
+// Порядок блокировок users → rooms → room_participants → chats → user_left_rooms →
+// upload_quota → messages (message-ordering.md, раздел 8.1) — тот же, что у
+// отправки, вступления и выхода из комнаты. При взаимной блокировке (40P01) транзакция повторяется
 // один раз (withTransactionRetry), поэтому результаты собираются заново на
 // каждой попытке.
 async function deleteUserAccount(userId) {
@@ -3863,33 +3935,52 @@ async function deleteUserAccount(userId) {
         // (она берёт users FOR KEY SHARE первым оператором) дождётся конца
         // удаления и получит «нет пользователя», а не оставит сообщение, которое
         // уже никто не удалит.
-        const user = await client.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [userId]);
+        const user = await client.query('SELECT id, created_at FROM users WHERE id = $1 FOR UPDATE', [userId]);
         if (user.rows.length === 0) return null;
         const rooms = await client.query('SELECT DISTINCT room_id FROM room_participants WHERE user_id = $1 ORDER BY room_id', [userId]);
         const roomIds = rooms.rows.map(r => r.room_id);
+        // Комнаты, откуда он вышел, оставив там сообщения: их тоже надо почистить.
+        const left = await client.query('SELECT room_id FROM user_left_rooms WHERE user_id = $1', [userId]);
+        const messageRoomIds = [...new Set([...roomIds, ...left.rows.map(r => r.room_id)])].sort((a, b) => a - b);
         // Комнаты блокируются так же, как при выходе из чата (DELETE
         // /api/chats/:chatId): иначе одновременный выход последнего другого
         // участника оставил бы пустую комнату навсегда. Порядок по id — без
         // взаимных блокировок между двумя такими удалениями.
-        if (roomIds.length > 0) {
-            await client.query('SELECT id FROM rooms WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE', [roomIds]);
+        if (messageRoomIds.length > 0) {
+            await client.query('SELECT id FROM rooms WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE', [messageRoomIds]);
         }
         await client.query('DELETE FROM e2ee_key_shares WHERE sender_id = $1 OR recipient_id = $1', [userId]);
         await client.query('DELETE FROM e2ee_key_requests WHERE requester_id = $1', [userId]);
         await client.query('DELETE FROM room_participants WHERE user_id = $1', [userId]);
         await client.query('DELETE FROM chats WHERE user_id = $1', [userId]);
-        const ownMessages = await client.query('DELETE FROM messages WHERE user_id = $1 RETURNING file_url', [userId]);
-        result.fileUrls = ownMessages.rows.map(r => r.file_url);
+        await client.query('DELETE FROM user_left_rooms WHERE user_id = $1', [userId]);
+        // Окна квоты - по псевдонимам от текущего и всех прежних ключей сообщений.
+        await deleteQuotaRows(client, authorTags.qkeysFor(userId));
+        // Сообщения комнат - по (комната, теги): в строке user_id нет. Запросы по
+        // комнате, а не одним массивом пар: у старого аккаунта тегов до 600 недель
+        // на ключ, и массив из всех комнат сразу получился бы огромным.
+        const now = Date.now();
+        for (const roomId of messageRoomIds) {
+            const tags = authorTags.tagsForAccount(roomId, userId, user.rows[0].created_at, now);
+            const roomMessages = await client.query(
+                'DELETE FROM messages WHERE room_id = $1 AND author_tag = ANY($2::bytea[]) RETURNING file_url',
+                [roomId, tags]
+            );
+            result.fileUrls.push(...roomMessages.rows.map(r => r.file_url));
+        }
+        // Чат с ботом: сообщения владельца (в том числе ответы бота).
+        const botMessages = await client.query('DELETE FROM messages WHERE room_id IS NULL AND user_id = $1 RETURNING file_url', [userId]);
+        result.fileUrls.push(...botMessages.rows.map(r => r.file_url));
         await client.query('DELETE FROM reactions WHERE user_id = $1', [userId]);
         const ownRequests = await client.query('DELETE FROM join_requests WHERE user_id = $1 RETURNING room_id', [userId]);
         result.requestRoomIds = [...new Set(ownRequests.rows.map(r => r.room_id))];
 
-        if (roomIds.length > 0) {
+        if (messageRoomIds.length > 0) {
             const orphaned = await client.query(
                 `DELETE FROM messages m WHERE m.room_id = ANY($1::int[])
                    AND NOT EXISTS (SELECT 1 FROM room_participants rp WHERE rp.room_id = m.room_id)
                  RETURNING file_url`,
-                [roomIds]
+                [messageRoomIds]
             );
             result.fileUrls.push(...orphaned.rows.map(r => r.file_url));
             // Заявки в опустевшие комнаты ушли бы и каскадом, но заявителям
@@ -3898,14 +3989,14 @@ async function deleteUserAccount(userId) {
                 `DELETE FROM join_requests jr WHERE jr.room_id = ANY($1::int[])
                    AND NOT EXISTS (SELECT 1 FROM room_participants rp WHERE rp.room_id = jr.room_id)
                  RETURNING id, user_id`,
-                [roomIds]
+                [messageRoomIds]
             );
             result.droppedRequests = orphanedRequests.rows;
             const removedRooms = await client.query(
                 `DELETE FROM rooms r WHERE r.id = ANY($1::int[])
                    AND NOT EXISTS (SELECT 1 FROM room_participants rp WHERE rp.room_id = r.id)
                  RETURNING id`,
-                [roomIds]
+                [messageRoomIds]
             );
             const removed = new Set(removedRooms.rows.map(r => r.id));
             result.survivingRoomIds = roomIds.filter(id => !removed.has(id));
