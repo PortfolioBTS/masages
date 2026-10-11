@@ -94,6 +94,32 @@ async function main() {
         assert.ok(puts.length >= 4);
     });
 
+    await test('verify.html: ядро SW подключено раньше verify.js (страница показывает закреплённую версию и хэш sw.js)', () => {
+        const html = fs.readFileSync(path.join(PUBLIC_DIR, 'verify.html'), 'utf8');
+        const core = html.indexOf('src="lib/sw-core.js"');
+        assert.ok(core > 0 && core < html.indexOf('src="verify.js"'));
+        assert.ok(html.indexOf('src="lib/client-verify.js"') < core, 'sw-core.js опирается на client-verify.js');
+        const pageJs = fs.readFileSync(path.join(PUBLIC_DIR, 'verify.js'), 'utf8');
+        for (const id of ['verify-pin', 'verify-pin-value', 'verify-staged-value', 'verify-sw-hash', 'verify-pin-note']) {
+            assert.ok(html.includes(`id="${id}"`) && pageJs.includes(`'${id}'`), id);
+        }
+    });
+
+    await test('Clear-Site-Data в коде сервера только "cache": "storage" и "*" стёрли бы регистрацию SW и ключи E2EE', () => {
+        const sources = [path.join(ROOT, 'server.js'), ...fs.readdirSync(path.join(ROOT, 'lib'), { recursive: true, withFileTypes: true })
+            .filter((entry) => entry.isFile() && entry.name.endsWith('.js'))
+            .map((entry) => path.join(entry.parentPath, entry.name))];
+        let found = 0;
+        for (const file of sources) {
+            const text = fs.readFileSync(file, 'utf8');
+            for (const match of text.matchAll(/set\(\s*'Clear-Site-Data'\s*,\s*('[^']*'|"[^"]*"|`[^`]*`)/g)) {
+                found++;
+                assert.strictEqual(match[1].slice(1, -1), '"cache"', `${path.relative(ROOT, file)}: ${match[1]}`);
+            }
+        }
+        assert.ok(found >= 1, 'Clear-Site-Data при удалении аккаунта не найден — сломан разбор?');
+    });
+
     await test('sw.js и ядро разбираются как скрипты (синтаксис)', () => {
         assert.doesNotThrow(() => new vm.Script(SW_SOURCE, { filename: 'sw.js' }));
         assert.doesNotThrow(() => new vm.Script(CORE_SOURCE, { filename: 'sw-core.js' }));

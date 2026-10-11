@@ -57,6 +57,32 @@
         }
     }
 
+    // Закреплённая версия service worker (lib/sw-core.js) и хэш sw.js, который сервер отдаёт сейчас.
+    // Страница читает состояние из Cache API сама: SW для этого не нужен (и может быть выключен).
+    async function showPin(servedHash) {
+        let state = null;
+        try {
+            if (window.NyxoSwCore && window.caches) state = await window.NyxoSwCore.readState(window.caches);
+        } catch { /* хранилище недоступно — покажем «закрепления нет» */ }
+        const pinned = state && state.pinned;
+        $('verify-pin-value').textContent = pinned
+            ? pinned.sha256 + (pinned.sha256 === servedHash
+                ? ' — совпадает с манифестом сервера'
+                : ' — ОТЛИЧАЕТСЯ от манифеста сервера: на сервере другая версия, браузер продолжает открывать закреплённую')
+            : 'нет: service worker не установлен, выключен или данные сайта очищены';
+        const staged = state && state.staged;
+        $('verify-staged-title').hidden = !staged;
+        $('verify-staged-value').hidden = !staged;
+        $('verify-staged-value').textContent = staged ? staged.sha256 : '';
+        try {
+            $('verify-sw-hash').textContent = await sha256Hex(await fetchBuffer('/sw.js'));
+        } catch (err) {
+            $('verify-sw-hash').textContent = 'не удалось получить: ' + (err && err.message ? err.message : 'ошибка запроса');
+        }
+        $('verify-pin').hidden = false;
+        $('verify-pin-note').hidden = false;
+    }
+
     async function pool(items, limit, fn) {
         let next = 0;
         const worker = async () => {
@@ -70,6 +96,8 @@
         $('verify-table-wrap').hidden = true;
         $('verify-output-wrap').hidden = true;
         $('verify-hashes').hidden = true;
+        $('verify-pin').hidden = true;
+        $('verify-pin-note').hidden = true;
 
         if (!window.crypto || !crypto.subtle) {
             setStatus('SHA-256 в этом браузере недоступен: нужен защищённый контекст (https, localhost или .onion в Tor Browser).');
@@ -99,6 +127,8 @@
                 problems.push('манифест сервера отличается от эталона' + (parts.length ? ' (' + parts.join('; ') + ')' : ''));
             }
         }
+
+        await showPin(servedHash);
 
         const wanted = V.pathsToFetch(manifest);
         const seen = {};

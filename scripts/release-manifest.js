@@ -11,7 +11,9 @@
 //                          в нём нет commit, времени и версии Node;
 //   release.json         — всё, что от этого зависит: версия из package.json,
 //                          commit, время коммита (SOURCE_DATE_EPOCH, не время
-//                          запуска), версия Node, хэш манифеста;
+//                          запуска), версия Node, хэш манифеста и хэш sw.js
+//                          (service worker в манифест не входит — он закрепляет
+//                          хэш манифеста, — поэтому его хэш публикуется отдельно);
 //   SHA256SUMS           — хэши файлов public/ в формате sha256sum; проверка:
 //                          cd public && sha256sum -c ../release/SHA256SUMS.
 //
@@ -71,6 +73,13 @@ function buildReleaseFiles({ publicDir = PUBLIC_DIR, version, commit, epoch, nod
             files: manifest.files.length,
         },
     };
+    // sw.js вне манифеста (R10): его хэш лежит здесь, и страница сверки показывает хэш того sw.js,
+    // который сервер отдаёт сейчас. Без файла (синтетический каталог в тестах) поле не пишется.
+    const swPath = path.join(publicDir, 'sw.js');
+    if (fs.existsSync(swPath)) {
+        const bytes = fs.readFileSync(swPath);
+        release.serviceWorker = { file: 'sw.js', sha256: clientManifest.sha256Hex(bytes), bytes: bytes.length };
+    }
     const sums = manifest.files.map((file) => `${file.sha256}  ${file.path.slice(1)}\n`).join('');
     return { manifestText, releaseText: JSON.stringify(release, null, 2) + '\n', sumsText: sums };
 }

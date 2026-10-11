@@ -32,6 +32,9 @@
     const VERIFY_URL = '/verify.html';
     const CHECK_EVERY_MS = 60 * 60 * 1000;
     const ASK_TIMEOUT_MS = 15 * 1000;
+    // Состояние страница может прочитать и сама (Cache API), поэтому ждать ответ дольше нескольких
+    // секунд незачем: активный SW может быть аварийным (SW_KILL_SWITCH) и на GET_STATE не отвечает.
+    const STATE_TIMEOUT_MS = 3 * 1000;
     // Проверка включает скачивание файлов: через Tor это заметно дольше обычного.
     const CHECK_TIMEOUT_MS = 3 * 60 * 1000;
     const ACTIVATION_FALLBACK_MS = 5 * 1000;
@@ -242,7 +245,7 @@
 
         async function refreshState() {
             try {
-                const reply = await ask({ type: Core.MSG.GET_STATE }, ASK_TIMEOUT_MS);
+                const reply = await ask({ type: Core.MSG.GET_STATE }, STATE_TIMEOUT_MS);
                 if (reply && reply.ok) {
                     state = reply.state;
                     return;

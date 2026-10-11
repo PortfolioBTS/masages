@@ -2277,14 +2277,14 @@ button.indicator:hover {
 
 /* Закрепление кода (service worker, lib/sw-client.js): «Доступна новая версия»
    и сообщения о проверке. Поверх приложения, а не в потоке: приложение занимает
-   весь экран (100dvh), и плашка в потоке сдвинула бы вёрстку. Выше соединения (250),
-   ниже тоста (300). */
+   весь экран (100dvh), и плашка в потоке сдвинула бы вёрстку. Ниже оверлея (99) и окон:
+   блокирующее предупреждение о подмене не должно оставлять рядом кнопку «Обновить». */
 body > .code-banner {
     position: fixed;
     top: 0;
     left: 0;
     right: 0;
-    z-index: 260;
+    z-index: 90;
     padding-top: max(8px, env(safe-area-inset-top));
     border-bottom: 1px solid var(--border-strong);
     box-shadow: var(--shadow);
