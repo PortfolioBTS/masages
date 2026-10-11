@@ -91,6 +91,8 @@ const { initKeyStoreSchema } = require('./lib/key-store');
 // (key-shares). Тоже регистрируется после sessionMiddleware.
 const { initE2eeGroupsSchema, registerE2eeGroupRoutes } = require('./lib/e2ee-groups');
 const { createTransactionRetry } = require('./lib/tx-retry');
+const { initUploadQuotaSchema, reserveUploadQuota, deleteQuotaRows } = require('./lib/upload-quota');
+const { isClientOutdated: isOutdatedProto } = require('./lib/proto');
 
 // Бот-помощник: ответ по теме запроса, приветствие нового аккаунта и подписи
 // кнопок-подсказок — чистые функции без БД (lib/bot-guide.js).
@@ -736,9 +738,14 @@ async function initDatabase() {
         )
     `);
 
-    // chat_id может стать NULL (ON DELETE SET NULL): когда участник выходит из
-    // комнаты, его строка chats удаляется, а история остаётся видна остальным
-    // по room_id. Комната удаляется — сообщения уходят каскадом; ответ на
+    // Sealed sender на хранении (docs/security/sealed-sender.md): в строке
+    // сообщения КОМНАТЫ нет ни user_id, ни chat_id (личная строка отправителя) —
+    // вместо них author_tag, псевдоним автора на неделю (lib/author-tag.js).
+    // Строка чата с БОТОМ наоборот: chat_id и user_id (владелец; у ответов бота
+    // тоже), без тега. Взаимоисключение держит CHECK messages_author_scope.
+    // chat_id ... ON DELETE CASCADE: SET NULL нарушил бы CHECK для строк бота при
+    // удалении строки chats; файлы каскадно удалённых строк убирает уборщик
+    // файлов-сирот. Комната удаляется — сообщения уходят каскадом; ответ на
     // удалённое сообщение теряет связь с оригиналом (SET NULL), а не блокирует
     // удаление. Приложение и так удаляет в правильном порядке (DELETE
     // /api/chats/:chatId, deleteUserAccount), каскады — страховка на случай,
@@ -755,9 +762,10 @@ async function initDatabase() {
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY,
             seq INTEGER NOT NULL,
-            chat_id INTEGER REFERENCES chats(id) ON DELETE SET NULL,
+            chat_id INTEGER REFERENCES chats(id) ON DELETE CASCADE,
             room_id INTEGER REFERENCES rooms(id) ON DELETE CASCADE,
-            user_id INTEGER NOT NULL REFERENCES users(id),
+            user_id INTEGER REFERENCES users(id),
+            author_tag BYTEA,
             text TEXT NOT NULL,
             file_url TEXT,
             file_name TEXT,
@@ -780,7 +788,12 @@ async function initDatabase() {
             -- В комнате только E2EE-конверты (roadmap R7). Маршруты это уже
             -- проверяют (lib/e2ee-envelope.js); ограничение — второй рубеж на
             -- случай ошибки в коде: открытый текст комнаты не ляжет в базу вовсе.
-            CONSTRAINT messages_room_e2ee CHECK (room_id IS NULL OR encrypted)
+            CONSTRAINT messages_room_e2ee CHECK (room_id IS NULL OR encrypted),
+            CONSTRAINT messages_author_scope CHECK (
+                   (room_id IS NULL     AND chat_id IS NOT NULL AND user_id IS NOT NULL AND author_tag IS NULL)
+                OR (room_id IS NOT NULL AND chat_id IS NULL     AND user_id IS NULL     AND author_tag IS NOT NULL
+                    AND octet_length(author_tag) = 16)
+            )
         )
     `);
 
@@ -799,6 +812,23 @@ async function initDatabase() {
             UNIQUE (room_id, user_id)
         )
     `);
+
+    // Комнаты, откуда пользователь вышел, оставив там сообщения (sealed-sender.md,
+    // 5 и 12): удаление аккаунта удаляет их во всех таких комнатах, а теги без
+    // этой записи найти было бы негде. Запись создаётся только если у пользователя
+    // там остались сообщения. Ключ на users - без каскада (как у остальных таблиц
+    // пользователя: deleteUserAccount удаляет строки сам), на rooms - с каскадом.
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS user_left_rooms (
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            PRIMARY KEY (user_id, room_id)
+        )
+    `);
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_user_left_rooms_room ON user_left_rooms(room_id)');
+    // Квота вложений под псевдонимом qkey (lib/upload-quota.js): в users столбцов
+    // окна нет, а в самой таблице нет user_id.
+    await initUploadQuotaSchema(pool);
 
     // Реакции исчезают вместе со своим сообщением: иначе снос всех сообщений
     // комнаты падал бы на внешнем ключе, как только у любого есть реакция.
@@ -846,14 +876,21 @@ async function initDatabase() {
     // для "тихой" комнаты это просмотр почти всей таблицы. В списке INCLUDE нет
     // ни id, ни seq: они уже в ключе или в первичном ключе. Каскад удаления
     // комнаты обслуживает префикс (room_id).
-    await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_room_seq ON messages(room_id, seq) INCLUDE (user_id, sent, encrypted) WHERE room_id IS NOT NULL');
+    await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_room_seq ON messages(room_id, seq) INCLUDE (sent, encrypted) WHERE room_id IS NOT NULL');
     await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_chat_seq ON messages(chat_id, seq) INCLUDE (user_id, sent, encrypted) WHERE room_id IS NULL');
-    // Внешний ключ messages.chat_id ... ON DELETE SET NULL: частичный индекс
+    // Внешний ключ messages.chat_id ... ON DELETE CASCADE: частичный индекс
     // выше по условию запроса RI (chat_id = $1, без room_id IS NULL) не
     // применим, и без этого индекса удаление каждой строки chats сканировало бы
     // всю таблицу messages (выход из комнаты, удаление аккаунта).
     await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id) WHERE chat_id IS NOT NULL');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id)');
+    // Внешний ключ messages.user_id (только чат с ботом): запрос RI при удалении
+    // users - `WHERE user_id = $1`, и частичный индекс с условием по room_id он
+    // бы не использовал. Условие user_id IS NOT NULL следует из равенства, а
+    // строки комнат (user_id NULL) в индекс не попадают.
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id) WHERE user_id IS NOT NULL');
+    // Тег автора: правка, удаление, прочитано, выход и удаление аккаунта ищут
+    // строки комнаты по (комната, набор тегов).
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_room_author ON messages(room_id, author_tag) WHERE room_id IS NOT NULL');
     // Каждая картинка/файл в чате проверяет доступ поиском по file_url —
     // без индекса это был бы полный проход по всей таблице messages на КАЖДЫЙ
     // запрос /uploads/*.
@@ -864,9 +901,6 @@ async function initDatabase() {
     await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_reply_to_id ON messages(reply_to_id) WHERE reply_to_id IS NOT NULL');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_chats_user_id ON chats(user_id)');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_chats_room_id ON chats(room_id)');
-    // Сумма размеров вложений пользователя (квота) — index-only scan по
-    // его файлам, а не проход по всем его сообщениям.
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_user_files ON messages(user_id) INCLUDE (file_size) WHERE file_size IS NOT NULL');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_room_participants_user ON room_participants(user_id)');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_reactions_msg_user ON reactions(message_id, user_id)');
     // Авто-разархивация получателей идёт на КАЖДОЕ новое сообщение комнаты;
