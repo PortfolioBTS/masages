@@ -355,12 +355,10 @@ async function main() {
         const p = (b0) => { const k = new Uint8Array(32).fill(0xff); k[0] = b0; k[31] = 0x7f; return k; };
         assert.ok(!kt.isValidLogKey(p(0xed)), 'y = p');
         assert.ok(!kt.isValidLogKey(p(0xff)), 'y = 2^255 − 1');
-        const justBelow = p(0xec);
-        justBelow[1] = 0xfe; // y < p
-        assert.ok(kt.isCanonicalY(justBelow));
         const withSign = p(0xed);
         withSign[31] = 0xff; // знаковый бит не меняет y: всё равно y = p
-        assert.ok(!kt.isCanonicalY(withSign));
+        assert.ok(!kt.isValidLogKey(withSign));
+        // Подробные проверки строгого модуля и оба отрицательных вектора — test/ed25519-strict.test.js.
     });
 
     await test('подпись: S ≥ L и неканоническая R — отказ; настоящая принимается', async () => {

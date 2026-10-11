@@ -14,17 +14,19 @@
 // node:crypto на случайных входах, test/kt-verify.test.js). Серверу этот
 // модуль отдаёт хэш из node:crypto через create({ sha256 }).
 //
-// Подпись Ed25519 проверяет WebCrypto, но ключи малого порядка и неканоничные
-// кодировки платформа принимает, поэтому проверка ключа и подписи явная
-// (раздел 11): isValidLogKey и isCanonicalSignature.
+// Подпись Ed25519 проверяет WebCrypto, но ключи малого порядка и некорректные
+// кодировки платформа принимает, поэтому ключ журнала, STH, SKT и заявления о смене
+// проверяются строгим модулем public/lib/ed25519-strict.js (signed-membership.md, 6.1):
+// декодирование по RFC 8032 (y < p, x = 0 при бите знака 1 — отказ), [8]P ≠ O, S < L,
+// и только потом verify. В браузере его скрипт подключается раньше этого.
 
 (function (root, factory) {
     if (typeof module !== 'undefined' && module.exports) {
-        module.exports = factory();
+        module.exports = factory(require('./ed25519-strict.js'));
     } else {
-        root.NyxoKt = factory();
+        root.NyxoKt = factory(root.NyxoEd25519Strict);
     }
-})(typeof self !== 'undefined' ? self : this, function () {
+})(typeof self !== 'undefined' ? self : this, function (strict) {
     'use strict';
 
     // ===================== Константы протокола =====================
@@ -212,66 +214,12 @@
 
     // ===================== Проверка ключа и подписи Ed25519 (раздел 11) =====================
 
-    // Ключ журнала и подпись проверяются явно: платформенный verify принимает
-    // точки малого порядка и неканоничные кодировки.
-    //
-    // Запрещённые кодировки публичного ключа (RFC 8032, 5.1.3): y ≥ p (p = 2^255 − 19)
-    // и десять кодировок, чей x либо нулевой, либо лежит в подгруппе порядка 8:
-    //   y = 1 (порядок 1) и y = p − 1 (порядок 2) — каждая и со знаковым битом, и без
-    //   (со знаковым битом при x = 0 кодировка ещё и неканоническая);
-    //   y = 0 (порядок 4) — со знаковым битом и без;
-    //   четыре точки порядка 8 — по две на два значения y.
-    const SMALL_ORDER_KEYS = [
-        '0100000000000000000000000000000000000000000000000000000000000000',
-        '0100000000000000000000000000000000000000000000000000000000000080',
-        'ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f',
-        'ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
-        '0000000000000000000000000000000000000000000000000000000000000000',
-        '0000000000000000000000000000000000000000000000000000000000000080',
-        '26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05',
-        '26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85',
-        'c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a',
-        'c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa',
-    ].map(fromHex);
-
-    // y (255 бит, little-endian, без знакового бита) < p?
-    function isCanonicalY(bytes) {
-        if ((bytes[31] & 0x7f) !== 0x7f) return true;
-        for (let i = 30; i >= 1; i--) if (bytes[i] !== 0xff) return true;
-        return bytes[0] < 0xed;
-    }
-
-    function isValidLogKey(pub) {
-        if (!(pub instanceof Uint8Array) || pub.length !== KEY_BYTES) return false;
-        if (!isCanonicalY(pub)) return false;
-        return !SMALL_ORDER_KEYS.some(bad => bytesEqual(bad, pub));
-    }
-
-    // L = 2^252 + 27742317777372353535851937790883648493, little-endian.
-    const ED25519_L = fromHex('edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010');
-
-    // S < L и точка R подписи каноническая (y < p).
-    function isCanonicalSignature(sig) {
-        if (!(sig instanceof Uint8Array) || sig.length !== SIG_BYTES) return false;
-        if (!isCanonicalY(sig.subarray(0, 32))) return false;
-        for (let i = 31; i >= 0; i--) {
-            const s = sig[32 + i];
-            if (s !== ED25519_L[i]) return s < ED25519_L[i];
-        }
-        return false; // S == L
-    }
-
-    async function verifyEd25519(pub, message, sig) {
-        if (!isValidLogKey(pub) || !isCanonicalSignature(sig)) return false;
-        const subtle = typeof globalThis !== 'undefined' && globalThis.crypto && globalThis.crypto.subtle;
-        if (!subtle) return false;
-        try {
-            const key = await subtle.importKey('raw', pub, { name: 'Ed25519' }, false, ['verify']);
-            return await subtle.verify({ name: 'Ed25519' }, key, sig, message);
-        } catch {
-            return false;
-        }
-    }
+    // Ключ журнала (первый, из манифеста, из заявления о смене), STH, SKT и заявление
+    // о смене проверяются строго: см. public/lib/ed25519-strict.js.
+    if (!strict) throw new Error('kt: не загружен ed25519-strict.js');
+    const isValidLogKey = (pub) => strict.isStrictKey(pub);
+    const isCanonicalSignature = (sig) => strict.checkSignature(sig).ok;
+    const verifyEd25519 = (pub, message, sig) => strict.verify(pub, message, sig);
 
     // ===================== Формулы раздела 5 =====================
 
@@ -436,8 +384,7 @@
         DEPTH, LABEL_BYTES, HASH_BYTES, NONCE_BYTES, KEY_BYTES, SIG_BYTES,
         EPOCH_SECONDS, GEN_EPOCHS, GRACE_EPOCHS, MAX_ENTRIES_PER_LEAF,
         pureSha256, concat, u32be, u16be, ascii, bytesEqual, compareBytes, toHex, fromHex, b64encode, b64decode,
-        isCanonicalY, isValidLogKey, isCanonicalSignature, verifyEd25519, comparePos,
-        SMALL_ORDER_KEYS,
+        isValidLogKey, isCanonicalSignature, verifyEd25519, comparePos,
     });
     return api;
 });

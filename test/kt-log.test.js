@@ -92,9 +92,10 @@ function fakeQuery(groups, tree, gen, epoch) {
             const above = rows.find(r => Buffer.compare(r.label, params[2]) > 0);
             return above ? [{ label: above.label }] : [];
         }
-        if (s.startsWith('SELECT min(label)')) {
+        if (s.startsWith('SELECT label FROM kt_entries') && s.includes('label >= $3 AND label <= $4')) {
             const inside = rows.filter(r => Buffer.compare(r.label, params[2]) >= 0 && Buffer.compare(r.label, params[3]) <= 0);
-            return [{ min: inside.length ? inside[0].label : null, max: inside.length ? inside[inside.length - 1].label : null }];
+            if (inside.length === 0) return [];
+            return s.includes('ORDER BY label ASC') ? [{ label: inside[0].label }] : [{ label: inside[inside.length - 1].label }];
         }
         if (s.startsWith('SELECT hash FROM kt_nodes')) {
             const node = nodes.find(n => n.depth === params[2] && n.prefix.equals(params[3]));
