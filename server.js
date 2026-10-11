@@ -31,6 +31,7 @@ const { stripMetadataFromFile, cleanupStaleTempFiles } = require('./lib/metadata
 const DisappearingMessagesManager = require('./lib/disappearing-messages');
 const { encryptText, decryptText, messageAad } = require('./lib/message-crypto');
 const { sanitizeText, getPrivacyHeaders, createHstsMiddleware } = require('./lib/privacy');
+const { createSwKillSwitch } = require('./lib/sw-kill-switch');
 const {
     ALLOWED_MIME_TYPES,
     MIME_EXTENSIONS,
@@ -1265,6 +1266,10 @@ function setRevalidateCacheHeaders(res, isPrivate) {
     res.removeHeader('Expires');
     res.removeHeader('Surrogate-Control');
 }
+
+// Аварийное снятие service worker (SW_KILL_SWITCH=yes, lib/sw-kill-switch.js):
+// подменяет только /sw.js и обязано стоять до статики, иначе та отдаст настоящий файл.
+app.use(createSwKillSwitch(process.env));
 
 // Статика раздаётся ДО sessionMiddleware: ей сессия не нужна, а раньше
 // каждый запрос за CSS/JS/иконкой ходил в Postgres за сессией.

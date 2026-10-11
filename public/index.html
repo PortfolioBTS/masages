@@ -58,6 +58,8 @@
             </ul>
             <nav class="auth-links" aria-label="Подробнее о Nyxo">
                 <button id="about-open-btn" class="link-btn" type="button" aria-haspopup="dialog">Как это работает</button>
+                <span class="auth-links-sep" aria-hidden="true">·</span>
+                <a class="link-btn" href="/verify.html" target="_blank" rel="noopener noreferrer">Проверка кода</a>
                 <span id="auth-links-sep" class="auth-links-sep hidden" aria-hidden="true">·</span>
                 <button id="onion-open-btn" class="link-btn hidden" type="button" aria-haspopup="dialog">Открыть через Tor (onion)</button>
             </nav>
@@ -314,6 +316,15 @@
                         </span>
                     </label>
                 </div>
+                <div class="field profile-code">
+                    <span class="field-label">Защита кода</span>
+                    <p id="code-protection-status" class="field-hint" aria-live="polite"></p>
+                    <div class="profile-code-actions">
+                        <button id="code-protection-check" class="btn btn-secondary hidden" type="button"><svg class="icon" aria-hidden="true"><use href="#i-refresh"></use></svg><span>Проверить обновление</span></button>
+                        <a class="btn btn-secondary" href="/verify.html" target="_blank" rel="noopener noreferrer"><svg class="icon" aria-hidden="true"><use href="#i-shield"></use></svg><span>Сверка файлов</span></a>
+                        <button id="code-protection-toggle" class="btn btn-ghost hidden" type="button"></button>
+                    </div>
+                </div>
                 <div class="profile-actions">
                     <button id="profile-about-btn" class="btn btn-secondary" type="button" aria-haspopup="dialog"><svg class="icon" aria-hidden="true"><use href="#i-info"></use></svg><span>Как устроен Nyxo</span></button>
                     <button id="delete-account-btn" class="btn btn-danger" type="button" aria-haspopup="dialog"><svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg><span>Удалить аккаунт и выйти</span></button>
@@ -505,6 +516,31 @@
     </div>
 
     <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+    <div id="code-banner" class="code-banner banner banner-warning hidden" role="status" aria-live="polite">
+        <svg class="icon" aria-hidden="true"><use href="#i-shield"></use></svg>
+        <span id="code-banner-text" class="banner-text"></span>
+        <div class="banner-actions">
+            <a class="banner-btn btn btn-sm btn-secondary" href="/verify.html" target="_blank" rel="noopener noreferrer">Сверить</a>
+            <button id="code-banner-apply" class="banner-btn btn btn-sm btn-secondary" type="button"></button>
+            <button id="code-banner-dismiss" class="banner-btn btn btn-sm btn-secondary" type="button"></button>
+        </div>
+    </div>
+
+    <div id="code-warning-modal" class="modal hidden" role="alertdialog" aria-modal="true" aria-labelledby="code-warning-title" aria-describedby="code-warning-text">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h3 id="code-warning-title">Код Nyxo заменён без вашего подтверждения</h3>
+            </div>
+            <div class="modal-body">
+                <p id="code-warning-text" class="modal-warning">Это бывает только при сбое или вмешательстве сервера. Не вводите ничего и не открывайте чаты, пока не сверите отпечаток новой версии на странице проверки.</p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" type="button" data-close-modal>Продолжить</button>
+                <a class="btn btn-primary" href="/verify.html" target="_blank" rel="noopener noreferrer" data-autofocus>Сверить отпечаток</a>
+            </div>
+        </div>
+    </div>
     <div id="overlay" class="overlay hidden"></div>
 
     <script src="vendor/socket.io.min.js"></script>
@@ -519,6 +555,8 @@
     <script src="lib/e2ee-lock.js"></script>
     <script src="lib/e2ee-policy.js"></script>
     <script src="lib/text-search.js"></script>
+    <script src="lib/sw-core.js"></script>
+    <script src="lib/sw-client.js"></script>
     <script src="script.js"></script>
 </body>
 </html>

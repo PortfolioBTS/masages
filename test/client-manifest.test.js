@@ -242,7 +242,9 @@ test('buildReleaseFiles: манифест тот же, release.json с commit и
     const files = releaseScript.buildReleaseFiles({ version: '2.1.0', commit: FIXED_COMMIT, epoch, nodeVersion: 'v24.0.0' });
     assert.strictEqual(files.manifestText, manifestLib.buildManifestText(PUBLIC_DIR));
     const release = JSON.parse(files.releaseText);
-    assert.deepStrictEqual(Object.keys(release), ['format', 'version', 'commit', 'created', 'node', 'manifest']);
+    assert.deepStrictEqual(Object.keys(release), ['format', 'version', 'commit', 'created', 'node', 'manifest', 'serviceWorker']);
+    const swBytes = fs.readFileSync(path.join(PUBLIC_DIR, 'sw.js'));
+    assert.deepStrictEqual(release.serviceWorker, { file: 'sw.js', sha256: sha256(swBytes), bytes: swBytes.length }, 'хэш sw.js публикуется отдельно: в манифесте его нет');
     assert.strictEqual(release.format, 'nyxo-release/1');
     assert.strictEqual(release.version, '2.1.0');
     assert.strictEqual(release.commit, FIXED_COMMIT);

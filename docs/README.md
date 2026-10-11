@@ -47,6 +47,7 @@
 | [ops/backups.md](ops/backups.md) | Резервные копии: срок 7 дней, восстановление, проверка |
 | [ops/logs-retention.md](ops/logs-retention.md) | Логи приложения и платформы, сроки хранения |
 | [ops/cloudflare.md](ops/cloudflare.md) | Cloudflare: убрать или оставить только DNS |
+| [ops/service-worker.md](ops/service-worker.md) | Service worker с закреплением кода: что видит пользователь, выкат, аварийное снятие (`SW_KILL_SWITCH`, `/?sw=off`), ручная проверка |
 | [ops/scaling.md](ops/scaling.md) | Одна реплика, блокеры нескольких, что делать при росте нагрузки |
 
 Onion-сервис описан отдельно: [tor-service/README.md](../tor-service/README.md).

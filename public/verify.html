@@ -56,6 +56,17 @@
                 <dt id="verify-ref-hash-title" hidden>Хэш эталонного манифеста (SHA-256)</dt>
                 <dd id="verify-ref-hash" hidden></dd>
             </dl>
+            <dl id="verify-pin" class="hashes" hidden>
+                <dt>Закреплено в этом браузере (service worker)</dt>
+                <dd id="verify-pin-value"></dd>
+                <dt id="verify-staged-title" hidden>Скачано и ждёт вашего согласия</dt>
+                <dd id="verify-staged-value" hidden></dd>
+                <dt>SHA-256 файла sw.js, который сервер отдаёт сейчас</dt>
+                <dd id="verify-sw-hash"></dd>
+            </dl>
+            <p id="verify-pin-note" class="hint" hidden>Закрепление — это копия кода, проверенная при первом визите (доверие без проверки) и обновляемая только по вашему согласию.
+                Файл <code>sw.js</code> в манифест не входит: сравните его хэш с полем <code>serviceWorker.sha256</code> в <code>release.json</code> из релиза
+                или командой <code>curl -s https://&lt;хост&gt;/sw.js | sha256sum</code>.</p>
             <div class="table-wrap" id="verify-table-wrap" hidden>
                 <table class="results" aria-label="Результат сверки по файлам">
                     <thead>
@@ -72,6 +83,7 @@
     </main>
 
     <script src="lib/client-verify.js"></script>
+    <script src="lib/sw-core.js"></script>
     <script src="verify.js"></script>
 </body>
 </html>
