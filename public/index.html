@@ -1,17 +1,22 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="ru" data-theme="dark">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#000000">
     <title>Nyxo — Мессенджер</title>
+    <link rel="icon" type="image/svg+xml" href="icons/favicon.svg">
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+    <link rel="manifest" href="manifest.webmanifest">
+    <script src="theme.js"></script>
+    <script src="icons.js"></script>
     <link rel="stylesheet" href="style.css">
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E💬%3C/text%3E%3C/svg%3E">
 </head>
 <body>
     <div id="auth-screen" class="auth-screen">
         <div class="auth-container">
             <div class="auth-logo">
-                <div class="logo-icon" aria-hidden="true">💬</div>
+                <div class="logo-icon" aria-hidden="true"><svg class="icon icon-xl" aria-hidden="true"><use href="#i-brand"></use></svg></div>
                 <h1>Nyxo</h1>
                 <p>Безопасный мессенджер</p>
             </div>
@@ -28,10 +33,10 @@
                     <label for="login-password">Пароль</label>
                     <input type="password" id="login-password" placeholder="Введите пароль" autocomplete="current-password" required>
                 </div>
-                <button id="login-btn" class="auth-btn">Войти</button>
+                <button id="login-btn" class="auth-btn"><svg class="icon" aria-hidden="true"><use href="#i-log-in"></use></svg><span>Войти</span></button>
                 <div class="auth-divider"><span>или</span></div>
-                <button id="anonymous-login-btn" class="auth-btn anonymous-btn">🔒 Войти в приватном режиме</button>
-                <p class="anonymous-hint">Без email и пароля. Данные удалятся при выходе.</p>
+                <button id="anonymous-login-btn" class="auth-btn anonymous-btn"><svg class="icon" aria-hidden="true"><use href="#i-eye-off"></use></svg><span>Войти в приватном режиме</span></button>
+                <p class="anonymous-hint">Без email и пароля. Аккаунт удалится при выходе или после выбранного срока без активности.</p>
             </div>
             <div id="register-form" class="auth-form">
                 <div class="form-group">
@@ -50,7 +55,7 @@
                     <label for="register-confirm-password">Подтвердите пароль</label>
                     <input type="password" id="register-confirm-password" placeholder="Повторите пароль" autocomplete="new-password" required>
                 </div>
-                <button id="register-btn" class="auth-btn">Зарегистрироваться</button>
+                <button id="register-btn" class="auth-btn"><svg class="icon" aria-hidden="true"><use href="#i-user-plus"></use></svg><span>Зарегистрироваться</span></button>
             </div>
         </div>
     </div>
@@ -58,91 +63,169 @@
     <div id="app" class="app hidden">
         <div class="sidebar">
             <div class="sidebar-header">
-                <div class="logo-small">💬 Nyxo</div>
-                <button id="new-chat-btn" class="icon-btn" title="Новый чат" aria-label="Новый чат">+</button>
+                <div class="logo-small"><svg class="icon" aria-hidden="true"><use href="#i-brand"></use></svg><span>Nyxo</span></div>
+                <div class="chat-actions sidebar-actions">
+                    <button id="theme-toggle-btn" class="icon-btn theme-toggle" type="button" title="Сменить тему" aria-label="Сменить тему"><svg class="icon" aria-hidden="true"><use href="#i-sun"></use></svg></button>
+                    <button id="new-chat-btn" class="icon-btn" type="button" title="Новый чат" aria-label="Новый чат"><svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg></button>
+                </div>
+            </div>
+            <div id="anon-note" class="anon-note hidden" role="status">
+                <svg class="icon icon-sm" aria-hidden="true"><use href="#i-hourglass"></use></svg>
+                <span id="anon-note-text"></span>
             </div>
             <div class="search-container">
                 <input type="text" id="search-input" placeholder="Поиск чатов и сообщений..." aria-label="Поиск чатов и сообщений">
             </div>
             <div id="chats-list" class="chats-list"></div>
             <div class="sidebar-footer">
-                <button id="profile-btn" class="footer-btn">👤 Профиль</button>
-                <button id="logout-btn" class="footer-btn">🚪 Выйти</button>
+                <button id="profile-btn" class="footer-btn"><svg class="icon" aria-hidden="true"><use href="#i-user"></use></svg><span>Профиль</span></button>
+                <button id="logout-btn" class="footer-btn"><svg class="icon" aria-hidden="true"><use href="#i-log-out"></use></svg><span>Выйти</span></button>
             </div>
         </div>
         <div class="main-content">
             <div id="chat-header" class="chat-header hidden">
                 <div class="chat-info">
-                    <button id="back-btn" class="icon-btn back-btn" title="Назад к чатам" aria-label="Назад к чатам">←</button>
+                    <button id="back-btn" class="icon-btn back-btn" title="Назад к чатам" aria-label="Назад к чатам"><svg class="icon" aria-hidden="true"><use href="#i-arrow-left"></use></svg></button>
                     <div id="chat-avatar" class="chat-avatar" aria-hidden="true"></div>
                     <div class="chat-details">
                         <h3 id="chat-name"></h3>
                         <span id="chat-status" class="status"></span>
+                        <span id="chat-indicators" class="chat-indicators">
+                            <span id="expiry-indicator" class="indicator is-on hidden">
+                                <svg class="icon icon-sm" aria-hidden="true"><use href="#i-timer"></use></svg>
+                                <span id="expiry-indicator-text"></span>
+                            </span>
+                            <span id="muted-indicator" class="indicator hidden" title="Без звука" aria-label="Без звука">
+                                <svg class="icon icon-sm" aria-hidden="true"><use href="#i-bell-off"></use></svg>
+                            </span>
+                        </span>
                     </div>
                 </div>
                 <div class="chat-actions">
-                    <button id="e2ee-toggle-btn" class="icon-btn hidden" title="Сквозное шифрование" aria-label="Сквозное шифрование" aria-pressed="false">🔓</button>
-                    <button id="members-keys-btn" class="icon-btn hidden" title="Участники и ключи" aria-label="Участники и ключи">🔑</button>
-                    <button id="get-chat-code-btn" class="icon-btn hidden" title="Код приглашения" aria-label="Код приглашения">🔗</button>
-                    <button id="chat-menu-btn" class="icon-btn" title="Меню" aria-label="Меню чата">⋮</button>
+                    <button id="e2ee-toggle-btn" class="icon-btn hidden" title="Сквозное шифрование" aria-label="Сквозное шифрование" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-lock"></use></svg></button>
+                    <button id="members-keys-btn" class="icon-btn hidden" title="Участники и ключи" aria-label="Участники и ключи"><svg class="icon" aria-hidden="true"><use href="#i-key"></use></svg></button>
+                    <button id="get-chat-code-btn" class="icon-btn hidden" title="Пригласить" aria-label="Пригласить в группу"><svg class="icon" aria-hidden="true"><use href="#i-user-plus"></use></svg></button>
+                    <button id="chat-menu-btn" class="icon-btn" title="Меню" aria-label="Меню чата"><svg class="icon" aria-hidden="true"><use href="#i-more-vertical"></use></svg></button>
                 </div>
             </div>
-            <div id="e2ee-banner" class="e2ee-banner hidden" role="alert">
+            <div id="e2ee-banner" class="e2ee-banner banner banner-warning hidden" role="alert">
+                <svg class="icon" aria-hidden="true"><use href="#i-alert-triangle"></use></svg>
                 <span id="e2ee-banner-text" class="e2ee-banner-text"></span>
-                <button id="e2ee-banner-btn" class="banner-btn">Проверить код</button>
+                <div class="banner-actions">
+                    <button id="e2ee-banner-btn" class="banner-btn btn btn-sm btn-secondary">Проверить код</button>
+                </div>
+            </div>
+            <div id="requests-bar" class="requests-bar hidden" role="status">
+                <svg class="icon" aria-hidden="true"><use href="#i-user-plus"></use></svg>
+                <span id="requests-bar-text"></span>
+                <button id="requests-bar-btn" class="btn btn-sm btn-secondary">Открыть</button>
             </div>
             <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
+            <button id="jump-down" class="jump-down hidden" type="button" title="К последним сообщениям" aria-label="К последним сообщениям">
+                <svg class="icon" aria-hidden="true"><use href="#i-arrow-down"></use></svg>
+                <span id="jump-down-badge" class="badge hidden"></span>
+            </button>
+            <div id="drop-zone" class="drop-zone hidden" aria-hidden="true">
+                <svg class="icon icon-xl" aria-hidden="true"><use href="#i-upload"></use></svg>
+                <p>Отпустите файлы, чтобы отправить</p>
+            </div>
             <div id="message-input-container" class="message-input-container hidden">
+                <div id="upload-status" class="upload-status hidden" role="status">
+                    <svg class="icon icon-sm" aria-hidden="true"><use href="#i-upload"></use></svg>
+                    <span id="upload-status-text"></span>
+                    <div id="upload-progress" class="progress" role="progressbar" aria-label="Загрузка файла" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                        <div id="upload-progress-bar" class="progress-bar"></div>
+                    </div>
+                    <button id="upload-cancel-btn" class="icon-btn icon-btn-sm" type="button" title="Отменить загрузку" aria-label="Отменить загрузку"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"></use></svg></button>
+                </div>
                 <div id="reply-preview" class="reply-preview hidden">
+                    <svg class="icon icon-sm" aria-hidden="true"><use href="#i-reply"></use></svg>
                     <span id="reply-preview-text"></span>
-                    <button id="cancel-reply-btn" class="icon-btn" title="Отменить ответ" aria-label="Отменить ответ">✕</button>
+                    <button id="cancel-reply-btn" class="icon-btn icon-btn-sm" title="Отменить ответ" aria-label="Отменить ответ"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"></use></svg></button>
                 </div>
                 <div class="input-wrapper">
-                    <button id="attach-btn" class="icon-btn" title="Прикрепить файл" aria-label="Прикрепить файл">📎</button>
+                    <button id="attach-btn" class="icon-btn" title="Прикрепить файлы" aria-label="Прикрепить файлы"><svg class="icon" aria-hidden="true"><use href="#i-paperclip"></use></svg></button>
                     <input type="text" id="message-input" placeholder="Введите сообщение..." maxlength="4000" aria-label="Текст сообщения">
-                    <button id="send-btn" class="icon-btn" title="Отправить" aria-label="Отправить">➤</button>
-                    <button id="record-btn" class="icon-btn" title="Голосовые сообщения пока не реализованы" aria-label="Голосовые сообщения пока не реализованы" disabled>🎤</button>
+                    <button id="send-btn" class="icon-btn" title="Отправить" aria-label="Отправить"><svg class="icon" aria-hidden="true"><use href="#i-send"></use></svg></button>
+                    <button id="record-btn" class="icon-btn" title="Голосовые сообщения пока не реализованы" aria-label="Голосовые сообщения пока не реализованы" disabled><svg class="icon" aria-hidden="true"><use href="#i-mic"></use></svg></button>
                 </div>
-                <input type="file" id="file-input" class="hidden" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/quicktime,video/webm,audio/webm,audio/ogg,audio/mpeg,audio/wav,application/pdf,text/plain,.pdf,.txt">
+                <input type="file" id="file-input" class="hidden" multiple accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/quicktime,video/webm,audio/webm,audio/ogg,audio/mpeg,audio/wav,application/pdf,text/plain,.pdf,.txt">
             </div>
             <div id="empty-state" class="empty-state">
-                <div class="empty-icon" aria-hidden="true">💬</div>
+                <div class="empty-icon" aria-hidden="true"><svg class="icon icon-xl" aria-hidden="true"><use href="#i-message-square"></use></svg></div>
                 <h2>Добро пожаловать в Nyxo</h2>
                 <p>Выберите чат или создайте новый</p>
             </div>
         </div>
     </div>
 
+    <div id="connection-status" class="connection-status hidden" role="status" aria-live="polite">
+        <span id="connection-status-icon" class="connection-status-icon" aria-hidden="true"></span>
+        <span id="connection-status-text"></span>
+    </div>
+
     <div id="new-chat-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="new-chat-title">
         <div class="modal-content">
             <div class="modal-header">
                 <h3 id="new-chat-title">Новый чат</h3>
-                <button class="close-modal" aria-label="Закрыть">&times;</button>
+                <button class="close-modal icon-btn" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
             </div>
             <div class="modal-body">
-                <div class="form-group">
-                    <label for="new-chat-name">Название чата</label>
+                <div class="form-group field">
+                    <label for="new-chat-name" class="field-label">Название группы</label>
                     <input type="text" id="new-chat-name" placeholder="Введите название" maxlength="64">
                 </div>
-                <button id="create-chat-btn" class="auth-btn">Создать чат</button>
+                <button id="create-chat-btn" class="btn btn-primary btn-block"><svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg><span>Создать группу</span></button>
                 <div class="auth-divider"><span>или</span></div>
-                <div class="form-group">
-                    <label for="join-chat-code">Код приглашения</label>
+                <div class="form-group field">
+                    <label for="join-chat-code" class="field-label">Код приглашения</label>
                     <input type="text" id="join-chat-code" placeholder="Например: ABCDE FGHIJ …" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="40">
                 </div>
-                <button id="join-chat-btn" class="auth-btn secondary">Присоединиться</button>
+                <button id="join-chat-btn" class="btn btn-secondary btn-block"><svg class="icon" aria-hidden="true"><use href="#i-log-in"></use></svg><span>Продолжить</span></button>
+                <div id="join-preview" class="pending-card join-preview hidden" aria-live="polite">
+                    <svg class="icon icon-lg" aria-hidden="true"><use href="#i-users"></use></svg>
+                    <div class="join-preview-body">
+                        <h4 id="join-preview-name"></h4>
+                        <p id="join-preview-meta" class="muted"></p>
+                        <p id="join-preview-approval" class="field-hint hidden">Вы вступите после того, как кто-то из участников одобрит заявку.</p>
+                    </div>
+                    <div class="invite-actions">
+                        <button id="join-confirm-btn" class="btn btn-primary btn-sm">Вступить</button>
+                        <button id="join-cancel-btn" class="btn btn-ghost btn-sm">Отмена</button>
+                    </div>
+                </div>
+                <div id="my-requests" class="my-requests hidden">
+                    <h4 class="field-label">Ваши заявки</h4>
+                    <div id="my-requests-list"></div>
+                </div>
             </div>
         </div>
     </div>
 
     <div id="chat-menu-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="chat-menu-title">
-        <div class="modal-content">
+        <div class="modal-content modal-sm">
             <div class="modal-header">
                 <h3 id="chat-menu-title">Меню чата</h3>
-                <button class="close-modal" aria-label="Закрыть">&times;</button>
+                <button class="close-modal icon-btn" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
             </div>
             <div class="modal-body">
-                <button id="delete-chat-btn" class="danger-btn">🗑 Удалить чат</button>
+                <div class="chat-menu-actions" role="group" aria-label="Настройки чата">
+                    <button id="pin-chat-btn" class="menu-item"></button>
+                    <button id="mute-chat-btn" class="menu-item"></button>
+                    <button id="archive-chat-btn" class="menu-item"></button>
+                </div>
+                <div class="divider"></div>
+                <fieldset id="expiry-fieldset" class="field expiry-settings">
+                    <legend class="field-label"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-timer"></use></svg><span>Исчезающие сообщения</span></legend>
+                    <label class="radio-row"><input type="radio" name="chat-expiry" value="0"><span>Выключены</span></label>
+                    <label class="radio-row"><input type="radio" name="chat-expiry" value="300"><span>5 минут</span></label>
+                    <label class="radio-row"><input type="radio" name="chat-expiry" value="3600"><span>1 час</span></label>
+                    <label class="radio-row"><input type="radio" name="chat-expiry" value="86400"><span>1 день</span></label>
+                    <label class="radio-row"><input type="radio" name="chat-expiry" value="604800"><span>7 дней</span></label>
+                    <p id="expiry-hint" class="field-hint">Срок действует для новых сообщений всех участников. Уже отправленные сообщения не изменятся.</p>
+                </fieldset>
+                <div class="divider"></div>
+                <button id="delete-chat-btn" class="btn btn-danger btn-block"><svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg><span>Удалить чат</span></button>
             </div>
         </div>
     </div>
@@ -151,7 +234,7 @@
         <div class="modal-content">
             <div class="modal-header">
                 <h3 id="profile-title">Профиль</h3>
-                <button class="close-modal" aria-label="Закрыть">&times;</button>
+                <button class="close-modal icon-btn" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
             </div>
             <div class="modal-body">
                 <div class="profile-info">
@@ -159,44 +242,48 @@
                     <div class="profile-details">
                         <h4 id="profile-username"></h4>
                         <p id="profile-email"></p>
-                        <p id="profile-code" class="profile-code"></p>
-                        <span id="profile-anon-badge" class="anon-badge hidden">🔒 Приватный режим</span>
+                        <p id="profile-code" class="profile-code mono"></p>
+                        <span id="profile-anon-badge" class="anon-badge chip hidden"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-eye-off"></use></svg><span>Приватный режим</span></span>
                     </div>
                 </div>
-                <div class="form-group">
-                    <span class="form-label" id="avatar-color-label">Цвет аватара</span>
-                    <div class="color-picker" role="group" aria-labelledby="avatar-color-label">
-                        <button class="color-option" data-color="#667EEA" aria-label="Синий"></button>
-                        <button class="color-option" data-color="#F093FB" aria-label="Розовый"></button>
-                        <button class="color-option" data-color="#4FACFE" aria-label="Голубой"></button>
-                        <button class="color-option" data-color="#43E97B" aria-label="Зелёный"></button>
-                        <button class="color-option" data-color="#FA709A" aria-label="Малиновый"></button>
-                        <button class="color-option" data-color="#FFD93D" aria-label="Жёлтый"></button>
-                    </div>
+                <div class="field">
+                    <span class="field-label">Оформление</span>
+                    <button id="profile-theme-btn" class="btn btn-secondary theme-toggle" type="button"><svg class="icon" aria-hidden="true"><use href="#i-sun"></use></svg><span>Светлая тема</span></button>
                 </div>
                 <div class="settings-row">
-                    <label class="switch-row" for="read-receipts-toggle">
-                        <span class="switch-text">
+                    <label class="toggle-row" for="read-receipts-toggle">
+                        <input type="checkbox" id="read-receipts-toggle" role="switch">
+                        <span>
                             <span class="switch-title">Отправлять отметки о прочтении</span>
-                            <small class="switch-hint">Если выключить, собеседники не узнают, что вы прочитали их сообщения, а вы не увидите ✓✓ у своих.</small>
+                            <small class="field-hint">Если выключить, собеседники не узнают, что вы прочитали их сообщения, а вы не увидите отметку «прочитано» у своих.</small>
                         </span>
-                        <input type="checkbox" id="read-receipts-toggle" class="switch-input" role="switch">
-                        <span class="switch" aria-hidden="true"></span>
+                    </label>
+                    <label class="toggle-row" for="notify-toggle">
+                        <input type="checkbox" id="notify-toggle" role="switch">
+                        <span>
+                            <span class="switch-title">Уведомления о новых сообщениях</span>
+                            <small class="field-hint">Только когда вкладка скрыта. Без текста и имени отправителя — просто «Nyxo — новое сообщение». Чаты без звука не уведомляют.</small>
+                        </span>
                     </label>
                 </div>
+                <section id="security-section" class="security-section">
+                    <h4 class="field-label">Журнал безопасности</h4>
+                    <p class="field-hint">Последние входы и изменения аккаунта. IP-адреса не сохраняются.</p>
+                    <ul id="security-list" class="security-list" aria-live="polite"></ul>
+                </section>
                 <div class="profile-actions">
-                    <button id="change-password-btn" class="auth-btn secondary">🔒 Сменить пароль</button>
-                    <button id="delete-account-btn" class="danger-btn outline">🗑 Удалить аккаунт</button>
+                    <button id="change-password-btn" class="btn btn-secondary"><svg class="icon" aria-hidden="true"><use href="#i-key"></use></svg><span>Сменить пароль</span></button>
+                    <button id="delete-account-btn" class="btn btn-danger"><svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg><span>Удалить аккаунт</span></button>
                 </div>
             </div>
         </div>
     </div>
 
     <div id="password-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="password-title">
-        <div class="modal-content">
+        <div class="modal-content modal-sm">
             <div class="modal-header">
                 <h3 id="password-title">Смена пароля</h3>
-                <button class="close-modal" aria-label="Закрыть">&times;</button>
+                <button class="close-modal icon-btn" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
             </div>
             <div class="modal-body">
                 <div class="form-group">
@@ -211,16 +298,16 @@
                     <label for="confirm-new-password">Подтвердите новый пароль</label>
                     <input type="password" id="confirm-new-password" placeholder="Повторите новый пароль" autocomplete="new-password">
                 </div>
-                <button id="save-password-btn" class="auth-btn">Сохранить</button>
+                <button id="save-password-btn" class="btn btn-primary btn-block">Сохранить</button>
             </div>
         </div>
     </div>
 
     <div id="delete-account-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="delete-account-title" aria-describedby="delete-account-text">
-        <div class="modal-content">
+        <div class="modal-content modal-sm">
             <div class="modal-header">
                 <h3 id="delete-account-title">Удаление аккаунта</h3>
-                <button class="close-modal" aria-label="Закрыть">&times;</button>
+                <button class="close-modal icon-btn" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
             </div>
             <div class="modal-body">
                 <p id="delete-account-text" class="modal-warning"></p>
@@ -228,27 +315,57 @@
                     <label for="delete-account-password">Пароль для подтверждения</label>
                     <input type="password" id="delete-account-password" placeholder="Введите пароль" autocomplete="current-password">
                 </div>
-                <button id="confirm-delete-account-btn" class="danger-btn">Удалить навсегда</button>
+                <button id="confirm-delete-account-btn" class="btn btn-danger btn-block"><svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg><span>Удалить навсегда</span></button>
             </div>
         </div>
     </div>
 
     <div id="invite-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="invite-title">
-        <div class="modal-content">
+        <div class="modal-content modal-wide">
             <div class="modal-header">
-                <h3 id="invite-title">Код приглашения</h3>
-                <button class="close-modal" aria-label="Закрыть">&times;</button>
+                <h3 id="invite-title">Приглашение в группу</h3>
+                <button class="close-modal icon-btn" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
             </div>
             <div class="modal-body">
-                <p class="invite-text">Поделитесь этим кодом с тем, кого хотите пригласить:</p>
+                <div id="invite-status" class="invite-status" aria-live="polite"></div>
                 <div id="invite-code-container" class="invite-code-container">
-                    <code id="invite-code-display"></code>
-                    <button id="copy-invite-btn" class="icon-btn" title="Скопировать код" aria-label="Скопировать код">📋</button>
+                    <code id="invite-code-display" class="invite-code mono"></code>
+                    <button id="copy-invite-btn" class="icon-btn" title="Скопировать код" aria-label="Скопировать код" data-autofocus><svg class="icon" aria-hidden="true"><use href="#i-copy"></use></svg></button>
                 </div>
-                <p id="invite-expiry" class="invite-meta" aria-live="polite"></p>
+                <div id="invite-qr" class="invite-qr">
+                    <canvas id="invite-qr-canvas" role="img" aria-label="QR-код ссылки-приглашения"></canvas>
+                </div>
+                <button id="copy-invite-link-btn" class="btn btn-secondary btn-sm"><svg class="icon" aria-hidden="true"><use href="#i-link"></use></svg><span>Скопировать ссылку</span></button>
                 <p class="invite-hint">Новый участник увидит только сообщения, отправленные после его вступления, — старая история ему недоступна.</p>
-                <button id="rotate-invite-btn" class="auth-btn secondary">🔄 Создать новый код</button>
-                <p class="invite-hint">Старый код сразу перестанет действовать.</p>
+                <fieldset class="invite-settings">
+                    <legend class="field-label">Параметры нового кода</legend>
+                    <div class="field">
+                        <label for="invite-ttl" class="field-label">Срок действия</label>
+                        <select id="invite-ttl" class="select">
+                            <option value="3600">1 час</option>
+                            <option value="86400">1 день</option>
+                            <option value="604800" selected>7 дней</option>
+                            <option value="2592000">30 дней</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="invite-max" class="field-label">Лимит участников</label>
+                        <input type="number" id="invite-max" class="input" min="2" max="1000" step="1" inputmode="numeric" placeholder="Без лимита">
+                        <small class="field-hint">Пусто — без лимита. Считаются все участники группы, включая вас.</small>
+                    </div>
+                    <label class="toggle-row" for="invite-approval">
+                        <input type="checkbox" id="invite-approval" role="switch" checked>
+                        <span>
+                            <span class="switch-title">Впускать после одобрения</span>
+                            <small class="field-hint">По коду приходит заявка, а в группу человек попадает, только когда кто-то из участников её примет.</small>
+                        </span>
+                    </label>
+                </fieldset>
+                <div class="invite-actions">
+                    <button id="rotate-invite-btn" class="btn btn-primary"><svg class="icon" aria-hidden="true"><use href="#i-refresh"></use></svg><span>Создать новый код</span></button>
+                    <button id="disable-invite-btn" class="btn btn-danger"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg><span>Отключить</span></button>
+                </div>
+                <p class="invite-hint">Новый код и отключение сразу делают старый код недействительным.</p>
             </div>
         </div>
     </div>
@@ -257,7 +374,7 @@
         <div class="modal-content modal-wide">
             <div class="modal-header">
                 <h3 id="members-title">Участники и ключи</h3>
-                <button class="close-modal" aria-label="Закрыть">&times;</button>
+                <button class="close-modal icon-btn" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
             </div>
             <div class="modal-body">
                 <p class="members-intro">Сверьте код безопасности с участником лично или по другому каналу связи. Если коды совпадают, ключи шифрования никто не подменил.</p>
@@ -267,10 +384,105 @@
         </div>
     </div>
 
+    <div id="requests-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="requests-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="requests-title">Заявки на вступление</h3>
+                <button class="close-modal icon-btn" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+            </div>
+            <div class="modal-body">
+                <p class="field-hint">Принятый участник увидит только новые сообщения. Ключ шифрования ему передастся автоматически.</p>
+                <ul id="requests-list" class="requests-list" aria-live="polite"></ul>
+            </div>
+        </div>
+    </div>
+
+    <div id="anon-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="anon-title" aria-describedby="anon-desc">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h3 id="anon-title">Приватный режим</h3>
+                <button class="close-modal icon-btn" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+            </div>
+            <div class="modal-body">
+                <p id="anon-desc">Аккаунт без email и пароля. Выберите, когда удалить его, если вы перестанете им пользоваться.</p>
+                <fieldset class="field">
+                    <legend class="field-label">Удалить аккаунт</legend>
+                    <label class="radio-row">
+                        <input type="radio" name="anon-lifetime" value="tab" checked>
+                        <span>
+                            <span class="switch-title">Когда закрою вкладку</span>
+                            <small class="field-hint">Через 30 минут после закрытия вкладки или потери связи</small>
+                        </span>
+                    </label>
+                    <label class="radio-row">
+                        <input type="radio" name="anon-lifetime" value="day">
+                        <span>
+                            <span class="switch-title">Через 1 день без активности</span>
+                            <small class="field-hint">Можно закрыть вкладку и вернуться в течение суток</small>
+                        </span>
+                    </label>
+                    <label class="radio-row">
+                        <input type="radio" name="anon-lifetime" value="week">
+                        <span>
+                            <span class="switch-title">Через 7 дней без активности</span>
+                            <small class="field-hint">Дольше аккаунт не живёт в любом случае</small>
+                        </span>
+                    </label>
+                </fieldset>
+                <p class="field-hint">Активность — это открытая вкладка Nyxo. Независимо от выбора аккаунт удалится не позже чем через 7 дней после создания, а кнопка «Выйти» удаляет его сразу. Удаляются чаты, сообщения и файлы на сервере и ключи шифрования на этом устройстве — восстановить их будет нельзя.</p>
+                <p class="field-hint">Приватный режим не скрывает ваш IP-адрес от сервера и провайдера. Для этого используйте Tor Browser.</p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" type="button" data-close-modal>Отмена</button>
+                <button id="anon-confirm-btn" class="btn btn-primary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-eye-off"></use></svg><span>Войти</span></button>
+            </div>
+        </div>
+    </div>
+
+    <div id="logout-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="logout-title">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h3 id="logout-title">Выход из аккаунта</h3>
+                <button class="close-modal icon-btn" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+            </div>
+            <div class="modal-body">
+                <button id="logout-keep-btn" class="btn btn-secondary btn-block"><svg class="icon" aria-hidden="true"><use href="#i-log-out"></use></svg><span>Выйти</span></button>
+                <p class="field-hint">Ключи шифрования останутся на этом устройстве: при следующем входе переписка откроется, как раньше.</p>
+                <button id="logout-wipe-btn" class="btn btn-danger btn-block"><svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg><span>Выйти и стереть данные с устройства</span></button>
+                <p class="field-hint">Ключи шифрования и настройки удалятся с этого устройства, а ваши публичные ключи — с сервера. Старые зашифрованные сообщения здесь больше не откроются, а собеседникам придётся заново сверять с вами коды безопасности.</p>
+            </div>
+        </div>
+    </div>
+
+    <div id="send-files-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="send-files-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="send-files-title">Отправить файлы</h3>
+                <button class="close-modal icon-btn" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+            </div>
+            <div class="modal-body">
+                <ul id="send-files-list" class="send-files-list"></ul>
+                <p class="field-hint">Перед отправкой из файлов удаляются метаданные: геометки, EXIF, теги. Имена фото, видео и аудио заменяются обезличенными.</p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" type="button" data-close-modal>Отмена</button>
+                <button id="send-files-btn" class="btn btn-primary" type="button" data-autofocus><svg class="icon" aria-hidden="true"><use href="#i-send"></use></svg><span>Отправить</span></button>
+            </div>
+        </div>
+    </div>
+
     <div id="message-menu" class="context-menu hidden" role="menu">
-        <button id="reply-message-btn" class="menu-item" role="menuitem">↩️ Ответить</button>
-        <button id="edit-message-btn" class="menu-item" role="menuitem">✏️ Редактировать</button>
-        <button id="delete-message-btn" class="menu-item danger" role="menuitem">🗑 Удалить</button>
+        <div id="reaction-picker" class="reaction-picker" role="group" aria-label="Реакции"></div>
+        <button id="reply-message-btn" class="menu-item" role="menuitem"><svg class="icon" aria-hidden="true"><use href="#i-reply"></use></svg><span>Ответить</span></button>
+        <button id="copy-message-btn" class="menu-item" role="menuitem"><svg class="icon" aria-hidden="true"><use href="#i-copy"></use></svg><span>Копировать</span></button>
+        <button id="edit-message-btn" class="menu-item" role="menuitem"><svg class="icon" aria-hidden="true"><use href="#i-pencil"></use></svg><span>Редактировать</span></button>
+        <button id="delete-message-btn" class="menu-item danger" role="menuitem"><svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg><span>Удалить</span></button>
+    </div>
+
+    <div id="chat-item-menu" class="context-menu hidden" role="menu" aria-label="Действия с чатом">
+        <button id="ctx-pin-btn" class="menu-item" role="menuitem"></button>
+        <button id="ctx-mute-btn" class="menu-item" role="menuitem"></button>
+        <button id="ctx-archive-btn" class="menu-item" role="menuitem"></button>
     </div>
 
     <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
@@ -280,6 +492,7 @@
     <script src="mlkem.js"></script>
     <script src="media-sanitizer.js"></script>
     <script src="e2ee.js"></script>
+    <script src="vendor/qrcode.js"></script>
     <script src="script.js"></script>
 </body>
 </html>

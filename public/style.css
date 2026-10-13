@@ -1,1216 +1,1019 @@
-:root {
-    --primary: #6366f1;
-    --primary-hover: #4f46e5;
-    --primary-dark: #3730a3;
-    --secondary: #8b5cf6;
-    --accent: #ec4899;
-    --success: #10b981;
-    --error: #ef4444;
-    --warning: #f59e0b;
+/* ==========================================================================
+   Nyxo — визуальная система: строгий чёрно-белый монохром.
 
-    /* Dark theme as default */
-    --bg-primary: #0f0f1a;
-    --bg-secondary: #1a1a2e;
-    --bg-tertiary: #25253f;
-    --surface: rgba(26, 26, 46, 0.8);
-    --surface-hover: rgba(37, 37, 63, 0.9);
+   Правила, на которых всё держится:
+   - Только чёрный, белый и серые. Акцент — инверсией (в тёмной теме белое
+     на чёрном), толщиной линии, весом шрифта и иконкой, но не цветом.
+   - Ритм 4 px: отступы, высоты контролов и строк кратны 4.
+   - Линии 1 px, радиусы 6 px (контролы) и 10 px (карточки, пузыри, окна).
+   - Тени только у всплывающего (окна, меню, тосты); градиентов и свечений нет.
+   - Анимации 120–180 мс; prefers-reduced-motion их выключает.
+   - Компоненты пользуются ТОЛЬКО переменными из блока токенов ниже; цвета
+     в остальном файле — лишь там, где они не зависят от темы (QR, тона аватаров).
+   ========================================================================== */
 
-    --text-primary: #f8fafc;
-    --text-secondary: #cbd5e1;
-    --text-tertiary: #94a3b8;
 
-    --border: rgba(148, 163, 184, 0.1);
-    --border-hover: rgba(148, 163, 184, 0.2);
+/* --------------------------------------------------------------------------
+   1. Токены.
+   Тёмная тема — по умолчанию. «Инверсные» блоки (свои сообщения,
+   предупреждения, тосты) получают набор противоположной темы — и всё внутри
+   них (кнопки, реакции, иконки, мета) инвертируется само, без отдельных правил.
+   -------------------------------------------------------------------------- */
 
-    --shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-    --shadow-lg: 0 20px 50px rgba(0, 0, 0, 0.5);
-    --glow: 0 0 20px rgba(99, 102, 241, 0.3);
+:root,
+[data-theme="dark"],
+[data-theme="light"] :is(.message.sent, .e2ee-banner, .banner-warning, .toast, .modal-warning,
+    .member-warning, .members-note, .connection-status.is-offline, .inverse) {
+    color-scheme: dark;
+    --bg: #0a0a0a;
+    --surface: #121212;
+    --surface-2: #1b1b1b;
+    --surface-3: #262626;
+    --border: #2a2a2a;
+    --border-strong: #474747;
+    --text: #fafafa;
+    --text-2: #b3b3b3;
+    --text-3: #8f8f8f;
+    --accent: #fafafa;
+    --accent-fg: #0a0a0a;
+    --overlay: rgba(0, 0, 0, 0.72);
+    --shadow: 0 16px 48px rgba(0, 0, 0, 0.56), 0 2px 8px rgba(0, 0, 0, 0.4);
+
+    /* Служебные (не из контракта, U их не использует напрямую). */
+    --hover: rgba(255, 255, 255, 0.06);
+    --pressed: rgba(255, 255, 255, 0.11);
+    --focus: #fafafa;
+    --glyph-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23b3b3b3' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    --glyph-search: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238f8f8f' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m21 21-4.34-4.34'/%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3C/svg%3E");
 }
 
-* {
+[data-theme="light"],
+:root:not([data-theme="light"]) :is(.message.sent, .e2ee-banner, .banner-warning, .toast, .modal-warning,
+    .member-warning, .members-note, .connection-status.is-offline, .inverse) {
+    color-scheme: light;
+    --bg: #ffffff;
+    --surface: #f6f6f6;
+    --surface-2: #eeeeee;
+    --surface-3: #e2e2e2;
+    --border: #e2e2e2;
+    --border-strong: #b8b8b8;
+    --text: #0a0a0a;
+    --text-2: #474747;
+    --text-3: #636363;
+    --accent: #0a0a0a;
+    --accent-fg: #ffffff;
+    --overlay: rgba(10, 10, 10, 0.4);
+    --shadow: 0 16px 48px rgba(0, 0, 0, 0.14), 0 2px 8px rgba(0, 0, 0, 0.08);
+
+    --hover: rgba(0, 0, 0, 0.05);
+    --pressed: rgba(0, 0, 0, 0.09);
+    --focus: #0a0a0a;
+    --glyph-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23474747' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    --glyph-search: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23636363' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m21 21-4.34-4.34'/%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3C/svg%3E");
+}
+
+/* Не зависящее от темы: геометрия, шрифты, движение, маски-иконки для
+   псевдоэлементов (цвет маски не важен — красится background-color). */
+:root {
+    --radius: 10px;
+    --radius-sm: 6px;
+    --font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+    --dur: 150ms;
+    --dur-fast: 120ms;
+    --dur-slow: 180ms;
+    --ease: cubic-bezier(0.2, 0, 0, 1);
+
+    --sidebar-w: 320px;
+    --header-h: 64px;
+    --control-h: 40px;
+    --control-h-sm: 32px;
+    --feed-max: 880px;
+
+    --mask-alert: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3'/%3E%3Cpath d='M12 9v4'/%3E%3Cpath d='M12 17h.01'/%3E%3C/svg%3E");
+    --mask-info: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='M12 16v-4'/%3E%3Cpath d='M12 8h.01'/%3E%3C/svg%3E");
+    --mask-check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E");
+    --mask-unlock: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect width='18' height='11' x='3' y='11' rx='2'/%3E%3Cpath d='M7 11V7a5 5 0 0 1 9.9-1'/%3E%3C/svg%3E");
+    --mask-upload: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3v12'/%3E%3Cpath d='m17 8-5-5-5 5'/%3E%3Cpath d='M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'/%3E%3C/svg%3E");
+}
+
+
+/* --------------------------------------------------------------------------
+   2. Основа.
+   -------------------------------------------------------------------------- */
+
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
     margin: 0;
     padding: 0;
-    box-sizing: border-box;
+}
+
+html {
+    height: 100%;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+    accent-color: var(--accent);
+    background: var(--bg);
 }
 
 body {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
-    color: var(--text-primary);
-    height: 100vh;
+    height: 100%;
     overflow: hidden;
-    position: relative;
-}
-
-/* Background.
-   Раньше этот полноэкранный слой бесконечно анимировался (scale + opacity).
-   Поверх него лежат элементы с backdrop-filter: blur(), и браузер был
-   вынужден пересчитывать размытие ВСЕГО интерфейса на каждом кадре —
-   постоянная нагрузка на GPU/CPU, лаги при прокрутке и наборе текста. */
-body::before {
-    content: '';
-    position: fixed;
-    inset: 0;
-    background:
-        radial-gradient(circle at 20% 50%, rgba(99, 102, 241, 0.1) 0%, transparent 50%),
-        radial-gradient(circle at 80% 80%, rgba(139, 92, 246, 0.1) 0%, transparent 50%),
-        radial-gradient(circle at 40% 90%, rgba(236, 72, 153, 0.05) 0%, transparent 50%);
-    pointer-events: none;
-    z-index: 0;
-}
-
-.hidden { display: none !important; }
-
-/* Authentication Screen */
-.auth-screen {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 100vh;
-    padding: 20px;
-    position: relative;
-    z-index: 1;
-}
-
-.auth-container {
-    background: rgba(26, 26, 46, 0.7);
-    backdrop-filter: blur(20px) saturate(180%);
-    -webkit-backdrop-filter: blur(20px) saturate(180%);
-    border: 1px solid rgba(148, 163, 184, 0.1);
-    border-radius: 24px;
-    padding: 48px;
-    width: 100%;
-    max-width: 440px;
-    box-shadow: var(--shadow-lg);
-    animation: slideUp 0.6s ease-out;
-}
-
-@keyframes slideUp {
-    from { opacity: 0; transform: translateY(30px); }
-    to { opacity: 1; transform: translateY(0); }
-}
-
-.auth-logo {
-    text-align: center;
-    margin-bottom: 40px;
-}
-
-.auth-logo h1 {
-    font-size: 32px;
-    font-weight: 700;
-    margin: 16px 0 8px;
-    background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-}
-
-.auth-logo p {
-    color: var(--text-secondary);
-    font-size: 15px;
-}
-
-.logo-icon {
-    font-size: 56px;
-    filter: drop-shadow(0 4px 12px rgba(99, 102, 241, 0.4));
-}
-
-.auth-tabs {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 32px;
-    background: rgba(37, 37, 63, 0.5);
-    padding: 6px;
-    border-radius: 16px;
-    border: 1px solid var(--border);
-}
-
-.auth-tab {
-    flex: 1;
-    padding: 12px 16px;
-    border: none;
-    background: transparent;
-    border-radius: 12px;
-    cursor: pointer;
-    font-weight: 600;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
     font-size: 14px;
-    color: var(--text-tertiary);
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    line-height: 20px;
+    font-weight: 400;
+    font-feature-settings: "cv11", "calt";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    -webkit-tap-highlight-color: transparent;
 }
 
-.auth-tab.active {
-    background: linear-gradient(135deg, var(--primary) 0%, var(--primary-hover) 100%);
-    color: white;
-    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
-    transform: translateY(-1px);
+.hidden,
+[hidden] {
+    display: none !important;
 }
 
-.auth-tab:hover:not(.active) {
-    background: rgba(99, 102, 241, 0.1);
-    color: var(--text-primary);
+/* Только для скринридера. */
+.sr-only,
+.visually-hidden {
+    position: absolute !important;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
 }
 
-.auth-form {
-    display: none;
-}
-
-.auth-form.active {
-    display: block;
-    animation: fadeIn 0.4s ease;
-}
-
-@keyframes fadeIn {
-    from { opacity: 0; }
-    to { opacity: 1; }
-}
-
-.form-group {
-    margin-bottom: 20px;
-}
-
-.form-group label,
-.form-label {
-    display: block;
-    margin-bottom: 8px;
-    font-size: 14px;
-    font-weight: 500;
-    color: var(--text-secondary);
-}
-
-.form-group input {
-    width: 100%;
-    padding: 14px 18px;
-    border: 1px solid var(--border);
-    background: rgba(37, 37, 63, 0.5);
-    border-radius: 12px;
-    font-size: 15px;
-    color: var(--text-primary);
-    transition: all 0.3s ease;
-}
-
-.form-group input:focus {
-    outline: none;
-    border-color: var(--primary);
-    background: rgba(37, 37, 63, 0.8);
-    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
-}
-
-.form-group input::placeholder {
-    color: var(--text-tertiary);
-}
-
-.auth-btn {
-    width: 100%;
-    padding: 16px;
-    background: linear-gradient(135deg, var(--primary) 0%, var(--primary-hover) 100%);
-    color: white;
-    border: none;
-    border-radius: 12px;
-    font-size: 16px;
+h1, h2, h3, h4, h5, h6 {
     font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--text);
+}
+
+a {
+    color: inherit;
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
+}
+
+a:hover {
+    text-decoration-thickness: 2px;
+}
+
+button,
+input,
+select,
+textarea {
+    font: inherit;
+    color: inherit;
+    letter-spacing: inherit;
+}
+
+button {
+    background: none;
+    border: 0;
     cursor: pointer;
-    transition: all 0.3s ease;
-    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
 }
 
-.auth-btn:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4);
+button:disabled {
+    cursor: not-allowed;
 }
 
-.auth-btn:active {
-    transform: translateY(0);
+img,
+video,
+canvas,
+svg {
+    max-width: 100%;
 }
 
-/* Кнопка на время PoW-проверки ("Проверка…") и других долгих операций. */
-.auth-btn:disabled,
-.danger-btn:disabled {
-    opacity: 0.7;
-    cursor: progress;
-    transform: none;
+/* fieldset — просто группа полей: без рамки и «врезки» легенды. float
+   делает легенду обычным блоком, который участвует во flex/grid (gap). */
+fieldset {
+    min-width: 0;
+    border: 0;
 }
 
-/* Видимый фокус для клавиатуры — у кнопок и пунктов списка чатов. */
-button:focus-visible,
-.chat-item:focus-visible {
-    outline: 2px solid var(--primary);
+fieldset > legend {
+    float: left;
+    width: 100%;
+    padding: 0;
+}
+
+fieldset > legend + * {
+    clear: both;
+}
+
+code,
+kbd,
+samp {
+    font-family: var(--font-mono);
+    font-size: 0.93em;
+}
+
+::selection {
+    background: var(--text);
+    color: var(--bg);
+}
+
+/* Фокус с клавиатуры — чёткая обводка 2 px цветом текста. */
+:focus-visible {
+    outline: 2px solid var(--focus);
     outline-offset: 2px;
 }
 
-.auth-btn.secondary {
-    background: rgba(37, 37, 63, 0.8);
-    color: var(--text-primary);
-    border: 1px solid var(--border);
-    box-shadow: none;
-}
-
-.auth-btn.secondary:hover {
-    background: rgba(37, 37, 63, 1);
-    border-color: var(--border-hover);
-}
-
-.anonymous-btn {
-    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-    color: #e2e8f0;
-    box-shadow: 0 4px 12px rgba(15, 23, 42, 0.5);
-}
-
-.anonymous-btn:hover {
-    box-shadow: 0 6px 20px rgba(15, 23, 42, 0.6);
-}
-
-.anonymous-hint {
-    text-align: center;
-    font-size: 13px;
-    color: var(--text-tertiary);
-    margin-top: 10px;
-    font-style: italic;
-}
-
-.auth-divider {
-    display: flex;
-    align-items: center;
-    margin: 24px 0;
-    color: var(--text-tertiary);
-    font-size: 13px;
-}
-
-.auth-divider::before,
-.auth-divider::after {
-    content: '';
-    flex: 1;
-    height: 1px;
-    background: var(--border);
-}
-
-.auth-divider span {
-    padding: 0 16px;
-}
-
-/* Main App */
-.app {
-    display: flex;
-    height: 100vh;
-    position: relative;
-    z-index: 1;
-}
-
-.sidebar {
-    width: 340px;
-    background: rgba(26, 26, 46, 0.8);
-    backdrop-filter: blur(20px);
-    border-right: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    position: relative;
-}
-
-.sidebar-header {
-    padding: 20px 24px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    border-bottom: 1px solid var(--border);
-    background: rgba(37, 37, 63, 0.5);
-}
-
-.logo-small {
-    font-weight: 700;
-    font-size: 20px;
-    background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-}
-
-.search-container {
-    padding: 16px 20px;
-}
-
-.search-container input {
-    width: 100%;
-    padding: 12px 16px 12px 40px;
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    font-size: 14px;
-    background: rgba(37, 37, 63, 0.5);
-    color: var(--text-primary);
-    transition: all 0.3s ease;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='%2394a3b8' viewBox='0 0 16 16'%3E%3Cpath d='M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: 14px center;
-}
-
-.search-container input:focus {
+:focus:not(:focus-visible) {
     outline: none;
-    border-color: var(--primary);
-    background-color: rgba(37, 37, 63, 0.8);
-    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
 }
 
-.chats-list {
-    flex: 1;
-    overflow-y: auto;
-    padding: 8px 12px;
+/* Скроллбары: тонкие, серые, без стрелок. В Chrome 121+ и Firefox работают
+   стандартные свойства, ::-webkit-scrollbar — для Safari и старых Chromium. */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
 }
 
-.chats-list::-webkit-scrollbar {
-    width: 6px;
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
 }
 
-.chats-list::-webkit-scrollbar-track {
+::-webkit-scrollbar-track {
     background: transparent;
 }
 
-.chats-list::-webkit-scrollbar-thumb {
-    background: rgba(148, 163, 184, 0.2);
-    border-radius: 10px;
+::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    background-clip: padding-box;
+    border: 3px solid transparent;
+    border-radius: 8px;
 }
 
-.chats-list::-webkit-scrollbar-thumb:hover {
-    background: rgba(148, 163, 184, 0.3);
+::-webkit-scrollbar-thumb:hover {
+    background-color: var(--text-3);
 }
 
-.chat-item {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    padding: 14px;
-    border-radius: 14px;
-    cursor: pointer;
-    transition: all 0.3s ease;
+::-webkit-scrollbar-corner {
     background: transparent;
-    border: 1px solid transparent;
 }
 
-.chat-item:hover {
-    background: rgba(99, 102, 241, 0.08);
-    border-color: rgba(99, 102, 241, 0.2);
-    transform: translateX(4px);
+/* Смена темы: один кадр без transition (см. theme.js). */
+.theme-switching *,
+.theme-switching *::before,
+.theme-switching *::after {
+    transition: none !important;
 }
 
-.chat-item.active {
-    background: rgba(99, 102, 241, 0.15);
-    border-color: var(--primary);
+/* Элементы, видимые только в одной теме (например, sun/moon в .theme-toggle). */
+[data-theme="light"] .show-dark,
+[data-theme="dark"] .show-light,
+:root:not([data-theme]) .show-light {
+    display: none !important;
 }
 
-.chat-avatar-small {
-    width: 52px;
-    height: 52px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: white;
-    font-weight: 700;
-    font-size: 20px;
-    flex-shrink: 0;
-    background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
-    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+@keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
 }
 
-.chat-info {
-    flex: 1;
-    min-width: 0;
+@keyframes rise-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: none; }
 }
 
-.chat-name {
-    font-weight: 600;
-    font-size: 15px;
-    margin-bottom: 4px;
-    white-space: nowrap;
+@keyframes drop-in {
+    from { opacity: 0; transform: translateY(-4px) scale(0.98); }
+    to { opacity: 1; transform: none; }
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+
+/* --------------------------------------------------------------------------
+   3. Иконки (спрайт из icons.js).
+   Обводка и толщина задаются здесь, а не атрибутами <symbol>: так работают
+   .icon-fill и более толстая линия у мелких размеров.
+   -------------------------------------------------------------------------- */
+
+/* Спрайт прячется без display:none — иначе часть браузеров не рисует <use>. */
+.icon-sprite {
+    position: absolute;
+    width: 0;
+    height: 0;
     overflow: hidden;
-    text-overflow: ellipsis;
-    color: var(--text-primary);
+    pointer-events: none;
 }
 
-.chat-last {
-    font-size: 13px;
-    color: var(--text-tertiary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+.icon {
+    display: inline-block;
+    flex: none;
+    width: 20px;
+    height: 20px;
+    vertical-align: middle;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.75;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    overflow: visible;
+    /* Клик по иконке в кнопке — это клик по кнопке (event.target — кнопка). */
+    pointer-events: none;
 }
 
-.chat-badge {
-    background: linear-gradient(135deg, var(--primary) 0%, var(--primary-hover) 100%);
-    color: white;
-    font-size: 11px;
-    font-weight: 700;
-    min-width: 22px;
-    height: 22px;
-    border-radius: 11px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0 7px;
-    box-shadow: 0 2px 8px rgba(99, 102, 241, 0.4);
+/* Размер, заданный явно, важнее контекстного (меню, флаги чата и т. п.). */
+svg.icon.icon-sm {
+    width: 16px;
+    height: 16px;
+    stroke-width: 2;
 }
 
-.sidebar-footer {
-    padding: 16px 20px;
-    border-top: 1px solid var(--border);
-    display: flex;
-    gap: 10px;
-    background: rgba(37, 37, 63, 0.5);
+svg.icon.icon-md {
+    width: 20px;
+    height: 20px;
+    stroke-width: 1.75;
 }
 
+svg.icon.icon-lg {
+    width: 24px;
+    height: 24px;
+    stroke-width: 1.75;
+}
+
+svg.icon.icon-xl {
+    width: 32px;
+    height: 32px;
+    stroke-width: 1.5;
+}
+
+/* Тональная заливка «в тон» (реакции): контур цвета текста + прозрачная
+   заливка того же цвета — детали лиц (глаза, рот) остаются видны. */
+.icon-fill {
+    fill: currentColor;
+    fill-opacity: 0.24;
+}
+
+.spin {
+    animation: spin 0.9s linear infinite;
+    transform-origin: 50% 50%;
+}
+
+.loading {
+    animation: spin 0.9s linear infinite;
+}
+
+
+/* --------------------------------------------------------------------------
+   4. Кнопки.
+   -------------------------------------------------------------------------- */
+
+.btn,
+.auth-btn,
+.danger-btn,
+.banner-btn,
+.member-code-btn,
 .footer-btn {
-    flex: 1;
-    padding: 12px;
-    background: rgba(37, 37, 63, 0.6);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    cursor: pointer;
-    font-size: 14px;
-    color: var(--text-secondary);
-    transition: all 0.3s ease;
-    font-weight: 500;
-}
-
-.footer-btn:hover {
-    background: rgba(99, 102, 241, 0.1);
-    border-color: var(--primary);
-    color: var(--text-primary);
-    transform: translateY(-2px);
-}
-
-/* Main Content */
-.main-content {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    background: rgba(15, 15, 26, 0.5);
-}
-
-.chat-header {
-    padding: 20px 28px;
-    background: rgba(26, 26, 46, 0.9);
-    backdrop-filter: blur(20px);
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-}
-
-/* Только шапка чата: без .chat-header этот flex-ряд применялся и к
-   .chat-info в списке чатов — имя и последнее сообщение вставали в одну
-   строку, и имя обрезалось до "Room…". */
-.chat-header .chat-info {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    min-width: 0;
-}
-
-.chat-avatar {
-    width: 48px;
-    height: 48px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: white;
-    font-weight: 700;
-    font-size: 18px;
-    background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
-    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
-}
-
-.chat-details h3 {
-    font-size: 17px;
-    margin-bottom: 4px;
-    color: var(--text-primary);
-}
-
-.status {
-    font-size: 13px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-
-.status::before {
-    content: '';
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: currentColor;
-}
-
-.status.online {
-    color: var(--success);
-}
-
-.status.online::before {
-    box-shadow: 0 0 8px var(--success);
-}
-
-.status.offline {
-    color: var(--text-tertiary);
-}
-
-.chat-actions {
-    display: flex;
-    gap: 10px;
-}
-
-/* Messages */
-.chat-messages {
-    flex: 1;
-    overflow-y: auto;
-    padding: 28px;
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-}
-
-.chat-messages::-webkit-scrollbar {
-    width: 8px;
-}
-
-.chat-messages::-webkit-scrollbar-track {
-    background: transparent;
-}
-
-.chat-messages::-webkit-scrollbar-thumb {
-    background: rgba(148, 163, 184, 0.2);
-    border-radius: 10px;
-}
-
-.chat-messages::-webkit-scrollbar-thumb:hover {
-    background: rgba(148, 163, 184, 0.3);
-}
-
-/* У пузыря сообщения больше нет backdrop-filter: blur() — это был
-   отдельный слой с размытием на КАЖДОЕ сообщение (сотни на экране), и
-   прокрутка длинного чата заметно тормозила. Фон пузырей и так почти
-   непрозрачный, визуально разницы нет. Анимация появления — только для
-   новых сообщений, а не для всей истории разом при открытии чата. */
-.message {
-    max-width: 70%;
-    padding: 14px 18px;
-    border-radius: 18px;
-    position: relative;
-}
-
-.message.message-new {
-    animation: messageSlide 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-@keyframes messageSlide {
-    from {
-        opacity: 0;
-        transform: translateY(20px);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
-}
-
-.message.sent {
-    align-self: flex-end;
-    background: linear-gradient(135deg, var(--primary) 0%, var(--primary-hover) 100%);
-    color: white;
-    border-bottom-right-radius: 6px;
-    box-shadow: 0 4px 16px rgba(99, 102, 241, 0.3);
-}
-
-.message.received {
-    align-self: flex-start;
-    background: rgba(26, 26, 46, 0.8);
-    border: 1px solid var(--border);
-    border-bottom-left-radius: 6px;
-    color: var(--text-primary);
-}
-
-.message-content {
-    word-break: break-word;
-}
-
-.message-text {
-    line-height: 1.6;
-    font-size: 15px;
-}
-
-.message-meta {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 8px;
-    font-size: 11px;
-    opacity: 0.7;
-    justify-content: flex-end;
-}
-
-.message-time {
-    font-weight: 500;
-}
-
-.message-status {
-    font-weight: 600;
-}
-
-.message-image {
-    max-width: 300px;
-    border-radius: 14px;
-    cursor: pointer;
-    display: block;
-    margin-bottom: 8px;
-    transition: transform 0.3s ease;
-}
-
-.message-image:hover {
-    transform: scale(1.02);
-}
-
-.message-video,
-.message-audio {
-    max-width: 300px;
-    border-radius: 12px;
-    display: block;
-    margin-bottom: 8px;
-}
-
-.file-attachment a {
-    color: inherit;
-    text-decoration: none;
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 8px;
-    padding: 10px 14px;
-    background: rgba(0, 0, 0, 0.15);
-    border-radius: 10px;
+    height: var(--control-h);
+    padding: 0 16px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
     font-size: 14px;
-    transition: background 0.3s ease;
-}
-
-.file-attachment a:hover {
-    background: rgba(0, 0, 0, 0.25);
-}
-
-.reactions {
-    display: flex;
-    gap: 6px;
-    margin-top: 8px;
-    flex-wrap: wrap;
-}
-
-.reaction {
-    background: rgba(0, 0, 0, 0.2);
-    padding: 4px 10px;
-    border-radius: 12px;
-    font-size: 14px;
-    transition: all 0.3s ease;
-    cursor: pointer;
-}
-
-.reaction:hover {
-    background: rgba(0, 0, 0, 0.3);
-    transform: scale(1.1);
-}
-
-.reply-to {
-    background: rgba(0, 0, 0, 0.15);
-    padding: 8px 12px;
-    border-radius: 10px;
-    margin-bottom: 8px;
-    font-size: 13px;
-    border-left: 3px solid currentColor;
-    opacity: 0.8;
-}
-
-.edited-label {
-    font-size: 11px;
-    opacity: 0.6;
-    margin-top: 6px;
-    text-align: right;
-    font-style: italic;
-}
-
-/* Message Input */
-.message-input-container {
-    padding: 20px 28px;
-    background: rgba(26, 26, 46, 0.9);
-    backdrop-filter: blur(20px);
-    border-top: 1px solid var(--border);
-}
-
-.reply-preview {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 14px;
-    background: rgba(99, 102, 241, 0.1);
-    border-left: 3px solid var(--primary);
-    border-radius: 10px;
-    margin-bottom: 12px;
-    font-size: 13px;
-    color: var(--text-secondary);
-}
-
-.input-wrapper {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-}
-
-.input-wrapper input {
-    flex: 1;
-    padding: 14px 18px;
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    font-size: 15px;
-    background: rgba(37, 37, 63, 0.6);
-    color: var(--text-primary);
-    transition: all 0.3s ease;
-}
-
-.input-wrapper input:focus {
-    outline: none;
-    border-color: var(--primary);
-    background: rgba(37, 37, 63, 0.9);
-    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
-}
-
-.input-wrapper input::placeholder {
-    color: var(--text-tertiary);
-}
-
-.icon-btn {
-    width: 44px;
-    height: 44px;
-    border: none;
-    background: rgba(37, 37, 63, 0.8);
-    border-radius: 50%;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 20px;
-    transition: all 0.3s ease;
-    color: var(--text-secondary);
-    border: 1px solid var(--border);
-}
-
-.icon-btn:hover {
-    background: rgba(99, 102, 241, 0.2);
-    border-color: var(--primary);
-    color: var(--text-primary);
-    transform: scale(1.05);
-}
-
-.icon-btn:active {
-    transform: scale(0.95);
-}
-
-.icon-btn:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
-    transform: none;
-}
-
-.icon-btn:disabled:hover {
-    background: rgba(37, 37, 63, 0.8);
-    border-color: var(--border);
-}
-
-/* E2EE */
-.icon-btn.e2ee-active {
-    background: rgba(34, 197, 94, 0.15);
-    border-color: rgba(34, 197, 94, 0.5);
-    color: #22c55e;
-}
-
-.icon-btn.e2ee-active:hover {
-    background: rgba(34, 197, 94, 0.25);
-    border-color: #22c55e;
-}
-
-/* Ключи устройства не удалось подготовить — шифрование недоступно. */
-.icon-btn.e2ee-unavailable {
-    background: rgba(245, 158, 11, 0.15);
-    border-color: rgba(245, 158, 11, 0.5);
-    color: var(--warning);
-}
-
-.icon-btn.e2ee-unavailable:hover {
-    background: rgba(245, 158, 11, 0.25);
-    border-color: var(--warning);
-}
-
-/* Баннер над лентой: у участника сменился ключ шифрования. */
-.e2ee-banner {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    padding: 12px 28px;
-    background: rgba(245, 158, 11, 0.12);
-    border-bottom: 1px solid rgba(245, 158, 11, 0.4);
-    color: #fcd34d;
-    font-size: 14px;
-    line-height: 1.5;
-}
-
-.e2ee-banner-text {
-    flex: 1;
-    min-width: 0;
-}
-
-.banner-btn {
-    flex-shrink: 0;
-    padding: 8px 14px;
-    background: rgba(245, 158, 11, 0.2);
-    border: 1px solid rgba(245, 158, 11, 0.6);
-    border-radius: 10px;
-    color: #fde68a;
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.3s ease;
-}
-
-.banner-btn:hover {
-    background: rgba(245, 158, 11, 0.3);
-}
-
-/* Локальные служебные строки в ленте (не сообщения сервера). */
-.system-notice {
-    align-self: center;
-    max-width: 85%;
-    padding: 8px 14px;
-    background: rgba(37, 37, 63, 0.7);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    color: var(--text-secondary);
-    font-size: 13px;
+    line-height: 20px;
+    font-weight: 500;
     text-align: center;
-    line-height: 1.5;
-}
-
-/* Чужое открытое сообщение в комнате, где у меня включено E2EE. */
-.plaintext-label {
-    color: var(--warning);
-    font-weight: 600;
+    text-decoration: none;
     white-space: nowrap;
-}
-
-/* Зашифрованное вложение: заглушка, пока файл скачивается и расшифровывается. */
-.encrypted-attachment {
-    margin-bottom: 8px;
-}
-
-.attachment-status {
-    display: inline-block;
-    padding: 10px 14px;
-    background: rgba(0, 0, 0, 0.15);
-    border-radius: 10px;
-    font-size: 14px;
-}
-
-.attachment-status.e2ee-failed {
-    font-style: italic;
-    opacity: 0.7;
-}
-
-/* Кнопка "назад к списку чатов" — только на мобильных (см. @media ниже). */
-.back-btn {
-    display: none;
-    flex-shrink: 0;
-}
-
-.search-section-title {
-    padding: 12px 14px 6px;
-    font-size: 12px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-tertiary);
-}
-
-.message-lock {
-    opacity: 0.8;
-}
-
-.message-text.e2ee-failed {
-    font-style: italic;
-    opacity: 0.6;
-}
-
-/* Empty State */
-.empty-state {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-tertiary);
-    gap: 16px;
-}
-
-.empty-icon {
-    font-size: 72px;
-    opacity: 0.5;
-}
-
-.empty-state h2 {
-    color: var(--text-primary);
-    font-size: 24px;
-}
-
-/* Modals */
-.modal {
-    position: fixed;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 100;
-    animation: modalFade 0.3s ease;
-}
-
-@keyframes modalFade {
-    from { opacity: 0; }
-    to { opacity: 1; }
-}
-
-.modal-content {
-    background: rgba(26, 26, 46, 0.95);
-    backdrop-filter: blur(30px);
-    border: 1px solid var(--border);
-    border-radius: 20px;
-    width: 90%;
-    max-width: 460px;
-    max-height: 90vh;
-    overflow-y: auto;
-    box-shadow: var(--shadow-lg);
-    z-index: 101;
-    animation: modalSlide 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-@keyframes modalSlide {
-    from {
-        opacity: 0;
-        transform: translateY(-30px) scale(0.95);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0) scale(1);
-    }
-}
-
-.modal-header {
-    padding: 24px 28px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    background: rgba(37, 37, 63, 0.5);
-}
-
-.modal-header h3 {
-    font-size: 20px;
-    color: var(--text-primary);
-}
-
-.close-modal {
-    background: none;
-    border: none;
-    font-size: 28px;
     cursor: pointer;
-    color: var(--text-tertiary);
-    width: 36px;
-    height: 36px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 50%;
-    transition: all 0.3s ease;
+    user-select: none;
+    transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease),
+        color var(--dur) var(--ease), opacity var(--dur) var(--ease);
 }
 
-.close-modal:hover {
-    background: rgba(239, 68, 68, 0.1);
-    color: var(--error);
-    transform: rotate(90deg);
+.btn > .icon,
+.auth-btn > .icon,
+.danger-btn > .icon,
+.footer-btn > .icon {
+    width: 18px;
+    height: 18px;
+    margin-left: -2px;
 }
 
-.modal-body {
-    padding: 24px 28px;
+/* Основная — заливка акцентом (инверсия фона). */
+.btn-primary,
+.auth-btn {
+    background: var(--accent);
+    color: var(--accent-fg);
+    border-color: var(--accent);
 }
 
-.overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.7);
-    backdrop-filter: blur(4px);
-    z-index: 99;
-    animation: overlayFade 0.3s ease;
+.btn-primary:hover,
+.auth-btn:hover {
+    background: color-mix(in srgb, var(--accent) 86%, var(--bg));
+    border-color: color-mix(in srgb, var(--accent) 86%, var(--bg));
 }
 
-@keyframes overlayFade {
-    from { opacity: 0; }
-    to { opacity: 1; }
+.btn-primary:active,
+.auth-btn:active {
+    background: color-mix(in srgb, var(--accent) 74%, var(--bg));
+    border-color: color-mix(in srgb, var(--accent) 74%, var(--bg));
 }
 
-.danger-btn {
-    width: 100%;
-    padding: 14px;
-    background: linear-gradient(135deg, var(--error) 0%, #dc2626 100%);
-    color: white;
-    border: none;
-    border-radius: 12px;
-    font-size: 15px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.3s ease;
-    box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+/* Второстепенная — поверхность с рамкой. */
+.btn-secondary,
+.auth-btn.secondary,
+.anonymous-btn,
+.member-code-btn {
+    background: var(--surface-2);
+    color: var(--text);
+    border-color: var(--border-strong);
 }
 
-.danger-btn:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 6px 20px rgba(239, 68, 68, 0.4);
+.btn-secondary:hover,
+.auth-btn.secondary:hover,
+.anonymous-btn:hover,
+.member-code-btn:hover {
+    background: var(--surface-3);
+    border-color: var(--text-3);
 }
 
-.danger-btn:disabled:hover {
-    transform: none;
+.btn-secondary:active,
+.auth-btn.secondary:active,
+.anonymous-btn:active,
+.member-code-btn:active {
+    background: var(--surface-3);
+    border-color: var(--text-2);
 }
 
-/* Менее заметный вариант — для "Удалить аккаунт" в профиле. */
-.danger-btn.outline {
+/* Призрачная — без фона, для третьестепенных действий. */
+.btn-ghost,
+.footer-btn {
     background: transparent;
-    color: var(--error);
-    border: 1px solid rgba(239, 68, 68, 0.5);
-    box-shadow: none;
+    color: var(--text-2);
+    border-color: transparent;
+}
+
+.btn-ghost:hover,
+.footer-btn:hover {
+    background: var(--hover);
+    color: var(--text);
+}
+
+.btn-ghost:active,
+.footer-btn:active {
+    background: var(--pressed);
+    color: var(--text);
+}
+
+/* Опасная — в монохроме без красного: полная обводка цветом текста,
+   полужирный текст и иконка; при наведении — инверсия. */
+.btn-danger,
+.danger-btn {
+    background: transparent;
+    color: var(--text);
+    border-color: var(--text);
+    font-weight: 600;
+}
+
+.btn-danger:hover,
+.danger-btn:hover {
+    background: var(--text);
+    color: var(--bg);
+}
+
+.btn-danger:active,
+.danger-btn:active {
+    background: color-mix(in srgb, var(--text) 82%, var(--bg));
+    border-color: color-mix(in srgb, var(--text) 82%, var(--bg));
+    color: var(--bg);
+}
+
+/* Тихий вариант опасной кнопки («Удалить аккаунт» в профиле). */
+.danger-btn.outline {
+    color: var(--text-2);
+    border-color: var(--border-strong);
+    font-weight: 500;
 }
 
 .danger-btn.outline:hover {
-    background: rgba(239, 68, 68, 0.1);
+    background: transparent;
+    color: var(--text);
+    border-color: var(--text);
+    text-decoration: underline;
+    text-underline-offset: 3px;
 }
 
-.modal-warning {
-    margin-bottom: 20px;
-    padding: 12px 14px;
-    background: rgba(239, 68, 68, 0.1);
-    border: 1px solid rgba(239, 68, 68, 0.3);
-    border-radius: 12px;
-    color: var(--text-secondary);
-    font-size: 14px;
-    line-height: 1.5;
+.btn-sm {
+    height: var(--control-h-sm);
+    padding: 0 12px;
+    gap: 6px;
+    font-size: 13px;
 }
 
-.modal-content.modal-wide {
-    max-width: 560px;
+.btn-sm > .icon {
+    width: 16px;
+    height: 16px;
+    stroke-width: 2;
 }
 
-/* Profile */
-.profile-info {
+.btn-block,
+.auth-btn,
+.danger-btn {
     display: flex;
-    align-items: center;
-    gap: 18px;
-    margin-bottom: 24px;
+    width: 100%;
 }
 
-.profile-avatar {
-    width: 72px;
-    height: 72px;
-    border-radius: 50%;
-    display: flex;
+.auth-btn {
+    height: 44px;
+    font-weight: 600;
+}
+
+.btn:disabled,
+.btn[aria-disabled="true"],
+.auth-btn:disabled,
+.danger-btn:disabled,
+.banner-btn:disabled,
+.member-code-btn:disabled,
+.footer-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
+.btn[aria-busy="true"],
+.auth-btn[aria-busy="true"] {
+    cursor: progress;
+}
+
+/* Квадратная кнопка-иконка. Эмодзи-содержимое старой разметки тоже
+   центрируется (font-size), пока его не заменили иконками. */
+.icon-btn,
+.close-modal {
+    position: relative;
+    display: inline-flex;
     align-items: center;
     justify-content: center;
-    color: white;
-    font-size: 28px;
-    font-weight: 700;
-    background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
-    box-shadow: 0 4px 16px rgba(99, 102, 241, 0.4);
-}
-
-.profile-details h4 {
-    font-size: 20px;
-    margin-bottom: 6px;
-    color: var(--text-primary);
-}
-
-.profile-details p {
-    color: var(--text-secondary);
-    font-size: 14px;
-    margin-bottom: 4px;
-}
-
-.profile-code {
-    font-family: 'JetBrains Mono', 'Courier New', monospace;
-    background: rgba(99, 102, 241, 0.1);
-    padding: 6px 12px;
-    border-radius: 8px;
-    margin-top: 8px;
-    display: inline-block;
-    font-size: 13px;
-    border: 1px solid rgba(99, 102, 241, 0.2);
-}
-
-.anon-badge {
-    display: inline-block;
-    margin-top: 10px;
-    padding: 6px 14px;
-    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-    color: #e2e8f0;
-    border-radius: 20px;
-    font-size: 12px;
-    font-weight: 600;
-    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.4);
-}
-
-.color-picker {
-    display: flex;
-    gap: 12px;
-    flex-wrap: wrap;
-}
-
-.color-option {
-    width: 40px;
-    height: 40px;
-    border-radius: 50%;
-    border: 3px solid transparent;
+    flex: none;
+    width: var(--control-h);
+    height: var(--control-h);
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-2);
+    font-size: 18px;
+    line-height: 1;
     cursor: pointer;
-    transition: all 0.3s ease;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+    transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease),
+        color var(--dur) var(--ease);
 }
 
-.color-option:hover {
-    transform: scale(1.15);
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+.icon-btn:hover,
+.close-modal:hover {
+    background: var(--hover);
+    color: var(--text);
 }
 
-.color-option.active {
-    border-color: var(--text-primary);
-    box-shadow: 0 0 0 2px var(--bg-primary), 0 0 0 4px var(--text-primary);
+.icon-btn:active,
+.close-modal:active {
+    background: var(--pressed);
+    color: var(--text);
 }
 
-/* Цвета образцов — здесь, а не в style="..." разметки: CSP style-src
-   без 'unsafe-inline' инлайновые стили блокирует. */
-.color-option[data-color="#667EEA"] { background: #667EEA; }
-.color-option[data-color="#F093FB"] { background: #F093FB; }
-.color-option[data-color="#4FACFE"] { background: #4FACFE; }
-.color-option[data-color="#43E97B"] { background: #43E97B; }
-.color-option[data-color="#FA709A"] { background: #FA709A; }
-.color-option[data-color="#FFD93D"] { background: #FFD93D; }
-
-/* Настройки-переключатели в профиле */
-.settings-row {
-    margin-bottom: 20px;
+.icon-btn.is-active,
+.icon-btn[aria-pressed="true"],
+.icon-btn.e2ee-active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-fg);
 }
 
-.switch-row {
+.icon-btn.is-active:hover,
+.icon-btn[aria-pressed="true"]:hover,
+.icon-btn.e2ee-active:hover {
+    background: color-mix(in srgb, var(--accent) 86%, var(--bg));
+    color: var(--accent-fg);
+}
+
+/* Шифрование недоступно — пунктир: «что-то не так», без цвета. */
+.icon-btn.e2ee-unavailable {
+    border: 1px dashed var(--text-2);
+    color: var(--text);
+}
+
+.icon-btn:disabled,
+.icon-btn[aria-disabled="true"] {
+    opacity: 0.35;
+    cursor: not-allowed;
+    background: transparent;
+    color: var(--text-2);
+}
+
+.icon-btn-sm,
+.close-modal {
+    width: var(--control-h-sm);
+    height: var(--control-h-sm);
+    font-size: 16px;
+}
+
+.close-modal {
+    font-size: 24px;
+    color: var(--text-3);
+}
+
+.icon-btn-sm .icon,
+.close-modal .icon {
+    width: 18px;
+    height: 18px;
+}
+
+/* Бейдж-счётчик поверх кнопки (например, у .jump-down). */
+.icon-btn > .badge,
+.jump-down > .badge {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+}
+
+
+/* --------------------------------------------------------------------------
+   5. Формы.
+   -------------------------------------------------------------------------- */
+
+.field,
+.form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.field-label,
+.form-label,
+.form-group > label:not(.toggle-row):not(.radio-row):not(.switch-row) {
+    display: block;
+    font-size: 13px;
+    line-height: 20px;
+    font-weight: 500;
+    color: var(--text-2);
+}
+
+.field-hint {
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-3);
+}
+
+legend.field-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+legend.field-label .icon {
+    color: var(--text);
+}
+
+/* Заголовок раздела в окне («Журнал безопасности», «Ваши заявки»). */
+h4.field-label {
+    margin: 0 0 8px;
+    font-size: 11px;
+    line-height: 16px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-3);
+}
+
+/* В .field промежутки задаёт gap — отступы между вариантами не нужны. */
+.field > .radio-row + .radio-row,
+.field > .toggle-row + .toggle-row {
+    margin-top: 0;
+}
+
+.field > .btn:not(.btn-block) {
+    align-self: flex-start;
+}
+
+.btn + .field-hint,
+.btn-block + .field-hint,
+.auth-btn + .field-hint {
+    margin-top: 8px;
+}
+
+.field-hint + .btn-block,
+.field-hint + .btn {
+    margin-top: 16px;
+}
+
+.input,
+input[type="text"],
+input[type="email"],
+input[type="password"],
+input[type="number"],
+input[type="search"],
+input[type="url"],
+input[type="tel"],
+textarea,
+.select {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    height: var(--control-h);
+    padding: 0 12px;
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-size: 14px;
+    line-height: 20px;
+    transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease),
+        background-color var(--dur) var(--ease);
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+textarea,
+textarea.input {
+    height: auto;
+    min-height: 80px;
+    padding: 8px 12px;
+    resize: vertical;
+}
+
+.input:hover,
+input[type="text"]:hover,
+input[type="email"]:hover,
+input[type="password"]:hover,
+input[type="number"]:hover,
+input[type="search"]:hover,
+input[type="url"]:hover,
+input[type="tel"]:hover,
+textarea:hover,
+.select:hover {
+    border-color: var(--border-strong);
+}
+
+/* Поля ввода получают :focus-visible и от мыши — рамка 1 px + кольцо 1 px =
+   те же 2 px, что и у остального фокуса, но без зазора. */
+.input:focus-visible,
+input[type="text"]:focus-visible,
+input[type="email"]:focus-visible,
+input[type="password"]:focus-visible,
+input[type="number"]:focus-visible,
+input[type="search"]:focus-visible,
+input[type="url"]:focus-visible,
+input[type="tel"]:focus-visible,
+textarea:focus-visible,
+.select:focus-visible {
+    outline: none;
+    border-color: var(--focus);
+    box-shadow: 0 0 0 1px var(--focus);
+}
+
+::placeholder {
+    color: var(--text-3);
+    opacity: 1;
+}
+
+[aria-invalid="true"] {
+    border-style: dashed !important;
+    border-color: var(--text) !important;
+}
+
+.input:disabled,
+input:disabled,
+textarea:disabled,
+.select:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Автозаполнение браузера красит поле жёлтым/голубым — возвращаем монохром. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus {
+    -webkit-text-fill-color: var(--text);
+    caret-color: var(--text);
+    box-shadow: 0 0 0 1000px var(--surface-2) inset;
+    transition: background-color 9999s 0s;
+}
+
+input[type="search"]::-webkit-search-cancel-button,
+input[type="search"]::-webkit-search-decoration {
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+input[type="number"] {
+    font-variant-numeric: tabular-nums;
+}
+
+.select,
+select.input {
+    padding-right: 36px;
+    background-image: var(--glyph-chevron);
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    background-size: 16px 16px;
+    cursor: pointer;
+}
+
+.select option,
+select option {
+    background: var(--surface);
+    color: var(--text);
+}
+
+/* Переключатель: label.toggle-row > input[type=checkbox] + span.
+   Бегунок нарисован radial-gradient'ом — псевдоэлементы у <input> есть не
+   во всех браузерах. */
+.toggle-row {
     display: flex;
     align-items: center;
     gap: 16px;
-    padding: 14px 16px;
-    background: rgba(37, 37, 63, 0.5);
-    border: 1px solid var(--border);
-    border-radius: 12px;
+    min-height: 48px;
+    padding: 12px 0;
     cursor: pointer;
+    user-select: none;
+}
+
+.toggle-row > span,
+.toggle-row > .toggle-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 14px;
+    line-height: 20px;
+    color: var(--text);
+}
+
+.toggle-row small,
+.toggle-row .toggle-hint {
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-3);
+}
+
+.toggle-row input[type="checkbox"] {
+    order: 2;
+    flex: none;
+    width: 36px;
+    height: 20px;
+    margin: 0;
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    background-color: var(--surface-3);
+    background-image: radial-gradient(circle, var(--text-2) 0 6px, transparent 6.5px);
+    background-size: 18px 18px;
+    background-position: 0 50%;
+    background-repeat: no-repeat;
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+    transition: background-color var(--dur) var(--ease), background-position var(--dur) var(--ease),
+        border-color var(--dur) var(--ease);
+}
+
+.toggle-row:hover input[type="checkbox"] {
+    border-color: var(--text-3);
+}
+
+.toggle-row input[type="checkbox"]:checked {
+    background-color: var(--accent);
+    border-color: var(--accent);
+    background-image: radial-gradient(circle, var(--accent-fg) 0 6px, transparent 6.5px);
+    background-position: 100% 50%;
+}
+
+.toggle-row input[type="checkbox"]:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.toggle-row:has(input:disabled) {
+    cursor: not-allowed;
+}
+
+/* Ряды настроек одной группой — разделители между ними. */
+.toggle-row + .toggle-row {
+    border-top: 1px solid var(--border);
+}
+
+/* Выбор из вариантов: label.radio-row > input[type=radio] + текст. */
+.radio-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 44px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    cursor: pointer;
+    user-select: none;
+    font-size: 14px;
+    line-height: 20px;
+    transition: border-color var(--dur) var(--ease), background-color var(--dur) var(--ease);
+}
+
+.radio-row + .radio-row {
+    margin-top: 8px;
+}
+
+.radio-row:hover {
+    background: var(--hover);
+    border-color: var(--border-strong);
+}
+
+.radio-row:has(input:checked) {
+    border-color: var(--text);
+    background: var(--surface-2);
+}
+
+.radio-row > span {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.radio-row small {
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-3);
+}
+
+.radio-row input[type="radio"] {
+    flex: none;
+    width: 18px;
+    height: 18px;
+    margin: 0;
+    border: 1.5px solid var(--border-strong);
+    border-radius: 50%;
+    background: transparent;
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+    transition: border-color var(--dur) var(--ease), background-color var(--dur) var(--ease);
+}
+
+.radio-row input[type="radio"]:checked {
+    border-color: var(--text);
+    background: radial-gradient(circle, var(--text) 0 4px, transparent 4.5px);
+}
+
+.radio-row input[type="radio"]:disabled,
+.radio-row:has(input:disabled) {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+/* Группа вариантов в строку (сегменты), если обёрнута в .radio-group. */
+.radio-group {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+    gap: 8px;
+}
+
+.radio-group > .radio-row + .radio-row {
+    margin-top: 0;
+}
+
+/* Старый переключатель профиля (label.switch-row > .switch-text + input + .switch). */
+.settings-row {
+    margin-bottom: 16px;
+}
+
+.switch-row {
     position: relative;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    cursor: pointer;
+}
+
+.switch-row:hover {
+    border-color: var(--border-strong);
 }
 
 .switch-text {
@@ -1223,159 +1026,2856 @@ button:focus-visible,
 
 .switch-title {
     font-size: 14px;
+    line-height: 20px;
     font-weight: 500;
-    color: var(--text-primary);
+    color: var(--text);
 }
 
 .switch-hint {
     font-size: 12px;
-    color: var(--text-tertiary);
-    line-height: 1.4;
+    line-height: 16px;
+    color: var(--text-3);
 }
 
 /* Сам чекбокс невидим, но остаётся в порядке фокуса и читается скринридером. */
 .switch-input {
     position: absolute;
-    opacity: 0;
     width: 1px;
     height: 1px;
+    opacity: 0;
 }
 
 .switch {
-    flex-shrink: 0;
-    width: 44px;
-    height: 24px;
-    border-radius: 12px;
-    background: rgba(148, 163, 184, 0.3);
     position: relative;
-    transition: background 0.3s ease;
+    flex: none;
+    width: 36px;
+    height: 20px;
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    background: var(--surface-3);
+    transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease);
 }
 
 .switch::after {
-    content: '';
+    content: "";
     position: absolute;
-    top: 3px;
-    left: 3px;
-    width: 18px;
-    height: 18px;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
     border-radius: 50%;
-    background: white;
-    transition: transform 0.3s ease;
+    background: var(--text-2);
+    transition: transform var(--dur) var(--ease), background-color var(--dur) var(--ease);
 }
 
 .switch-input:checked + .switch {
-    background: var(--primary);
+    background: var(--accent);
+    border-color: var(--accent);
 }
 
 .switch-input:checked + .switch::after {
-    transform: translateX(20px);
+    background: var(--accent-fg);
+    transform: translateX(16px);
 }
 
 .switch-input:focus-visible + .switch {
-    outline: 2px solid var(--primary);
+    outline: 2px solid var(--focus);
     outline-offset: 2px;
 }
 
 .switch-input:disabled + .switch {
-    opacity: 0.5;
+    opacity: 0.4;
+}
+
+
+/* --------------------------------------------------------------------------
+   6. Мелкие компоненты и утилиты.
+   -------------------------------------------------------------------------- */
+
+.badge,
+.chat-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: 10px;
+    background: var(--accent);
+    color: var(--accent-fg);
+    font-size: 11px;
+    line-height: 20px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0;
+}
+
+.chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 24px;
+    padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    color: var(--text-2);
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.chip > .icon {
+    width: 14px;
+    height: 14px;
+    stroke-width: 2;
+}
+
+button.chip {
+    cursor: pointer;
+    transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease),
+        color var(--dur) var(--ease);
+}
+
+button.chip:hover {
+    border-color: var(--border-strong);
+    color: var(--text);
+}
+
+.chip.is-active,
+.chip[aria-pressed="true"] {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-fg);
+}
+
+.divider,
+.auth-divider {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 20px 0;
+    color: var(--text-3);
+    font-size: 12px;
+    line-height: 16px;
+}
+
+.divider::before,
+.divider::after,
+.auth-divider::before,
+.auth-divider::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+}
+
+.divider:empty {
+    gap: 0;
+    margin: 16px 0;
+}
+
+hr.divider {
+    display: block;
+    height: 0;
+    border: 0;
+    border-top: 1px solid var(--border);
+}
+
+.muted {
+    color: var(--text-3);
+}
+
+.mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0;
+}
+
+.inverse {
+    background: var(--bg);
+    color: var(--text);
+}
+
+/* Статус собеседника: точка — залитая (в сети) или кольцо (не в сети). */
+.status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-2);
+}
+
+.status::before {
+    content: "";
+    flex: none;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    border: 1.5px solid var(--text-3);
+}
+
+.status.online {
+    color: var(--text);
+}
+
+.status.online::before {
+    background: var(--text);
+    border-color: var(--text);
+}
+
+.status:empty::before,
+.status:not(.online):not(.offline)::before {
+    display: none;
+}
+
+/* Аватары: всегда монохром — буква или иконка на нейтральном фоне.
+   !important перекрывает цвет, если код где-то ещё ставит el.style.background;
+   при желании тон задаётся классом .avatar-tone-1…5. */
+.avatar,
+.chat-avatar,
+.chat-avatar-small,
+.profile-avatar,
+.member-avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    border-radius: 50%;
+    background: var(--surface-3) !important;
+    color: var(--text) !important;
+    box-shadow: inset 0 0 0 1px var(--border);
+    font-weight: 600;
+    letter-spacing: 0;
+    user-select: none;
+}
+
+.avatar .icon,
+.chat-avatar .icon,
+.chat-avatar-small .icon,
+.member-avatar .icon {
+    width: 50%;
+    height: 50%;
+}
+
+.avatar-tone-1 {
+    background: #f5f5f5 !important;
+    color: #0a0a0a !important;
+}
+
+.avatar-tone-2 {
+    background: #bdbdbd !important;
+    color: #0a0a0a !important;
+}
+
+.avatar-tone-3 {
+    background: #8a8a8a !important;
+    color: #0a0a0a !important;
+}
+
+.avatar-tone-4 {
+    background: #4a4a4a !important;
+    color: #fafafa !important;
+}
+
+.avatar-tone-5 {
+    background: #0a0a0a !important;
+    color: #fafafa !important;
+    box-shadow: inset 0 0 0 1px #474747;
+}
+
+
+/* --------------------------------------------------------------------------
+   7. Экран входа.
+   -------------------------------------------------------------------------- */
+
+.auth-screen {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    min-height: 100%;
+    overflow-y: auto;
+    padding: max(24px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+        max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+    background: var(--bg);
+}
+
+.auth-container {
+    width: 100%;
+    max-width: 400px;
+    margin: auto;
+    padding: 40px 32px 32px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    animation: rise-in var(--dur-slow) var(--ease);
+}
+
+.auth-logo {
+    display: grid;
+    justify-items: start;
+    gap: 4px;
+    margin-bottom: 32px;
+}
+
+.logo-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    margin-bottom: 12px;
+    color: var(--text);
+    font-size: 36px;
+    line-height: 1;
+}
+
+.logo-icon .icon,
+.auth-logo .logo-icon svg.icon {
+    width: 48px;
+    height: 48px;
+}
+
+.auth-logo h1 {
+    font-size: 32px;
+    line-height: 40px;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+}
+
+.auth-logo p {
+    font-size: 14px;
+    line-height: 20px;
+    color: var(--text-2);
+}
+
+/* Вкладки «Вход / Регистрация» — подчёркнутые, как в редакционной вёрстке. */
+.auth-tabs {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+    margin-bottom: 24px;
+    border-bottom: 1px solid var(--border);
+}
+
+.auth-tab {
+    position: relative;
+    height: 40px;
+    padding: 0 8px;
+    background: none;
+    border: 0;
+    color: var(--text-3);
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: color var(--dur) var(--ease);
+}
+
+.auth-tab::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -1px;
+    height: 2px;
+    background: transparent;
+    transition: background-color var(--dur) var(--ease);
+}
+
+.auth-tab:hover {
+    color: var(--text);
+}
+
+.auth-tab.active,
+.auth-tab[aria-selected="true"] {
+    color: var(--text);
+}
+
+.auth-tab.active::after,
+.auth-tab[aria-selected="true"]::after {
+    background: var(--text);
+}
+
+.auth-tab:focus-visible {
+    outline-offset: -2px;
+}
+
+.auth-form {
+    display: none;
+}
+
+.auth-form.active {
+    display: block;
+    animation: fade-in var(--dur) var(--ease);
+}
+
+.anonymous-hint {
+    margin-top: 8px;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-3);
+    text-align: center;
+}
+
+
+/* --------------------------------------------------------------------------
+   8. Каркас приложения и сайдбар.
+   -------------------------------------------------------------------------- */
+
+.app {
+    display: flex;
+    height: 100vh;
+    height: 100dvh;
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+    background: var(--bg);
+}
+
+.sidebar {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    flex: none;
+    width: var(--sidebar-w);
+    min-width: 0;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+}
+
+.sidebar-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex: none;
+    height: calc(var(--header-h) + env(safe-area-inset-top));
+    padding: env(safe-area-inset-top) 12px 0 16px;
+    border-bottom: 1px solid var(--border);
+}
+
+.sidebar-actions,
+.sidebar-header > div:last-child:not(.logo-small) {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.logo-small {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    font-size: 16px;
+    line-height: 24px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--text);
+    white-space: nowrap;
+}
+
+.logo-small .icon {
+    width: 24px;
+    height: 24px;
+}
+
+.search-container {
+    position: relative;
+    flex: none;
+    padding: 12px 12px 8px;
+}
+
+.search-container > .icon {
+    position: absolute;
+    top: 50%;
+    left: 24px;
+    width: 16px;
+    height: 16px;
+    margin-top: 2px;
+    transform: translateY(-50%);
+    color: var(--text-3);
+    stroke-width: 2;
+}
+
+.search-container input {
+    height: 36px;
+    padding-left: 36px;
+    background-color: var(--surface-2);
+}
+
+/* Лупа фоном — пока в разметке нет иконки-элемента. */
+.search-container:not(:has(> .icon)) input {
+    background-image: var(--glyph-search);
+    background-repeat: no-repeat;
+    background-position: 12px center;
+    background-size: 16px 16px;
+}
+
+.chats-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 4px 8px 12px;
+}
+
+.chats-section-title,
+.search-section-title {
+    padding: 16px 12px 8px;
+    font-size: 11px;
+    line-height: 16px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-3);
+}
+
+.chats-section-title:first-child,
+.search-section-title:first-child {
+    padding-top: 8px;
+}
+
+.chat-item {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 64px;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    cursor: pointer;
+    user-select: none;
+    transition: background-color var(--dur-fast) var(--ease);
+}
+
+.chat-item + .chat-item {
+    margin-top: 2px;
+}
+
+.chat-item:hover {
+    background: var(--hover);
+}
+
+.chat-item:active {
+    background: var(--pressed);
+}
+
+.chat-item:focus-visible {
+    outline-offset: -2px;
+}
+
+/* Открытый чат: поверхность плотнее + вертикальная черта слева. */
+.chat-item.active,
+.chat-item.is-active {
+    background: var(--surface-3);
+}
+
+.chat-item.active::before,
+.chat-item.is-active::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 12px;
+    bottom: 12px;
+    width: 2px;
+    border-radius: 0 2px 2px 0;
+    background: var(--text);
+}
+
+.chat-avatar-small {
+    width: 44px;
+    height: 44px;
+    font-size: 16px;
+    line-height: 20px;
+}
+
+.chat-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.chat-name {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.chat-last {
+    font-size: 13px;
+    line-height: 20px;
+    color: var(--text-2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.chat-last svg.icon {
+    width: 14px;
+    height: 14px;
+    margin: -2px 4px 0 0;
+    stroke-width: 2;
+}
+
+/* Флаги чата: закреплён, без звука, исчезающие сообщения. */
+.chat-item-flags {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+    color: var(--text-3);
+}
+
+/* Плотный контекст: размер фиксирован и важнее icon-sm из скрипта. */
+.chat-item-flags svg.icon {
+    width: 14px;
+    height: 14px;
+    stroke-width: 2;
+}
+
+.chat-item-flags:empty {
+    display: none;
+}
+
+/* Правая колонка элемента (время/бейдж), если скрипт её выделит. */
+.chat-item-side {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+    flex: none;
+}
+
+.chat-time {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 16px;
+    color: var(--text-3);
+    font-variant-numeric: tabular-nums;
+}
+
+.chat-item.is-muted .chat-badge,
+.chat-item.is-muted .badge {
+    background: transparent;
+    color: var(--text-2);
+    box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+.chat-item.is-muted .chat-name {
+    font-weight: 500;
+}
+
+.chat-item.is-archived {
+    opacity: 0.72;
+}
+
+.chat-item.is-archived:hover,
+.chat-item.is-archived.active,
+.chat-item.is-archived.is-active {
+    opacity: 1;
+}
+
+/* «Архив (N)» внизу списка. */
+.archive-toggle {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-height: 44px;
+    margin-top: 8px;
+    padding: 0 12px;
+    border: 0;
+    border-top: 1px solid var(--border);
+    border-radius: 0;
+    background: none;
+    color: var(--text-2);
+    font-size: 13px;
+    line-height: 20px;
+    font-weight: 500;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.archive-toggle:hover {
+    background: var(--hover);
+    color: var(--text);
+}
+
+.archive-toggle .icon {
+    width: 18px;
+    height: 18px;
+}
+
+.archive-toggle .badge {
+    margin-left: auto;
+    background: transparent;
+    color: var(--text-2);
+    box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+.archive-toggle[aria-expanded="true"] {
+    color: var(--text);
+}
+
+.sidebar-footer {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+    padding: 8px 8px max(8px, env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+}
+
+.footer-btn {
+    flex: 1;
+    min-width: 0;
+    height: 36px;
+    padding: 0 12px;
+    font-size: 13px;
+}
+
+/* Заметка о сроке жизни анонимного аккаунта. */
+.anon-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    flex: none;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text-2);
+    font-size: 12px;
+    line-height: 16px;
+}
+
+/* Внизу сайдбара (над кнопками) — линия сверху, а не снизу. */
+.chats-list + .anon-note {
+    border-top: 1px solid var(--border);
+    border-bottom: 0;
+}
+
+.anon-note .icon {
+    width: 16px;
+    height: 16px;
+    color: var(--text);
+    stroke-width: 2;
+}
+
+.anon-note strong,
+.anon-note b {
+    color: var(--text);
+    font-weight: 600;
+}
+
+.theme-toggle {
+    position: relative;
+}
+
+/* Если .theme-toggle — самостоятельная кнопка, а не .icon-btn. */
+button.theme-toggle:not(.icon-btn):not(.btn) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--control-h);
+    height: var(--control-h);
+    border-radius: var(--radius-sm);
+    color: var(--text-2);
+    transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+button.theme-toggle:not(.icon-btn):not(.btn):hover {
+    background: var(--hover);
+    color: var(--text);
+}
+
+/* Состояние соединения: видно, только когда что-то не так. */
+.connection-status {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    flex: none;
+    min-height: 32px;
+    padding: 6px 16px;
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 500;
+    text-align: center;
+}
+
+.connection-status .icon {
+    width: 16px;
+    height: 16px;
+    stroke-width: 2;
+}
+
+.connection-status.is-offline {
+    display: flex;
+    background: var(--bg);
+    color: var(--text);
+}
+
+.connection-status.is-reconnecting {
+    display: flex;
+    background: var(--surface-2);
+    color: var(--text-2);
+    border-bottom: 1px solid var(--border);
+}
+
+.connection-status-icon {
+    display: inline-flex;
+    flex: none;
+}
+
+/* Сам по себе в <body> (вне сайдбара и ленты) — всплывающая плашка сверху. */
+body > .connection-status {
+    position: fixed;
+    top: max(8px, env(safe-area-inset-top));
+    left: 50%;
+    z-index: 250;
+    min-height: 32px;
+    padding: 6px 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow);
+    transform: translateX(-50%);
+    white-space: nowrap;
+    animation: fade-in var(--dur) var(--ease);
+}
+
+body > .connection-status.is-offline {
+    border-color: var(--bg);
+}
+
+body > .connection-status.is-reconnecting {
+    border-color: var(--border-strong);
+}
+
+
+/* --------------------------------------------------------------------------
+   9. Основная область: шапка чата, баннеры, заявки.
+   -------------------------------------------------------------------------- */
+
+.main-content {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    background: var(--bg);
+}
+
+.chat-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex: none;
+    height: calc(var(--header-h) + env(safe-area-inset-top));
+    padding: env(safe-area-inset-top) 12px 0 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+}
+
+/* Только шапка чата: без .chat-header этот ряд применялся бы и к .chat-info
+   в списке чатов. */
+.chat-header .chat-info {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+}
+
+.chat-avatar {
+    width: 40px;
+    height: 40px;
+    font-size: 15px;
+    line-height: 20px;
+}
+
+/* Имя сверху, под ним в одну строку статус и индикаторы режима. */
+.chat-details {
+    display: grid;
+    grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+    align-items: center;
+    column-gap: 8px;
+    row-gap: 2px;
+    min-width: 0;
+}
+
+.chat-details h3 {
+    grid-column: 1 / -1;
+    font-size: 15px;
+    line-height: 20px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.chat-details .status {
+    white-space: nowrap;
+}
+
+.chat-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+}
+
+/* Индикаторы режима чата в шапке: «исчезающие 1 ч», «без звука» и т. п.
+   В одну строку: при нехватке места обрезаются, а не растягивают шапку
+   по высоте. */
+.chat-indicators {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.chat-indicators:empty,
+.chat-indicators:not(:has(> :not(.hidden))) {
+    display: none;
+}
+
+.indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 20px;
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-2);
+    font-size: 11px;
+    line-height: 16px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.indicator svg.icon {
+    width: 12px;
+    height: 12px;
+    stroke-width: 2.25;
+}
+
+.indicator.is-on {
+    border-color: var(--text);
+    color: var(--text);
+    font-weight: 600;
+}
+
+button.indicator {
+    cursor: pointer;
+    background: none;
+    transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+button.indicator:hover {
+    border-color: var(--border-strong);
+    color: var(--text);
+}
+
+/* Баннеры над лентой. Предупреждение — инверсная плашка с alert-triangle;
+   иконка рисуется псевдоэлементом, если в разметке своей нет. */
+.banner,
+.e2ee-banner {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: none;
+    min-height: 48px;
+    padding: 8px 16px 8px 20px;
+    font-size: 13px;
+    line-height: 20px;
+}
+
+.banner-warning,
+.e2ee-banner {
+    background: var(--bg);
+    color: var(--text);
+    font-weight: 500;
+}
+
+.banner-info {
+    background: var(--surface);
+    color: var(--text-2);
+    border-bottom: 1px solid var(--border);
+}
+
+.banner > .icon,
+.e2ee-banner > .icon {
+    width: 20px;
+    height: 20px;
+}
+
+.banner-warning:not(:has(> .icon))::before,
+.e2ee-banner:not(:has(> .icon))::before,
+.banner-info:not(:has(> .icon))::before {
+    content: "";
+    flex: none;
+    width: 20px;
+    height: 20px;
+    background-color: currentColor;
+    -webkit-mask: var(--mask-alert) center / contain no-repeat;
+    mask: var(--mask-alert) center / contain no-repeat;
+}
+
+.banner-info:not(:has(> .icon))::before {
+    -webkit-mask-image: var(--mask-info);
+    mask-image: var(--mask-info);
+}
+
+.banner-text,
+.e2ee-banner-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.banner-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: none;
+}
+
+/* Кнопка на инверсной плашке — снова инверсия: «чёрная на белом». */
+.banner-btn {
+    flex: none;
+    height: var(--control-h-sm);
+    padding: 0 12px;
+    background: var(--accent);
+    color: var(--accent-fg);
+    border-color: var(--accent);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.banner-btn:hover {
+    background: color-mix(in srgb, var(--accent) 84%, var(--bg));
+}
+
+/* Заявки на вступление: полоса над лентой. */
+.requests-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: none;
+    min-height: 48px;
+    padding: 8px 16px 8px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    font-size: 13px;
+    line-height: 20px;
+    font-weight: 500;
+    color: var(--text);
+}
+
+.requests-bar > .icon {
+    width: 18px;
+    height: 18px;
+    color: var(--text-2);
+}
+
+.requests-bar > :not(.icon):not(button):not(.btn):not(.badge) {
+    flex: 1;
+    min-width: 0;
+}
+
+.requests-bar .badge {
+    margin-left: -4px;
+}
+
+
+/* --------------------------------------------------------------------------
+   10. Лента сообщений.
+   -------------------------------------------------------------------------- */
+
+.chat-messages {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    /* Колонка ленты не шире --feed-max: на широком экране строки не
+       растягиваются на всю ширину. */
+    padding: 20px max(24px, calc((100% - var(--feed-max)) / 2));
+}
+
+.message {
+    position: relative;
+    max-width: min(72%, 560px);
+    padding: 8px 12px;
+    border-radius: var(--radius);
+    font-size: 15px;
+    line-height: 20px;
+}
+
+.message.received {
+    align-self: flex-start;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 2px;
+    color: var(--text);
+}
+
+/* Своё сообщение — инверсия (набор токенов противоположной темы, см. §1). */
+.message.sent {
+    align-self: flex-end;
+    background: var(--bg);
+    border: 1px solid var(--bg);
+    border-bottom-right-radius: 2px;
+    color: var(--text);
+}
+
+.message.message-new {
+    animation: rise-in var(--dur-slow) var(--ease);
+}
+
+/* Подсветка сообщения, к которому перешли (например, из цитаты). */
+.message.is-highlighted {
+    outline: 2px solid var(--text-2);
+    outline-offset: 2px;
+}
+
+.message-content {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.message-author {
+    margin-bottom: 2px;
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 600;
+    color: var(--text-2);
+}
+
+.message-text {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.message-text:empty {
+    display: none;
+}
+
+.message-text.e2ee-failed {
+    color: var(--text-3);
+}
+
+.message-text .icon {
+    width: 16px;
+    height: 16px;
+    margin: -3px 6px 0 0;
+    stroke-width: 2;
+}
+
+.edited-label {
+    margin-top: 2px;
+    font-size: 11px;
+    line-height: 16px;
+    color: var(--text-3);
+    text-align: right;
+}
+
+/* Цитата в ответе. */
+.reply-to {
+    display: block;
+    margin-bottom: 8px;
+    padding: 4px 8px 4px 10px;
+    border-left: 2px solid currentColor;
+    border-radius: 0 4px 4px 0;
+    background: var(--hover);
+    color: var(--text-2);
+    font-size: 13px;
+    line-height: 20px;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+}
+
+.reply-to small {
+    font-size: inherit;
+}
+
+.reply-to .icon {
+    width: 14px;
+    height: 14px;
+    margin: -2px 4px 0 0;
+    stroke-width: 2;
+}
+
+button.reply-to,
+.reply-to[role="button"] {
+    width: 100%;
+    text-align: left;
+    cursor: pointer;
+}
+
+.reply-to[role="button"]:hover,
+button.reply-to:hover {
+    background: var(--pressed);
+}
+
+.message-meta {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 4px;
+    font-size: 11px;
+    line-height: 16px;
+    color: var(--text-3);
+}
+
+.message-time {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0;
+}
+
+.message-lock,
+.message-status,
+.message-expiry {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 11px;
+}
+
+.message-lock svg.icon,
+.message-expiry svg.icon {
+    width: 13px;
+    height: 13px;
+    stroke-width: 2.25;
+}
+
+.message-status .icon {
+    width: 16px;
+    height: 16px;
+    stroke-width: 2;
+}
+
+/* Прочитано — полный цвет текста, отправлено — приглушённо. */
+.message-status.is-read,
+.message-status[data-state="read"],
+.message-status[data-status="read"] {
+    color: var(--text);
+}
+
+/* «Без сквозного шифрования» — рамка вокруг метки, иконка открытого замка. */
+.plaintext-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 16px;
+    padding: 0 4px;
+    border: 1px solid currentColor;
+    border-radius: 3px;
+    color: var(--text-2);
+    font-size: 10px;
+    line-height: 14px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+}
+
+.plaintext-label svg.icon {
+    width: 10px;
+    height: 10px;
+    stroke-width: 2.5;
+}
+
+.plaintext-label:not(:has(> .icon))::before {
+    content: "";
+    flex: none;
+    width: 10px;
+    height: 10px;
+    background-color: currentColor;
+    -webkit-mask: var(--mask-unlock) center / contain no-repeat;
+    mask: var(--mask-unlock) center / contain no-repeat;
+}
+
+/* Реакции: иконка + число. Моя реакция — инверсия. */
+.reactions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 8px;
+}
+
+.reaction {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 24px;
+    padding: 0 8px;
+    border: 1px solid var(--border-strong);
+    border-radius: 12px;
+    background: transparent;
+    color: var(--text);
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+    transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease),
+        color var(--dur-fast) var(--ease);
+}
+
+.reaction .icon {
+    width: 14px;
+    height: 14px;
+    stroke-width: 2;
+}
+
+.reaction:hover {
+    background: var(--hover);
+    border-color: var(--text-3);
+}
+
+.reaction.is-active,
+.reaction.is-mine,
+.reaction[aria-pressed="true"] {
+    background: var(--text);
+    border-color: var(--text);
+    color: var(--bg);
+}
+
+.reaction-picker {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 4px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    animation: drop-in var(--dur-fast) var(--ease);
+}
+
+.reaction-option {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--text-2);
+    cursor: pointer;
+    transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease),
+        transform var(--dur-fast) var(--ease);
+}
+
+.reaction-option .icon {
+    width: 22px;
+    height: 22px;
+}
+
+.reaction-option:hover {
+    background: var(--hover);
+    color: var(--text);
+    transform: translateY(-1px);
+}
+
+.reaction-option:active {
+    background: var(--pressed);
+    transform: none;
+}
+
+.reaction-option.is-active,
+.reaction-option[aria-pressed="true"] {
+    background: var(--surface-3);
+    color: var(--text);
+}
+
+/* Панель реакций внутри контекстного меню — без собственной рамки. */
+.context-menu .reaction-picker {
+    display: flex;
+    justify-content: space-between;
+    padding: 0 0 4px;
+    margin-bottom: 4px;
+    border: 0;
+    border-bottom: 1px solid var(--border);
+    border-radius: 0;
+    box-shadow: none;
+    background: none;
+    animation: none;
+}
+
+/* Вложения. */
+.message-image {
+    display: block;
+    max-width: min(320px, 100%);
+    max-height: 360px;
+    margin-bottom: 4px;
+    border-radius: var(--radius-sm);
+    object-fit: cover;
+    cursor: zoom-in;
+    transition: opacity var(--dur) var(--ease);
+}
+
+.message-image:hover {
+    opacity: 0.9;
+}
+
+.message-video,
+.message-audio {
+    display: block;
+    max-width: min(320px, 100%);
+    margin-bottom: 4px;
+    border-radius: var(--radius-sm);
+}
+
+.message-audio {
+    width: 280px;
+    height: 40px;
+}
+
+.file-attachment {
+    margin-bottom: 4px;
+}
+
+.file-attachment a,
+a.file-attachment {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 100%;
+    min-height: 40px;
+    padding: 8px 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    color: var(--text);
+    font-size: 13px;
+    line-height: 20px;
+    font-weight: 500;
+    text-decoration: none;
+    overflow-wrap: anywhere;
+    transition: border-color var(--dur) var(--ease), background-color var(--dur) var(--ease);
+}
+
+.file-attachment a:hover,
+a.file-attachment:hover {
+    border-color: var(--text);
+    text-decoration: none;
+}
+
+.file-attachment .icon {
+    width: 18px;
+    height: 18px;
+}
+
+.file-attachment a > span {
+    min-width: 0;
+}
+
+/* Значок «скачать» в конце ссылки — вторичный. */
+.file-attachment a > svg.icon:last-child:not(:first-child) {
+    width: 16px;
+    height: 16px;
+    color: var(--text-3);
+}
+
+.file-size {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-3);
+    font-variant-numeric: tabular-nums;
+}
+
+.encrypted-attachment {
+    margin-bottom: 4px;
+}
+
+.attachment-status,
+.attachment-loading {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 40px;
+    padding: 8px 12px;
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius-sm);
+    color: var(--text-2);
+    font-size: 13px;
+    line-height: 20px;
+}
+
+.attachment-status .icon,
+.attachment-loading .icon {
+    width: 16px;
+    height: 16px;
+    stroke-width: 2;
+}
+
+.attachment-status.e2ee-failed {
+    color: var(--text-3);
+}
+
+/* Служебная строка в ленте: текст по центру между тонкими линиями. */
+.system-notice {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    align-self: stretch;
+    margin: 8px 0;
+    color: var(--text-2);
+    font-size: 12px;
+    line-height: 16px;
+    text-align: center;
+}
+
+.system-notice::before,
+.system-notice::after {
+    content: "";
+    flex: 1 1 24px;
+    min-width: 24px;
+    height: 1px;
+    background: var(--border);
+}
+
+.system-notice .icon {
+    width: 14px;
+    height: 14px;
+    stroke-width: 2;
+    margin-right: -6px;
+}
+
+/* Плавающая «вниз». Ставится в .main-content сразу после #chat-messages:
+   order держит её над полем ввода, отрицательные поля — поверх ленты без
+   сдвига вёрстки. Внутри самой ленты — липкая к низу. */
+.jump-down {
+    position: relative;
+    z-index: 5;
+    order: 1;
+    align-self: flex-end;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 40px;
+    height: 40px;
+    margin: -56px 16px 16px 0;
+    border: 1px solid var(--border-strong);
+    border-radius: 50%;
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.24);
+    cursor: pointer;
+    animation: rise-in var(--dur) var(--ease);
+    transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+
+.jump-down:hover {
+    background: var(--surface-3);
+    border-color: var(--text-3);
+}
+
+.jump-down .icon {
+    width: 20px;
+    height: 20px;
+}
+
+/* Пока показано пустое состояние, пустая лента не делит с ним высоту. */
+.main-content:has(> .empty-state:not(.hidden)) > .chat-messages:empty {
+    display: none;
+}
+
+.main-content > .message-input-container,
+.main-content > .empty-state,
+.main-content > .composer {
+    order: 2;
+}
+
+.chat-messages > .jump-down {
+    position: sticky;
+    bottom: 0;
+    order: 9999;
+    margin: -40px 0 0;
+}
+
+/* Оверлей перетаскивания файлов. */
+.drop-zone {
+    position: absolute;
+    inset: 12px;
+    z-index: 30;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    border: 2px dashed var(--text);
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--bg) 92%, transparent);
+    color: var(--text);
+    font-size: 15px;
+    line-height: 20px;
+    font-weight: 600;
+    text-align: center;
+}
+
+.drop-zone.is-active {
+    display: flex;
+    animation: fade-in var(--dur-fast) var(--ease);
+}
+
+.drop-zone .icon {
+    width: 32px;
+    height: 32px;
+    stroke-width: 1.5;
+}
+
+.drop-zone:not(:has(.icon))::before {
+    content: "";
+    width: 32px;
+    height: 32px;
+    background-color: currentColor;
+    -webkit-mask: var(--mask-upload) center / contain no-repeat;
+    mask: var(--mask-upload) center / contain no-repeat;
+}
+
+.drop-zone small,
+.drop-zone .field-hint {
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 400;
+    color: var(--text-2);
+}
+
+/* Карточка заявки: «Ожидает одобрения» у заявителя и предпросмотр группы
+   перед вступлением. Строка: иконка | текст | действия (действия
+   переносятся вниз, если не помещаются). */
+.pending-card {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 12px;
+    width: 100%;
+    padding: 12px 12px 12px 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    text-align: left;
+    animation: rise-in var(--dur-slow) var(--ease);
+}
+
+/* Только что отправленная заявка — выделена рамкой цвета текста. */
+.pending-card.is-active {
+    border-color: var(--text);
+}
+
+.pending-card + .pending-card {
+    margin-top: 8px;
+}
+
+.pending-card > .icon {
+    width: 20px;
+    height: 20px;
+    color: var(--text);
+}
+
+.pending-card > div:not([class]),
+.pending-card > .join-preview-body {
+    flex: 1 1 160px;
+    min-width: 0;
+}
+
+.pending-card h2,
+.pending-card h3,
+.pending-card h4,
+.pending-card strong {
+    margin: 0;
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 600;
+    text-transform: none;
+    letter-spacing: normal;
+    color: var(--text);
+    overflow-wrap: anywhere;
+}
+
+.pending-card p {
+    margin: 0;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-2);
+}
+
+.pending-card p.field-hint {
+    margin-top: 4px;
+    color: var(--text-3);
+}
+
+.pending-card > .invite-actions {
+    flex-basis: 100%;
+    justify-content: flex-end;
+    margin-top: 4px;
+}
+
+.pending-card > .invite-actions > .btn {
+    flex: none;
+}
+
+/* Предпросмотр группы по коду: в окне «Новый чат» под кнопкой «Продолжить». */
+.join-preview {
+    margin-top: 16px;
+    padding: 16px;
+    border-color: var(--border-strong);
+    background: var(--surface);
+}
+
+.join-preview > .icon {
+    align-self: flex-start;
+    width: 24px;
+    height: 24px;
+}
+
+.join-preview h4 {
+    font-size: 16px;
+    line-height: 24px;
+}
+
+.my-requests {
+    margin-top: 24px;
+}
+
+/* В ленте (вместо сообщений) — крупная карточка по центру. */
+.chat-messages > .pending-card,
+.pending-card.is-centered {
+    flex-direction: column;
+    flex-wrap: nowrap;
+    max-width: 400px;
+    margin: auto;
+    padding: 32px 24px;
+    border-radius: var(--radius);
+    background: var(--surface);
+    text-align: center;
+}
+
+.chat-messages > .pending-card > .icon,
+.pending-card.is-centered > .icon {
+    width: 32px;
+    height: 32px;
+    stroke-width: 1.5;
+}
+
+.chat-messages > .pending-card > div:not([class]),
+.pending-card.is-centered > div:not([class]) {
+    flex: none;
+}
+
+.pending-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    width: 100%;
+    max-width: 400px;
+    margin: auto;
+}
+
+.pending-list .pending-card {
+    margin: 0;
+}
+
+/* Пустое состояние. */
+.empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    flex: 1;
+    padding: 32px 24px;
+    text-align: center;
+    color: var(--text-2);
+}
+
+.empty-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 64px;
+    height: 64px;
+    margin-bottom: 16px;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    color: var(--text);
+    font-size: 28px;
+    line-height: 1;
+}
+
+.empty-icon .icon {
+    width: 28px;
+    height: 28px;
+    stroke-width: 1.5;
+}
+
+.empty-state h2 {
+    font-size: 20px;
+    line-height: 28px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+}
+
+.empty-state p {
+    max-width: 360px;
+    font-size: 14px;
+    line-height: 20px;
+}
+
+
+/* --------------------------------------------------------------------------
+   11. Поле ввода, загрузка файлов.
+   -------------------------------------------------------------------------- */
+
+.message-input-container {
+    flex: none;
+    padding: 12px max(16px, calc((100% - var(--feed-max)) / 2 - 8px)) max(12px, env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+}
+
+.reply-preview {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+    padding: 4px 4px 4px 12px;
+    border-left: 2px solid var(--text);
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    background: var(--surface-2);
+    color: var(--text-2);
+    font-size: 13px;
+    line-height: 20px;
+}
+
+.reply-preview > span,
+.reply-preview > .reply-preview-text {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.reply-preview > .icon {
+    width: 16px;
+    height: 16px;
+    color: var(--text);
+    stroke-width: 2;
+}
+
+.reply-preview .icon-btn {
+    width: var(--control-h-sm);
+    height: var(--control-h-sm);
+    font-size: 14px;
+}
+
+.input-wrapper {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+}
+
+.input-wrapper input,
+.input-wrapper textarea {
+    flex: 1;
+    min-height: var(--control-h);
+    border-radius: var(--radius);
+    font-size: 15px;
+}
+
+.input-wrapper textarea {
+    height: var(--control-h);
+    max-height: 160px;
+    padding-top: 9px;
+    padding-bottom: 9px;
+    resize: none;
+}
+
+/* Отправка — основное действие: заливка акцентом. */
+.input-wrapper #send-btn,
+.input-wrapper .send-btn {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-fg);
+    border-radius: var(--radius);
+}
+
+.input-wrapper #send-btn:hover,
+.input-wrapper .send-btn:hover {
+    background: color-mix(in srgb, var(--accent) 86%, var(--bg));
+}
+
+.input-wrapper #send-btn:disabled,
+.input-wrapper .send-btn:disabled {
+    background: var(--surface-3);
+    border-color: var(--surface-3);
+    color: var(--text-3);
+    opacity: 1;
+}
+
+/* Запись голосового (зарезервировано): мигающая обводка вместо красной точки. */
+.recording {
+    background: var(--text) !important;
+    color: var(--bg) !important;
+    animation: rec-blink 1.2s steps(2, jump-none) infinite;
+}
+
+@keyframes rec-blink {
+    from { outline: 2px solid var(--text); outline-offset: 2px; }
+    to { outline: 2px solid transparent; outline-offset: 2px; }
+}
+
+/* Статус загрузки: подпись + полоса прогресса (ширина — el.style.width). */
+.upload-status {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    color: var(--text-2);
+    font-size: 12px;
+    line-height: 16px;
+}
+
+.upload-status > .icon {
+    width: 16px;
+    height: 16px;
+    stroke-width: 2;
+    color: var(--text);
+}
+
+.upload-status > span,
+.upload-status > .upload-label {
+    min-width: 0;
+    max-width: 50%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.upload-percent {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+}
+
+.progress {
+    position: relative;
+    flex: 1;
+    min-width: 48px;
+    height: 4px;
+    overflow: hidden;
+    border-radius: 2px;
+    background: var(--surface-3);
+}
+
+.progress-bar {
+    width: 0;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--text);
+    transition: width var(--dur-fast) linear;
+}
+
+/* Прогресс без процента (подготовка, шифрование) — бегущая полоса. */
+.upload-status .progress:not([aria-valuenow]) .progress-bar,
+.progress.is-indeterminate .progress-bar {
+    width: 32% !important;
+    animation: progress-slide 1.1s var(--ease) infinite;
+}
+
+@keyframes progress-slide {
+    from { transform: translateX(-100%); }
+    to { transform: translateX(320%); }
+}
+
+.upload-status .icon-btn {
+    width: 24px;
+    height: 24px;
+    margin: -4px -6px -4px 0;
+}
+
+.upload-status .icon-btn .icon {
+    width: 14px;
+    height: 14px;
+}
+
+/* Очередь файлов к отправке. */
+.send-files-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 240px;
+    margin: 0 0 8px;
+    padding: 0;
+    overflow-y: auto;
+    list-style: none;
+}
+
+.send-file-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 48px;
+    padding: 4px 4px 4px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    font-size: 13px;
+    line-height: 20px;
+}
+
+.send-file-row > .icon {
+    width: 20px;
+    height: 20px;
+    color: var(--text-2);
+}
+
+.send-file-thumb {
+    flex: none;
+    width: 40px;
+    height: 40px;
+    margin-left: -8px;
+    border-radius: 4px;
+    object-fit: cover;
+    background: var(--surface-3);
+}
+
+.send-file-name {
+    flex: 1;
+    min-width: 0;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.send-file-size {
+    flex: none;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-3);
+    font-variant-numeric: tabular-nums;
+}
+
+.send-file-row > div:not([class]) {
+    flex: 1;
+    min-width: 0;
+}
+
+.send-file-row > div:not([class]) > div {
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.send-file-row small {
+    display: block;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-3);
+    font-variant-numeric: tabular-nums;
+}
+
+.send-file-row .icon-btn {
+    width: var(--control-h-sm);
+    height: var(--control-h-sm);
+}
+
+/* Файл не пройдёт (размер, тип): пунктир и полный цвет предупреждения. */
+.send-file-row.muted {
+    border-style: dashed;
+    border-color: var(--border-strong);
+    background: transparent;
+}
+
+.send-file-row.muted > .icon {
+    color: var(--text);
+}
+
+.send-file-row.muted > div:not([class]) > div {
+    color: var(--text-2);
+    text-decoration: line-through;
+}
+
+.send-file-row.muted small.field-hint {
+    color: var(--text-2);
+}
+
+.send-file-row.is-error {
+    border-style: dashed;
+    border-color: var(--text);
+}
+
+
+/* --------------------------------------------------------------------------
+   12. Модальные окна.
+   -------------------------------------------------------------------------- */
+
+.overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 99;
+    background: var(--overlay);
+    animation: fade-in var(--dur) var(--ease);
+}
+
+.modal {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+        max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+    animation: fade-in var(--dur) var(--ease);
+}
+
+.modal-content {
+    position: relative;
+    z-index: 101;
+    width: 100%;
+    max-width: 440px;
+    max-height: 100%;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    animation: drop-in var(--dur-slow) var(--ease);
+}
+
+.modal-content.modal-sm {
+    max-width: 360px;
+}
+
+.modal-content.modal-wide {
+    max-width: 560px;
+}
+
+.modal-header {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 64px;
+    padding: 12px 12px 12px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+}
+
+.modal-header h3 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    font-size: 16px;
+    line-height: 24px;
+    font-weight: 600;
+}
+
+.modal-header h3 .icon {
+    width: 20px;
+    height: 20px;
+}
+
+.modal-body {
+    padding: 24px;
+}
+
+/* :not(.modal-body) лишь поднимает специфичность: у последнего блока
+   (например, .invite-hint) не должно оставаться нижнего поля. */
+.modal-body > :last-child:not(.modal-body) {
+    margin-bottom: 0;
+}
+
+:where(.modal-body) > p {
+    margin-bottom: 16px;
+    color: var(--text-2);
+    font-size: 14px;
+    line-height: 20px;
+}
+
+:where(.modal-body) h4 {
+    margin: 24px 0 12px;
+    font-size: 11px;
+    line-height: 16px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-3);
+}
+
+:where(.modal-body) > h4:first-child {
+    margin-top: 0;
+}
+
+.modal-body > .auth-btn + .auth-btn,
+.modal-body > .btn-block + .btn-block {
+    margin-top: 8px;
+}
+
+.modal-footer {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 16px 24px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+}
+
+.modal-footer > .spacer,
+.modal-footer > .modal-footer-start {
+    margin-right: auto;
+}
+
+/* Предупреждение в окне — инверсная плашка с alert-triangle. */
+.modal-warning,
+.member-warning,
+.members-note {
+    position: relative;
+    margin-bottom: 16px;
+    padding: 12px 16px 12px 44px;
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+    line-height: 20px;
+    font-weight: 500;
+}
+
+.modal-warning::before,
+.member-warning::before,
+.members-note::before {
+    content: "";
+    position: absolute;
+    top: 12px;
+    left: 16px;
+    width: 18px;
+    height: 18px;
+    margin-top: 1px;
+    background-color: currentColor;
+    -webkit-mask: var(--mask-alert) center / contain no-repeat;
+    mask: var(--mask-alert) center / contain no-repeat;
+}
+
+.modal-warning:has(> .icon),
+.member-warning:has(> .icon),
+.members-note:has(> .icon) {
+    display: flex;
+    gap: 10px;
+    padding-left: 16px;
+}
+
+.modal-warning:has(> .icon)::before,
+.member-warning:has(> .icon)::before,
+.members-note:has(> .icon)::before {
+    display: none;
+}
+
+.modal-warning > .icon,
+.member-warning > .icon,
+.members-note > .icon {
+    width: 18px;
+    height: 18px;
+    margin-top: 1px;
+}
+
+.modal-warning:empty,
+.members-note:empty {
+    display: none;
+}
+
+/* Профиль. */
+.profile-info {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.profile-avatar {
+    width: 64px;
+    height: 64px;
+    font-size: 24px;
+    line-height: 32px;
+}
+
+.profile-details {
+    min-width: 0;
+}
+
+.profile-details h4 {
+    margin: 0 0 2px;
+    font-size: 18px;
+    line-height: 24px;
+    font-weight: 600;
+    text-transform: none;
+    letter-spacing: -0.01em;
+    color: var(--text);
+    overflow-wrap: anywhere;
+}
+
+.profile-details p {
+    font-size: 13px;
+    line-height: 20px;
+    color: var(--text-2);
+    overflow-wrap: anywhere;
+}
+
+.profile-details p:empty {
+    display: none;
+}
+
+.profile-code {
+    display: inline-block;
+    margin-top: 8px;
+    padding: 2px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--surface-2);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 20px;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+}
+
+.profile-details .profile-code {
+    color: var(--text);
+}
+
+.anon-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 24px;
+    margin-top: 8px;
+    padding: 0 8px;
+    border-radius: 4px;
+    background: var(--text);
+    color: var(--bg);
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 600;
+}
+
+.anon-badge .icon {
+    width: 14px;
+    height: 14px;
+    stroke-width: 2;
 }
 
 .profile-actions {
     display: flex;
     flex-direction: column;
+    gap: 8px;
+    margin-top: 24px;
+}
+
+.profile-section + .profile-section {
+    margin-top: 24px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+}
+
+/* Выбор тона аватара: круги-образцы оттенков серого. */
+.color-picker {
+    display: flex;
+    flex-wrap: wrap;
     gap: 12px;
 }
 
+.color-option {
+    position: relative;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: 1px solid var(--border-strong);
+    background: var(--surface-3);
+    cursor: pointer;
+    transition: transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+
+.color-option:hover {
+    transform: scale(1.08);
+}
+
+.color-option.active,
+.color-option[aria-pressed="true"],
+.color-option[aria-checked="true"] {
+    box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--text);
+}
+
+/* Образцы тонов (если выбор тона вернётся в профиль): data-tone = N из .avatar-tone-N. */
+.color-option[data-tone="0"] { background: var(--surface-3); }
+.color-option[data-tone="1"] { background: #f5f5f5; }
+.color-option[data-tone="2"] { background: #bdbdbd; }
+.color-option[data-tone="3"] { background: #8a8a8a; }
+.color-option[data-tone="4"] { background: #4a4a4a; }
+.color-option[data-tone="5"] { background: #0a0a0a; border-color: #474747; }
+
+/* Журнал безопасности. */
+.security-section {
+    margin: 24px 0;
+}
+
+.security-section > .field-hint {
+    margin-bottom: 12px;
+}
+
+.security-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+}
+
+.security-item {
+    display: grid;
+    grid-template-columns: 20px minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 12px;
+    min-height: 56px;
+    padding: 8px 16px;
+    font-size: 13px;
+    line-height: 20px;
+}
+
+.security-item + .security-item {
+    border-top: 1px solid var(--border);
+}
+
+.security-item > .icon {
+    width: 20px;
+    height: 20px;
+    color: var(--text-2);
+}
+
+.security-item.is-warning > .icon,
+.security-item[data-type="login_failed"] > .icon {
+    color: var(--text);
+}
+
+.security-item.is-warning .security-text,
+.security-item[data-type="login_failed"] .security-text {
+    font-weight: 600;
+}
+
+.security-text,
+.security-item > div:not([class]) {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    color: var(--text);
+    font-weight: 500;
+}
+
+.security-item small {
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 400;
+    color: var(--text-3);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Заглушка «Загрузка…» / «Событий пока нет» — одна строка по центру. */
+.security-item.muted {
+    display: block;
+    min-height: 0;
+    padding: 16px;
+    text-align: center;
+}
+
+.security-client {
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 400;
+    color: var(--text-3);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.security-time,
+.security-item time {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 16px;
+    color: var(--text-3);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.security-empty {
+    padding: 16px;
+    color: var(--text-3);
+    font-size: 13px;
+    text-align: center;
+}
+
+/* Приглашения (старые классы окна + новые из К1). */
 .invite-text {
-    margin-bottom: 14px;
-    color: var(--text-secondary);
+    margin-bottom: 12px;
+    color: var(--text-2);
 }
 
 .invite-code-container {
     display: flex;
-    gap: 12px;
     align-items: center;
-    background: rgba(99, 102, 241, 0.1);
-    padding: 16px;
-    border-radius: 12px;
-    border: 1px solid rgba(99, 102, 241, 0.2);
+    gap: 8px;
+    padding: 8px 8px 8px 16px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
 }
 
 /* 26 символов группами по 5 — переносится по пробелам между группами. */
-.invite-code-container code {
-    flex: 1;
-    min-width: 0;
-    font-family: 'JetBrains Mono', 'Courier New', monospace;
+.invite-code-container code,
+.invite-code {
+    font-family: var(--font-mono);
     font-size: 18px;
-    letter-spacing: 1px;
-    word-spacing: 4px;
-    line-height: 1.6;
+    line-height: 28px;
     font-weight: 600;
-    color: var(--primary);
+    letter-spacing: 0.08em;
+    word-spacing: 0.2em;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
     overflow-wrap: anywhere;
     user-select: all;
 }
 
-.invite-code-container.expired code {
+.invite-code-container code {
+    flex: 1;
+    min-width: 0;
+}
+
+.invite-code {
+    display: block;
+    padding: 12px 16px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    text-align: center;
+}
+
+.invite-code-container .invite-code {
+    display: block;
+    padding: 0;
+    border: 0;
+    background: none;
+    text-align: left;
+}
+
+.invite-code.is-expired,
+.invite-code.is-disabled {
+    color: var(--text-3);
     text-decoration: line-through;
-    opacity: 0.5;
+    text-decoration-thickness: 2px;
+}
+
+/* Код недействителен (истёк или выключен): пунктир и приглушённый текст —
+   зачёркивание не подходит к надписи «Приглашение выключено». */
+.invite-code-container.expired {
+    border-style: dashed;
+    background: transparent;
+}
+
+.invite-code-container.expired code {
+    color: var(--text-3);
+    font-family: var(--font);
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 500;
+    letter-spacing: normal;
+    word-spacing: normal;
+    user-select: text;
+}
+
+/* «Скопировать ссылку» под QR — по центру; без QR (код выключен) —
+   с отступом от поля кода. */
+.invite-qr + .btn {
+    display: flex;
+    margin: 12px auto 8px;
 }
 
 .invite-meta {
-    margin-top: 10px;
-    font-size: 13px;
-    color: var(--text-secondary);
+    margin-top: 8px;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-2);
 }
 
 .invite-meta.expired {
-    color: var(--warning);
     font-weight: 600;
+    color: var(--text);
 }
 
 .invite-hint {
     margin: 12px 0;
-    font-size: 13px;
-    color: var(--text-tertiary);
-    line-height: 1.5;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-3);
 }
 
-/* Участники и ключи */
+/* QR всегда чёрным по белому в обеих темах — иначе его не отсканировать. */
+.invite-qr {
+    display: grid;
+    place-items: center;
+    width: fit-content;
+    max-width: 100%;
+    margin: 16px auto;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: #ffffff;
+    color: #000000;
+    color-scheme: light;
+}
+
+.invite-qr canvas,
+.invite-qr img,
+.invite-qr svg {
+    display: block;
+    width: 216px;
+    max-width: 100%;
+    height: auto;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+}
+
+.invite-qr.is-expired,
+.invite-qr.is-disabled {
+    opacity: 0.2;
+}
+
+.invite-settings {
+    display: grid;
+    gap: 16px;
+    margin: 16px 0;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+}
+
+.invite-settings > .field,
+.invite-settings > .form-group {
+    margin-bottom: 0;
+}
+
+.invite-settings > legend {
+    color: var(--text);
+    font-weight: 600;
+}
+
+.invite-settings > .toggle-row {
+    padding: 0;
+    min-height: 40px;
+}
+
+.invite-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+.invite-actions > .btn {
+    flex: 1 1 auto;
+}
+
+.invite-status {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 12px;
+    font-size: 13px;
+    line-height: 20px;
+    color: var(--text-2);
+}
+
+.invite-status:empty {
+    display: none;
+}
+
+.invite-status-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* Первая строка — срок кода: главное, что нужно знать. */
+.invite-status-line:first-child {
+    color: var(--text);
+    font-weight: 500;
+}
+
+.invite-status.expired .invite-status-line:first-child {
+    font-weight: 600;
+}
+
+.invite-status .icon {
+    width: 16px;
+    height: 16px;
+    stroke-width: 2;
+}
+
+.invite-status.is-warning,
+.invite-status.is-expired,
+.invite-status.is-disabled {
+    color: var(--text);
+    font-weight: 600;
+}
+
+/* Заявки в окне. */
+.request-list,
+.requests-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.request-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 56px;
+    padding: 8px 0;
+}
+
+.request-row + .request-row {
+    border-top: 1px solid var(--border);
+}
+
+.request-row > .member-info,
+.request-row > .request-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.request-row .member-actions {
+    flex: none;
+    margin-top: 0;
+}
+
+/* Заглушка «Новых заявок нет». */
+.request-row.muted {
+    justify-content: center;
+    min-height: 0;
+    padding: 16px 0;
+    font-size: 13px;
+}
+
+.request-row > .avatar {
+    width: 36px;
+    height: 36px;
+    font-size: 14px;
+}
+
+.request-info {
+    display: flex;
+    flex-direction: column;
+}
+
+.request-name {
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.request-time {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 16px;
+    color: var(--text-3);
+    font-variant-numeric: tabular-nums;
+}
+
+.request-actions {
+    display: flex;
+    gap: 8px;
+    flex: none;
+}
+
+/* Участники и ключи. */
 .members-intro {
     margin-bottom: 16px;
-    font-size: 14px;
-    color: var(--text-secondary);
-    line-height: 1.5;
-}
-
-.members-note {
-    margin-bottom: 16px;
-    padding: 10px 14px;
-    background: rgba(245, 158, 11, 0.12);
-    border: 1px solid rgba(245, 158, 11, 0.4);
-    border-radius: 12px;
-    color: #fcd34d;
     font-size: 13px;
+    line-height: 20px;
+    color: var(--text-2);
 }
 
 .members-list {
-    list-style: none;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
 }
 
 .members-placeholder {
-    padding: 14px;
-    color: var(--text-tertiary);
-    font-size: 14px;
+    padding: 16px;
+    color: var(--text-3);
+    font-size: 13px;
     text-align: center;
 }
 
 .member-item {
-    background: rgba(37, 37, 63, 0.5);
+    padding: 12px;
     border: 1px solid var(--border);
-    border-radius: 14px;
-    padding: 12px 14px;
+    border-radius: var(--radius-sm);
+    background: var(--surface);
 }
 
 .member-head {
@@ -1385,63 +3885,95 @@ button:focus-visible,
 }
 
 .member-avatar {
-    width: 38px;
-    height: 38px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    color: white;
-    font-weight: 700;
-    background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+    width: 36px;
+    height: 36px;
+    font-size: 14px;
+    line-height: 20px;
 }
 
 .member-info {
-    flex: 1;
-    min-width: 0;
     display: flex;
     flex-direction: column;
     gap: 2px;
+    flex: 1;
+    min-width: 0;
+}
+
+.member-info small {
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-3);
 }
 
 .member-name {
+    font-size: 14px;
+    line-height: 20px;
     font-weight: 600;
-    font-size: 15px;
-    color: var(--text-primary);
+    color: var(--text);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 
 .member-status {
+    display: inline-flex;
+    align-items: center;
+    align-self: flex-start;
+    gap: 4px;
     font-size: 12px;
+    line-height: 16px;
+    font-weight: 500;
+    color: var(--text-2);
+}
+
+.member-status svg.icon {
+    width: 12px;
+    height: 12px;
+    stroke-width: 2.5;
+}
+
+.member-status.verified {
+    color: var(--text);
     font-weight: 600;
 }
 
-.member-status.verified { color: var(--success); }
-.member-status.unverified { color: var(--text-tertiary); }
-.member-status.changed { color: var(--warning); }
-.member-status.unknown { color: var(--text-tertiary); font-style: italic; }
+.member-status.verified:not(:has(.icon))::before {
+    content: "";
+    width: 12px;
+    height: 12px;
+    background-color: currentColor;
+    -webkit-mask: var(--mask-check) center / contain no-repeat;
+    mask: var(--mask-check) center / contain no-repeat;
+}
+
+/* Ключ сменился — инверсная метка: главное, что должно броситься в глаза. */
+.member-status.changed {
+    padding: 0 6px;
+    border-radius: 4px;
+    background: var(--text);
+    color: var(--bg);
+    font-weight: 600;
+}
+
+.member-status.unverified {
+    color: var(--text-2);
+}
+
+.member-status.unknown {
+    color: var(--text-3);
+}
 
 .member-code-btn {
-    flex-shrink: 0;
-    padding: 8px 14px;
-    background: rgba(37, 37, 63, 0.8);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    color: var(--text-secondary);
+    flex: none;
+    height: var(--control-h-sm);
+    padding: 0 12px;
     font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.3s ease;
 }
 
-.member-code-btn:hover,
 .member-code-btn[aria-expanded="true"] {
-    background: rgba(99, 102, 241, 0.2);
-    border-color: var(--primary);
-    color: var(--text-primary);
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-fg);
 }
 
 .member-details {
@@ -1452,228 +3984,396 @@ button:focus-visible,
 
 .member-warning {
     margin-bottom: 12px;
-    padding: 10px 12px;
-    background: rgba(245, 158, 11, 0.12);
-    border: 1px solid rgba(245, 158, 11, 0.4);
-    border-radius: 10px;
-    color: #fcd34d;
-    font-size: 13px;
-    line-height: 1.5;
 }
 
-/* 60 цифр — 12 групп по 5, сеткой, чтобы было удобно сверять вслух. */
+/* Код безопасности: 12 групп по 5 цифр сеткой, чтобы сверять вслух. */
 .safety-number {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
-    gap: 6px 12px;
-    padding: 12px;
-    background: rgba(15, 15, 26, 0.6);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    font-family: 'JetBrains Mono', 'Courier New', monospace;
+    gap: 8px 16px;
+    padding: 16px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    font-family: var(--font-mono);
     font-size: 16px;
-    letter-spacing: 1px;
+    line-height: 24px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    font-variant-numeric: tabular-nums;
     text-align: center;
-    color: var(--text-primary);
+    color: var(--text);
 }
 
 .safety-number.unavailable {
     display: block;
-    font-family: inherit;
+    font-family: var(--font);
     font-size: 13px;
+    line-height: 20px;
+    font-weight: 400;
     letter-spacing: normal;
-    color: var(--text-tertiary);
+    color: var(--text-3);
+    border-style: dashed;
 }
 
 .safety-hint {
-    margin: 10px 0;
+    margin: 8px 0;
     font-size: 12px;
-    color: var(--text-tertiary);
-    line-height: 1.5;
+    line-height: 16px;
+    color: var(--text-3);
+}
+
+.member-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
 }
 
 .member-actions .auth-btn,
 .member-actions .danger-btn {
-    padding: 12px;
+    height: var(--control-h);
     font-size: 14px;
 }
 
-/* Context Menu */
-.context-menu {
-    position: absolute;
-    background: rgba(26, 26, 46, 0.98);
-    backdrop-filter: blur(20px);
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    box-shadow: var(--shadow-lg);
-    padding: 8px;
-    min-width: 200px;
-    z-index: 200;
-    animation: contextSlide 0.2s ease;
-}
 
-@keyframes contextSlide {
-    from {
-        opacity: 0;
-        transform: translateY(-10px);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
+/* --------------------------------------------------------------------------
+   13. Контекстное меню.
+   -------------------------------------------------------------------------- */
+
+.context-menu {
+    position: fixed;
+    z-index: 200;
+    min-width: 208px;
+    max-width: calc(100vw - 16px);
+    padding: 4px;
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    animation: drop-in var(--dur-fast) var(--ease);
+    transform-origin: top left;
 }
 
 .menu-item {
-    width: 100%;
-    padding: 12px 16px;
-    border: none;
-    background: none;
-    text-align: left;
-    border-radius: 10px;
-    cursor: pointer;
-    font-size: 14px;
     display: flex;
     align-items: center;
-    gap: 10px;
-    color: var(--text-primary);
-    transition: all 0.2s ease;
+    gap: 12px;
+    width: 100%;
+    height: 36px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--text);
+    font-size: 14px;
+    line-height: 20px;
+    text-align: left;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
 
-.menu-item:hover {
-    background: rgba(99, 102, 241, 0.15);
+.menu-item > .icon {
+    width: 18px;
+    height: 18px;
+    color: var(--text-2);
+    transition: color var(--dur-fast) var(--ease);
 }
 
+.menu-item:hover,
+.menu-item:focus-visible {
+    background: var(--hover);
+}
+
+.menu-item:hover > .icon {
+    color: var(--text);
+}
+
+.menu-item:focus-visible {
+    outline-offset: -2px;
+}
+
+.menu-item:active {
+    background: var(--pressed);
+}
+
+.menu-item:disabled,
+.menu-item[aria-disabled="true"] {
+    opacity: 0.4;
+    cursor: not-allowed;
+    background: none;
+}
+
+/* Опасный пункт: полужирный, при наведении — инверсия. */
 .menu-item.danger {
-    color: var(--error);
+    font-weight: 600;
 }
 
-.menu-item.danger:hover {
-    background: rgba(239, 68, 68, 0.1);
+.menu-item.danger > .icon {
+    color: var(--text);
 }
 
-/* Toast */
+.menu-item.danger:hover,
+.menu-item.danger:focus-visible {
+    background: var(--text);
+    color: var(--bg);
+}
+
+.menu-item.danger:hover > .icon,
+.menu-item.danger:focus-visible > .icon {
+    color: var(--bg);
+}
+
+.menu-item .menu-hint,
+.menu-item kbd {
+    margin-left: auto;
+    padding-left: 16px;
+    color: var(--text-3);
+    font-size: 12px;
+}
+
+.menu-item[aria-checked="true"]::after {
+    content: "";
+    width: 16px;
+    height: 16px;
+    margin-left: auto;
+    background-color: currentColor;
+    -webkit-mask: var(--mask-check) center / contain no-repeat;
+    mask: var(--mask-check) center / contain no-repeat;
+}
+
+/* Иконки пунктов — на одной вертикали с подписями полей окна. */
+.chat-menu-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: -12px -12px 0;
+}
+
+.chat-menu-actions .menu-item {
+    height: 40px;
+}
+
+.menu-separator {
+    height: 1px;
+    margin: 4px 0;
+    background: var(--border);
+    border: 0;
+}
+
+.menu-label {
+    padding: 8px 12px 4px;
+    font-size: 11px;
+    line-height: 16px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-3);
+}
+
+
+/* --------------------------------------------------------------------------
+   14. Тосты — инверсные плашки с иконкой слева.
+   -------------------------------------------------------------------------- */
+
 .toast {
     position: fixed;
-    bottom: 28px;
     left: 50%;
-    transform: translateX(-50%);
-    padding: 14px 28px;
-    border-radius: 12px;
-    color: white;
-    font-weight: 600;
+    bottom: max(24px, calc(env(safe-area-inset-bottom) + 16px));
     z-index: 300;
-    box-shadow: var(--shadow-lg);
-    animation: toastSlide 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-    backdrop-filter: blur(10px);
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    width: max-content;
+    max-width: min(480px, calc(100vw - 32px));
+    padding: 12px 16px;
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--text);
+    box-shadow: var(--shadow);
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 500;
+    transform: translateX(-50%);
+    animation: toast-in var(--dur-slow) var(--ease);
 }
 
-@keyframes toastSlide {
-    from {
-        opacity: 0;
-        transform: translate(-50%, 30px);
-    }
-    to {
-        opacity: 1;
-        transform: translate(-50%, 0);
-    }
+@keyframes toast-in {
+    from { opacity: 0; transform: translate(-50%, 8px); }
+    to { opacity: 1; transform: translate(-50%, 0); }
 }
 
-.toast.success {
-    background: linear-gradient(135deg, var(--success) 0%, #059669 100%);
+.toast > .icon {
+    width: 20px;
+    height: 20px;
 }
 
-.toast.error {
-    background: linear-gradient(135deg, var(--error) 0%, #dc2626 100%);
+.toast:not(:has(> .icon))::before {
+    content: "";
+    flex: none;
+    width: 20px;
+    height: 20px;
+    background-color: currentColor;
+    -webkit-mask: var(--mask-info) center / contain no-repeat;
+    mask: var(--mask-info) center / contain no-repeat;
 }
 
-.toast.info {
-    background: linear-gradient(135deg, var(--primary) 0%, var(--primary-hover) 100%);
+.toast.success:not(:has(> .icon))::before,
+.toast.toast-success:not(:has(> .icon))::before {
+    -webkit-mask-image: var(--mask-check);
+    mask-image: var(--mask-check);
 }
 
-/* Mobile Responsive */
+.toast.error:not(:has(> .icon))::before,
+.toast.toast-error:not(:has(> .icon))::before {
+    -webkit-mask-image: var(--mask-alert);
+    mask-image: var(--mask-alert);
+}
+
+/* Ошибка отличается не цветом, а весом и внутренней рамкой. */
+.toast.error,
+.toast.toast-error {
+    font-weight: 600;
+    outline: 2px solid var(--text);
+    outline-offset: -5px;
+    padding: 14px 18px;
+}
+
+.toast-text,
+.toast > span {
+    flex: 1;
+    min-width: 0;
+}
+
+.toast .btn,
+.toast .toast-action {
+    margin: -6px -8px -6px 8px;
+    height: var(--control-h-sm);
+}
+
+
+/* --------------------------------------------------------------------------
+   15. Адаптив: планшет/телефон — одна колонка (сайдбар ↔ чат).
+   -------------------------------------------------------------------------- */
+
 @media (max-width: 768px) {
+    :root {
+        --header-h: 56px;
+    }
+
     .sidebar {
         position: fixed;
         inset: 0;
-        width: 100%;
         z-index: 50;
+        width: 100%;
+        padding-left: env(safe-area-inset-left);
+        padding-right: env(safe-area-inset-right);
+        border-right: 0;
         transform: translateX(0);
-        transition: transform 0.3s ease;
+        visibility: visible;
+        transition: transform var(--dur-slow) var(--ease), visibility 0s linear 0s;
     }
 
-    .back-btn {
-        display: flex;
-    }
-
-    .chat-header,
-    .message-input-container {
-        padding: 12px 14px;
-    }
-
-    .chat-header .chat-info {
-        gap: 10px;
-    }
-
-    .chat-details {
-        min-width: 0;
-    }
-
-    .chat-details h3 {
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-    }
-
-    .chat-actions {
-        gap: 6px;
-    }
-
-    .chat-header .icon-btn,
-    .chat-avatar {
-        width: 38px;
-        height: 38px;
-        font-size: 17px;
-    }
-
-    .chat-messages {
-        padding: 16px 12px;
-    }
-
+    /* visibility убирает скрытый сайдбар из порядка фокуса. */
     .sidebar.hidden-mobile {
         transform: translateX(-100%);
+        visibility: hidden;
+        transition: transform var(--dur-slow) var(--ease), visibility 0s linear var(--dur-slow);
     }
 
     .main-content {
         width: 100%;
     }
 
+    .chat-header {
+        gap: 8px;
+        padding: env(safe-area-inset-top) 8px 0 4px;
+    }
+
+    .chat-header .chat-info {
+        gap: 8px;
+    }
+
+    .chat-avatar {
+        width: 36px;
+        height: 36px;
+        font-size: 14px;
+    }
+
+    .chat-actions {
+        gap: 0;
+    }
+
+    .chat-messages {
+        padding: 12px;
+    }
+
     .message {
         max-width: 85%;
     }
 
-    .auth-container {
-        padding: 32px 24px;
+    .message-input-container {
+        padding: 8px 8px max(8px, env(safe-area-inset-bottom));
     }
 
+    .banner,
     .e2ee-banner {
-        padding: 10px 14px;
-        font-size: 13px;
         flex-wrap: wrap;
-        gap: 8px;
+        padding: 8px 12px;
     }
 
-    .banner-btn {
-        width: 100%;
+    .banner-text,
+    .e2ee-banner-text {
+        flex-basis: calc(100% - 40px);
     }
 
-    .modal-content {
-        width: calc(100% - 24px);
-        max-height: calc(100vh - 24px);
+    .banner-actions,
+    .banner > .banner-btn,
+    .e2ee-banner > .banner-btn {
+        margin-left: 32px;
     }
 
-    .modal-header,
+    .requests-bar {
+        padding: 8px 12px;
+    }
+
+    .auth-container {
+        padding: 32px 24px 24px;
+    }
+
+    /* Окна — снизу, как лист: ближе к большому пальцу. */
+    .modal {
+        align-items: flex-end;
+        padding: max(24px, env(safe-area-inset-top)) 0 0;
+    }
+
+    .modal-content,
+    .modal-content.modal-sm,
+    .modal-content.modal-wide {
+        max-width: none;
+        max-height: 100%;
+        border-bottom: 0;
+        border-radius: var(--radius) var(--radius) 0 0;
+        padding-bottom: env(safe-area-inset-bottom);
+        animation: sheet-in var(--dur-slow) var(--ease);
+    }
+
+    .modal-header {
+        min-height: 56px;
+        padding: 8px 8px 8px 16px;
+    }
+
     .modal-body {
-        padding: 18px 16px;
+        padding: 16px;
+    }
+
+    .modal-footer {
+        padding: 12px 16px max(12px, env(safe-area-inset-bottom));
+    }
+
+    .modal-footer > .btn {
+        flex: 1 1 auto;
     }
 
     .safety-number {
@@ -1684,50 +4384,162 @@ button:focus-visible,
     .member-head {
         flex-wrap: wrap;
     }
+
+    .toast {
+        bottom: max(80px, calc(env(safe-area-inset-bottom) + 72px));
+    }
+
+    .jump-down {
+        margin-right: 12px;
+    }
+
+    /* На сенсорных экранах кнопки не меньше 40 px. */
+    .reaction {
+        height: 28px;
+    }
 }
 
-/* Узкие телефоны: в шапке комнаты четыре кнопки + "назад" + аватар. */
+@keyframes sheet-in {
+    from { transform: translateY(24px); opacity: 0; }
+    to { transform: none; opacity: 1; }
+}
+
+/* Узкие телефоны: в шапке комнаты «назад» + до пяти кнопок. */
 @media (max-width: 420px) {
     .chat-header .icon-btn {
-        width: 34px;
-        height: 34px;
-        font-size: 15px;
+        width: 36px;
+        height: 36px;
     }
 
     .chat-header .chat-avatar {
         display: none;
     }
 
-    .chat-actions {
-        gap: 4px;
+    .chat-details h3 {
+        font-size: 14px;
     }
 
-    .invite-code-container code {
+    .chat-indicators .indicator span,
+    .indicator-text {
+        display: none;
+    }
+
+    .sidebar-header {
+        padding-left: 12px;
+        padding-right: 8px;
+    }
+
+    .auth-screen {
+        padding-left: 0;
+        padding-right: 0;
+        align-items: flex-start;
+    }
+
+    .auth-container {
+        border: 0;
+        background: transparent;
+        padding: 24px 20px;
+    }
+
+    .auth-logo {
+        margin-bottom: 24px;
+    }
+
+    .invite-code-container code,
+    .invite-code {
         font-size: 16px;
+        letter-spacing: 0.04em;
+    }
+
+    .message {
+        max-width: 90%;
+    }
+
+    .footer-btn {
+        padding: 0 8px;
+    }
+
+    .input-wrapper #record-btn:disabled {
+        display: none;
+    }
+
+    .request-row {
+        flex-wrap: wrap;
+    }
+
+    .request-actions {
+        width: 100%;
+    }
+
+    .request-actions > * {
+        flex: 1;
+    }
+
+    .security-item {
+        grid-template-columns: 20px minmax(0, 1fr);
+    }
+
+    .security-item .security-time,
+    .security-item time {
+        grid-column: 2;
     }
 }
 
-/* Loading Animation */
-@keyframes spin {
-    to { transform: rotate(360deg); }
+/* Кнопка «назад к списку» — только в одноколоночном режиме. */
+.back-btn {
+    display: none;
 }
 
-.loading {
-    animation: spin 1s linear infinite;
-}
-
-/* Recording Animation */
-@keyframes recordPulse {
-    0%, 100% {
-        box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
-    }
-    50% {
-        box-shadow: 0 0 0 15px rgba(239, 68, 68, 0);
+@media (max-width: 768px) {
+    .back-btn {
+        display: inline-flex;
     }
 }
 
-.recording {
-    animation: recordPulse 2s infinite;
-    background: var(--error) !important;
-    color: white !important;
+
+/* --------------------------------------------------------------------------
+   16. Доступность: без анимаций, высокий контраст.
+   -------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        transition-delay: 0s !important;
+        scroll-behavior: auto !important;
+    }
+
+    /* Индикатор загрузки остаётся: это состояние, а не украшение. */
+    .spin,
+    .loading,
+    .upload-status .progress:not([aria-valuenow]) .progress-bar,
+    .progress.is-indeterminate .progress-bar {
+        animation-duration: 1.6s !important;
+        animation-iteration-count: infinite !important;
+    }
+}
+
+@media (prefers-contrast: more) {
+    :root,
+    [data-theme] {
+        --border: var(--border-strong);
+        --text-2: var(--text);
+        --text-3: var(--text-2);
+    }
+}
+
+@media (forced-colors: active) {
+    .icon {
+        forced-color-adjust: auto;
+    }
+
+    .toggle-row input[type="checkbox"],
+    .radio-row input[type="radio"],
+    .switch {
+        forced-color-adjust: none;
+        border-color: CanvasText;
+    }
 }

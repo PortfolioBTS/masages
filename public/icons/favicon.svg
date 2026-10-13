@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<title>Nyxo</title>
+<style>
+path { fill: #0a0a0a; stroke: #ffffff; }
+@media (prefers-color-scheme: dark) { path { fill: #fafafa; stroke: #0a0a0a; } }
+</style>
+<path fill="#0a0a0a" stroke="#ffffff" stroke-width="1" stroke-linejoin="round" paint-order="stroke" d="M15.5 1.572A11 11 0 0 1 14.406 22.734L8.5 10.5V22.428A11 11 0 0 1 9.594 1.266L15.5 13.5Z"/>
+</svg>

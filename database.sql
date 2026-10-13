@@ -27,7 +27,8 @@
 --   * reactions.message_id, unread.chat_id, room_participants.room_id —
 --     ON DELETE CASCADE.
 --   * Все FK на users(id) (chats.user_id, messages.user_id, unread.user_id,
---     room_participants.user_id, reactions.user_id, e2ee_key_shares.*) НЕ
+--     room_participants.user_id, reactions.user_id, e2ee_key_shares.*,
+--     join_requests.user_id, security_events.user_id) НЕ
 --     каскадные (обычный ON DELETE NO ACTION): удаление пользователя
 --     (deleteUserAccount в server.js) само удаляет его строки в нужном
 --     порядке одной транзакцией.
@@ -67,7 +68,12 @@ CREATE TABLE IF NOT EXISTS users (
     avatar TEXT DEFAULT '',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     -- отметки прочтения (POST /api/user/privacy)
-    read_receipts BOOLEAN NOT NULL DEFAULT TRUE
+    read_receipts BOOLEAN NOT NULL DEFAULT TRUE,
+    -- только у анонимов: срок жизни без активности ('tab' | 'day' | 'week',
+    -- NULL у старых анонимов = 'tab') и последняя активность (сокет, API);
+    -- у обычных аккаунтов обе колонки NULL (см. lib/anon-lifetime.js)
+    anon_lifetime TEXT,
+    last_active_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS rooms (
@@ -76,7 +82,12 @@ CREATE TABLE IF NOT EXISTS rooms (
     code TEXT UNIQUE NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     -- срок жизни инвайт-кода (INVITE_TTL_HOURS); NULL считается истёкшим
-    code_expires_at TIMESTAMPTZ
+    code_expires_at TIMESTAMPTZ,
+    -- параметры кода (lib/invites.js): лимит участников (NULL — без лимита),
+    -- вступление только с одобрения участника, выключенный код
+    invite_max_members INTEGER,
+    invite_require_approval BOOLEAN NOT NULL DEFAULT TRUE,
+    invite_disabled BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE TABLE IF NOT EXISTS chats (
@@ -90,7 +101,11 @@ CREATE TABLE IF NOT EXISTS chats (
     -- id последнего прочитанного сообщения (счётчик непрочитанного)
     last_read_message_id INTEGER NOT NULL DEFAULT 0,
     -- порядок чатов без сообщений (id случайные); у старых строк NULL
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    -- личные флаги чата (POST /api/chats/:chatId/prefs)
+    pinned BOOLEAN NOT NULL DEFAULT FALSE,
+    muted BOOLEAN NOT NULL DEFAULT FALSE,
+    archived BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 ALTER TABLE users ALTER COLUMN id SET DEFAULT nyxo_random_id('users'::regclass);
@@ -166,6 +181,19 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS file_size BIGINT;
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ;
 ALTER TABLE chats ALTER COLUMN created_at SET DEFAULT NOW();
 
+-- Колонки версии с приглашениями по одобрению, личными флагами чатов и
+-- сроком жизни анонимов. Одобрение (DEFAULT TRUE) включается и у уже
+-- существующих комнат. Старым анонимам server.js при добавлении
+-- last_active_at ставит NOW() — отсчёт неактивности с момента обновления.
+ALTER TABLE rooms ADD COLUMN IF NOT EXISTS invite_max_members INTEGER;
+ALTER TABLE rooms ADD COLUMN IF NOT EXISTS invite_require_approval BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE rooms ADD COLUMN IF NOT EXISTS invite_disabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS pinned BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS muted BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS anon_lifetime TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_active_at TIMESTAMPTZ;
+
 -- Таблицы lib/disappearing-messages.js и lib/e2ee-groups.js
 CREATE TABLE IF NOT EXISTS message_expiry (
     message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
@@ -174,10 +202,45 @@ CREATE TABLE IF NOT EXISTS message_expiry (
 );
 CREATE INDEX IF NOT EXISTS idx_message_expiry_expires_at ON message_expiry(expires_at);
 
+-- Личный таймер — только для чата с ботом. Таймеры комнат — общие
+-- (room_settings); старые личные таймеры комнат server.js при старте
+-- переносит в room_settings (самый короткий) и удаляет
+-- (migrateLegacyRoomExpiry).
 CREATE TABLE IF NOT EXISTS chat_settings (
     chat_id INTEGER PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
     default_message_expiry INTEGER
 );
+
+-- Общий таймер исчезающих сообщений комнаты (нет строки — выключен)
+CREATE TABLE IF NOT EXISTS room_settings (
+    room_id INTEGER PRIMARY KEY REFERENCES rooms(id) ON DELETE CASCADE,
+    default_message_expiry INTEGER
+);
+
+-- Заявки на вступление в комнату с одобрением; живут 7 дней (просроченные
+-- server.js удаляет в фоне). id — случайный, как у users/rooms/chats.
+CREATE TABLE IF NOT EXISTS join_requests (
+    id INTEGER PRIMARY KEY,
+    room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (room_id, user_id)
+);
+ALTER TABLE join_requests ALTER COLUMN id SET DEFAULT nyxo_random_id('join_requests'::regclass);
+CREATE INDEX IF NOT EXISTS idx_join_requests_user ON join_requests(user_id);
+CREATE INDEX IF NOT EXISTS idx_join_requests_created ON join_requests(created_at);
+
+-- Журнал безопасности: последние 50 событий на пользователя (login,
+-- login_failed, password_changed, register) и грубое семейство клиента по
+-- User-Agent. Ни IP, ни полной строки User-Agent.
+CREATE TABLE IF NOT EXISTS security_events (
+    id BIGSERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    type TEXT NOT NULL,
+    client TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_security_events_user ON security_events(user_id, id);
 
 CREATE TABLE IF NOT EXISTS e2ee_key_shares (
     id SERIAL PRIMARY KEY,
@@ -206,3 +269,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_room_participants_unique ON room_participa
 DROP INDEX IF EXISTS idx_room_participants_room_user;
 CREATE INDEX IF NOT EXISTS idx_room_participants_user ON room_participants(user_id);
 CREATE INDEX IF NOT EXISTS idx_reactions_msg_user ON reactions(message_id, user_id);
+-- Авто-разархивация получателей на каждое новое сообщение комнаты
+CREATE INDEX IF NOT EXISTS idx_chats_archived ON chats(room_id) WHERE archived;
+-- Удаление просроченных анонимов
+CREATE INDEX IF NOT EXISTS idx_users_anon ON users(created_at) WHERE email IS NULL AND password IS NULL;

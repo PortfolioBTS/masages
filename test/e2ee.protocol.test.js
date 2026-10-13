@@ -426,6 +426,34 @@ async function main() {
         assert.strictEqual((await bob.decryptIncoming(300, 1, ct, 1)).text, 'partial group');
     });
 
+    await test('no bundle request for a peer without identity on the server (saves the per-pair bundle quota); sent once keys appear', async () => {
+        const server = makeFakeServer();
+        server.addParticipant(310, 1, 11);
+        server.addParticipant(310, 3, 33);
+        const bundleCalls = [];
+        const base = server.transportFor(1);
+        const transport = Object.assign({}, base, {
+            getBundle(target) { bundleCalls.push(Number(target)); return base.getBundle(target); },
+        });
+        const alice = makeUser(server, 1, { transport });
+        await alice.init();
+        const parts = [{ id: 1 }, { id: 3 }];
+        for (let i = 0; i < 7; i++) {
+            const r = await alice.ensureRoomSession(11, 310, parts);
+            assert.strictEqual(r.warnings[0].reason, 'у собеседника ещё не настроен E2EE');
+        }
+        assert.deepStrictEqual(bundleCalls, [], 'bundle не запрашивается, пока у собеседника нет identity');
+        // Собеседник настроил E2EE — ключ уходит при следующем открытии комнаты.
+        const carol = makeUser(server, 3);
+        await carol.init();
+        const r = await alice.ensureRoomSession(11, 310, parts);
+        assert.strictEqual(r.warnings.length, 0, JSON.stringify(r.warnings));
+        assert.deepStrictEqual(bundleCalls, [3]);
+        assert.strictEqual((await carol.syncKeyShares(33, 310)).applied, 1);
+        const ct = await alice.encryptOutgoing(310, 'после настройки ключей');
+        assert.strictEqual((await carol.decryptIncoming(310, 1, ct, 5)).text, 'после настройки ключей');
+    });
+
     await test('rooms are isolated: a message encrypted for room A cannot be replayed into room B', async () => {
         const server = makeFakeServer();
         server.addParticipant(400, 1, 11);
