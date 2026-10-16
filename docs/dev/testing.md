@@ -87,6 +87,11 @@ worktree, на одном контейнере) друг другу не меш�
     становится N мс: сессия продлевается, когда `sess.renewBucket` отличается от
     `floor(now / N)`. Наборы, которым нужно «та же корзина» без случайностей, ставят
     огромное N и сбрасывают маркер вручную (`forceRenewal` в `helpers/anon.js`).
+  - `KT_SIGNING_KEY` + `KT_EPOCH_SECONDS=2`, `KT_GENERATION_EPOCHS`, `KT_GRACE_EPOCHS`, `KT_COMPACT_MIN` —
+    журнал ключей (`test/e2e/key-transparency*.e2e.test.js`): эпоха в секундах, поколение и льготный срок
+    в эпохах, порог компактного индекса. Это константы протокола, а не настройки: ручки действуют только при
+    `NODE_ENV=test`, в production `env-check` считает их ошибкой. Протокол клиента проверяют юнит-тесты
+    `test/kt-client.*.test.js` (журнал в памяти `test/fake-kt.js`, оснастка `test/kt-harness.js`).
 - **Сокеты** — свой минимальный клиент Engine.IO v4 / Socket.IO v5 на
   глобальном `WebSocket` Node 24 (`helpers/socket.js`), без пакета
   `socket.io-client`: заголовки `Cookie`, `Origin`, `X-Forwarded-For` под полным
