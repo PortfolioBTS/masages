@@ -138,6 +138,11 @@ const elements = {
     membersModal: document.getElementById('members-modal'),
     membersList: document.getElementById('members-list'),
     membersNote: document.getElementById('members-note'),
+    ktBanner: document.getElementById('kt-banner'),
+    ktBannerText: document.getElementById('kt-banner-text'),
+    ktBannerBtn: document.getElementById('kt-banner-btn'),
+    ktModal: document.getElementById('kt-modal'),
+    ktAlertList: document.getElementById('kt-alert-list'),
 
     // ---- Заявки на вступление: плашка и окно ----
     requestsBar: document.getElementById('requests-bar'),
@@ -567,6 +572,12 @@ function getE2eeClient() {
                 // Без Web Locks lock = null — работает внутренняя очередь клиента, в консоли предупреждение.
                 lock: NyxoE2eeLock.makeLock(typeof navigator !== 'undefined' ? navigator.locks : null, currentUser.id,
                     (message) => console.warn(message)),
+                // Прозрачность ключей: новая тревога журнала сразу попадает в баннер боковой панели.
+                onTransparencyAlert: (alert) => {
+                    // stale — не тревога, а предупреждение: журнал давно не обновлялся (не блокирует работу).
+                    if (alert && alert.kind === 'stale') showToast('Журнал ключей на сервере давно не обновлялся: проверка ключей собеседников может запаздывать', 'info', 8000);
+                    refreshTransparencyBanner();
+                },
             });
             e2eeClientUserId = currentUser.id;
         } catch (err) {
@@ -610,6 +621,11 @@ function initE2eeForCurrentUser() {
             e2eeRetryStep = 0;
             clearTimeout(e2eeRetryTimer);
             refreshE2eeUi();
+            // Журнал ключей: плановые проверки раз в час и первая проверка (самомониторинг) сразу после входа.
+            if (typeof client.startTransparency === 'function') {
+                client.startTransparency();
+                client.runKtChecks().then(refreshTransparencyBanner, (err) => console.warn('E2EE: проверка журнала ключей не удалась:', err));
+            }
             return true;
         }, (err) => {
             console.error('E2EE: инициализация ключей устройства не удалась:', err);
@@ -787,6 +803,8 @@ async function retryE2ee({ silent = false } = {}) {
 
 const roomParticipants = new Map();          // roomId -> [{id, username}] (последний известный состав)
 const pendingIdentityChanges = new Map();    // userId -> username (для баннера открытой комнаты)
+const pendingLogMismatches = new Map();      // userId -> username: ключа нет в журнале ключей (там же)
+const notedLogMismatches = new Set();        // 'комната:участник': о чём уже писали в ленту
 const warnedRooms = new Set();               // о каких комнатах уже предупреждали, что не все получили ключ
 
 function rememberRoomParticipants(roomId, participants) {
@@ -864,14 +882,22 @@ function flushSystemNotices() {
 
 function renderIdentityBanner() {
     const names = Array.from(pendingIdentityChanges.values());
-    if (!currentRoomId || names.length === 0) {
+    const mismatched = Array.from(pendingLogMismatches.values());
+    if (!currentRoomId || (names.length === 0 && mismatched.length === 0)) {
         elements.e2eeBanner.classList.add('hidden');
         elements.e2eeBannerText.textContent = '';
         return;
     }
-    elements.e2eeBannerText.textContent = names.length === 1
-        ? `У участника ${names[0]} сменился ключ шифрования. Сообщения ему не отправляются, пока вы не проверите код безопасности`
-        : `У участников ${names.join(', ')} сменились ключи шифрования. Сообщения им не отправляются, пока вы не проверите коды безопасности`;
+    const parts = [];
+    if (names.length > 0) {
+        parts.push(names.length === 1
+            ? `У участника ${names[0]} сменился ключ шифрования. Сообщения ему не отправляются, пока вы не проверите код безопасности`
+            : `У участников ${names.join(', ')} сменились ключи шифрования. Сообщения им не отправляются, пока вы не проверите коды безопасности`);
+    }
+    if (mismatched.length > 0) {
+        parts.push(`Сервер показывает для ${mismatched.join(', ')} ключ, которого нет в журнале ключей (или журнал у участников разный). Возможна подмена. Сверьте код безопасности лично. Ключ комнаты ${mismatched.length === 1 ? 'этому участнику' : 'этим участникам'} не отправляется`);
+    }
+    elements.e2eeBannerText.textContent = parts.join('. ');
     elements.e2eeBanner.classList.remove('hidden');
 }
 
@@ -906,16 +932,22 @@ async function refreshIdentityChanges(client, roomId, participants, reported) {
         if (userId) changed.set(userId, c.username || participantName(roomId, userId));
     });
     const others = (participants || []).filter(p => currentUser && Number(p.id) !== Number(currentUser.id));
+    const mismatched = new Map();
     let statusesKnown = true;
     for (const peer of others) {
         const status = await peerIdentityStatus(client, peer.id);
         if (status === null) statusesKnown = false;
         if (status === 'changed') changed.set(Number(peer.id), peer.username || participantName(roomId, peer.id));
+        if (status === 'log-mismatch') mismatched.set(Number(peer.id), peer.username || participantName(roomId, peer.id));
     }
     if (Number(roomId) !== Number(currentRoomId)) return;
     // Если статусы узнать не удалось, ничего из баннера не убираем.
-    if (statusesKnown) pendingIdentityChanges.clear();
+    if (statusesKnown) {
+        pendingIdentityChanges.clear();
+        pendingLogMismatches.clear();
+    }
     changed.forEach((name, userId) => pendingIdentityChanges.set(userId, name));
+    mismatched.forEach((name, userId) => pendingLogMismatches.set(userId, name));
     renderIdentityBanner();
 }
 
@@ -923,7 +955,9 @@ function handleRoomSessionResult(roomId, result) {
     if (!result || Number(roomId) !== Number(currentRoomId)) return;
     const warnings = Array.isArray(result.warnings) ? result.warnings : [];
     const failedIds = new Set(warnings.filter(w => w && w.userId != null).map(w => Number(w.userId)));
-    const changedIds = new Set((result.identityChanges || []).map(c => Number(c.userId)));
+    // Участники со сменившимся ключом и с ключом, которого нет в журнале, тоже попадают в warnings, но о них
+    // говорят баннер и отдельная строка — здесь они не «без шифрования».
+    const changedIds = new Set((result.identityChanges || []).concat(result.logMismatches || []).map(c => Number(c.userId)));
     const newMembers = Array.isArray(result.newMembers) ? result.newMembers : [];
     const removedMembers = Array.isArray(result.removedMembers) ? result.removedMembers : [];
 
@@ -938,6 +972,13 @@ function handleRoomSessionResult(roomId, result) {
     }
     if (undelivered.length > 0) {
         appendSystemNotice(roomId, `В чат вошли: ${joinNames(undelivered)}, но ключ шифрования им передать не удалось — они пока не смогут читать зашифрованные сообщения`, 'alert-triangle');
+    }
+    // Ключа участника нет в журнале ключей: ключ комнаты ему не передан (один раз за сессию на участника).
+    const fresh = (Array.isArray(result.logMismatches) ? result.logMismatches : [])
+        .filter(m => !notedLogMismatches.has(`${roomId}:${m.userId}`));
+    if (fresh.length > 0) {
+        fresh.forEach(m => notedLogMismatches.add(`${roomId}:${m.userId}`));
+        appendSystemNotice(roomId, `Ключа ${joinNames(fresh)} нет в журнале ключей: ключ шифрования ${fresh.length === 1 ? 'ему' : 'им'} не передан${result.rotated ? ', ключ комнаты обновлён' : ''}. Сверьте код безопасности лично`, 'alert-triangle');
     }
     if (removedMembers.length > 0) {
         const verb = removedMembers.length === 1 ? 'покинул(а)' : 'покинули';
@@ -1017,6 +1058,7 @@ async function runRoomSession(chatId, roomId, { answerKeyRequests = false } = {}
     }
     handleRoomSessionResult(roomId, result);
     await refreshIdentityChanges(client, roomId, part.participants, result && result.identityChanges);
+    refreshTransparencyBanner();
     return result;
 }
 
@@ -2088,6 +2130,7 @@ function releaseChatResources() {
     resetAttachmentDecrypts();
     clearBotSuggestions();
     pendingIdentityChanges.clear();
+    pendingLogMismatches.clear();
     renderIdentityBanner();
     noticesReady = false;
     pendingNotices = [];
@@ -2465,6 +2508,7 @@ function setupE2eeListeners() {
     elements.membersKeysBtn.addEventListener('click', openMembersModal);
     elements.noHistoryToggle.addEventListener('change', onNoHistoryToggle);
     elements.e2eeBannerBtn.addEventListener('click', openMembersModal);
+    elements.ktBannerBtn.addEventListener('click', openTransparencyModal);
     elements.composerStatusRetry.addEventListener('click', () => retryE2ee());
 }
 
@@ -3907,7 +3951,33 @@ function createRequestRow(req) {
     deny.addEventListener('click', () => decideJoinRequest(req, false, li, [approve, deny]));
     actions.append(approve, deny);
     li.append(avatar, info, actions);
+    showApplicantKeyCheck(req, info);
     return li;
+}
+
+// Одобряющий поручается за ключ заявителя до вступления: ключ проверяется по журналу (ревью К12).
+async function showApplicantKeyCheck(req, info) {
+    if (!req || !req.identity || !req.identity.kt) return;
+    const client = await getReadyE2eeClient();
+    if (!client || typeof client.checkApplicantKey !== 'function') return;
+    let result;
+    try {
+        result = await client.checkApplicantKey(req.userId, req.identity);
+    } catch (err) {
+        console.warn('E2EE: проверка ключа заявителя по журналу не удалась:', err);
+        return;
+    }
+    const texts = {
+        ok: 'ключ проверен по журналу',
+        pending: KT_PEER_TEXT.pending,
+        mismatch: 'Ключа заявителя нет в журнале ключей. Возможна подмена, сверьте код безопасности лично',
+    };
+    const text = result && texts[result.status];
+    if (!text || !info.isConnected) return;
+    const line = document.createElement('small');
+    line.className = result.status === 'mismatch' ? 'member-kt' : 'member-kt';
+    line.textContent = text;
+    info.appendChild(line);
 }
 
 async function decideJoinRequest(req, approve, row, buttons) {
@@ -3935,11 +4005,196 @@ async function decideJoinRequest(req, approve, row, buttons) {
 
 // ==================== Участники и ключи ====================
 
+// ==================== Журнал ключей ====================
+//
+// Прозрачность ключей (docs/security/key-transparency.md, 10): тревоги клиента попадают в баннер боковой
+// панели, подробности и действия — в окне «Журнал ключей». Статусы участников — в окне «Участники и ключи».
+
+const KT_BANNER_TEXT = {
+    'self-foreign-entry': 'Сервер опубликовал для вашего аккаунта ключ, которого нет на этом устройстве.',
+    'self-missing': 'Сервер не выполнил обещание включить ваш ключ в журнал ключей.',
+    'key-split': 'Подпись журнала у вас и у собеседника не сходится. Возможна подмена журнала — сверьте коды безопасности лично.',
+    'log-disabled': 'Журнал ключей на сервере перестал отвечать или отключён, хотя раньше работал. Новые и изменившиеся ключи собеседников не считаются проверенными — сверяйте коды безопасности.',
+    inconsistent: 'Журнал ключей на сервере не прошёл проверку. Шифрование может быть небезопасным — сверяйте коды безопасности.',
+};
+// Какая тревога главная для баннера: сначала про мой аккаунт, потом про журнал.
+const KT_BANNER_ORDER = ['self-foreign-entry', 'self-missing', 'key-split', 'log-disabled'];
+const KT_INCONSISTENT_KINDS = ['log-fork', 'equivocation', 'bad-signature', 'key-changed'];
+
+let ktAlertsSeq = 0;
+
+function currentE2eeClientIfReady() {
+    return currentUser && e2eeClient && e2eeClientUserId === currentUser.id ? e2eeClient : null;
+}
+
+async function readTransparencyAlerts() {
+    const client = currentE2eeClientIfReady();
+    if (!client || typeof client.getTransparencyAlerts !== 'function') return [];
+    try {
+        return await client.getTransparencyAlerts();
+    } catch (err) {
+        console.warn('E2EE: не удалось прочитать тревоги журнала ключей:', err);
+        return [];
+    }
+}
+
+async function refreshTransparencyBanner() {
+    const seq = ++ktAlertsSeq;
+    const alerts = await readTransparencyAlerts();
+    if (seq !== ktAlertsSeq) return;
+    let kind = KT_BANNER_ORDER.find(k => alerts.some(a => a.kind === k)) || null;
+    if (!kind && alerts.some(a => KT_INCONSISTENT_KINDS.includes(a.kind))) kind = 'inconsistent';
+    if (!kind) {
+        elements.ktBanner.classList.add('hidden');
+        elements.ktBannerText.textContent = '';
+        return;
+    }
+    elements.ktBannerText.textContent = KT_BANNER_TEXT[kind];
+    elements.ktBanner.classList.remove('hidden');
+}
+
+// Час эпохи (число часов от 1970-го) → «2026-10-11 14:00 UTC».
+function ktEpochText(epoch) {
+    if (!Number.isFinite(epoch)) return 'время неизвестно';
+    return new Date(epoch * 3600 * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+}
+
+const KT_FORK_TEXT = {
+    rollback: 'Сервер показал более раннюю версию журнала, чем уже видело это устройство.',
+    'chain-mismatch': 'История журнала переписана: новая цепочка не продолжает ту, что видело это устройство.',
+    'genesis-changed': 'Начало поколения журнала изменилось.',
+    'generation-length': 'Сервер нарушил длину поколения журнала.',
+    'grace-violated': 'Сервер удалил прежнее поколение журнала раньше срока.',
+    'prev-final-head': 'Новое поколение журнала не продолжает прежнее.',
+    'self-proof': 'Сервер прислал для вашей метки доказательство, которое не сходится с журналом.',
+};
+
+// Описание тревоги для окна: заголовок, пояснения и действия (кнопки).
+function ktAlertView(alert, pendingKey, client) {
+    const lines = [];
+    const actions = [];
+    let title = KT_BANNER_TEXT[alert.kind] || 'Журнал ключей не прошёл проверку.';
+    if (alert.kind === 'self-foreign-entry') {
+        (alert.entries || []).forEach((entry) => lines.push(`Запись в журнале от ${ktEpochText(entry.epoch)}.`));
+        if (Number.isFinite(alert.identityCreatedHour)) {
+            lines.push(`Ключи этого устройства созданы ${ktEpochText(alert.identityCreatedHour)} (с точностью до часа).`);
+        }
+        lines.push('Записи старше создания ключей на этом устройстве — вероятно, прежние ключи вашего аккаунта (например, после очистки данных сайта без выхода). Записи новее подозрительны: сверьте коды безопасности с собеседниками лично.');
+        actions.push({
+            text: 'Это были мои прежние ключи',
+            run: async () => { await client.ackSelfEntries(alert.entries || []); },
+        });
+    } else if (alert.kind === 'self-missing') {
+        title = alert.reason === 'carry-over'
+            ? 'Сервер не перенёс ваш ключ в новое поколение журнала.'
+            : KT_BANNER_TEXT['self-missing'];
+        lines.push(`Поколение ${alert.gen}, ${ktEpochText(alert.epoch)}. Подписанное обещание сервера сохранено на этом устройстве как доказательство.`);
+    } else if (alert.kind === 'log-fork') {
+        title = KT_FORK_TEXT[alert.reason] || 'Журнал ключей показывает несогласованную историю.';
+        lines.push('Это доказательство того, что сервер ведёт журнал нечестно (или его базу восстановили без смены ключа журнала).');
+    } else if (alert.kind === 'equivocation') {
+        title = alert.reason === 'keychange'
+            ? 'Сервер выдал два разных заявления о смене ключа журнала.'
+            : 'Вы и собеседник видите разные подписанные версии журнала для одной эпохи.';
+        lines.push('Подписанные версии сохранены на этом устройстве как доказательство.');
+    } else if (alert.kind === 'bad-signature') {
+        title = alert.reason === 'own-skt'
+            ? 'Обещание сервера включить ваш ключ в журнал имеет неверную подпись.'
+            : 'Подпись журнала ключей не проходит проверку.';
+    } else if (alert.kind === 'key-changed') {
+        title = 'Ключ подписи журнала изменился без заявления о смене.';
+        lines.push('Принимайте новый ключ только после сверки отпечатка с опубликованным релизом.');
+        if (pendingKey) {
+            lines.push({ fingerprint: pendingKey.hex.match(/.{1,8}/g).join(' ') });
+            actions.push({
+                text: 'Принять новый ключ журнала',
+                confirm: 'Отпечаток совпадает с опубликованным в релизе? Принятие сбросит сохранённые цепочки журнала на этом устройстве.',
+                run: async () => {
+                    // false — ключ не прошёл проверку (малый порядок и т.п.): принять его нельзя.
+                    if (!(await client.acceptLogKey())) throw new Error('ключ журнала не принят');
+                },
+            });
+        }
+    }
+    return { title, lines, actions };
+}
+
+async function openTransparencyModal() {
+    const client = currentE2eeClientIfReady();
+    if (!client) return;
+    const alerts = await readTransparencyAlerts();
+    let pendingKey = null;
+    try { pendingKey = await client.getPendingLogKey(); } catch { pendingKey = null; }
+    const items = alerts.map((alert) => {
+        const view = ktAlertView(alert, pendingKey, client);
+        const li = document.createElement('li');
+        li.className = 'kt-alert';
+        const title = document.createElement('div');
+        title.className = 'kt-alert-title';
+        title.textContent = view.title;
+        li.appendChild(title);
+        view.lines.forEach((line) => {
+            const p = document.createElement('p');
+            if (typeof line === 'object') {
+                p.className = 'kt-fingerprint';
+                p.textContent = line.fingerprint;
+            } else {
+                p.textContent = line;
+            }
+            li.appendChild(p);
+        });
+        if (view.actions.length > 0) {
+            const row = document.createElement('div');
+            row.className = 'member-actions';
+            view.actions.forEach((action) => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'btn btn-secondary btn-sm';
+                btn.textContent = action.text;
+                btn.addEventListener('click', async () => {
+                    if (action.confirm && !confirm(action.confirm)) return;
+                    btn.disabled = true;
+                    try {
+                        await action.run();
+                    } catch (err) {
+                        console.error('E2EE: действие над тревогой журнала не удалось:', err);
+                        showToast('Не удалось выполнить действие', 'error');
+                        btn.disabled = false;
+                        return;
+                    }
+                    await refreshTransparencyBanner();
+                    openTransparencyModal();
+                });
+                row.appendChild(btn);
+            });
+            li.appendChild(row);
+        }
+        return li;
+    });
+    if (items.length === 0) {
+        const li = document.createElement('li');
+        li.className = 'members-placeholder';
+        li.textContent = 'Тревог нет.';
+        items.push(li);
+    }
+    elements.ktAlertList.replaceChildren(...items);
+    if (elements.ktModal.classList.contains('hidden')) openModal(elements.ktModal);
+}
+
 const IDENTITY_STATUS = {
     verified: { text: 'проверен', cls: 'verified', icon: 'shield-check' },
     unverified: { text: 'не проверен', cls: 'unverified', icon: 'shield' },
     changed: { text: 'ключ изменился', cls: 'changed', icon: 'alert-triangle' },
+    // Ключа нет в журнале ключей: класс как у changed (раздел 10 key-transparency.md).
+    'log-mismatch': { text: 'нет в журнале ключей', cls: 'changed', icon: 'alert-triangle' },
     unknown: { text: 'нет E2EE', cls: 'unknown', icon: 'unlock' },
+};
+
+// Журнал ключей рядом со статусом участника: неброская строка (pending, unavailable) и отметка ok.
+const KT_PEER_TEXT = {
+    ok: 'ключ проверен по журналу',
+    pending: 'Ключ ждёт подтверждения журналом',
+    unavailable: 'Проверка журнала ключей сейчас недоступна',
 };
 
 let membersModalSeq = 0;
@@ -3978,6 +4233,9 @@ async function renderMemberDetails(row, peer, ctx) {
     const status = row._status;
     details.replaceChildren();
 
+    if (status === 'log-mismatch') {
+        details.appendChild(iconText('p', 'member-warning', 'alert-triangle', `Сервер показывает для ${peer.username} ключ, которого нет в журнале ключей (или журнал у участников разный). Возможна подмена. Сверьте код безопасности лично. Ключ комнаты этому участнику не отправляется, пока вы не сверите код или не продолжите явно.`));
+    }
     if (status === 'changed') {
         details.appendChild(iconText('p', 'member-warning', 'alert-triangle', 'Ключ шифрования этого участника изменился. Так бывает после переустановки браузера или входа с нового устройства — но так же выглядит и подмена ключа сервером. Сверьте код безопасности с участником лично, прежде чем принимать новый ключ.'));
     }
@@ -3999,12 +4257,19 @@ async function renderMemberDetails(row, peer, ctx) {
         setIconLabel(accept, 'key', 'Принять новый ключ');
         accept.addEventListener('click', () => acceptIdentityChange(row, peer, ctx, accept));
         actions.appendChild(accept);
-    } else if (status === 'unverified') {
+    } else if (status === 'unverified' || status === 'log-mismatch') {
         const mark = document.createElement('button');
         mark.className = 'btn btn-primary btn-sm';
         setIconLabel(mark, 'shield-check', 'Отметить как проверенный');
         mark.addEventListener('click', () => markVerified(row, peer, ctx, mark));
         actions.appendChild(mark);
+        if (status === 'log-mismatch') {
+            const proceed = document.createElement('button');
+            proceed.className = 'btn btn-danger btn-sm';
+            setIconLabel(proceed, 'key', 'Продолжить без проверки');
+            proceed.addEventListener('click', () => overrideLogMismatch(row, peer, ctx, proceed));
+            actions.appendChild(proceed);
+        }
     } else if (status === 'verified') {
         actions.appendChild(iconText('p', 'safety-hint', 'check', 'Вы уже сверили этот код.', { size: 'sm' }));
     }
@@ -4029,6 +4294,27 @@ async function markVerified(row, peer, ctx, btn) {
     }
     setMemberStatus(row, (await peerIdentityStatus(ctx.client, peer.id)) || 'verified');
     showToast(`${peer.username}: ключ отмечен как проверенный`, 'success');
+    renderMemberDetails(row, peer, ctx);
+}
+
+// Пользователь явно продолжает общение с участником, чьего ключа нет в журнале: он снова адресат рассылки.
+async function overrideLogMismatch(row, peer, ctx, btn) {
+    if (!confirm(`Продолжить обмен ключами с ${peer.username} без проверки по журналу? Делайте это, только если уверены, что его ключ настоящий (код безопасности сверен лично).`)) return;
+    btn.disabled = true;
+    try {
+        await ctx.client.overrideLogMismatch(peer.id);
+    } catch (err) {
+        console.error('E2EE: overrideLogMismatch failed:', err);
+        btn.disabled = false;
+        showToast('Не удалось продолжить', 'error');
+        return;
+    }
+    setMemberStatus(row, (await peerIdentityStatus(ctx.client, peer.id)) || 'unverified');
+    if (Number(ctx.roomId) === Number(currentRoomId)) {
+        pendingLogMismatches.delete(Number(peer.id));
+        renderIdentityBanner();
+        ensureE2eeRoomSession(ctx.chatId, ctx.roomId);
+    }
     renderMemberDetails(row, peer, ctx);
 }
 
@@ -4078,6 +4364,13 @@ function createMemberRow(peer, status, ctx) {
     info.appendChild(statusEl);
     li._statusEl = statusEl;
     setMemberStatus(li, status);
+    const ktText = ctx.kt && KT_PEER_TEXT[ctx.kt];
+    if (ktText) {
+        const ktEl = document.createElement('small');
+        ktEl.className = 'member-kt';
+        ktEl.textContent = ktText;
+        info.appendChild(ktEl);
+    }
     if (!ctx.client || status === 'unknown') return li;
 
     const details = document.createElement('div');
@@ -4086,7 +4379,7 @@ function createMemberRow(peer, status, ctx) {
     li.details = details;
     const toggle = document.createElement('button');
     toggle.className = 'member-code-btn';
-    toggle.textContent = status === 'changed' ? 'Проверить' : 'Код';
+    toggle.textContent = status === 'changed' || status === 'log-mismatch' ? 'Проверить' : 'Код';
     toggle.setAttribute('aria-expanded', 'false');
     toggle.setAttribute('aria-controls', details.id);
     toggle.setAttribute('aria-label', `Код безопасности с ${peer.username}`);
@@ -4099,7 +4392,7 @@ function createMemberRow(peer, status, ctx) {
     head.appendChild(toggle);
     li.appendChild(details);
     // Сменившийся ключ сразу разворачиваем: ради этого окно и открыли.
-    if (status === 'changed') toggle.click();
+    if (status === 'changed' || status === 'log-mismatch') toggle.click();
     return li;
 }
 
@@ -4124,10 +4417,14 @@ async function openMembersModal() {
     const others = part.participants.filter(p => Number(p.id) !== Number(currentUser.id));
 
     const statuses = new Map();
+    const ktStatuses = new Map();
     if (client && others.length > 0) {
         try {
             const list = await client.checkPeerIdentities(others.map(p => p.id));
-            (list || []).forEach(s => statuses.set(Number(s.userId), s.status));
+            (list || []).forEach((s) => {
+                statuses.set(Number(s.userId), s.status);
+                if (s.kt) ktStatuses.set(Number(s.userId), s.kt);
+            });
         } catch (err) {
             console.warn('E2EE: checkPeerIdentities failed:', err);
         }
@@ -4147,7 +4444,7 @@ async function openMembersModal() {
     others.forEach((peer) => {
         const status = client ? (statuses.get(Number(peer.id)) || 'unknown') : 'unknown';
         if (status === 'changed') changed.push({ userId: peer.id, username: peer.username });
-        fragment.appendChild(createMemberRow(peer, status, ctx));
+        fragment.appendChild(createMemberRow(peer, status, { ...ctx, kt: ktStatuses.get(Number(peer.id)) }));
     });
     elements.membersList.replaceChildren(fragment);
     if (changed.length > 0) addIdentityChanges(roomId, changed);

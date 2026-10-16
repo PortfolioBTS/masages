@@ -65,11 +65,12 @@ function makeFakeKeyDb() {
             const row = identities.get(uid);
             return row ? [{ identity_signing_key: row.identity_signing_key }] : [];
         }
-        if (q.startsWith('SELECT user_id, identity_signing_key, identity_dh_key FROM identity_keys WHERE user_id = ANY')) {
+        // С журналом ключей (lib/key-store.js, kt) к выборке добавляются столбцы kt_*: тест кладёт их прямо в строку identities.
+        if (/^SELECT user_id, identity_signing_key, identity_dh_key(, kt_nonce, kt_gen, kt_epoch, kt_skt)? FROM identity_keys WHERE user_id = ANY/.test(q)) {
             return params[0].filter(id => identities.has(id)).sort((a, b) => a - b)
                 .map(id => Object.assign({ user_id: String(id) }, identities.get(id))); // BIGINT приходит строкой
         }
-        if (q.startsWith('SELECT identity_signing_key, identity_dh_key FROM identity_keys')) {
+        if (/^SELECT identity_signing_key, identity_dh_key(, kt_nonce, kt_gen, kt_epoch, kt_skt)? FROM identity_keys/.test(q)) {
             const row = identities.get(uid);
             return row ? [row] : [];
         }

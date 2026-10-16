@@ -25,6 +25,8 @@ function goodEnv(extra = {}) {
     return Object.assign({
         SESSION_SECRET: rnd(48),
         MESSAGE_ENCRYPTION_KEY: crypto.randomBytes(32).toString('base64'),
+        // Ключ журнала ключей: без него в production есть предупреждение «журнал выключен».
+        KT_SIGNING_KEY: crypto.generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'der' }).toString('base64'),
         DATABASE_URL: `postgresql://postgres:${rnd(24)}@postgres.railway.internal:5432/railway`,
         NODE_ENV: 'production',
         RAILWAY_ENVIRONMENT_NAME: 'production',

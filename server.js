@@ -90,6 +90,10 @@ const { createAnonActivity } = require('./lib/anon-activity');
 // registerE2eeKeyRoutes ниже) и встроенное хранилище публичных E2EE-ключей
 const { registerE2eeKeyRoutes, deleteKeysForUser } = require('./lib/e2ee-keys');
 const { initKeyStoreSchema } = require('./lib/key-store');
+// Журнал ключей (прозрачность ключей, docs/security/key-transparency.md): сервис с базой,
+// маршруты /api/kt/*; задачи эпох регистрируются через JOB_MODULES (lib/jobs).
+const { createKtService } = require('./lib/kt-service');
+const { registerKtRoutes } = require('./lib/kt-routes');
 // Групповой E2EE: участники чата + попарная доставка Sender Key
 // (key-shares). Тоже регистрируется после sessionMiddleware.
 const { initE2eeGroupsSchema, registerE2eeGroupRoutes } = require('./lib/e2ee-groups');
@@ -1329,9 +1333,15 @@ app.get('/link.my', (req, res) => {
 
 // Маршруты из lib/routes/ (см. lib/routes/index.js): здесь — те, которым
 // сессия не нужна; ниже, после лимитера /api/, — обычные маршруты API.
+// Журнал ключей: без KT_SIGNING_KEY сервис выключен (kt.enabled = false) — регистраций
+// и задачи эпох нет, kt в ответах null, /api/kt/* отвечает 503. Длина эпохи и поколения —
+// константы протокола; тестовые ручки KT_* действуют только при NODE_ENV=test.
+const kt = createKtService({ pool, withTransaction, onEpochClosed: metrics.ktEpochClosed });
+metrics.attachKt(() => kt.stats());
+
 // serverContext — общий контекст маршрутов и задач из lib/ (lib/jobs).
 const serverContext = Object.freeze({
-    pool, dbGet, dbAll, dbRun, withTransaction, io, logError, isProduction: IS_PRODUCTION,
+    pool, dbGet, dbAll, dbRun, withTransaction, io, logError, isProduction: IS_PRODUCTION, kt,
     // Мониторинг и security.txt (lib/routes/health.js, lib/routes/well-known.js).
     metrics, readiness, env: process.env,
 });
@@ -1392,7 +1402,12 @@ app.use('/api/', apiLimiter);
 // Публичные E2EE-ключи: /api/keys/* → встроенное хранилище (lib/key-store.js).
 // Регистрируется строго ПОСЛЕ sessionMiddleware — маршрутам нужна сессия.
 // Чужие ключи отдаются только при общей комнате — модулю нужна БД.
-registerE2eeKeyRoutes(app, { dbGet, dbAll, bundleLimiter });
+// Регистрация identity — одной транзакцией с записью в журнал ключей; withTransactionRetry
+// определена ниже и вызывается уже при запросах, поэтому передаётся оболочкой.
+registerE2eeKeyRoutes(app, { dbGet, dbAll, bundleLimiter, kt, withTransaction: (work) => withTransactionRetry(work) });
+// Журнал ключей: головы и корни — любому вошедшему, записи — по правилам доступа.
+// JOIN_REQUEST_LIVE_SQL объявлена ниже (условие «заявка жива»).
+registerKtRoutes(app, { dbGet, kt, limiter: pgLimits.slidingLimiter('kt'), joinRequestLiveSql: () => JOIN_REQUEST_LIVE_SQL });
 // Групповой E2EE: список участников чата + key-shares (тоже нужна сессия).
 registerE2eeGroupRoutes(app, { dbGet, dbAll, dbRun, io, queryWithRetry, respondIfDeadlock, keyShareLimiter, keyRequestLimiter });
 registerApiRoutes(app, serverContext);
@@ -3051,7 +3066,9 @@ app.post('/api/chats/join', joinUserLimiter, joinIpLimiter, async (req, res) => 
     }
 });
 
-// Живые заявки комнаты — любому её участнику.
+// Живые заявки комнаты — любому её участнику. У заявителя — его identity-ключи и kt из
+// журнала ключей: одобряющий поручается за ключ заявителя до вступления, и проверить его по
+// журналу можно, пока заявитель ещё не в комнате (key-transparency.md, 6.5, GET /api/kt/proof).
 app.get('/api/chats/:chatId/join-requests', async (req, res) => {
     const userId = req.session.userId;
     if (!userId) return res.json({ success: false, message: 'Не авторизован' });
@@ -3067,9 +3084,27 @@ app.get('/api/chats/:chatId/join-requests', async (req, res) => {
              ORDER BY jr.created_at, jr.id`,
             [chat.room_id, userId]
         );
+        const identities = new Map();
+        if (rows.length > 0) {
+            const keyRows = await dbAll(
+                `SELECT user_id, identity_signing_key, identity_dh_key, kt_nonce, kt_gen, kt_epoch, kt_skt
+                 FROM identity_keys WHERE user_id = ANY($1::bigint[])`,
+                [rows.map(r => r.user_id)]
+            );
+            for (const k of keyRows) {
+                identities.set(Number(k.user_id), {
+                    signingKey: k.identity_signing_key.toString('base64'),
+                    dhKey: k.identity_dh_key.toString('base64'),
+                    kt: kt.hintOf(k),
+                });
+            }
+        }
         res.json({
             success: true,
-            requests: rows.map(r => ({ id: r.id, userId: r.user_id, username: r.username, createdAt: r.created_at })),
+            requests: rows.map(r => ({
+                id: r.id, userId: r.user_id, username: r.username, createdAt: r.created_at,
+                identity: identities.get(Number(r.user_id)) || null,
+            })),
         });
     } catch (error) {
         console.error('Get join requests error:', error);
@@ -4019,6 +4054,17 @@ async function deleteUserAccount(userId) {
             result.survivingRoomIds = roomIds.filter(id => !removed.has(id));
         }
         await client.query('DELETE FROM users WHERE id = $1', [userId]);
+        // Домен журнала ключей — после основного, в его порядке: kt_state FOR SHARE → identity_keys →
+        // kt_pending (message-ordering.md, 8.1). Регистрация ключа и закрытие эпохи берут их так же,
+        // поэтому взаимных блокировок нет. Prekey пользователя уходят следом за identity_keys, как
+        // и в регистрации; nonce обязательства удаляется вместе со строкой identity_keys, и записи
+        // журнала перестают связываться с ключами. Запись kt_pending в эпоху уже не попадёт.
+        await client.query('SELECT 1 FROM kt_state FOR SHARE');
+        await client.query('DELETE FROM identity_keys WHERE user_id = $1', [userId]);
+        for (const table of ['pq_one_time_prekeys', 'one_time_prekeys', 'signed_pq_prekeys', 'signed_prekeys']) {
+            await client.query(`DELETE FROM ${table} WHERE user_id = $1`, [userId]);
+        }
+        await client.query('DELETE FROM kt_pending WHERE user_id = $1', [userId]);
         return result;
     });
     if (!outcome) return false;

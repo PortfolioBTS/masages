@@ -4250,6 +4250,46 @@ a.file-attachment:hover {
     color: var(--text-3);
 }
 
+/* Журнал ключей: строка под статусом участника и записи в окне «Журнал ключей». */
+.member-info small.member-kt {
+    color: var(--text-3);
+}
+
+.kt-alert {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.kt-alert:last-child {
+    border-bottom: 0;
+}
+
+.kt-alert-title {
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.kt-alert p,
+.kt-alert-list-item {
+    margin: 0;
+    font-size: 13px;
+    line-height: 20px;
+    color: var(--text-2);
+}
+
+.kt-fingerprint {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 12px;
+    line-height: 18px;
+    word-break: break-all;
+    color: var(--text);
+}
+
 .member-code-btn {
     flex: none;
     height: var(--control-h-sm);
