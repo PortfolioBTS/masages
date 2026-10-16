@@ -20,6 +20,7 @@
 
 const { spawn, execFileSync } = require('child_process');
 const crypto = require('crypto');
+const { logError } = require('../lib/log-error');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -118,7 +119,7 @@ async function main() {
     const cleanups = [];
     const cleanup = async () => {
         while (cleanups.length > 0) {
-            try { await cleanups.pop()(); } catch (err) { console.error(`[dev-local] уборка: ${err.message}`); }
+            try { await cleanups.pop()(); } catch (err) { logError('[dev-local] уборка', err); }
         }
     };
 
@@ -192,7 +193,7 @@ async function main() {
         const code = await exited;
         return stop(stopping ? 130 : (code === 0 ? 0 : 1));
     } catch (err) {
-        console.error(`[dev-local] ${err.message}`);
+        logError('[dev-local]', err);
         await cleanup();
         process.exitCode = 1;
     }

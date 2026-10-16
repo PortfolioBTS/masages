@@ -15,6 +15,7 @@
 const fs = require('fs');
 const path = require('path');
 const { applySri } = require('../lib/client-sri');
+const { logError } = require('../lib/log-error');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const INDEX = path.join(PUBLIC_DIR, 'index.html');
@@ -58,6 +59,6 @@ function main(argv) {
 try {
     main(process.argv.slice(2));
 } catch (err) {
-    console.error('Ошибка: ' + (err && err.message ? err.message : err));
+    logError('Ошибка', err);
     process.exitCode = 1;
 }

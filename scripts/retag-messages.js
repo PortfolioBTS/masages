@@ -26,6 +26,7 @@
 
 require('dotenv').config();
 const { Pool } = require('pg');
+const { logError } = require('../lib/log-error');
 
 const USAGE = 'Использование: node scripts/retag-messages.js [--dry-run] [--verify] [--batch N] [--room ID] [--verbose]';
 
@@ -120,7 +121,9 @@ async function main() {
 
 if (require.main === module) {
     main().then((code) => { process.exitCode = code; }, (err) => {
-        console.error(err && err.message ? err.message : err);
+        // Ошибки Postgres несут в detail значения строк: печатаются только
+        // message и code (lib/log-error.js).
+        logError('Ошибка', err);
         process.exitCode = 1;
     });
 }
