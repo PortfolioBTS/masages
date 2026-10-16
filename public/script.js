@@ -1054,8 +1054,14 @@ function handleRoomSessionResult(roomId, result) {
     if (delivered.length > 0) {
         // «{имя} в группе — одобрил(а) {имя}»: кто и как подтвердил (подпись участника, а не слово сервера).
         const lines = delivered.map((member) => {
-            const how = membershipHowLine(roomId, membersById.get(Number(member.id)));
-            return how ? `${member.username || `участник #${member.id}`} в группе — ${how.charAt(0).toLowerCase()}${how.slice(1)}` : null;
+            const entry = membersById.get(Number(member.id));
+            const name = member.username || `участник #${member.id}`;
+            if (!entry || entry.status !== 'confirmed') return null;
+            // Допуск заявки, подписанный участником, выглядит для остальных как поручительство: в ленте это «одобрил(а)».
+            if (entry.how === 'vouched' || entry.how === 'approved') return `${name} в группе — одобрил(а) ${memberLabel(roomId, entry.by)}`;
+            if (entry.how === 'invite') return `${name} в группе — по приглашению ${memberLabel(roomId, entry.by)}`;
+            const how = membershipHowLine(roomId, entry);
+            return how ? `${name} в группе — ${how.charAt(0).toLowerCase()}${how.slice(1)}` : null;
         });
         const text = lines.every(Boolean)
             ? `${lines.join('; ')}. Ключ шифрования передан`
@@ -4773,7 +4779,8 @@ async function openMembersModal() {
     const membership = new Map();
     if (client) {
         try {
-            const roomResult = await client.ensureRoomSession(chatId, roomId, part.participants, part);
+            // Через общую очередь сессий комнаты: баннер и лента обновляются тем же проходом.
+            const roomResult = (await ensureE2eeRoomSession(chatId, roomId)) || { members: [], unconfirmed: [] };
             (roomResult.members || []).forEach(member => membership.set(Number(member.id), member));
             (roomResult.unconfirmed || []).forEach((u) => {
                 const entry = membership.get(Number(u.id));
