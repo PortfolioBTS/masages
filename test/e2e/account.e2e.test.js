@@ -16,6 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const { createSuite, roomWithMember, waitUntil } = require('./helpers/scenarios');
 const { setCookies, sessionCookie, userRow, count } = require('./helpers/anon');
+const { createAuthorTags } = require('../../lib/author-tag');
 
 const suite = createSuite('account');
 
@@ -131,9 +132,15 @@ test('удаление стирает всё: сообщения, файлы, к
     await v.ok(v.post('/api/keys/key-shares', { chatId: shared.ownerChat.id, shares: [{ recipientUserId: friend.user.id, ciphertext: 'c2hhcmUtdjJm' }] }), 'key-share от пользователя');
     await f.ok(f.post('/api/keys/key-shares', { chatId: shared.memberChat.id, shares: [{ recipientUserId: vId, ciphertext: 'c2hhcmUtZjJ2' }] }), 'key-share пользователю');
 
-    // До удаления следы есть везде, где должны быть.
+    // До удаления следы есть везде, где должны быть. Сообщения комнат (sealed sender) user_id не
+    // несут: их следы - строки с тегами автора в комнатах пользователя.
     const before = await traces(vId);
     for (const [table, n] of Object.entries(before)) assert.ok(n >= 1, `до удаления в ${table} ничего нет — проверка была бы пустой`);
+    const tagLib = createAuthorTags([Buffer.from(suite.secrets.MESSAGE_ENCRYPTION_KEY, 'base64')]);
+    const vCreated = (await userRow(suite, vId)).created_at;
+    const victimTags = [solo.room_id, shared.roomId].flatMap(roomId => tagLib.tagsForAccount(roomId, vId, vCreated, Date.now()));
+    const roomTraces = () => count(suite, 'SELECT 1 FROM messages WHERE author_tag = ANY($1::bytea[])', [victimTags]);
+    assert.strictEqual(await roomTraces(), 3, 'до удаления: сообщение в одинокой комнате, сообщение и файл в общей');
     assert.ok(onDisk(botFile) && onDisk(sharedFile) && onDisk(friendFile));
     const csrfBefore = await v.csrfToken();
 
@@ -152,6 +159,7 @@ test('удаление стирает всё: сообщения, файлы, к
 
     // В базе пусто; чужие данные целы.
     assert.deepStrictEqual(await traces(vId), NO_TRACES);
+    assert.strictEqual(await roomTraces(), 0, 'ни одной строки с его тегами в комнатах');
     assert.strictEqual(await userRow(suite, vId), null);
     assert.strictEqual(await count(suite, 'SELECT 1 FROM rooms WHERE id = $1', [solo.room_id]), 0, 'комната, где он был один, удалена');
     assert.strictEqual(await count(suite, 'SELECT 1 FROM join_requests WHERE room_id = $1', [solo.room_id]), 0, 'заявки в неё удалены');

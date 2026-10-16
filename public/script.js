@@ -793,6 +793,37 @@ function rememberRoomParticipants(roomId, participants) {
     roomParticipants.set(Number(roomId), Array.isArray(participants) ? participants : []);
 }
 
+// Карты имён бывших и текущих участников из хранилища ключей устройства
+// (memberNames:<комната>, sealed-sender.md, 9.5): сообщение вышедшего участника
+// подписывается его последним известным именем.
+const roomMemberNames = new Map();           // roomId -> { <id>: <имя> }
+
+// Подпись автора сообщения комнаты. Сервер автора не называет: senderId приходит из
+// результата расшифровки (индекс отправителей), имя - из списка участников. Не
+// расшифрованное сообщение - «Участник группы»; вышедший - с пометкой; без имени -
+// «Бывший участник». Пока список участников не загружен, назвать некого.
+function roomAuthorLabel(roomId, senderId) {
+    if (!Number.isSafeInteger(senderId)) return 'Участник группы';
+    const list = roomParticipants.get(Number(roomId));
+    if (!list) return 'Участник группы';
+    const current = list.find(p => Number(p.id) === senderId);
+    if (current && current.username) return current.username;
+    const former = (roomMemberNames.get(Number(roomId)) || {})[senderId];
+    return former ? `${former} (вышел(ла))` : 'Бывший участник';
+}
+
+// Список участников и карта имён - до показа истории: автор сообщения известен только
+// клиенту. Сбой не мешает показать историю (подписи будут «Участник группы»).
+async function loadRoomAuthorDirectory(chatId, roomId) {
+    try {
+        const [part, client] = await Promise.all([api(`/api/chats/${chatId}/participants`), getReadyE2eeClient()]);
+        if (part && part.success && Array.isArray(part.participants)) rememberRoomParticipants(roomId, part.participants);
+        if (client) roomMemberNames.set(Number(roomId), await client.getRoomMemberNames(roomId));
+    } catch (err) {
+        console.warn('E2EE: имена участников не загружены:', err);
+    }
+}
+
 function participantName(roomId, userId) {
     const list = roomParticipants.get(Number(roomId)) || [];
     const found = list.find(p => Number(p.id) === Number(userId));
@@ -1072,9 +1103,20 @@ function reportBlockedSend(err, chatId, roomId) {
     if (roomId && err.showsRetry) setRoomBlock(chatId, err.message);
 }
 
+// Общий признак версии клиента волны 4 (message-ordering.md, 14.1): все изменяющие
+// запросы сообщений (отправка, файл, правка) несут proto. Значение должно равняться
+// PROTO_CURRENT в lib/proto.js - это проверяет test/proto.test.js. Устаревшая вкладка
+// без признака получает 400 client-outdated («Обновите страницу»).
+const PROTO_VERSION = 4;
+
 // Тексты для причин отказа decryptIncoming (res.reason из e2ee.js). Причина,
 // которой здесь нет, получает общий текст. Новая причина — новая строка.
 const E2EE_FAILURE_TEXTS = {
+    // Автора сообщения комнаты определяет клиент по senderKeyId через индекс
+    // отправителей (sealed-sender.md, 9.3): ключа в индексе ещё нет - он придёт
+    // key-share'ом или по запросу ключа.
+    'no-sender-key': 'Ключ автора ещё не получен на этом устройстве',
+    'bad-signature': 'Подпись сообщения неверна (возможна подмена сервером)',
     replay: 'Повтор старого сообщения (возможна подмена сервером)',
     // Содержимое привязано к сообщению (message-ordering.md, раздел 9): внутри
     // шифротекста лежат id сообщения, автор версии и время правки.
@@ -1158,11 +1200,14 @@ async function decryptMessageInPlace(message, roomId) {
         message.file_name = null;
     } else if (message.encrypted) {
         if (roomId) {
-            const res = await decryptEnvelope(roomId, message.user_id, message.text, message.id);
+            // Подсказки сервера об авторе нет и быть не может: senderId = null, автора
+            // находит клиент по индексу отправителей (sealed-sender.md, 9.3).
+            const res = await decryptEnvelope(roomId, null, message.text, message.id);
             if (res.ok) {
                 message.text = res.text || '';
                 if (res.file) message._file = res.file;
                 message._ts = res.ts; // время отправителя для показа (раздел 9.5)
+                message._senderId = res.senderId; // автор - только из расшифровки (9.4)
             } else {
                 message.text = e2eeFailureText(res.reason);
                 message._e2eeFailed = true;
@@ -1179,9 +1224,15 @@ async function decryptMessageInPlace(message, roomId) {
             message.reply_to.text = e2eeFailureText('not-encrypted');
         } else if (message.reply_to.encrypted) {
             const replyRes = roomId
-                ? await decryptEnvelope(roomId, message.reply_to.sender_id, message.reply_to.text, message.reply_to.id)
+                ? await decryptEnvelope(roomId, null, message.reply_to.text, message.reply_to.id)
                 : { ok: false };
             message.reply_to.text = decryptedSummary(replyRes);
+            // Автор цитаты определяется так же, как у обычного сообщения; цитата без
+            // расшифровки - «Сообщение недоступно» (sealed-sender.md, 9.6).
+            if (roomId) {
+                message.reply_to._author = replyRes.ok ? roomAuthorLabel(roomId, replyRes.senderId) : '';
+                if (!replyRes.ok) message.reply_to.text = 'Сообщение недоступно';
+            }
         }
     }
     return message;
@@ -2620,7 +2671,7 @@ function setupSocketListeners() {
         }
     });
 
-    socket.on('messageEdited', async ({ id, text, chat_id, room_id, encrypted, user_id }) => {
+    socket.on('messageEdited', async ({ id, text, chat_id, room_id, encrypted }) => {
         if (!belongsToCurrentChat(chat_id, room_id)) return;
         const roomId = currentRoomId;
         const seq = openChatSeq;
@@ -2631,7 +2682,7 @@ function setupSocketListeners() {
             displayText = e2eeFailureText('not-encrypted');
             failed = true;
         } else if (encrypted) {
-            const res = await decryptEnvelope(roomId, user_id, text, id);
+            const res = await decryptEnvelope(roomId, null, text, id);
             displayText = decryptedSummary(res);
             failed = !res.ok;
         }
@@ -4105,9 +4156,18 @@ async function openMembersModal() {
 // ==================== Список чатов ====================
 
 function isOwnMessage(message) {
+    if (!currentUser) return false;
+    if (message.room_id) {
+        // Сообщение комнаты: в строке автора нет. Главное - результат расшифровки
+        // (senderId из индекса отправителей); подсказка mine с сервера (ответ на
+        // отправку, копия события на user:<id>) - только косметика для сообщения,
+        // которое расшифровать не удалось, иначе оно «чужое» (sealed-sender.md, 9.4).
+        if (Number.isSafeInteger(message._senderId)) return message._senderId === currentUser.id;
+        return message.mine === true;
+    }
     // Ответы бота хранятся с user_id владельца чата и sent = 0 — раньше
     // они отображались как собственные сообщения пользователя.
-    return Boolean(currentUser) && message.user_id === currentUser.id && Number(message.sent) !== 0;
+    return message.user_id === currentUser.id && Number(message.sent) !== 0;
 }
 
 // Сообщение относится к открытому чату? Групповые — по room_id, личный
@@ -4540,6 +4600,8 @@ function renderChatMenu() {
     setIconLabel(elements.muteChatBtn, meta.muted ? 'bell' : 'bell-off', meta.muted ? 'Включить звук' : 'Без звука');
     setIconLabel(elements.archiveChatBtn, meta.archived ? 'archive-restore' : 'archive', meta.archived ? 'Вернуть из архива' : 'В архив');
     [elements.pinChatBtn, elements.muteChatBtn, elements.archiveChatBtn].forEach((b) => { b.disabled = !known; });
+    // Из группы выходят (и решают судьбу своих сообщений), чат с ботом удаляют.
+    setIconLabel(elements.deleteChatBtn, 'trash', currentRoomId ? 'Выйти из группы' : 'Удалить чат');
     elements.expiryHint.textContent = currentRoomId
         ? 'Срок действует для новых сообщений всех участников группы. Уже отправленные сообщения не изменятся.'
         : 'Срок действует для новых сообщений этого чата. Уже отправленные сообщения не изменятся.';
@@ -4693,6 +4755,9 @@ async function openChat(chatId, roomId, name, avatar, online, isBot) {
     // сервер ключей не должен навсегда оставлять чат пустым — ждём не
     // дольше 15 секунд.
     const messagesPromise = api(`/api/messages/${chatId}`);
+    // Автор сообщения комнаты известен только клиенту: список участников и карта имён
+    // нужны к моменту показа (подпись над чужим сообщением).
+    const authorsPromise = room ? loadRoomAuthorDirectory(chatId, room) : null;
     if (room) {
         await withTimeout(syncE2eeKeyShares(chatId, room), 15000, null);
         // Сессия комнаты (свой ключ новым участникам, ротация после ухода)
@@ -4715,6 +4780,8 @@ async function openChat(chatId, roomId, name, avatar, online, isBot) {
         flushSystemNotices();
         return;
     }
+    if (authorsPromise) await withTimeout(authorsPromise, 5000, null);
+    if (seq !== openChatSeq) return;
 
     await decryptMessagesInPlace(data.messages, room);
     if (seq !== openChatSeq) return;
@@ -4853,7 +4920,10 @@ function placeMessageElement(el) {
 
 function formatReplyQuote(reply) {
     if (reply.deleted) return 'Сообщение удалено';
-    return `${reply.sender_username || 'Неизвестно'}: ${(reply.text || '').substring(0, 60)}`;
+    // В комнате автора цитаты сервер не называет: подпись собрана при расшифровке.
+    const author = reply._author !== undefined ? reply._author : (reply.sender_username || 'Неизвестно');
+    const text = (reply.text || '').substring(0, 60);
+    return author ? `${author}: ${text}` : text;
 }
 
 // Обновляет цитаты на сообщение messageId в других сообщениях ленты.
@@ -5043,6 +5113,13 @@ function createMessageElement(message, animate) {
     const contentDiv = document.createElement('div');
     contentDiv.className = 'message-content';
 
+    if (!isMine && message.room_id) {
+        // Имя автора - из списка участников по senderId расшифровки (9.1).
+        const authorDiv = document.createElement('div');
+        authorDiv.className = 'message-author';
+        authorDiv.textContent = roomAuthorLabel(message.room_id, message._senderId);
+        contentDiv.appendChild(authorDiv);
+    }
     if (message.reply_to) {
         const replyDiv = document.createElement('div');
         replyDiv.className = 'reply-to';
@@ -5331,7 +5408,7 @@ async function sendText(text, { chatId, roomId, replyToId } = {}) {
                     return null;
                 }
             }
-            const payload = { chatId, text: outgoingText, encrypted };
+            const payload = { chatId, text: outgoingText, encrypted, proto: PROTO_VERSION };
             if (clientMessageId) payload.clientMessageId = clientMessageId;
             if (replyToId) payload.replyToId = replyToId;
             return payload;
@@ -5355,7 +5432,9 @@ async function sendText(text, { chatId, roomId, replyToId } = {}) {
         const message = { ...data.message, text };
         const reply = message.reply_to;
         if (reply && reply.encrypted && !reply.deleted) {
-            reply.text = decryptedSummary(await decryptEnvelope(roomId, reply.sender_id, reply.text, reply.id));
+            const replyRes = await decryptEnvelope(roomId, null, reply.text, reply.id);
+            reply.text = decryptedSummary(replyRes);
+            reply._author = replyRes.ok ? roomAuthorLabel(roomId, replyRes.senderId) : '';
         }
         if (chatId === currentChatId) {
             if (appendMessage(message, true)) scrollToBottom();
@@ -5402,10 +5481,10 @@ async function sendMessage() {
             }
             const data = await api(`/api/messages/${messageId}`, {
                 method: 'PUT',
-                body: JSON.stringify({ text: outgoingText }),
+                body: JSON.stringify({ text: outgoingText, proto: PROTO_VERSION }),
             });
             if (!data.success) {
-                showToast(data.message || 'Не удалось изменить сообщение', 'error');
+                showToast(sendFailureText(data, 'Не удалось изменить сообщение'), 'error');
                 return; // поле не очищаем — пользователь не теряет набранный текст
             }
             showToast('Сообщение изменено', 'success');
@@ -5707,9 +5786,10 @@ async function sendOneFile(queue, item, index, total) {
         shouldStop: () => queue.cancelled,
         buildRequest: async (clientMessageId) => {
             const formData = new FormData();
-            // Порядок полей важен: сервер читает chatId/encrypted/clientMessageId/
+            // Порядок полей важен: сервер читает proto/chatId/encrypted/clientMessageId/
             // envelope ДО того, как начнёт принимать сам файл (fileFilter), и проверяет
-            // id раньше, чем файл попадёт на диск. Поле после файла — 400 client-outdated.
+            // их раньше, чем файл попадёт на диск. Поле после файла — 400 client-outdated.
+            formData.append('proto', String(PROTO_VERSION)); // признак версии - первым, до файла (14.1)
             formData.append('chatId', String(chatId));
             if (client) formData.append('encrypted', 'true');
             if (clientMessageId) formData.append('clientMessageId', clientMessageId);
@@ -5899,15 +5979,36 @@ async function createChat() {
 
 async function deleteChat() {
     if (!currentChatId) return;
-    if (!confirm('Удалить чат?')) return;
-    const data = await api(`/api/chats/${currentChatId}`, { method: 'DELETE' });
+    const roomId = currentRoomId;
+    if (!confirm(roomId ? 'Выйти из группы?' : 'Удалить чат?')) return;
+    // Сообщения комнаты хранятся без автора и удаляются вместе с аккаунтом (sealed-sender.md,
+    // 12.1): выходящий решает, убрать ли свои сразу. По умолчанию (Отмена) - оставить.
+    let removeMine = false;
+    if (roomId) {
+        removeMine = confirm('Удалить ваши сообщения в этой группе?\n\nОК - удалить сейчас.\nОтмена - оставить: они удалятся вместе с аккаунтом, но не раньше.');
+    }
+    const data = await api(`/api/chats/${currentChatId}${removeMine ? '?deleteMessages=1' : ''}`, { method: 'DELETE' });
     if (data.success) {
-        showToast('Чат удалён', 'success');
+        if (roomId) await forgetLeftRoom(roomId);
+        showToast(roomId ? 'Вы вышли из группы' : 'Чат удалён', 'success');
         closeModal(elements.chatMenuModal);
         resetChatView();
         loadChats();
     } else {
         showToast(data.message, 'error');
+    }
+}
+
+// Локальная очистка комнаты после выхода: ключи, индекс отправителей (вместе с
+// надгробиями), архив, имена участников. Сбой не мешает выходу.
+async function forgetLeftRoom(roomId) {
+    roomParticipants.delete(Number(roomId));
+    roomMemberNames.delete(Number(roomId));
+    try {
+        const client = await getReadyE2eeClient();
+        if (client) await client.forgetRoom(roomId);
+    } catch (err) {
+        console.warn('E2EE: локальные данные комнаты не очищены:', err);
     }
 }
 

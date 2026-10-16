@@ -45,6 +45,10 @@ const CLIENT_METHODS = [
     'forgetRoomHistory',
     'forgetAllNoHistoryRooms',
 
+    // Комнаты: локальная очистка при выходе и имена участников
+    'forgetRoom',
+    'getRoomMemberNames',
+
     // Сообщения и файлы
     'encryptOutgoing',
     'decryptIncoming',

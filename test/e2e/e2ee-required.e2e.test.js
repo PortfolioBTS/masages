@@ -189,6 +189,7 @@ test('поля формы после файла: правила те же (пр�
     // Флаг и id до файла, а чат и неправильный конверт — после него: файл уже принят, и
     // отказывает обработчик, который сам удаляет файл с диска.
     const form = new FormData();
+    form.append('proto', '4');
     form.append('encrypted', 'true');
     form.append('clientMessageId', newClientMessageId());
     form.append('file', new Blob([crypto.randomBytes(300)], { type: 'application/octet-stream' }), 'file.bin');
@@ -202,6 +203,7 @@ test('поля формы после файла: правила те же (пр�
     assert.deepStrictEqual(dirFiles(), before, 'принятый файл удалён с диска');
     // То же с открытым файлом: чат пришёл после файла, флага encrypted нет.
     const plain = new FormData();
+    plain.append('proto', '4');
     plain.append('clientMessageId', newClientMessageId());
     plain.append('file', new Blob([Buffer.from('текст\n', 'utf8')], { type: 'text/plain' }), 'a.txt');
     plain.append('chatId', String(p.ownerChat.id));
@@ -220,17 +222,17 @@ test('правка: новый конверт правильной формы п
     const sent = await p.owner.send(p.ownerChat.id, 'первая версия');
     const storedBefore = (await suite.query('SELECT text, edited_at FROM messages WHERE id = $1', [sent.id])).rows[0];
 
-    const plain = await p.owner.put(`/api/messages/${sent.id}`, { text: 'открытая правка' });
+    const plain = await p.owner.put(`/api/messages/${sent.id}`, { proto: 4, text: 'открытая правка' });
     assert.strictEqual(plain.status, 400);
     assert.strictEqual(plain.body.code, 'bad-envelope');
-    const junk = await p.owner.put(`/api/messages/${sent.id}`, { text: envelopeWith({ ct: 'AAAA' }) });
+    const junk = await p.owner.put(`/api/messages/${sent.id}`, { proto: 4, text: envelopeWith({ ct: 'AAAA' }) });
     assert.strictEqual(junk.status, 400);
     assert.strictEqual(junk.body.code, 'bad-envelope');
-    const v1 = await p.owner.put(`/api/messages/${sent.id}`, { text: JSON.stringify({ alg: 'senderkey-v1', senderKeyId: 'a', iteration: 0, iv: 'a', ct: 'a', sig: 'a' }) });
+    const v1 = await p.owner.put(`/api/messages/${sent.id}`, { proto: 4, text: JSON.stringify({ alg: 'senderkey-v1', senderKeyId: 'a', iteration: 0, iv: 'a', ct: 'a', sig: 'a' }) });
     assert.strictEqual(v1.status, 400);
     assert.deepStrictEqual((await suite.query('SELECT text, edited_at FROM messages WHERE id = $1', [sent.id])).rows[0], storedBefore, 'отказанные правки ничего не изменили');
 
-    const good = await p.owner.put(`/api/messages/${sent.id}`, { text: fakeEnvelope('вторая версия') });
+    const good = await p.owner.put(`/api/messages/${sent.id}`, { proto: 4, text: fakeEnvelope('вторая версия') });
     assert.strictEqual(good.status, 200);
     assert.strictEqual(good.body.success, true);
     assert.strictEqual(good.body.text, fakeEnvelope('вторая версия'));
@@ -238,12 +240,13 @@ test('правка: новый конверт правильной формы п
     assert.strictEqual(history.text, fakeEnvelope('вторая версия'));
 
     // Открытое сообщение в комнате не ляжет в базу даже в обход маршрутов:
-    // CHECK messages_room_e2ee (второй рубеж к проверкам маршрутов).
+    // CHECK messages_room_e2ee (второй рубеж к проверкам маршрутов). Строка комнаты - по схеме
+    // sealed sender (тег автора, без user_id и chat_id), чтобы сработало именно это ограничение.
     await assert.rejects(
         suite.query(
-            `INSERT INTO messages (id, chat_id, room_id, user_id, text, sent, status, encrypted)
-             VALUES ($1, $2, $3, $4, $5, 1, 'sent', FALSE)`,
-            ['7654321', p.ownerChat.id, p.roomId, p.owner.user.id, 'открытый текст']
+            `INSERT INTO messages (id, room_id, author_tag, text, sent, status, encrypted)
+             VALUES ($1, $2, $3, $4, 1, 'sent', FALSE)`,
+            ['7654321', p.roomId, crypto.randomBytes(16), 'открытый текст']
         ),
         (err) => err.code === '23514' && err.constraint === 'messages_room_e2ee'
     );
@@ -278,7 +281,7 @@ test('чат с ботом: открытый текст и файл — ок; ш
 
     const file = await client.upload(bot.id, Buffer.from('просто текстовый файл\n', 'utf8'), 'text/plain', { filename: 'a.txt' });
     assert.strictEqual(file.encrypted, false);
-    const edit = await client.put(`/api/messages/${sent.id}`, { text: 'гайд ещё раз' });
+    const edit = await client.put(`/api/messages/${sent.id}`, { proto: 4, text: 'гайд ещё раз' });
     assert.strictEqual(edit.status, 200);
     assert.strictEqual(edit.body.success, true);
     assert.strictEqual(edit.body.text, 'гайд ещё раз');

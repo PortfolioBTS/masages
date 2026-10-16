@@ -21,6 +21,9 @@ const { solve } = require(path.join(REPO_ROOT, 'public', 'pow-worker.js'));
 const { fakeEnvelope } = require('./envelope');
 
 const UNSAFE = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+// Общий признак версии клиента волны 4 (message-ordering.md, 14.1): изменяющие
+// запросы сообщений несут proto: 4. `proto: undefined` в тесте - «поле не присылать».
+const PROTO = 4;
 let clientCounter = 0;
 
 // Случайный id сообщения в допустимом формате (31 бит, не меньше 1 000 000).
@@ -173,7 +176,10 @@ class TestClient {
 
     async deny(requestId) { return this.ok(this.post(`/api/join-requests/${requestId}/deny`, {}), 'отклонение заявки'); }
 
-    async leave(chatId) { return this.ok(this.del(`/api/chats/${chatId}`), 'выход из чата'); }
+    // deleteMessages: true - выйти и сразу удалить свои сообщения (?deleteMessages=1).
+    async leave(chatId, { deleteMessages = false } = {}) {
+        return this.ok(this.del(`/api/chats/${chatId}${deleteMessages ? '?deleteMessages=1' : ''}`), 'выход из чата');
+    }
 
     // ---- Сообщения и файлы ----
 
@@ -198,12 +204,13 @@ class TestClient {
     // extra.raw: true — отправить text и поля как есть (негативные проверки).
     async messageBody(chatId, text, extra) {
         const { raw, ...rest } = extra;
-        const body = { chatId, text, clientMessageId: newClientMessageId(), ...rest };
+        const body = { chatId, text, clientMessageId: newClientMessageId(), proto: PROTO, ...rest };
         if (!raw && body.encrypted === undefined && await this.isRoomChat(chatId)) {
             body.text = fakeEnvelope(text);
             body.encrypted = true;
         }
         if (body.clientMessageId === undefined) delete body.clientMessageId;
+        if (body.proto === undefined) delete body.proto;
         return body;
     }
 
@@ -216,18 +223,30 @@ class TestClient {
         return this.post('/api/messages', await this.messageBody(chatId, text, extra));
     }
 
+    // Правка сообщения: PUT /api/messages/:id (тело - конверт; proto: 4 по умолчанию).
+    async editRaw(messageId, text, extra = {}) {
+        const body = { text: fakeEnvelope(text), proto: PROTO, ...extra };
+        if (body.proto === undefined) delete body.proto;
+        return this.put(`/api/messages/${messageId}`, body);
+    }
+
+    async edit(messageId, text, extra) { return this.ok(this.editRaw(messageId, text, extra), 'правка сообщения'); }
+
     async messages(chatId, query = '') {
         return this.ok(this.get(`/api/messages/${chatId}${query ? `?${query}` : ''}`), 'сообщения чата');
     }
 
     // Сырой ответ: квота и отказы проверяются по статусу.
-    // Порядок полей FormData важен (раздел 6.3 контракта): chatId, encrypted,
+    // Порядок полей FormData важен (раздел 6.3 контракта): proto, chatId, encrypted,
     // clientMessageId, envelope — ДО файла, иначе fileFilter сервера их не увидит.
     // clientMessageId: undefined — не присылать поле; ключа нет — случайный id.
     async uploadRaw(chatId, bytes, mime, opts = {}) {
         const { filename = 'file.bin', text, encrypted, envelope } = opts;
         const clientMessageId = 'clientMessageId' in opts ? opts.clientMessageId : newClientMessageId();
+        const proto = 'proto' in opts ? opts.proto : PROTO;
         const form = new FormData();
+        // proto - первым: как clientMessageId, он обязан стоять ДО файла (14.1).
+        if (proto !== undefined) form.append('proto', String(proto));
         form.append('chatId', String(chatId));
         if (text !== undefined) form.append('text', text);
         if (encrypted !== undefined) form.append('encrypted', String(encrypted));
@@ -268,4 +287,4 @@ class TestClient {
     }
 }
 
-module.exports = { TestClient, ApiError, nextXff, newClientMessageId };
+module.exports = { TestClient, ApiError, nextXff, newClientMessageId, PROTO };

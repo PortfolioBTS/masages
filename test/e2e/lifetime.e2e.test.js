@@ -25,6 +25,7 @@ const fs = require('fs');
 const path = require('path');
 const { createSuite, roomWithMember, waitUntil } = require('./helpers/scenarios');
 const { LIFETIME_MS, LIFETIME_SECONDS, BUCKET_MS, MINUTE_MS, bucketCeil, userRow, count, setLastActive } = require('./helpers/anon');
+const { createAuthorTags } = require('../../lib/author-tag');
 
 const suite = createSuite('lifetime');
 
@@ -128,6 +129,11 @@ for (const lifetime of LIFETIMES) {
         const shared = await roomWithMember(victim, survivor, { name: 'Общая комната' });
         const sharedMessage = await victim.send(shared.ownerChat.id, 'сообщение в общей комнате');
         const survivorMessage = await survivor.send(shared.memberChat.id, 'сообщение выжившего');
+        // Сообщения комнат (sealed sender) user_id не несут: их следы - строки с тегами автора.
+        const tagLib = createAuthorTags([Buffer.from(suite.secrets.MESSAGE_ENCRYPTION_KEY, 'base64')]);
+        const victimCreated = (await userRow(suite, victimUser.id)).created_at;
+        const victimTags = [solo.room_id, shared.roomId].flatMap(roomId => tagLib.tagsForAccount(roomId, victimUser.id, victimCreated, Date.now()));
+        assert.strictEqual(await count(suite, 'SELECT 1 FROM messages WHERE author_tag = ANY($1::bytea[])', [victimTags]), 2, 'до чистки: одинокое и общее сообщения');
         assert.ok(uploadsOf().includes(path.basename(file.file_url)), 'файл лежит на диске');
         assert.ok(await count(suite, 'SELECT 1 FROM session WHERE sess->>\'userId\' = $1', [String(victimUser.id)]) >= 1);
 
@@ -140,6 +146,7 @@ for (const lifetime of LIFETIMES) {
         const id = [victimUser.id];
         assert.strictEqual(await count(suite, 'SELECT 1 FROM chats WHERE user_id = $1', id), 0, 'чаты');
         assert.strictEqual(await count(suite, 'SELECT 1 FROM messages WHERE user_id = $1', id), 0, 'сообщения');
+        assert.strictEqual(await count(suite, 'SELECT 1 FROM messages WHERE author_tag = ANY($1::bytea[])', [victimTags]), 0, 'сообщения в комнатах (по тегам автора)');
         assert.strictEqual(await count(suite, 'SELECT 1 FROM room_participants WHERE user_id = $1', id), 0, 'участие в комнатах');
         assert.strictEqual(await count(suite, 'SELECT 1 FROM session WHERE sess->>\'userId\' = $1', [String(victimUser.id)]), 0, 'сессии');
         assert.strictEqual(await count(suite, 'SELECT 1 FROM rooms WHERE id = $1', [solo.room_id]), 0, 'комната, где он был один, удалена');

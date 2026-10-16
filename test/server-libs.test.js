@@ -1,6 +1,7 @@
 'use strict';
 // Тесты серверных модулей без БД и сети:
-//   - lib/message-crypto.js — at rest v2 (kid + AAD), чтение v1, ротация ключей;
+//   - lib/message-crypto.js — at rest v2 для чата с ботом (kid + AAD), чтение v1, ротация
+//     ключей (enc:v3 комнат — test/message-crypto.test.js);
 //   - lib/privacy.js — заголовки и оставшиеся помощники.
 // Модули читают ключи из окружения при загрузке, поэтому env выставляется
 // ДО require, а для смены ключей модуль загружается заново.
@@ -75,26 +76,26 @@ async function main() {
         assert.throws(() => loadMessageCrypto(b64(KEY_A), b64(KEY_B) + ',c2hvcnQ='), /MESSAGE_ENCRYPTION_KEY_PREVIOUS/);
     });
 
-    await test('messageAad: room messages bind room+sender (chat_id ignored), personal chats bind chat+sender', async () => {
+    await test('messageAad (enc:v2): только чат с ботом — чат и владелец; комнатный AAD v2 больше не существует', async () => {
         const { messageAad } = loadMessageCrypto(b64(KEY_A));
-        assert.strictEqual(messageAad({ room_id: 5, chat_id: 11, user_id: 7 }), 'nyxo:msg:v2:room=5:user=7');
-        // chat_id у сообщения комнаты обнуляется при удалении чата отправителя — AAD от этого не меняется.
-        assert.strictEqual(messageAad({ room_id: 5, chat_id: null, user_id: 7 }), 'nyxo:msg:v2:room=5:user=7');
-        // Строки из req.params и числа из pg дают одно и то же.
-        assert.strictEqual(messageAad({ room_id: '5', user_id: '7' }), 'nyxo:msg:v2:room=5:user=7');
         assert.strictEqual(messageAad({ room_id: null, chat_id: 11, user_id: 7 }), 'nyxo:msg:v2:chat=11:user=7');
         assert.strictEqual(messageAad({ chat_id: 11, user_id: 7 }), 'nyxo:msg:v2:chat=11:user=7');
-        assert.throws(() => messageAad({ room_id: 5 }), TypeError);
+        // Строки из req.params и числа из pg дают одно и то же.
+        assert.strictEqual(messageAad({ chat_id: '11', user_id: '7' }), 'nyxo:msg:v2:chat=11:user=7');
+        // Комнаты шифруются enc:v3 (messageAadV3): v2 с room_id — ошибка программиста.
+        assert.throws(() => messageAad({ room_id: 5, chat_id: 11, user_id: 7 }), /enc:v3/);
+        assert.throws(() => messageAad({ room_id: 5, user_id: 7 }), /enc:v3/);
+        assert.throws(() => messageAad({ chat_id: 11 }), TypeError);
         assert.throws(() => messageAad({ user_id: 7 }), TypeError);
-        assert.throws(() => messageAad({ room_id: 'abc', user_id: 7 }), TypeError);
-        assert.throws(() => messageAad({ room_id: 0, user_id: 7 }), TypeError);
-        assert.throws(() => messageAad({ room_id: 1.5, user_id: 7 }), TypeError);
+        assert.throws(() => messageAad({ chat_id: 'abc', user_id: 7 }), TypeError);
+        assert.throws(() => messageAad({ chat_id: 0, user_id: 7 }), TypeError);
+        assert.throws(() => messageAad({ chat_id: 1.5, user_id: 7 }), TypeError);
         assert.throws(() => messageAad(null), TypeError);
     });
 
     await test('message-crypto: v2 round trip, format enc:v2:<kid>:<iv>:<tag>:<ct>', async () => {
         const { encryptText, decryptText, messageAad } = loadMessageCrypto(b64(KEY_A));
-        const aad = messageAad({ room_id: 5, chat_id: 11, user_id: 7 });
+        const aad = messageAad({ chat_id: 11, user_id: 7 });
         for (const text of ['Привет, мир! 👋', '', 'a:b:c', 'x'.repeat(10000)]) {
             const stored = encryptText(text, aad);
             const parts = stored.split(':');
@@ -122,18 +123,18 @@ async function main() {
         assert.throws(() => decryptText(stored, null), /AAD/);
     });
 
-    await test('message-crypto: ciphertext moved to another room / sender / chat, or altered, does not decrypt', async () => {
+    await test('message-crypto: ciphertext moved to another chat / sender, or altered, does not decrypt', async () => {
         const { encryptText, decryptText, messageAad } = loadMessageCrypto(b64(KEY_A));
-        const original = { room_id: 5, chat_id: 11, user_id: 7 };
-        const stored = encryptText('только для комнаты 5', messageAad(original));
+        const original = { chat_id: 11, user_id: 7 };
+        const stored = encryptText('только для чата 11', messageAad(original));
         const [prefix1, prefix2, kid, iv, tag, ct] = stored.split(':');
         const flipped = Buffer.from(ct, 'base64');
         flipped[0] ^= 1;
         const cases = [
-            ['another room', stored, messageAad({ room_id: 6, user_id: 7 })],
-            ['another sender', stored, messageAad({ room_id: 5, user_id: 8 })],
-            ['personal chat with the same number', stored, messageAad({ chat_id: 5, user_id: 7 })],
-            ['raw AAD swapped', stored, 'nyxo:msg:v2:room=5:user=77'],
+            ['another chat', stored, messageAad({ chat_id: 12, user_id: 7 })],
+            ['another sender', stored, messageAad({ chat_id: 11, user_id: 8 })],
+            ['raw AAD swapped', stored, 'nyxo:msg:v2:chat=11:user=77'],
+            ['room AAD of the same numbers', stored, 'nyxo:msg:v2:room=11:user=7'],
             ['ciphertext bit flip', [prefix1, prefix2, kid, iv, tag, b64(flipped)].join(':'), messageAad(original)],
             ['truncated tag', [prefix1, prefix2, kid, iv, b64(Buffer.from(tag, 'base64').subarray(0, 4)), ct].join(':'), messageAad(original)],
             ['missing field', [prefix1, prefix2, kid, iv, ct].join(':'), messageAad(original)],
@@ -145,7 +146,7 @@ async function main() {
             assert.ok(logged.length > 0, label + ': failure must be logged');
         }
         // А на своём месте — расшифровывается.
-        assert.strictEqual(decryptText(stored, messageAad({ room_id: 5, chat_id: null, user_id: 7 })), 'только для комнаты 5');
+        assert.strictEqual(decryptText(stored, messageAad({ room_id: null, chat_id: 11, user_id: 7 })), 'только для чата 11');
     });
 
     await test('message-crypto: legacy v1 records and unprefixed strings still read', async () => {
@@ -153,7 +154,7 @@ async function main() {
         const v1 = encryptV1(KEY_A, 'старое сообщение');
         assert.strictEqual(decryptText(v1), 'старое сообщение');
         // AAD для v1 не используется, но и не мешает — сервер передаёт его всегда.
-        assert.strictEqual(decryptText(v1, messageAad({ room_id: 1, user_id: 1 })), 'старое сообщение');
+        assert.strictEqual(decryptText(v1, messageAad({ chat_id: 1, user_id: 1 })), 'старое сообщение');
         assert.strictEqual(decryptText('[Сообщение удалено]', 'nyxo:msg:v2:chat=1:user=1'), '[Сообщение удалено]');
         assert.strictEqual(decryptText('plain text before encryption'), 'plain text before encryption');
         let result;
@@ -163,7 +164,7 @@ async function main() {
 
     await test('message-crypto: key rotation via MESSAGE_ENCRYPTION_KEY_PREVIOUS, key picked by kid', async () => {
         const oldModule = loadMessageCrypto(b64(KEY_A));
-        const aad = oldModule.messageAad({ room_id: 9, user_id: 2 });
+        const aad = oldModule.messageAad({ chat_id: 9, user_id: 2 });
         const storedUnderA = oldModule.encryptText('до ротации', aad);
         const v1UnderA = encryptV1(KEY_A, 'совсем старое');
 
