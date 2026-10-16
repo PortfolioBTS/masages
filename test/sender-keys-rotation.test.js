@@ -266,7 +266,7 @@ async function connect(ctx, ids = [2, 3]) {
 
     // ===================== Выдача «с начала эпохи» =====================
 
-    await test('с начала эпохи: участник без identity при создании ключа потом читает сообщения этой эпохи, новичок — нет', async () => {
+    await test('с начала эпохи: участник без identity при создании ключа получает ключ как новичок (не получатель на момент создания), прежнего не читает', async () => {
         const ctx = await trio({ ids: [1, 2, 3, 4], initIds: [1, 2, 4] }); // Carol (3) ещё не настроила E2EE
         // Dave (4) пока не в комнате.
         ctx.server.removeParticipant(ROOM, 4);
@@ -281,7 +281,12 @@ async function connect(ctx, ids = [2, 3]) {
         await ensure(ctx, 1);
         const carolSync = await sync(ctx, 3);
         assert.strictEqual(carolSync.applied, 1);
-        for (const m of early) assert.strictEqual((await read(ctx.carol, ROOM, m)).text, m.text, 'Carol читает то, что отправлено до её настройки');
+        // Право на ключ с начала эпохи - у recipients на момент создания ключа (signed-membership.md, 9.4, entitled = пары
+        // { id, memkey }): у Carol тогда не было ключей на сервере, значит, её не было среди получателей. Поздняя настройка
+        // шифрования больше не открывает прежних сообщений эпохи; те, что отправлены дальше, она читает.
+        for (const m of early) assert.strictEqual((await read(ctx.carol, ROOM, m)).reason, 'no-message-key', 'Carol не читает то, что отправлено до её настройки');
+        const afterSetup = await send(ctx.alice, ROOM, 'после настройки Carol');
+        assert.strictEqual((await read(ctx.carol, ROOM, afterSetup)).text, 'после настройки Carol');
 
         // Dave вступает позже: ключ ему — с текущей позиции.
         ctx.server.addParticipant(ROOM, 4, chatOf(4));
@@ -294,7 +299,7 @@ async function connect(ctx, ids = [2, 3]) {
             assert.strictEqual((await read(ctx.users[4], ROOM, m)).reason, 'no-message-key', 'новичок прошлое не читает');
         }
         const daveState = await stored(ctx.users[4], stateName(1));
-        assert.strictEqual(daveState.startIteration, 2);
+        assert.strictEqual(daveState.startIteration, 3, 'ключ Dave - с текущей позиции: две ранние итерации и сообщение после настройки Carol');
     });
 
     await test('с начала эпохи: достройка цепочки назад не трогает текущую позицию и уже имеющиеся ключи', async () => {

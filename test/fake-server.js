@@ -59,6 +59,13 @@ function makeFakeServer(opts = {}) {
     const keyRequests = []; // {roomId, requesterId, keyId (base64)}: запросы ключа Sender Key, ожидающие владельцев
     const messages = new Map(); // id (строка) -> {id, roomId, senderId, text}
     const keyRequestPosts = []; // журнал POST /key-requests: что и кто просил
+    // Подписанный состав (signed-membership.md, 7): сертификаты допуска/входа/повторного допуска (base64), приглашения
+    // комнат и журнал публикаций POST member-certs; сервер здесь НЕ проверяет подписи (это защита в глубину, проверяется
+    // отдельно): клиент обязан проверять всё сам.
+    const memberCerts = []; // {roomId, subjectId, actorId, kind, cert, aux, snap}
+    const invites = new Map(); // roomId -> {cert, snap} (base64)
+    const certPosts = []; // журнал POST member-certs: {roomId, actorId, subjectId, body}
+    const hiddenCertSubjects = new Set(); // субъекты, чьи сертификаты сервер «скрывает»
     let nextShareId = 1;
     // Id сообщений как у настоящего сервера (message-ordering.md, 6.1): строка из
     // 7-10 цифр. Клиент выбирает id ДО шифрования (mid внутри содержимого), сервер
@@ -97,11 +104,22 @@ function makeFakeServer(opts = {}) {
 
     function removeParticipant(roomId, userId) {
         if (rooms.has(roomId)) rooms.get(roomId).delete(userId);
+        // Выход: сертификаты, где участник субъект или подписавший, удаляются (signed-membership.md, 5.6).
+        for (let i = memberCerts.length - 1; i >= 0; i--) {
+            const c = memberCerts[i];
+            if (c.roomId === roomId && (c.subjectId === userId || c.actorId === userId)) memberCerts.splice(i, 1);
+        }
         const m = userChats.get(userId);
         if (m) {
             for (const [chatId, rid] of m) if (rid === roomId) m.delete(chatId);
         }
     }
+
+    const certItem = (c, withAux = true) => {
+        const item = { subjectId: c.subjectId, actorId: c.actorId, kind: c.kind, cert: c.cert };
+        if (withAux && c.aux) item.aux = c.aux;
+        return item;
+    };
 
     function participantsOf(roomId) {
         return Array.from(rooms.get(roomId) || []).map(id => ({ id, username: 'user' + id }));
@@ -288,7 +306,41 @@ function makeFakeServer(opts = {}) {
             async getParticipants(chatId) {
                 const roomId = room(userId, chatId);
                 if (!roomId) return { status: 200, data: { success: true, roomId: null, participants: [] } };
-                return { status: 200, data: { success: true, roomId, participants: participantsOf(roomId) } };
+                // Как GET participants (7.2): только сертификаты самого запрашивающего и снимки к ним, плюс приглашение комнаты.
+                const own = memberCerts.filter(c => c.roomId === roomId && c.subjectId === userId && !hiddenCertSubjects.has(userId));
+                const invite = invites.get(roomId);
+                return {
+                    status: 200,
+                    data: {
+                        success: true, roomId, participants: participantsOf(roomId),
+                        certs: own.map(c => certItem(c)),
+                        snaps: own.filter(c => c.snap).map(c => ({ actorId: c.actorId, kind: c.kind, snap: c.snap })),
+                        invite: invite ? invite.cert : null,
+                    },
+                };
+            },
+            // GET member-certs (7.2): сертификаты перечисленных субъектов, до 200 id, без снимков.
+            async getMemberCerts(chatId, ids) {
+                const roomId = room(userId, chatId);
+                if (!roomId) return { status: 200, data: { success: true, certs: [] } };
+                if (!Array.isArray(ids) || ids.length === 0 || ids.length > 200) return { status: 400, data: { success: false, code: 'bad-request' } };
+                const items = memberCerts.filter(c => c.roomId === roomId && ids.includes(c.subjectId) && !hiddenCertSubjects.has(c.subjectId));
+                return { status: 200, data: { success: true, certs: items.map(c => certItem(c)) } };
+            },
+            // POST member-certs: допуск (kind 1, со снимком) или повторный допуск (kind 4); не более 4 на субъекта.
+            async postMemberCert(chatId, body) {
+                const roomId = room(userId, chatId);
+                if (!roomId) return { status: 404, data: { success: false, code: 'not-participant' } };
+                const members = rooms.get(roomId);
+                const subjectId = Number(body && body.subjectId);
+                if (!members.has(userId) || !members.has(subjectId)) return { status: 404, data: { success: false, code: 'not-participant' } };
+                certPosts.push({ roomId, actorId: userId, subjectId, body: JSON.parse(JSON.stringify(body)) });
+                const parsed = Buffer.from(body.cert, 'base64');
+                const kind = parsed[8];
+                const same = memberCerts.filter(c => c.roomId === roomId && c.subjectId === subjectId && (c.kind === 1 || c.kind === 4));
+                if (same.length >= 4 || same.some(c => c.actorId === userId && c.kind === kind)) return { status: 200, data: { success: true, stored: false } };
+                memberCerts.push({ roomId, subjectId, actorId: userId, kind, cert: body.cert, aux: null, snap: body.snap || null });
+                return { status: 200, data: { success: true, stored: true } };
             },
             async postKeyShares(chatId, shares) {
                 const roomId = room(userId, chatId);
@@ -434,7 +486,18 @@ function makeFakeServer(opts = {}) {
         // "Призрачный участник": сервер молча добавляет своего пользователя
         // в комнату — клиенты видят его только через список участников.
         addGhost(roomId, ghostUserId, chatId) { addParticipant(roomId, ghostUserId, chatId); },
+        // Сервер скрывает сертификаты субъекта (от всех) и возвращает их.
+        hideCerts(subjectId) { hiddenCertSubjects.add(subjectId); },
+        showCerts(subjectId) { hiddenCertSubjects.delete(subjectId); },
+        // Подсунуть сертификат (например, подписанный «своим» человеком) или его копию.
+        injectCert(roomId, item) { memberCerts.push({ roomId, aux: null, snap: null, ...item }); },
     };
+
+    // Серверная сторона допуска и входа (после проверок маршрутов approve/join): участник добавляется вместе с сертификатом.
+    function admit(roomId, userId, chatId, cert) {
+        addParticipant(roomId, userId, chatId);
+        if (cert) memberCerts.push({ roomId, subjectId: userId, aux: null, snap: null, ...cert });
+    }
 
     return {
         transportFor,
@@ -444,7 +507,12 @@ function makeFakeServer(opts = {}) {
         // Загрузка пула одноразовых PQ-ключей после skip принятых пачек:
         // 'refuse' — явный отказ сервера (success: false), 'network' — исключение fetch.
         failNextPqUpload(mode, skip = 0) { pqUploadFailure = { mode, skip }; },
-        addParticipant, removeParticipant, participantsOf,
+        addParticipant, removeParticipant, participantsOf, admit,
+        setInvite(roomId, invite) { if (invite) invites.set(roomId, invite); else invites.delete(roomId); },
+        getInvite(roomId) { return invites.get(roomId) || null; },
+        identityOf(userId) { return identityKeys.get(userId) || null; },
+        _memberCerts: memberCerts,
+        _certPosts: certPosts,
         newMessageId, postMessage, editMessage, getMessage,
         evil,
         _rooms: rooms,

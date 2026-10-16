@@ -15,6 +15,7 @@ process.emitWarning = function (warning, ...args) {
 
 const assert = require('assert');
 const E2EE = require('../public/e2ee.js');
+require('./membership-harness').install(E2EE);
 const kem = require('../public/mlkem.js');
 const Lock = require('../public/lib/e2ee-lock.js');
 const { makeFakeServer } = require('./fake-server');

@@ -17,6 +17,7 @@ process.emitWarning = function (warning, ...args) {
 const assert = require('assert');
 const nodeCrypto = require('crypto');
 const E2EE = require('../public/e2ee.js');
+require('./membership-harness').install(E2EE);
 const { makeFakeServer } = require('./fake-server');
 
 const subtle = globalThis.crypto.subtle;

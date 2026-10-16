@@ -30,6 +30,22 @@ const CLIENT_METHODS = [
     'hasRoomKey',
     'rotateRoomKey',
 
+    // Состав группы: подписи, приглашения, вход, подтверждение участников
+    'noteRoomCreated',
+    'signApproval',
+    'signInvite',
+    'getInviteSecret',
+    'dropInviteSecret',
+    'prepareJoin',
+    'completeJoin',
+    'cancelJoinIntent',
+    'getJoinIntent',
+    'trustMember',
+    'vouchForMember',
+    'getMembers',
+    'runViewChecks',
+    'nextRevouchDueMs',
+
     // Комнаты: ротация ключа и запрос ключа
     'roomKeyDue',
     'requestRoomKeys',
