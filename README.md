@@ -164,7 +164,7 @@ SECURITY.md                # политика сообщений об уязви
 
 ## API
 
-Сессионная cookie; на изменяющие запросы нужны заголовок `X-CSRF-Token`, совпадающий с cookie `csrf_token`, и Origin своего сайта. Клиент передаёт признак версии `proto`: слишком старая страница получает 400 с кодом `client-outdated`.
+Сессионная cookie; на изменяющие запросы нужны заголовок `X-CSRF-Token`, совпадающий с cookie `csrf_token`, и Origin своего сайта. Клиент передаёт признак версии `proto`: слишком старая страница получает 400 с кодом `client-outdated`. Другие коды отказов: `bad-message-id` и `id-conflict` (идентификатор сообщения выбирает клиент), `busy` (хранилище лимитов или базы занято, повторить), `e2ee-required`, `bad-envelope` и `e2ee-not-allowed` (в группу принимается только корректный E2EE-конверт), `already-member`, `bad-request`.
 
 - Аккаунт: `GET /api/pow/challenge`, `POST /api/register/anonymous`, `GET /api/auth`, `GET /api/user`, `POST /api/user/lifetime`, `POST /api/user/privacy`, `POST /api/logout`, `POST /api/account/delete`
 - Чаты: `GET /api/chats`, `POST /api/chats`, `DELETE /api/chats/:chatId` (выход из группы, `?deleteMessages=1`), `POST /api/chats/:chatId/prefs`, `POST /api/chats/:chatId/expiry`, `GET /api/chats/:chatId/settings`, `GET /api/chats/:chatId/participants`
@@ -172,7 +172,7 @@ SECURITY.md                # политика сообщений об уязви
 - Состав группы: `GET` и `POST /api/chats/:chatId/member-certs`
 - Сообщения: `GET /api/messages/:chatId` (курсор `beforeSeq`), `POST /api/chats/:chatId/read`, `POST /api/messages` (в группу — только E2EE-конверт, открытый текст принимает лишь чат с ботом), `PUT` и `DELETE /api/messages/:messageId`, `POST /api/messages/file`, `POST /api/messages/:messageId/set-expiry`, `POST /api/reactions`, `DELETE /api/reactions/:messageId/:emoji`
 - Ключи: `PUT /api/keys/identity`, `PUT /api/keys/signed-prekey`, `PUT /api/keys/pq-prekey`, `POST /api/keys/one-time-prekeys`, `POST` и `DELETE /api/keys/pq-one-time-prekeys`, `GET /api/keys/one-time-prekeys/count`, `GET /api/keys/identities`, `GET /api/keys/bundle/:targetUserId`, `DELETE /api/keys`, `POST /api/keys/key-shares`, `GET /api/keys/key-shares/:chatId`, `POST /api/keys/key-requests`, `GET /api/keys/key-requests/:chatId`, `POST /api/keys/key-requests/done`
-- Журнал ключей: `GET /api/kt/head`, `/api/kt/roots`, `/api/kt/proof`, `/api/kt/self`
+- Журнал ключей: `GET /api/kt/head`, `/api/kt/roots`, `/api/kt/proof`, `/api/kt/self` (без `KT_SIGNING_KEY`: `/api/kt/head` отвечает `{enabled:false}`, остальные — 503)
 - Файлы: `GET /uploads/:filename` — только участникам чата, вступившим до сообщения
 - Служебные: `GET /healthz`, `/readyz`, `/metrics` (по токену), `/client-manifest.json`, `/.well-known/security.txt`
 - Socket.io: клиент отправляет `joinChat`; сервер присылает `newMessage`, `messageEdited`, `messageDeleted`, `messagesRead`, `e2eeKeyShare`, `e2eeKeyRequest`, `roomMembersChanged`, `chatExpiryChanged`, `chatListChanged`, `joinRequestsChanged`, `joinRequestDecided`
