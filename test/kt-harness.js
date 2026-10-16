@@ -8,6 +8,7 @@
 
 const { AsyncLocalStorage } = require('async_hooks');
 const E2EE = require('../public/e2ee.js');
+require('./membership-harness').install(E2EE);
 const { makeFakeServer } = require('./fake-server');
 const { FakeKt } = require('./fake-kt');
 

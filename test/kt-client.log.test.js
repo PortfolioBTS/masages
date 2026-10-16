@@ -8,6 +8,7 @@
 const assert = require('assert');
 const crypto = require('crypto');
 const E2EE = require('../public/e2ee.js');
+require('./membership-harness').install(E2EE);
 const NyxoKt = require('../public/lib/kt.js');
 const { makeWorld, statusOf, HOUR } = require('./kt-harness');
 const { FakeKt, newLogKey } = require('./fake-kt');

@@ -75,12 +75,17 @@ async function makeUser(name) {
         onTransparencyAlert: (alert) => alerts.push(alert),
         ktSchedule: () => 0, // повторы по таймеру в тесте не нужны: проверки вызываются явно
     });
+    // Допуски подписывает настоящий клиент (подписанный состав, signed-membership.md): ключи должны быть на сервере до входа в комнату.
+    await client.init();
+    tc.e2ee = client;
     return { tc, id: tc.user.id, client, alerts, chat: null };
 }
 
 async function joinRoom(owner, member) {
     const { code } = await owner.tc.invite(owner.chat.id);
-    const pending = await member.tc.join(code);
+    // Намерение входа (заявка) записывает клиент заявителя; допуск подписывает клиент одобряющего.
+    await member.client.prepareJoin(owner.chat.room_id, {});
+    const pending = await member.tc.join(code, { secret: null });
     await owner.tc.approve(pending.requestId);
     member.chat = (await member.tc.chats()).find(c => c.room_id === owner.chat.room_id);
     assert.ok(member.chat, 'чат комнаты у участника');
@@ -88,7 +93,7 @@ async function joinRoom(owner, member) {
 
 async function session(user) {
     const part = await user.tc.get(`/api/chats/${user.chat.id}/participants`);
-    return user.client.ensureRoomSession(user.chat.id, user.chat.room_id, part.body.participants);
+    return user.client.ensureRoomSession(user.chat.id, user.chat.room_id, part.body.participants, part.body);
 }
 
 const headOf = async (tc) => (await tc.get('/api/kt/head')).body;
@@ -112,6 +117,7 @@ test('ворота G4: честный журнал — собеседник ok, 
     alice = await makeUser('алиса');
     bob = await makeUser('боб');
     alice.chat = await alice.tc.createRoom('Журнал и клиент');
+    await alice.client.noteRoomCreated(alice.chat.room_id, alice.tc.user.username);
     await joinRoom(alice, bob);
     await alice.client.init();
     await bob.client.init();

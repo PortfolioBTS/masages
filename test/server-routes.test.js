@@ -72,9 +72,15 @@ async function runHandlers(handlers, req, res) {
     }
 }
 
+// Изменяющие запросы волны 4 несут общий признак версии клиента proto: 4
+// (message-ordering.md, 14.1). Тесты, не проверяющие сам признак, получают его
+// автоматически; { proto: undefined } в теле - «поле не присылать».
+const PROTO_PATHS = new Set(['/api/keys/identity', '/api/keys/key-shares']);
+
 async function call(app, method, path, opts) {
     const route = app._find(method, path);
     assert.ok(route, 'route not registered: ' + method + ' ' + path);
+    if (PROTO_PATHS.has(path) && opts && opts.body && !('proto' in opts.body)) opts = { ...opts, body: { ...opts.body, proto: 4 } };
     const { req, res } = makeFakeReqRes(opts);
     await runHandlers(route.handlers, req, res);
     return res;
@@ -144,6 +150,8 @@ function makeFakeDb() {
             return keyShares.filter(s => s.room_id === roomId && s.recipient_id === recipientId)
                 .map(s => ({ id: s.id, sender_id: s.sender_id, ciphertext: s.ciphertext }));
         }
+        if (query.includes('FROM room_member_certs')) return [];
+        if (query.includes('SELECT invite_cert FROM rooms')) return [{ invite_cert: null }];
         throw new Error('fake db: unhandled query: ' + query);
     }
     async function dbRun(query, params) {
@@ -311,6 +319,19 @@ async function main() {
         for (const [method, path] of expected) {
             assert.ok(app._find(method, path), 'missing route ' + method + ' ' + path);
         }
+    });
+
+    await test('proto: PUT /api/keys/identity без признака версии клиента (нет, 3, строка не из цифр) - 400 client-outdated, ключи не пишутся', async () => {
+        const { app, keyDb } = makeKeysFixture();
+        const keys = { identity_signing_key: b64(ed25519Pair().raw), identity_dh_key: b64(x25519Raw()) };
+        for (const proto of [undefined, 3, 'x', null]) {
+            const res = await call(app, 'put', '/api/keys/identity', { session: { userId: 5 }, body: { ...keys, proto } });
+            assert.strictEqual(res.statusCode, 400, String(proto));
+            assert.strictEqual(res.body.code, 'client-outdated');
+        }
+        assert.strictEqual(keyDb._state.identities.has(5), false);
+        const ok = await call(app, 'put', '/api/keys/identity', { session: { userId: 5 }, body: { ...keys, proto: 5 } });
+        assert.strictEqual(ok.statusCode, 200, 'новее минимального принимается');
     });
 
     await test('e2ee-keys.js: registration without { dbGet, dbAll } fails fast', async () => {
@@ -626,6 +647,20 @@ async function main() {
 
         const res = await call(app, 'get', '/api/chats/:chatId/participants', { session: { userId: 999 }, params: { chatId: '11' } });
         assert.strictEqual(res.body.success, false);
+    });
+
+    await test('proto: POST key-shares без признака версии клиента - 400 client-outdated, очередь не пополняется', async () => {
+        const { app, db } = makeGroupsFixture();
+        db._chats.push({ id: 11, user_id: 1, room_id: 100 });
+        db._participants.push({ room_id: 100, user_id: 1, username: 'alice' }, { room_id: 100, user_id: 2, username: 'bob' });
+        for (const proto of [undefined, 3, '']) {
+            const res = await call(app, 'post', '/api/keys/key-shares', {
+                session: { userId: 1 }, body: { chatId: 11, shares: [{ recipientUserId: 2, ciphertext: 'abc' }], proto },
+            });
+            assert.strictEqual(res.statusCode, 400, String(proto));
+            assert.strictEqual(res.body.code, 'client-outdated');
+        }
+        assert.strictEqual(db._keyShares.length, 0);
     });
 
     await test('POST key-shares: rejects a recipient who is not a room member', async () => {

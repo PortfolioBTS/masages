@@ -10,6 +10,7 @@ const { createKeyStore, _internal } = require('../lib/key-store');
 const { makeFakeKeyDb } = require('./fake-key-db');
 const { makeFakeServer } = require('./fake-server');
 const E2EE = require('../public/e2ee.js');
+require('./membership-harness').install(E2EE);
 const MLKEM = require('../public/mlkem.js');
 
 let passed = 0, failed = 0;

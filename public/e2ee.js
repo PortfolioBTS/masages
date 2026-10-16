@@ -235,6 +235,10 @@
 
     // ---- Причины отказа в обмене ключами (тексты для интерфейса) ----
 
+    // Общий признак версии клиента в изменяющих запросах (message-ordering.md, 14.1); равенство с PROTO_CURRENT
+    // сервера (lib/proto.js) проверяет test/proto-client.test.js.
+    const PROTO_VERSION = 4;
+
     const REASON_NOT_READY = 'у собеседника ещё не настроен E2EE';
     const REASON_OUTDATED = 'у собеседника устаревшая версия E2EE';
     const REASON_IDENTITY_CHANGED = 'ключ безопасности собеседника изменился — нужно подтверждение';
@@ -963,7 +967,7 @@
             return { status: res.status, data };
         }
         return {
-            async putIdentity(body) { return call('/api/keys/identity', 'PUT', body); },
+            async putIdentity(body) { return call('/api/keys/identity', 'PUT', { ...body, proto: PROTO_VERSION }); },
             async putSignedPrekey(body) { return call('/api/keys/signed-prekey', 'PUT', body); },
             async putPqPrekey(body) { return call('/api/keys/pq-prekey', 'PUT', body); },
             async postOneTimePrekeys(body) { return call('/api/keys/one-time-prekeys', 'POST', body); },
@@ -982,7 +986,15 @@
             async ktProof(userId, gen, epoch) { return call(`/api/kt/proof?user=${Number(userId)}&gen=${Number(gen)}&epoch=${Number(epoch)}`, 'GET'); },
             async ktSelf(gen, from, limit) { return call(`/api/kt/self?gen=${Number(gen)}&from=${Number(from)}&limit=${Number(limit)}`, 'GET'); },
             async getParticipants(chatId) { return call('/api/chats/' + encodeURIComponent(chatId) + '/participants', 'GET'); },
-            async postKeyShares(chatId, shares) { return call('/api/keys/key-shares', 'POST', { chatId, shares }); },
+            // Сертификаты состава (signed-membership.md, 7.2): чужие - отдельным запросом, до 200 id; публикация допуска.
+            async getMemberCerts(chatId, ids) {
+                const list = ids.map(Number).filter(id => Number.isSafeInteger(id) && id > 0);
+                return call('/api/chats/' + encodeURIComponent(chatId) + '/member-certs?subjects=' + list.join(','), 'GET');
+            },
+            async postMemberCert(chatId, body) {
+                return call('/api/chats/' + encodeURIComponent(chatId) + '/member-certs', 'POST', { ...body, proto: PROTO_VERSION });
+            },
+            async postKeyShares(chatId, shares) { return call('/api/keys/key-shares', 'POST', { chatId, shares, proto: PROTO_VERSION }); },
             async getKeyShares(chatId) { return call('/api/keys/key-shares/' + encodeURIComponent(chatId), 'GET'); },
             // Запрос ключа: «пришлите Sender Key с этим id» (потерянный key-share).
             async postKeyRequests(chatId, senderKeyIds) { return call('/api/keys/key-requests', 'POST', { chatId, senderKeyIds }); },
@@ -1018,6 +1030,24 @@
         }
         return null;
     }
+
+    // Подписанный состав группы (docs/security/signed-membership.md): форматы сертификатов и клиент состава.
+    // В браузере - глобальные NyxoMembership и NyxoMembershipClient (подключаются до e2ee.js), в Node - соседние модули.
+    // Без них клиент не работает: решение, кому отправлять ключ комнаты, принимает именно состав.
+    function resolveMembershipModules() {
+        if (typeof NyxoMembership !== 'undefined' && NyxoMembership && typeof NyxoMembershipClient !== 'undefined' && NyxoMembershipClient) {
+            return { lib: NyxoMembership, client: NyxoMembershipClient };
+        }
+        if (typeof require === 'function') {
+            try {
+                return { lib: require('./lib/membership.js'), client: require('./lib/membership-client.js') };
+            } catch {
+                return null;
+            }
+        }
+        return null;
+    }
+    const membershipModules = resolveMembershipModules();
 
     // ===================== Форматы конвертов =====================
 
@@ -1136,21 +1166,26 @@
         if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
         let json;
         try { json = JSON.stringify(raw); } catch { return null; }
-        // kt — справочная подсказка, а не условие ключа: при порче или превышении предела ext поле отбрасывается
-        // с предупреждением, SKDM принимается (строго разбирается только prev).
-        let ktDropped = false;
+        // kt и view - справочные подсказки, а не условие ключа: при порче или превышении предела ext эти поля
+        // отбрасываются с предупреждением, SKDM принимается (строго разбирается только prev).
+        let hintsDropped = false;
         if (json.length > MAX_EXT_CHARS) {
-            const { kt: ignored, ...rest } = raw;
+            const { kt: ignoredKt, view: ignoredView, ...rest } = raw;
             let restJson;
             try { restJson = JSON.stringify(rest); } catch { return null; }
-            if (restJson.length > MAX_EXT_CHARS || raw.kt === undefined) return null;
-            ktDropped = true;
+            if (restJson.length > MAX_EXT_CHARS || (raw.kt === undefined && raw.view === undefined)) return null;
+            hintsDropped = true;
         }
         const ext = {};
         if (raw.kt !== undefined) {
-            const kt = ktDropped ? null : parseKtGossip(raw.kt);
+            const kt = hintsDropped ? null : parseKtGossip(raw.kt);
             if (kt) ext.kt = kt;
             else console.warn('E2EE: поле kt в SKDM испорчено или не помещается в ext и отброшено');
+        }
+        if (raw.view !== undefined) {
+            const view = hintsDropped || !membershipModules ? null : membershipModules.client.parseViewField(raw.view);
+            if (view) ext.view = view;
+            else console.warn('E2EE: поле view в SKDM испорчено или не помещается в ext и отброшено');
         }
         if (raw.prev !== undefined) {
             const prev = raw.prev;
@@ -1330,6 +1365,27 @@
             schedule: options.ktSchedule,
         }) : null;
         const ktOn = () => Boolean(ktLog) && ktLog.supported();
+
+        // Подписанный состав группы (public/lib/membership-client.js): состояние V, removed, joinIntent, журнал доставок,
+        // проверка сертификатов. Сеть вне withLock; в блокировке клиент состава только читает и пишет хранилище.
+        if (!membershipModules) throw new E2eeError('unsupported', 'E2EE: модуль состава группы (membership.js) не загружен');
+        const Membership = membershipModules.lib;
+        const membership = membershipModules.client.createMembershipClient({
+            storage, transport, withLock, now,
+            getUserId: () => userId,
+            loadIdentityLocked,
+            sign,
+            logExcluded,
+            checkPeers: (ids) => checkPeersWithServer(ids),
+        });
+
+        // Мои ключи для проверок состава (в блокировке не вызывать: берёт её сама).
+        async function myKeys() {
+            return withLock(async () => {
+                const identity = await loadIdentityLocked();
+                return { id: Number(userId), signPub: b64decode(identity.signPub), dhPub: b64decode(identity.dhPub) };
+            });
+        }
 
         // Проверки журнала с пределом ожидания: ответ сервера не должен задерживать отправку.
         async function runKtChecksBounded() {
@@ -1920,6 +1976,9 @@
             for (const name of ['members:' + roomId, 'memberNames:' + roomId, 'roomPolicy:' + roomId]) {
                 if ((await storage.get(name)) !== null) { await storage.delete(name); removed++; }
             }
+            // Записи состава (signed-membership.md, 5.6): V, removed, очередь повторных допусков, намерение входа, журнал
+            // доставок, секрет ссылки. Вернувшийся в комнату начинает заново: новый joinIntent и якорная проверка.
+            removed += await membership.forgetRoomLocked(roomId);
             editCounts.delete(roomId);
             return { removed };
         }
@@ -2484,6 +2543,13 @@
                 for (const name of await storage.keys('sharedWith2:')) {
                     if (name.split(':')[3] === String(id)) await storage.delete(name);
                 }
+                // Решение человека о новом ключе подтверждает участника вручную там, где он есть в списке сервера (9.7).
+                await membership.trustAfterAcceptLocked(id, (members, peerId) => {
+                    const found = members.find(p => Number(p.id) === peerId);
+                    return found && typeof found.username === 'string' ? found.username : '';
+                });
+                // Ключи участника сменились: ключи комнат, которые он получил по прежним ключам, меняются везде (9.1).
+                await rotateCommonRoomsLocked(null, [id]);
                 const list = (await storage.get('pendingShares:' + id)) || [];
                 await storage.delete('pendingShares:' + id);
                 return list;
@@ -2736,6 +2802,13 @@
                 const own = await loadOwnSenderKeyLocked(roomId);
                 if (!own) return { warning: 'нет ключа комнаты' };
 
+                // Журнал доставок (signed-membership.md, 9.1, 9.4): пара { id, memkey } по закреплённым ключам, по которым
+                // шифруется share, - ДО сетевого вызова и только на добавление. Если запрос ушёл, а ответ потерян или вкладка
+                // закрылась, ключ мог дойти, и журнал это учитывает; по нему же решается ротация.
+                const peerMemkey = Membership.toHex(await Membership.memkey(Number(peerId), b64decode(pin.signPub), b64decode(pin.dhPub)));
+                const stored = await storage.get('members:' + roomId);
+                await membership.appendDeliveredLocked(roomId, own.senderKeyId, Number(peerId), peerMemkey, Array.isArray(stored) ? stored.length : 0);
+
                 const { messageKey, nextChainKey } = await chainStep(b64decode(session.ck));
                 const n = session.n;
                 session.ck = b64encode(nextChainKey);
@@ -2749,13 +2822,19 @@
                 // позиция: что было до их вступления, они читать не должны. На
                 // прямую секретность это не влияет: свои ключи сообщений
                 // отправитель и так хранит в cachedKeys.
+                // Право на ключ с начала эпохи - у пары { id, memkey } из recipients на момент создания ключа: участник, сменивший
+                // ключи, и участник, подтверждённый позже, получают его как новички (signed-membership.md, 9.4).
                 const fromStart = Boolean(own.origin && own.origin.chainKey0)
-                    && Array.isArray(own.entitled) && own.entitled.includes(Number(peerId));
+                    && Array.isArray(own.entitled) && own.entitled.includes(Number(peerId))
+                    && (!own.entitledKeys || own.entitledKeys[Number(peerId)] === peerMemkey);
                 // ext: прежний ключ (prev) и последняя проверенная подписанная голова журнала (kt, 7.5).
                 const ext = {};
                 if (own.prev) ext.prev = own.prev;
                 const gossip = ktOn() ? await ktLog.gossipHead() : null;
                 if (gossip) ext.kt = gossip;
+                // Хэш взгляда на состав и ключи участников (6.3): справочная подсказка внутри AEAD попарного канала.
+                const view = await membership.computeViewLocked(roomId, { id: Number(userId), signPub: b64decode(identity.signPub), dhPub: b64decode(identity.dhPub) });
+                if (view) ext.view = membership.encodeView(view);
                 const skdm = buildSkdm(roomId, {
                     senderKeyId: own.senderKeyId,
                     chainKey: fromStart ? own.origin.chainKey0 : own.chainKey,
@@ -3107,6 +3186,8 @@
                 if (onInstalled) onInstalled(keyId);
                 // Голова журнала отправителя (7.5): сверка — вне блокировки, в блокировке только задача.
                 if (ktOn() && opened.skdm.ext && opened.skdm.ext.kt) await ktLog.noteGossipLocked(opened.skdm.ext.kt);
+                // Хэш взгляда (9.6): в блокировке - только задача, сверка идёт вне блокировки (runViewChecks).
+                if (opened.skdm.ext && opened.skdm.ext.view) await membership.noteViewLocked(roomId, senderId, opened.skdm.ext.view);
                 return 'applied';
             });
         }
@@ -3120,6 +3201,15 @@
         // им ключ выдаётся с начала эпохи (prepareShareForPeer). prev — { id, final }
         // прежнего ключа: уходит в ext каждого SKDM нового ключа.
         async function newOwnSenderKeyState({ roomId, entitled = [], prev = null, logExcluded = [] } = {}) {
+            // entitled - ids либо пары { id, memkey } (recipients на момент создания ключа, signed-membership.md, 9.4).
+            const entitledIds = [];
+            const entitledKeys = {};
+            for (const item of Array.isArray(entitled) ? entitled : []) {
+                const id = Number(item && typeof item === 'object' ? item.id : item);
+                if (!Number.isSafeInteger(id) || id <= 0 || id === Number(userId) || entitledIds.includes(id)) continue;
+                entitledIds.push(id);
+                if (item && typeof item === 'object' && typeof item.memkey === 'string') entitledKeys[id] = item.memkey;
+            }
             const signKp = await generateEd25519();
             const chainKey = b64encode(randomBytes(32));
             const signingPublicKey = b64encode(signKp.pub);
@@ -3134,7 +3224,9 @@
                 keyTimes: {},
                 createdAt: now(),
                 origin: { chainKey0: chainKey },
-                entitled: normalizeIds(entitled).filter(id => id !== Number(userId)),
+                entitled: entitledIds,
+                // Пары: право на ключ с начала эпохи привязано к ключам участника (prepareShareForPeer).
+                entitledKeys,
                 // Участники, исключённые из рассылки журналом ключей (log-mismatch) к моменту создания ключа:
                 // решение о ротации из-за mismatch принимается по статусу, а не по отметкам рассылки (sharedWith2),
                 // которые стирает запрос ключа или принятие нового ключа.
@@ -3220,8 +3312,10 @@
             const existing = await loadOwnSenderKeyLocked(roomId);
             const known = await knownMemberIdsLocked(roomId);
             const excluded = await logExcludedIdsLocked(known);
-            // Исключённые журналом не читают нового ключа с начала эпохи.
-            const ids = (entitled || known).filter(id => !excluded.includes(Number(id)));
+            // Исключённые журналом не читают нового ключа с начала эпохи. Без явного списка - текущие получатели
+            // (подтверждённые участники состава), а не весь список сервера (signed-membership.md, 9.4).
+            const base = entitled || await membership.currentRecipientsLocked(roomId, Number(userId));
+            const ids = base.filter(item => !excluded.includes(Number(item && typeof item === 'object' ? item.id : item)));
             const prev = existing && existing.nextIteration > 0 ? { id: existing.senderKeyId, final: existing.nextIteration - 1 } : null;
             const next = await newOwnSenderKeyState({ roomId, entitled: ids, prev, logExcluded: excluded });
             if (existing) {
@@ -3232,10 +3326,12 @@
                 const evicted = await moveToArchiveLocked(roomId, userId, existing, { own: true });
                 next.archive = existing.archive;
                 await dropArchivesLocked(roomId, userId, evicted);
-                // Отметки рассылки старого ключа и ответов на его запросы больше ни к чему.
+                // Отметки рассылки старого ключа и ответов на его запросы больше ни к чему; журнал доставок старого
+                // ключа удаляется вместе с его ротацией (signed-membership.md, 8): новый ключ ведёт свой.
                 for (const prefix of [
                     'sharedWith2:' + roomId + ':' + existing.senderKeyId + ':',
                     'keyServed:' + roomId + ':' + existing.senderKeyId + ':',
+                    'delivered:' + roomId + ':' + existing.senderKeyId,
                 ]) {
                     for (const name of await storage.keys(prefix)) await storage.delete(name);
                 }
@@ -3243,6 +3339,28 @@
             await storage.set(ownKeyName(roomId), next);
             await writeIndexLocked(roomId, next.senderKeyId, userId);
             return next;
+        }
+
+        // События уровня человека (signed-membership.md, 9.1): смена ключа участника (changed), log-mismatch, принятие нового
+        // ключа проверяются во ВСЕХ общих комнатах, а не только в той, где они замечены. Проверка локальная (без сети): по
+        // сохранённым V, списку сервера и журналу доставок собственного ключа каждой комнаты. Новый ключ уходит получателям
+        // при следующем ensureRoomSession этой комнаты; до того он только создан - старый, известный подозреваемому, не живёт.
+        async function rotateCommonRoomsLocked(exceptRoomId, personIds) {
+            const rotated = [];
+            const seen = new Set();
+            for (const personId of personIds) {
+                for (const roomId of await membership.roomsWithMemberLocked(Number(personId))) {
+                    if (seen.has(roomId) || String(roomId) === String(exceptRoomId)) continue;
+                    seen.add(roomId);
+                    const own = await loadOwnSenderKeyLocked(roomId);
+                    if (!own) continue;
+                    const reason = await membership.journalReasonStoredLocked(roomId, own.senderKeyId, Number(userId));
+                    if (!reason) continue;
+                    await rotateRoomKeyLocked(roomId, await membership.currentRecipientsLocked(roomId, Number(userId)));
+                    rotated.push({ roomId, reason });
+                }
+            }
+            return rotated;
         }
 
         // После ротации нужно вызвать ensureRoomSession, чтобы разослать
@@ -3273,22 +3391,62 @@
             return 'sharedWith2:' + roomId + ':' + senderKeyId + ':' + peerId;
         }
 
-        // Устанавливает/подтверждает мой Sender Key для комнаты, сверяет
-        // состав комнаты с запомненным и рассылает ключ тем, кому текущая
-        // версия ещё не отправлена.
-        async function ensureRoomSession(chatId, roomId, participants) {
+        // Что клиент знает о составе из ответа GET participants (signed-membership.md, 7.2): свои сертификаты,
+        // снимки к ним и сертификат приглашения. Всё разбирается строго: сервер недоверенный.
+        function normalizeMembershipInfo(info, meId) {
+            const certMap = membershipModules.client.parseCertItems(info && info.certs, new Set([meId]));
+            const snaps = [];
+            for (const item of info && Array.isArray(info.snaps) ? info.snaps : []) {
+                const snap = Membership.fromB64(item && item.snap);
+                const kind = Number(item && item.kind);
+                const actorId = Number(item && item.actorId);
+                if (snap && snap.length > 0 && Number.isSafeInteger(actorId) && (kind === 1 || kind === 3 || kind === 4)) snaps.push({ actorId, kind, snap });
+            }
+            return { certMap, snaps };
+        }
+
+        // Устанавливает/подтверждает мой Sender Key для комнаты, проверяет состав группы (signed-membership.md, 9.1),
+        // сверяет его с запомненным и рассылает ключ ТОЛЬКО подтверждённым участникам, которым текущая версия ещё не
+        // отправлена. info - ответ GET participants целиком: { certs, snaps, invite }; без него сертификатов у меня нет.
+        async function ensureRoomSession(chatId, roomId, participants, info) {
             await ensureLocal();
             const me = Number(userId);
             const current = normalizeParticipants(participants);
-            const empty = { newMembers: [], removedMembers: [], rotated: false, rotationReason: null, identityChanges: [], peers: 0, keyHolders: 0 };
+            const empty = {
+                newMembers: [], removedMembers: [], rotated: false, rotationReason: null, identityChanges: [], peers: 0, keyHolders: 0,
+                members: [], unconfirmed: [], duplicateKeys: [], viewMismatch: false, viewIdsDiverged: false,
+            };
             if (!current.some(p => p.id === me)) {
                 return Object.assign({ ok: false, warnings: [{ reason: 'вы не участник этой комнаты' }] }, empty);
             }
+            const others = current.filter(p => p.id !== me);
 
-            const membership = await withLock(async () => {
-                // Новый ключ с начала эпохи читают все, кто в комнате сейчас.
-                const excludedNow = await logExcludedIdsLocked(current.filter(p => p.id !== me).map(p => p.id));
-                const entitledNow = current.filter(p => p.id !== me && !excludedNow.includes(p.id)).map(p => p.id);
+            // Закрепление ключей участников - до проверки состава (сеть и короткие секции блокировки).
+            const { statuses, serverKnown } = await checkPeersWithServer(others.map(p => p.id));
+            const changedIds = new Set(statuses.filter(s => s.status === 'changed').map(s => s.userId));
+
+            // Сертификаты других участников - вне блокировки: тех, кого я ещё не подтвердил, и тех, чей подписавший вышел.
+            const given = normalizeMembershipInfo(info, me);
+            const certMap = new Map(given.certMap);
+            for (const [subject, list] of await membership.fetchCerts(chatId, await membership.planCertFetch(roomId, current, me))) certMap.set(subject, list);
+            if (info && Object.prototype.hasOwnProperty.call(info, 'invite')) await membership.noteServerInvite(roomId, info.invite);
+
+            const membershipState = await withLock(async () => {
+                const identity = await loadIdentityLocked();
+                const meKeys = {
+                    id: me, username: (current.find(p => p.id === me) || {}).username || '',
+                    signPub: b64decode(identity.signPub), dhPub: b64decode(identity.dhPub),
+                };
+                const prevMembers = await storage.get('members:' + roomId);
+                const pins = await membership.loadPins(others.map(p => p.id));
+                // Проверка состава: V, removed, замыкание по сертификатам, якорь новичка, получатели (9.1, 9.2).
+                const verdict = await membership.verifyLocked({
+                    roomId, current, prevMembers: Array.isArray(prevMembers) ? prevMembers : null,
+                    certMap, snaps: given.snaps, me: meKeys, pins, nowMs: now(),
+                });
+                // Получатели нового ключа с начала эпохи (entitled) - пары { id, memkey } на момент создания ключа, а не V.
+                const entitledNow = verdict.recipients;
+                const excludedNow = others.filter(p => pins.get(p.id) && pins.get(p.id).excluded).map(p => p.id);
                 let own = await loadOwnSenderKeyLocked(roomId);
                 let rotated = false;
                 let rotationReason = null;
@@ -3305,25 +3463,30 @@
                     rotated = true;
                     rotationReason = 'upgrade';
                 }
-                const known = await storage.get('members:' + roomId);
                 let newMembers = [];
                 let removedMembers = [];
                 // Первый вызов для комнаты только запоминает состав: сравнивать
                 // не с чем, и "новыми" оказались бы все.
-                if (Array.isArray(known)) {
-                    const knownIds = new Set(known.map(p => Number(p.id)));
+                if (Array.isArray(prevMembers)) {
+                    const knownIds = new Set(prevMembers.map(p => Number(p.id)));
                     const currentIds = new Set(current.map(p => p.id));
                     newMembers = current.filter(p => p.id !== me && !knownIds.has(p.id));
-                    removedMembers = known
+                    removedMembers = prevMembers
                         .filter(p => Number(p.id) !== me && !currentIds.has(Number(p.id)))
                         .map(p => ({ id: Number(p.id), username: typeof p.username === 'string' ? p.username : '' }));
-                    // Ушедший участник знает текущий ключ цепочки и мог бы
-                    // читать всё будущее — ротируем до рассылки, так что
-                    // новый ключ он не получит.
-                    if (removedMembers.length > 0 && !rotated) {
+                }
+                // Ротация до рассылки по ЖУРНАЛУ ДОСТАВОК (9.1): получатель текущего ключа перестал быть адресатом - вышел,
+                // выпал из V (changed), получил log-mismatch или сменил ключи. Отметки рассылки sharedWith2 решения не
+                // определяют: сервер мог стереть их запросом ключа. Ключ, которого получатель не видел, ротировать незачем.
+                if (!rotated) {
+                    const ownNow = await loadOwnSenderKeyLocked(roomId);
+                    const reason = ownNow
+                        ? await membership.journalRotationReasonLocked(roomId, ownNow.senderKeyId, verdict.recipients, new Map(current.map(p => [p.id, p])), verdict.V, pins)
+                        : null;
+                    if (reason) {
                         await rotateRoomKeyLocked(roomId, entitledNow);
                         rotated = true;
-                        rotationReason = 'member-left';
+                        rotationReason = reason;
                     }
                 }
                 // Плановая ротация: 100 сообщений или 7 дней. Делается здесь, до
@@ -3339,12 +3502,10 @@
                 // сообщения сервер не называет, а список участников хранит только
                 // текущих.
                 await rememberMemberNamesLocked(roomId, current);
-                return { newMembers, removedMembers, rotated, rotationReason };
+                return { newMembers, removedMembers, rotated, rotationReason, verdict };
             });
-
-            const others = current.filter(p => p.id !== me);
-            const { statuses, serverKnown } = await checkPeersWithServer(others.map(p => p.id));
-            const changedIds = new Set(statuses.filter(s => s.status === 'changed').map(s => s.userId));
+            const { verdict } = membershipState;
+            const recipientIds = new Set(verdict.recipients.map(r => r.id));
 
             // Журнал ключей (7.3): собеседник с mismatch исключается из рассылки, а свой ключ комнаты ротируется,
             // если он мог получить текущий: решение по самому статусу — в состоянии ключа записано, кто был исключён
@@ -3356,11 +3517,14 @@
                     const ownNow = await loadOwnSenderKeyLocked(roomId);
                     const excludedAtCreation = new Set(ownNow && Array.isArray(ownNow.logExcluded) ? ownNow.logExcluded : []);
                     if ([...logMismatchIds].every(id => excludedAtCreation.has(id))) return false;
-                    await rotateRoomKeyLocked(roomId, others.filter(p => !logMismatchIds.has(p.id)).map(p => p.id));
+                    await rotateRoomKeyLocked(roomId, verdict.recipients);
                     return true;
                 });
             }
             const logMismatches = [];
+            // Те же события в остальных общих комнатах (9.1).
+            const personEvents = [...changedIds, ...logMismatchIds];
+            if (personEvents.length > 0) await withLock(() => rotateCommonRoomsLocked(roomId, personEvents));
 
             const warnings = [];
             const identityChanges = [];
@@ -3370,6 +3534,8 @@
                 identityChanges.push({ userId: peer.id, username: peer.username });
                 warnings.push({ userId: peer.id, reason: REASON_IDENTITY_CHANGED });
             };
+            // Предупреждения о составе: неподтверждённые и совпадающие ключи (signed-membership.md, 10).
+            for (const group of verdict.duplicateKeys) warnings.push({ userIds: group.ids.slice(), reason: 'duplicate-keys' });
 
             for (const peer of others) {
                 if (changedIds.has(peer.id)) { noteChanged(peer); continue; }
@@ -3384,6 +3550,12 @@
                 // ушёл бы даже тогда, когда собеседник E2EE настроит.
                 if (serverKnown && !serverKnown.has(peer.id)) {
                     warnings.push({ userId: peer.id, reason: REASON_NOT_READY });
+                    continue;
+                }
+                // Ключ комнаты получают только подтверждённые участники (П1): остальные остаются в unconfirmed, без
+                // запроса bundle и без отметки рассылки.
+                if (!recipientIds.has(peer.id)) {
+                    warnings.push({ userId: peer.id, reason: 'unconfirmed-member' });
                     continue;
                 }
                 const own = await storage.get(ownKeyName(roomId));
@@ -3416,9 +3588,16 @@
                 await withLock(async () => { for (const name of done) await storage.set(name, true); });
             }
 
+            // Повторный допуск после ухода подписавшего (5.5): задачи, срок которых наступил. Сбой публикации не
+            // мешает сессии комнаты: задача остаётся в очереди и повторится.
+            let revouchPublished = [];
+            if (verdict.revouchDue.length > 0) {
+                try { revouchPublished = await membership.publishDueRevouches(chatId, roomId, verdict.revouchDue); } catch (err) { console.warn('E2EE: повторный допуск не опубликован:', err); }
+            }
+
             // Сколько остальных участников получили ТЕКУЩИЙ ключ (по отметкам об успешной
             // рассылке). Если участники есть, а ключа нет ни у кого, отправка в комнату
-            // бессмысленна: никто не прочтёт — script.js в этом случае её блокирует.
+            // бессмысленна: script.js в этом случае её блокирует.
             const ownNow = await storage.get(ownKeyName(roomId));
             let keyHolders = 0;
             if (ownNow) {
@@ -3429,14 +3608,21 @@
 
             return {
                 ok, warnings,
-                newMembers: membership.newMembers,
-                removedMembers: membership.removedMembers,
-                rotated: membership.rotated || logRotated,
-                rotationReason: membership.rotationReason || (logRotated ? 'log-mismatch' : null),
+                newMembers: membershipState.newMembers,
+                removedMembers: membershipState.removedMembers,
+                rotated: membershipState.rotated || logRotated,
+                rotationReason: membershipState.rotationReason || (logRotated ? 'log-mismatch' : null),
                 identityChanges,
                 logMismatches,
                 peers: others.length,
                 keyHolders,
+                members: verdict.members,
+                unconfirmed: verdict.unconfirmed,
+                duplicateKeys: verdict.duplicateKeys,
+                anchor: verdict.anchor,
+                revouchPublished,
+                viewMismatch: false,
+                viewIdsDiverged: false,
             };
         }
 
@@ -3466,6 +3652,17 @@
             // Головы журнала из принятых SKDM сверяются в фоне.
             if (ktOn() && applied > 0) ktLog.runKtChecks().catch(err => console.warn('E2EE: сверка голов журнала не удалась:', err));
             const result = { applied, failed, identityChanges: changes };
+            // Сверка взглядов на состав и ключи (9.6): вне блокировки, после обработки key-share. Тревога информативная:
+            // отправка не блокируется.
+            if (applied > 0) {
+                try {
+                    const views = await membership.runViewChecks(roomId, await myKeys());
+                    if (views.viewMismatch) result.viewMismatch = true;
+                    if (views.viewIdsDiverged) result.viewIdsDiverged = true;
+                } catch (err) {
+                    console.warn('E2EE: сверка взглядов не удалась:', err);
+                }
+            }
             // Предупреждения — только когда есть о чём предупреждать.
             if (warnings.length > 0) result.warnings = warnings;
             return result;
@@ -3563,7 +3760,9 @@
                 const resend = [];
                 const own = await loadOwnSenderKeyLocked(roomId);
                 if (!own) return { resend };
-                const members = await knownMemberIdsLocked(roomId);
+                // Ответ - только текущим получателям ключа (signed-membership.md, 9.4): запрос от неподтверждённого, от
+                // участника с log-mismatch или от того, кого нет в списке, не снимает отметку и не расходует кулдаун.
+                const members = (await membership.currentRecipientsLocked(roomId, Number(userId))).map(r => r.id);
                 for (const request of list) {
                     const from = Number(request && request.fromUserId);
                     if (!Number.isSafeInteger(from) || from <= 0 || from === Number(userId) || !members.includes(from)) continue;
@@ -3828,8 +4027,31 @@
                 result.senderId = senderId;
                 result.ts = content.ts;
                 result.edit = content.edit;
+                // Отправитель вне V: SKDM принят, но сообщения помечаются. Флаг вычисляется при каждой расшифровке по
+                // текущему V, а не хранится: после подтверждения пометка исчезает без перешифровки (9.4).
+                if (!(await membership.isTrustedMember(roomId, senderId))) result.unverifiedSender = true;
                 return result;
             });
+        }
+
+        // ---- Состав группы: публичные методы (обёртки над клиентом состава) ----
+
+        async function noteRoomCreated(roomId, username) { await ensureLocal(); return membership.noteRoomCreated(roomId, username); }
+        async function signApproval(roomId, applicant) { await ensureLocal(); return membership.signApproval(roomId, applicant); }
+        async function signInvite(roomId, options) { await ensureLocal(); return membership.signInvite(roomId, options); }
+        async function getInviteSecret(roomId, serverInvite) { await ensureLocal(); return membership.getInviteSecret(roomId, serverInvite); }
+        async function dropInviteSecret(roomId) { await ensureLocal(); return membership.dropInviteSecret(roomId); }
+        async function prepareJoin(roomId, options) { await ensureLocal(); return membership.prepareJoin(roomId, options); }
+        async function completeJoin(roomId, inviteSnap) { await ensureLocal(); return membership.completeJoin(roomId, inviteSnap); }
+        async function cancelJoinIntent(roomId) { await ensureLocal(); return membership.cancelJoinIntent(roomId); }
+        async function getJoinIntent(roomId) { await ensureLocal(); return membership.getJoinIntent(roomId); }
+        async function trustMember(roomId, userId) { await ensureLocal(); return membership.trustMember(roomId, userId); }
+        async function vouchForMember(chatId, roomId, userId) { await ensureLocal(); return membership.vouchForMember(chatId, roomId, userId); }
+        async function getMembers(roomId) { await ensureLocal(); return membership.getMembers(roomId); }
+        async function nextRevouchDueMs(roomId) { await ensureLocal(); return membership.nextRevouchDueMs(roomId); }
+        async function runViewChecks(roomId) {
+            await ensureLocal();
+            return membership.runViewChecks(roomId, await myKeys());
         }
 
         // Публичный API клиента: по одному имени в строке, группы разделены —
@@ -3845,6 +4067,22 @@
             syncKeyShares,
             hasRoomKey,
             rotateRoomKey,
+
+            // Состав группы: подписи, приглашения, вход, подтверждение участников (signed-membership.md, 10)
+            noteRoomCreated,
+            signApproval,
+            signInvite,
+            getInviteSecret,
+            dropInviteSecret,
+            prepareJoin,
+            completeJoin,
+            cancelJoinIntent,
+            getJoinIntent,
+            trustMember,
+            vouchForMember,
+            getMembers,
+            runViewChecks,
+            nextRevouchDueMs,
 
             // Комнаты: ротация ключа и запрос ключа
             roomKeyDue,

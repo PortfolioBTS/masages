@@ -359,7 +359,9 @@ async function main() {
         assert.deepStrictEqual(own.logExcluded, [2]);
         assert.ok(!own.entitled.includes(2) && own.entitled.includes(4));
         assert.strictEqual((await world.sync(bob)).applied, 0, 'исключённый не получает нового ключа');
-        assert.strictEqual((await world.sync(carol)).applied, 1, 'остальные получают');
+        // Первый новый ключ - при смене ключа Боба (changed выводит его из V: ротация по журналу доставок, signed-membership.md,
+        // 9.1), второй - при log-mismatch после принятия ключа; Кэрол, не успев забрать первый, получает оба.
+        assert.strictEqual((await world.sync(carol)).applied, 2, 'остальные получают');
         // Повторный вход: статус прежний — второй ротации нет.
         const again = await world.session(alice);
         assert.strictEqual(again.rotated, false);

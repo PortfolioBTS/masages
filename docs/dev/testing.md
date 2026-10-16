@@ -261,6 +261,17 @@ await server.logs.waitFor(/\[Legacy\] …/, { from: mark });
 **`samples.js`** — минимальные настоящие PDF, MP4, WebM с метаданными (сервер их
 вычищает) и «головы» звуковых файлов для проверок отказа по типу.
 
+## Подписанный состав группы в тестах
+
+Вход по ссылке, одобрение заявки и приглашение без одобрения требуют сертификатов, подписанных identity-ключом (docs/security/signed-membership.md).
+
+- **Сквозные тесты.** `TestClient.join(code)`, `approve(requestId)` и `rotateInvite(chatId, { requireApproval: false })` подписывают сами (`test/e2e/helpers/membership.js`):
+  у клиента заводится identity (`tc.identity`), сертификат строится общим модулем `public/lib/membership.js`. `rotateInvite` запоминает секрет ссылки по коду, и `join(code)`
+  входит как человек со ссылкой; `join(code, { secret: null })` — вход кодом без секрета (заявка), `joinRaw` — сырой ответ. Тест, который регистрирует ключи сам (`PUT /api/keys/identity`),
+  должен задать `tc.identity = { signPub, dhPub, sign }`; тест с настоящим клиентом E2EE — `tc.e2ee = client` после `client.init()`: тогда подписывает он (`signApproval`, `signInvite`, `prepareJoin`).
+- **Протокольные тесты.** `test/membership-world.js` поднимает fake-server с сертификатами и настоящие клиенты E2EE без автоподтверждения; прежние протокольные тесты, которым состав не важен,
+  подключают `test/membership-harness.js` (`install(E2EE)`): клиент вручную подтверждает всех участников, переданных в `ensureRoomSession`.
+
 ## Ручная проверка интерфейса
 
 ```bash
