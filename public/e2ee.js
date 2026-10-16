@@ -235,6 +235,10 @@
 
     // ---- Причины отказа в обмене ключами (тексты для интерфейса) ----
 
+    // Общий признак версии клиента в изменяющих запросах (message-ordering.md, 14.1); равенство с PROTO_CURRENT
+    // сервера (lib/proto.js) проверяет test/proto-client.test.js.
+    const PROTO_VERSION = 4;
+
     const REASON_NOT_READY = 'у собеседника ещё не настроен E2EE';
     const REASON_OUTDATED = 'у собеседника устаревшая версия E2EE';
     const REASON_IDENTITY_CHANGED = 'ключ безопасности собеседника изменился — нужно подтверждение';
@@ -963,7 +967,7 @@
             return { status: res.status, data };
         }
         return {
-            async putIdentity(body) { return call('/api/keys/identity', 'PUT', body); },
+            async putIdentity(body) { return call('/api/keys/identity', 'PUT', { ...body, proto: PROTO_VERSION }); },
             async putSignedPrekey(body) { return call('/api/keys/signed-prekey', 'PUT', body); },
             async putPqPrekey(body) { return call('/api/keys/pq-prekey', 'PUT', body); },
             async postOneTimePrekeys(body) { return call('/api/keys/one-time-prekeys', 'POST', body); },
@@ -982,7 +986,7 @@
             async ktProof(userId, gen, epoch) { return call(`/api/kt/proof?user=${Number(userId)}&gen=${Number(gen)}&epoch=${Number(epoch)}`, 'GET'); },
             async ktSelf(gen, from, limit) { return call(`/api/kt/self?gen=${Number(gen)}&from=${Number(from)}&limit=${Number(limit)}`, 'GET'); },
             async getParticipants(chatId) { return call('/api/chats/' + encodeURIComponent(chatId) + '/participants', 'GET'); },
-            async postKeyShares(chatId, shares) { return call('/api/keys/key-shares', 'POST', { chatId, shares }); },
+            async postKeyShares(chatId, shares) { return call('/api/keys/key-shares', 'POST', { chatId, shares, proto: PROTO_VERSION }); },
             async getKeyShares(chatId) { return call('/api/keys/key-shares/' + encodeURIComponent(chatId), 'GET'); },
             // Запрос ключа: «пришлите Sender Key с этим id» (потерянный key-share).
             async postKeyRequests(chatId, senderKeyIds) { return call('/api/keys/key-requests', 'POST', { chatId, senderKeyIds }); },

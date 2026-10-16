@@ -24,6 +24,12 @@ const UNSAFE = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 // Общий признак версии клиента волны 4 (message-ordering.md, 14.1): изменяющие
 // запросы сообщений несут proto: 4. `proto: undefined` в тесте - «поле не присылать».
 const PROTO = 4;
+// Изменяющие запросы волны 4, которые несут proto: они получают его автоматически, если тест
+// не задал поле сам (`proto: undefined` - «не присылать», чтобы проверять client-outdated).
+const PROTO_ROUTES = [
+    /^\/api\/keys\/identity$/, /^\/api\/keys\/key-shares$/, /^\/api\/join-requests\/\d+\/approve$/,
+    /^\/api\/chats\/join$/, /^\/api\/chats\/\d+\/member-certs$/, /^\/api\/chats\/\d+\/invite\/(rotate|disable)$/,
+];
 let clientCounter = 0;
 
 // Случайный id сообщения в допустимом формате (31 бит, не меньше 1 000 000).
@@ -69,6 +75,10 @@ class TestClient {
     // если ответ JSON, иначе текст; binary: true — Buffer.
     async request(method, urlPath, { json, body, headers = {}, origin, csrf = 'auto', binary = false } = {}) {
         const upper = method.toUpperCase();
+        if (json && typeof json === 'object' && !Array.isArray(json) && !('proto' in json)
+            && PROTO_ROUTES.some(re => re.test(urlPath.split('?')[0]))) {
+            json = { ...json, proto: PROTO };
+        }
         const all = { 'X-Forwarded-For': this.xff, ...headers };
         const effectiveOrigin = origin === undefined ? this.origin : origin;
         if (effectiveOrigin !== null) all.Origin = effectiveOrigin;

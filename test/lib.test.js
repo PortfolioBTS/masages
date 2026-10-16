@@ -340,10 +340,11 @@ async function main() {
 
         assert.deepStrictEqual(invites.describeInvite(room, 3, now), {
             code: room.code, expiresAt: '2026-09-28T12:00:00.000Z', expired: false, disabled: false,
-            maxMembers: null, requireApproval: true, memberCount: 3,
+            maxMembers: null, requireApproval: true, signed: false, memberCount: 3,
         });
+        assert.strictEqual(invites.describeInvite({ ...room, invite_signed: true }, 3, now).signed, true);
         const disabled = invites.describeInvite({ ...room, invite_disabled: true, invite_max_members: 10, invite_require_approval: false }, '4', now);
-        assert.deepStrictEqual(disabled, { code: null, expiresAt: null, expired: false, disabled: true, maxMembers: 10, requireApproval: false, memberCount: 4 });
+        assert.deepStrictEqual(disabled, { code: null, expiresAt: null, expired: false, disabled: true, maxMembers: 10, requireApproval: false, signed: false, memberCount: 4 });
         assert.strictEqual(invites.describeInvite({ ...room, code_expires_at: '2026-09-27T11:00:00Z' }, 1, now).expired, true);
     });
 

@@ -100,6 +100,9 @@ const { initE2eeGroupsSchema, registerE2eeGroupRoutes } = require('./lib/e2ee-gr
 const { createTransactionRetry } = require('./lib/tx-retry');
 const { initUploadQuotaSchema, reserveUploadQuota, deleteQuotaRows } = require('./lib/upload-quota');
 const { isClientOutdated: isOutdatedProto } = require('./lib/proto');
+// Подписанный состав группы (signed-membership.md): проверки сертификатов на сервере и общий с клиентом разбор.
+const MembershipCerts = require('./lib/membership-certs');
+const Membership = require('./public/lib/membership.js');
 
 // Бот-помощник: ответ по теме запроса, приветствие нового аккаунта и подписи
 // кнопок-подсказок — чистые функции без БД (lib/bot-guide.js).
@@ -719,7 +722,17 @@ async function initDatabase() {
             -- участника, выключенный код
             invite_max_members INTEGER,
             invite_require_approval BOOLEAN NOT NULL DEFAULT TRUE,
-            invite_disabled BOOLEAN NOT NULL DEFAULT FALSE
+            invite_disabled BOOLEAN NOT NULL DEFAULT FALSE,
+            -- подписанное приглашение (signed-membership.md, 7.1): сертификат
+            -- приглашения (335 байт), снимок состава автора (16 байт на участника)
+            -- и автор приглашения (без внешнего ключа: выход или удаление аккаунта
+            -- автора обнуляет все три столбца). NULL - код принимает только заявки
+            invite_cert BYTEA CHECK (invite_cert IS NULL OR octet_length(invite_cert) = 335),
+            invite_snap BYTEA CHECK (invite_snap IS NULL OR (octet_length(invite_snap) % 16 = 0 AND octet_length(invite_snap) <= 16384)),
+            invite_actor_id INTEGER,
+            CONSTRAINT rooms_invite_signed CHECK (
+                (invite_cert IS NULL) = (invite_snap IS NULL) AND (invite_cert IS NULL) = (invite_actor_id IS NULL)
+            )
         )
     `);
 
@@ -825,6 +838,28 @@ async function initDatabase() {
             UNIQUE (room_id, user_id)
         )
     `);
+
+    // Сертификаты состава группы (signed-membership.md, 7.1): допуск (vouch, 1), вход по
+    // приглашению (join, 3) и повторный допуск (revouch, 4); приглашение (invite) лежит
+    // в rooms. Времени создания нет: минута допуска внутри сертификата. Субъекта нет
+    // среди внешних ключей: строки удаляет приложение вместе с выходом или удалением
+    // аккаунта субъекта и подписавшего (порядок блокировок message-ordering.md, 8.1:
+    // после chats, до user_left_rooms), комната - каскадом.
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS room_member_certs (
+            room_id    INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            subject_id INTEGER NOT NULL,
+            actor_id   INTEGER NOT NULL,
+            kind       SMALLINT NOT NULL CHECK (kind IN (1, 3, 4)),
+            cert       BYTEA NOT NULL CHECK (octet_length(cert) IN (271, 335)),
+            aux        BYTEA CHECK (aux IS NULL OR octet_length(aux) = 335),
+            snap       BYTEA CHECK (snap IS NULL OR (octet_length(snap) % 16 = 0 AND octet_length(snap) <= 16384)),
+            PRIMARY KEY (room_id, subject_id, actor_id, kind),
+            CONSTRAINT room_member_certs_length CHECK (octet_length(cert) = CASE kind WHEN 3 THEN 335 ELSE 271 END)
+        )
+    `);
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_rmc_subject ON room_member_certs(subject_id)');
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_rmc_actor ON room_member_certs(actor_id)');
 
     // Комнаты, откуда пользователь вышел, оставив там сообщения (sealed-sender.md,
     // 5 и 12): удаление аккаунта удаляет их во всех таких комнатах, а теги без
@@ -1065,6 +1100,8 @@ const bundleLimiter = pgLimits.slidingLimiter('bundle');
 // Отправки key-share (30 в час на пару «пользователь, комната») и запросы ключа (10 в час).
 const keyShareLimiter = pgLimits.slidingLimiter('keyshare');
 const keyRequestLimiter = pgLimits.slidingLimiter('keyreq');
+// Публикация и чтение сертификатов состава (signed-membership.md, 7.2).
+const memberCertLimiter = pgLimits.slidingLimiter('memcert');
 
 // CSRF-токен привязан к сессии: ключ выводится из SESSION_SECRET (HKDF), так что
 // смена секрета заодно сбрасывает все выданные токены.
@@ -1392,6 +1429,14 @@ app.use('/api/keys/key-shares', express.json({ limit: '2mb' }));
 // Пачка одноразовых PQ-prekey: до 50 ключей по ~1,7 КБ в base64 (ключ ML-KEM
 // 1184 байта + подпись 64) — около 90 КБ, впритык к 100 КБ по умолчанию.
 app.use('/api/keys/pq-one-time-prekeys', express.json({ limit: '256kb' }));
+// Запросы со снимком состава (approve, invite/rotate, member-certs): снимок на 1000 участников - 16 000 байт, в base64
+// около 21,3 тыс. символов, плюс сертификат и JSON; общий лимит их не вмещает, но и 100 КБ для них слишком много
+// (signed-membership.md, 7.2: 32 КБ). Парсер стоит раньше общего: тот видит разобранное тело и пропускает запрос.
+const snapBodyParser = express.json({ limit: MembershipCerts.BODY_LIMIT_WITH_SNAP });
+const SNAP_BODY_ROUTES = [/^\/api\/join-requests\/\d+\/approve$/, /^\/api\/chats\/\d+\/invite\/rotate$/, /^\/api\/chats\/\d+\/member-certs$/];
+app.use((req, res, next) => (
+    req.method === 'POST' && SNAP_BODY_ROUTES.some(re => re.test(req.path)) ? snapBodyParser(req, res, next) : next()
+));
 app.use(express.json());
 
 // Лимит на /api/ — ДО регистрации маршрутов из lib/: Express применяет
@@ -1409,7 +1454,11 @@ registerE2eeKeyRoutes(app, { dbGet, dbAll, bundleLimiter, kt, withTransaction: (
 // JOIN_REQUEST_LIVE_SQL объявлена ниже (условие «заявка жива»).
 registerKtRoutes(app, { dbGet, kt, limiter: pgLimits.slidingLimiter('kt'), joinRequestLiveSql: () => JOIN_REQUEST_LIVE_SQL });
 // Групповой E2EE: список участников чата + key-shares (тоже нужна сессия).
-registerE2eeGroupRoutes(app, { dbGet, dbAll, dbRun, io, queryWithRetry, respondIfDeadlock, keyShareLimiter, keyRequestLimiter });
+// Транзакция member-certs (7.1) идёт через withTransactionRetry, объявленный ниже: оболочка вызывается при запросах.
+registerE2eeGroupRoutes(app, {
+    dbGet, dbAll, dbRun, io, queryWithRetry, respondIfDeadlock, keyShareLimiter, keyRequestLimiter, memberCertLimiter,
+    withTransaction: (work) => withTransactionRetry(work),
+});
 registerApiRoutes(app, serverContext);
 
 app.get('/uploads/:filename', async (req, res) => {
@@ -2771,8 +2820,20 @@ function inviteExpiresAtIso(expiresAt) {
 
 // Состав комнаты изменился: клиенты участников перечитывают список
 // участников (E2EE: новичку — Sender Key, после ухода — ротация ключа).
-function notifyRoomMembersChanged(roomId) {
-    io.to(`room:${roomId}`).emit('roomMembersChanged', { roomId });
+// inviteRotated: true - из-за выхода участника сервер обнулил подписанное приглашение и выдал новый код
+// (решение владельца, signed-membership.md, вопрос 17): клиенты показывают «Ссылка-приглашение обновлена».
+function notifyRoomMembersChanged(roomId, extra) {
+    io.to(`room:${roomId}`).emit('roomMembersChanged', { roomId, ...extra });
+}
+
+// Новый код приглашения без подписанного сертификата: код остаётся и принимает только заявки, пока кто-то не создаст
+// новую подписанную ссылку («Пригласить»). Вызывается внутри транзакции выхода или удаления аккаунта, под блокировкой
+// комнаты. Срок и лимит участников прежние.
+async function resetInviteAfterLeave(client, roomId) {
+    await client.query(
+        'UPDATE rooms SET invite_cert = NULL, invite_snap = NULL, invite_actor_id = NULL, code = $2 WHERE id = $1',
+        [roomId, generateInviteCode()]
+    );
 }
 
 // Список заявок комнаты изменился — только участникам (заявитель в
@@ -2803,6 +2864,7 @@ async function getOwnRoom(chatIdParam, userId) {
     if (!chat.room_id) return { error: 'У этого чата нет кода приглашения' };
     const room = await dbGet(
         `SELECT r.id, r.name, r.code, r.code_expires_at, r.invite_max_members, r.invite_require_approval, r.invite_disabled,
+                (r.invite_cert IS NOT NULL) AS invite_signed,
                 (SELECT COUNT(*)::int FROM room_participants p WHERE p.room_id = r.id) AS member_count
          FROM rooms r
          JOIN room_participants rp ON rp.room_id = r.id AND rp.user_id = $2
@@ -2820,6 +2882,7 @@ async function findRoomByInviteCode(code) {
     if (!isValidInviteCode(code)) return null;
     const room = await dbGet(
         `SELECT r.id, r.name, r.code, r.code_expires_at, r.invite_max_members, r.invite_require_approval, r.invite_disabled,
+                r.invite_cert,
                 (SELECT COUNT(*)::int FROM room_participants p WHERE p.room_id = r.id) AS member_count
          FROM rooms r WHERE r.code = $1`,
         [code]
@@ -2845,16 +2908,21 @@ async function findRoomByInviteCode(code) {
 // строка новичка берётся первой, до комнаты.
 // check(room, client) под блокировкой перепроверяет основание для
 // вступления (код — для входа по коду, живую заявку — для одобрения) и
-// возвращает код ошибки или null.
+// возвращает код ошибки (строку), объект-ответ { reply: { status, body } } или null.
+// afterJoin(client, room) — в той же транзакции, только для нового участника: вставка
+// сертификата допуска или входа (signed-membership.md, 7.1). Прочитанные здесь
+// значения комнаты (invite_cert, invite_snap) принадлежат моменту блокировки: поворот
+// приглашения не успевает между проверкой сертификата и вставкой.
 // Новичок видит только сообщения после вступления: visible_from_seq —
 // rooms.msg_seq на этот момент (у заявки — на момент ОДОБРЕНИЯ, а не
 // подачи); та же граница — у непрочитанного (last_read_seq).
-async function addRoomMember(roomId, userId, check) {
+async function addRoomMember(roomId, userId, check, afterJoin) {
     const result = await withTransactionRetry(async (client) => {
         const newcomer = await client.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE', [userId]);
         if (newcomer.rows.length === 0) return { error: 'not-found' };
         const locked = await client.query(
             `SELECT id, name, code, invite_max_members, invite_require_approval, invite_disabled, msg_seq,
+                    invite_cert, invite_snap,
                     (code_expires_at IS NOT NULL AND code_expires_at > NOW()) AS code_live
              FROM rooms WHERE id = $1 FOR NO KEY UPDATE`,
             [roomId]
@@ -2891,7 +2959,8 @@ async function addRoomMember(roomId, userId, check) {
             [userId, roomId, name, avatar]
         );
         const dropped = await client.query('DELETE FROM join_requests WHERE room_id = $1 AND user_id = $2', [roomId, userId]);
-        return { chat: { id: chatResult.rows[0].id, name, avatar }, room, joined: true, requestRemoved: dropped.rowCount > 0 };
+        const extra = afterJoin ? await afterJoin(client, room) : null;
+        return { chat: { id: chatResult.rows[0].id, name, avatar }, room, joined: true, requestRemoved: dropped.rowCount > 0, extra };
     });
     if (result.error) return result;
 
@@ -2902,7 +2971,18 @@ async function addRoomMember(roomId, userId, check) {
         notifyChatListChanged(userId);
     }
     if (result.requestRemoved) notifyJoinRequestsChanged(roomId);
-    return { chat, joined: result.joined };
+    return { chat, joined: result.joined, extra: result.extra || null };
+}
+
+// Ответ на отказ addRoomMember с подробным вердиктом проверки сертификата.
+function respondCertVerdict(res, verdict) {
+    return res.status(verdict.status).json({ success: false, code: verdict.code, message: verdict.message });
+}
+
+// Ключи участника из хранилища ключей (identity_keys) - для проверки сертификатов.
+function identityKeysOf(client, userId) {
+    const run = client ? (sql, params) => client.query(sql, params).then(r => r.rows[0] || null) : dbGet;
+    return run('SELECT identity_signing_key, identity_dh_key FROM identity_keys WHERE user_id = $1', [userId]);
 }
 
 // Заявка на вступление в комнату с одобрением. Повторный запрос возвращает
@@ -2946,26 +3026,62 @@ app.get('/api/chats/invite/:chatId', async (req, res) => {
 // requireApproval } — любой участник комнаты. Старый код перестаёт
 // действовать сразу (так закрывается утёкшая ссылка); выключенный код
 // перевыпуск снова включает.
+//
+// Подписанное приглашение (signed-membership.md, 5.3, 7.2): вход без одобрения возможен только
+// по ссылке с секретом, поэтому при requireApproval = false обязательны inviteCert (сертификат
+// приглашения, подписанный автором и ключом приглашения) и inviteSnap (снимок состава автора);
+// срок такого приглашения не больше 720 часов (INVITE_MAX), а сервер сверяет длительность
+// сертификата с выбранным сроком, а не абсолютное время. При requireApproval = true сертификата
+// нет: код принимает только заявки, а invite_* обнуляются.
 app.post('/api/chats/:chatId/invite/rotate', async (req, res) => {
     const userId = req.session.userId;
     if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    if (isOutdatedProto(req.body?.proto)) return res.status(400).json(CLIENT_OUTDATED);
     let settings;
     try {
         settings = parseInviteSettings(req.body, { defaultTtlSeconds: INVITE_TTL_SECONDS });
     } catch (err) {
         return res.json({ success: false, message: err.message });
     }
+    const signed = !settings.requireApproval;
+    // Срок подписанного приглашения клиент кладёт в сертификат сам, поэтому он обязан его назвать.
+    if (signed && (req.body.ttlSeconds === undefined || req.body.ttlSeconds === null || req.body.ttlSeconds === '')) {
+        return res.status(400).json({ success: false, code: 'bad-request', message: 'Не задан срок действия кода' });
+    }
+    const ttlSeconds = signed ? Math.min(settings.ttlSeconds, Membership.INVITE_MAX_MIN * 60) : settings.ttlSeconds;
     try {
         const chat = await getOwnChat(req.params.chatId, userId);
         if (!chat) return res.json({ success: false, message: 'Чат не найден' });
         if (!chat.room_id) return res.json({ success: false, message: 'У этого чата нет кода приглашения' });
-        const room = await dbGet(
-            `UPDATE rooms SET code = $1, code_expires_at = NOW() + $2::integer * INTERVAL '1 second',
-                    invite_max_members = $5, invite_require_approval = $6, invite_disabled = FALSE
-             WHERE id = $3 AND EXISTS (SELECT 1 FROM room_participants WHERE room_id = $3 AND user_id = $4)
-             RETURNING code, code_expires_at, invite_max_members, invite_require_approval`,
-            [generateInviteCode(), settings.ttlSeconds, chat.room_id, userId, settings.maxMembers, settings.requireApproval]
-        );
+        let verdict = null;
+        if (signed) {
+            verdict = await MembershipCerts.verifyInvite({
+                certB64: req.body.inviteCert, snapB64: req.body.inviteSnap, roomId: chat.room_id, actorId: userId,
+                actorKeys: await identityKeysOf(null, userId), ttlSeconds,
+            });
+            if (!verdict.ok) return respondCertVerdict(res, verdict);
+        }
+        // Порядок блокировок users → rooms → room_participants: автор приглашения обязан быть участником
+        // ПОСЛЕ блокировки комнаты, иначе выход или удаление аккаунта автора между проверкой и записью
+        // оставили бы invite_actor_id несуществующего пользователя (его выход обнуляет invite_*).
+        const room = await withTransactionRetry(async (client) => {
+            const me = await client.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE', [userId]);
+            if (me.rows.length === 0) return null;
+            const locked = await client.query('SELECT id FROM rooms WHERE id = $1 FOR NO KEY UPDATE', [chat.room_id]);
+            if (locked.rows.length === 0) return null;
+            const member = await client.query('SELECT 1 FROM room_participants WHERE room_id = $1 AND user_id = $2', [chat.room_id, userId]);
+            if (member.rows.length === 0) return null;
+            const updated = await client.query(
+                `UPDATE rooms SET code = $1, code_expires_at = NOW() + $2::integer * INTERVAL '1 second',
+                        invite_max_members = $5, invite_require_approval = $6, invite_disabled = FALSE,
+                        invite_cert = $7, invite_snap = $8, invite_actor_id = $9
+                 WHERE id = $3
+                 RETURNING code, code_expires_at, invite_max_members, invite_require_approval`,
+                [generateInviteCode(), ttlSeconds, chat.room_id, userId, settings.maxMembers, settings.requireApproval,
+                    verdict ? Buffer.from(verdict.raw) : null, verdict ? Buffer.from(verdict.snap) : null, verdict ? userId : null]
+            );
+            return updated.rows[0];
+        });
         if (!room) return res.json({ success: false, message: 'Чат не найден' });
         res.json({
             success: true,
@@ -2975,6 +3091,7 @@ app.post('/api/chats/:chatId/invite/rotate', async (req, res) => {
             requireApproval: room.invite_require_approval,
         });
     } catch (error) {
+        if (respondIfDeadlock(res, error)) return;
         console.error('Rotate invite error:', error);
         res.json({ success: false, message: 'Ошибка обновления кода' });
     }
@@ -2982,16 +3099,18 @@ app.post('/api/chats/:chatId/invite/rotate', async (req, res) => {
 
 // Выключить приглашение. Сам код тоже заменяется случайным, нигде не
 // показанным: выключенный код не оживёт, даже если флаг где-то забудут
-// проверить. Уже поданные заявки остаются — их можно рассмотреть.
+// проверить. Сертификат приглашения и его снимок обнуляются (уже сохранённые join остаются:
+// у них копия в aux). Уже поданные заявки остаются — их можно рассмотреть.
 app.post('/api/chats/:chatId/invite/disable', async (req, res) => {
     const userId = req.session.userId;
     if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    if (isOutdatedProto(req.body?.proto)) return res.status(400).json(CLIENT_OUTDATED);
     try {
         const chat = await getOwnChat(req.params.chatId, userId);
         if (!chat) return res.json({ success: false, message: 'Чат не найден' });
         if (!chat.room_id) return res.json({ success: false, message: 'У этого чата нет кода приглашения' });
         const room = await dbGet(
-            `UPDATE rooms SET code = $1, invite_disabled = TRUE
+            `UPDATE rooms SET code = $1, invite_disabled = TRUE, invite_cert = NULL, invite_snap = NULL, invite_actor_id = NULL
              WHERE id = $2 AND EXISTS (SELECT 1 FROM room_participants WHERE room_id = $2 AND user_id = $3)
              RETURNING id`,
             [generateInviteCode(), chat.room_id, userId]
@@ -3014,11 +3133,16 @@ app.post('/api/chats/join/preview', joinUserLimiter, joinIpLimiter, async (req, 
     try {
         const room = await findRoomByInviteCode(code);
         if (!room) return res.json({ success: false, message: INVALID_INVITE_MESSAGE });
+        // roomId и сертификат приглашения (signed-membership.md, 7.2): выдаются по КОДУ, то есть и тому, кто секрета не
+        // знает, - раскрывают пригласившего (id, identity-ключ), число участников его V и хэш снимка (раздел 3). Сам
+        // снимок по коду не отдаётся: он приходит в ответе на POST /join владельцу join-сертификата.
         res.json({
             success: true,
+            roomId: room.id,
             roomName: room.name,
             memberCount: room.member_count,
             requireApproval: room.invite_require_approval !== false,
+            inviteCert: room.invite_cert ? Membership.toB64(new Uint8Array(room.invite_cert)) : null,
         });
     } catch (error) {
         console.error('Join preview error:', error);
@@ -3026,18 +3150,45 @@ app.post('/api/chats/join/preview', joinUserLimiter, joinIpLimiter, async (req, 
     }
 });
 
+// Вход по коду (signed-membership.md, 5.3-5.4, 7.2). Без joinCert - всегда заявка, даже если в комнате
+// requireApproval = false: код без секрета (набран руками, утёк в логи) не впускает. Вход без одобрения - только с
+// joinCert, подписанным ключом приглашения (его знает владелец ссылки с секретом) и identity-ключом входящего.
+// Ответ при успехе несёт inviteSnap - снимок приглашения: его получает только тот, чей joinCert прошёл проверку.
 app.post('/api/chats/join', joinUserLimiter, joinIpLimiter, async (req, res) => {
     const userId = req.session.userId;
     if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    if (isOutdatedProto(req.body?.proto)) return res.status(400).json(CLIENT_OUTDATED);
     const code = normalizeInviteCode(req.body?.code);
     if (!code) return res.json({ success: false, message: 'Введите код приглашения' });
+    let joinRaw = null;
+    if (req.body.joinCert !== undefined && req.body.joinCert !== null) {
+        joinRaw = MembershipCerts.decodeField(req.body.joinCert, { min: 335, max: 335 });
+        if (!joinRaw) return respondCertVerdict(res, MembershipCerts.BAD_CERT());
+    }
 
     try {
         const room = await findRoomByInviteCode(code);
         if (!room) return res.json({ success: false, message: INVALID_INVITE_MESSAGE });
 
         const existingChat = await dbGet('SELECT id, name, avatar FROM chats WHERE room_id = $1 AND user_id = $2', [room.id, userId]);
-        if (existingChat) return res.json({ success: true, chat: roomChatPayload(existingChat, room) });
+        if (existingChat) {
+            if (!joinRaw) return res.json({ success: true, chat: roomChatPayload(existingChat, room) });
+            // Повторный запрос после потери ответа: тот же joinCert от уже вошедшего даёт тот же ответ, пока приглашение
+            // не повернули; иначе - 409 (снимок получает только владелец действующего приглашения).
+            const stored = await dbGet('SELECT cert FROM room_member_certs WHERE room_id = $1 AND subject_id = $2 AND kind = 3', [room.id, userId]);
+            const current = await dbGet('SELECT invite_cert, invite_snap FROM rooms WHERE id = $1', [room.id]);
+            const same = stored && Buffer.from(stored.cert).equals(Buffer.from(joinRaw));
+            let unchanged = false;
+            if (same && current && current.invite_cert) {
+                const ref = new Uint8Array(stored.cert).subarray(Membership.OFF.ref, Membership.OFF.ref + 32);
+                unchanged = Membership.bytesEqual(await Membership.certHash(new Uint8Array(current.invite_cert)), ref);
+            }
+            if (!unchanged) return res.status(409).json({ success: false, code: 'already-member', message: 'Вы уже состоите в этой группе' });
+            return res.json({
+                success: true, chat: roomChatPayload(existingChat, room),
+                inviteSnap: Membership.toB64(new Uint8Array(current.invite_snap)),
+            });
+        }
         if (isRoomFull(room.member_count, room.invite_max_members)) {
             return res.json({ success: false, message: ROOM_FULL_MESSAGE });
         }
@@ -3047,18 +3198,34 @@ app.post('/api/chats/join', joinUserLimiter, joinIpLimiter, async (req, res) => 
             if (request.error) return res.json({ success: false, message: request.error });
             res.json({ success: true, pending: true, requestId: request.id, roomName: room.name });
         };
-        if (room.invite_require_approval !== false) return pendingResponse();
+        // Без сертификата, в комнате с одобрением и в комнате без подписанного приглашения (его обнулил выход участника
+        // или выключение) - заявка. Секрет ссылки в этом случае игнорируется.
+        if (!joinRaw || room.invite_require_approval !== false || !room.invite_cert) return pendingResponse();
 
-        // Код перепроверяется под блокировкой комнаты: пока шли запросы выше,
-        // его могли сменить или выключить, а могли и включить одобрение.
-        const result = await addRoomMember(room.id, userId, (locked) => {
+        // Код и сертификат перепроверяются под блокировкой комнаты: пока шли запросы выше, код могли сменить или
+        // выключить, приглашение - повернуть, а одобрение - включить.
+        const result = await addRoomMember(room.id, userId, async (locked, client) => {
             if (locked.code !== code || !locked.code_live || locked.invite_disabled) return 'invalid';
-            return locked.invite_require_approval === false ? null : 'approval';
+            if (locked.invite_require_approval !== false || !locked.invite_cert) return 'approval';
+            const verdict = await MembershipCerts.verifyJoin({
+                joinRaw, inviteRaw: new Uint8Array(locked.invite_cert), roomId: room.id, userId,
+                userKeys: await identityKeysOf(client, userId),
+            });
+            return verdict.ok ? null : { reply: verdict };
+        }, async (client, locked) => {
+            await client.query(
+                'INSERT INTO room_member_certs (room_id, subject_id, actor_id, kind, cert, aux) VALUES ($1, $2, 0, 3, $3, $4)',
+                [room.id, userId, Buffer.from(joinRaw), Buffer.from(locked.invite_cert)]
+            );
+            return { inviteSnap: locked.invite_snap ? Membership.toB64(new Uint8Array(locked.invite_snap)) : null };
         });
         if (result.error === 'approval') return pendingResponse();
         if (result.error === 'full') return res.json({ success: false, message: ROOM_FULL_MESSAGE });
+        if (result.error && result.error.reply) return respondCertVerdict(res, result.error.reply);
         if (result.error) return res.json({ success: false, message: INVALID_INVITE_MESSAGE });
-        res.json({ success: true, chat: result.chat });
+        const reply = { success: true, chat: result.chat };
+        if (result.extra && result.extra.inviteSnap) reply.inviteSnap = result.extra.inviteSnap;
+        res.json(reply);
     } catch (error) {
         if (respondIfDeadlock(res, error)) return;
         console.error('Join chat error:', error);
@@ -3135,9 +3302,16 @@ app.get('/api/join-requests/mine', async (req, res) => {
 // неотличимы от несуществующих. Вступление — тем же addRoomMember, что и
 // вход по коду без одобрения (лимит участников, visible_from_seq на момент
 // одобрения, подписка сокетов заявителя, roomMembersChanged).
+//
+// Одобрение подписывается (signed-membership.md, 5.2, 7.2): тело { cert, snap } - сертификат допуска
+// (vouch) от одобряющего заявителю и снимок состава одобряющего; без них - 400 cert-required /
+// snap-required. Сертификат и участие одобряющего проверяются ПОСЛЕ блокировки комнаты (7.1):
+// одобряющий мог выйти между проверкой подписи и вставкой, и сертификат с несуществующим подписавшим
+// остался бы навсегда.
 app.post('/api/join-requests/:id/approve', async (req, res) => {
     const userId = req.session.userId;
     if (!userId) return res.json({ success: false, message: 'Не авторизован' });
+    if (isOutdatedProto(req.body?.proto)) return res.status(400).json(CLIENT_OUTDATED);
     const requestId = toPositiveInt(req.params.id);
     if (!requestId) return res.json(JOIN_REQUEST_NOT_FOUND);
     try {
@@ -3148,6 +3322,16 @@ app.post('/api/join-requests/:id/approve', async (req, res) => {
             [requestId, userId]
         );
         if (!request) return res.json(JOIN_REQUEST_NOT_FOUND);
+        const applicantKeys = await identityKeysOf(null, request.user_id);
+        if (!applicantKeys) {
+            return res.status(409).json({ success: false, code: 'applicant-no-keys', message: 'Пользователь ещё не настроил шифрование' });
+        }
+        const verdict = await MembershipCerts.verifyVouch({
+            certB64: req.body.cert, snapB64: req.body.snap, allowedKinds: [Membership.KIND.vouch],
+            roomId: request.room_id, actorId: userId, subjectId: request.user_id,
+            actorKeys: await identityKeysOf(null, userId), subjectKeys: applicantKeys,
+        });
+        if (!verdict.ok) return respondCertVerdict(res, verdict);
         // Под блокировкой комнаты — заявка всё ещё жива (её не отклонили и не
         // отозвали параллельно; FOR UPDATE — чтобы и не успели), а
         // одобряющий всё ещё участник. Строку заявителя addRoomMember берёт
@@ -3155,16 +3339,26 @@ app.post('/api/join-requests/:id/approve', async (req, res) => {
         // deleteUserAccount: одновременное удаление его аккаунта не даст
         // взаимной блокировки, заявка просто окажется удалённой.
         const result = await addRoomMember(request.room_id, request.user_id, async (room, client) => {
+            const actor = await client.query('SELECT 1 FROM room_participants WHERE room_id = $1 AND user_id = $2', [room.id, userId]);
+            if (actor.rows.length === 0) return 'not-participant';
             const live = await client.query(
                 `SELECT jr.id FROM join_requests jr
-                 JOIN room_participants rp ON rp.room_id = jr.room_id AND rp.user_id = $3
-                 WHERE jr.id = $1 AND jr.user_id = $2 AND jr.room_id = $4 AND jr.${JOIN_REQUEST_LIVE_SQL}
+                 WHERE jr.id = $1 AND jr.user_id = $2 AND jr.room_id = $3 AND jr.${JOIN_REQUEST_LIVE_SQL}
                  FOR UPDATE OF jr`,
-                [requestId, request.user_id, userId, room.id]
+                [requestId, request.user_id, room.id]
             );
             return live.rows.length > 0 ? null : 'not-found';
+        }, async (client, room) => {
+            await client.query(
+                'INSERT INTO room_member_certs (room_id, subject_id, actor_id, kind, cert, snap) VALUES ($1, $2, $3, 1, $4, $5)',
+                [room.id, request.user_id, userId, Buffer.from(verdict.raw), Buffer.from(verdict.snap)]
+            );
+            return null;
         });
         if (result.error === 'full') return res.json({ success: false, message: ROOM_FULL_MESSAGE });
+        if (result.error === 'not-participant') {
+            return res.status(404).json({ success: false, code: 'not-participant', message: 'Вы больше не состоите в этой группе' });
+        }
         if (result.error) return res.json(JOIN_REQUEST_NOT_FOUND);
         notifyJoinRequestDecided(request.user_id, { requestId, approved: true, chat: result.chat });
         res.json({ success: true });
@@ -3251,6 +3445,12 @@ app.delete('/api/chats/:chatId', async (req, res) => {
                 await client.query('DELETE FROM e2ee_key_shares WHERE room_id = $1 AND recipient_id = $2', [chat.room_id, userId]);
                 await client.query('DELETE FROM e2ee_key_requests WHERE room_id = $1 AND requester_id = $2', [chat.room_id, userId]);
                 await client.query('DELETE FROM chats WHERE id = $1 AND user_id = $2', [chat.id, userId]);
+                // Сертификаты состава, где он субъект или подписавший (после chats, до user_left_rooms и messages -
+                // порядок message-ordering.md, 8.1). Выход не подписывается: управляет сервер (signed-membership.md, 5.6).
+                await client.query(
+                    'DELETE FROM room_member_certs WHERE room_id = $1 AND (subject_id = $2 OR actor_id = $2)',
+                    [chat.room_id, userId]
+                );
                 const remaining = await client.query('SELECT 1 FROM room_participants WHERE room_id = $1 LIMIT 1', [chat.room_id]);
                 if (remaining.rows.length === 0) {
                     // Последний участник вышел — сносим комнату целиком (запись
@@ -3264,6 +3464,9 @@ app.delete('/api/chats/:chatId', async (req, res) => {
                     await client.query('DELETE FROM rooms WHERE id = $1', [chat.room_id]);
                 } else {
                     state.roomSurvived = true;
+                    // Решение владельца (signed-membership.md, вопрос 17): при выходе любого участника подписанное
+                    // приглашение обнуляется, а код заменяется новым - старая ссылка и старый код перестают работать.
+                    await resetInviteAfterLeave(client, chat.room_id);
                     const tags = authorTags.tagsForAccount(chat.room_id, userId, me.rows[0].created_at, Date.now());
                     if (deleteOwnMessages) {
                         const deleted = await client.query(
@@ -3309,7 +3512,7 @@ app.delete('/api/chats/:chatId', async (req, res) => {
         for (const id of outcome.deletedIds) {
             io.to(getSocketRoomKey(null, chat.room_id)).emit('messageDeleted', { id: String(id), room_id: chat.room_id });
         }
-        if (outcome.roomSurvived) notifyRoomMembersChanged(chat.room_id);
+        if (outcome.roomSurvived) notifyRoomMembersChanged(chat.room_id, { inviteRotated: true });
         for (const request of outcome.droppedRequests) notifyJoinRequestDecided(request.user_id, { requestId: request.id, approved: false });
         notifyChatListChanged(userId);
         res.json({ success: true });
@@ -4004,6 +4207,10 @@ async function deleteUserAccount(userId) {
         );
         result.fileUrls.push(...botFiles.rows.map(r => r.file_url));
         await client.query('DELETE FROM chats WHERE user_id = $1', [userId]);
+        // Сертификаты состава, где он субъект или подписавший, и подписанные приглашения комнат, из которых он уходит
+        // (решение владельца, вопрос 17): код заменяется новым. Комнаты уже заблокированы выше.
+        await client.query('DELETE FROM room_member_certs WHERE subject_id = $1 OR actor_id = $1', [userId]);
+        for (const roomId of roomIds) await resetInviteAfterLeave(client, roomId);
         await client.query('DELETE FROM user_left_rooms WHERE user_id = $1', [userId]);
         // Окна квоты - по псевдонимам от текущего и всех прежних ключей сообщений.
         await deleteQuotaRows(client, authorTags.qkeysFor(userId));
@@ -4073,7 +4280,7 @@ async function deleteUserAccount(userId) {
     removeUploadedFiles(fileUrls);
     anonActivity.forget(userId);
     io.in('user:' + userId).disconnectSockets(true);
-    for (const roomId of survivingRoomIds) notifyRoomMembersChanged(roomId);
+    for (const roomId of survivingRoomIds) notifyRoomMembersChanged(roomId, { inviteRotated: true });
     for (const roomId of requestRoomIds) notifyJoinRequestsChanged(roomId);
     for (const request of droppedRequests) notifyJoinRequestDecided(request.user_id, { requestId: request.id, approved: false });
     deleteKeysForUser(userId);
