@@ -55,7 +55,7 @@ function main() {
 
     test('SyntaxError разбора JSON: текста из запроса в логе нет', () => {
         let parseError;
-        try { JSON.parse('{"password":"hunter2-секрет", oops'); } catch (e) { parseError = e; }
+        try { JSON.parse('{"token":"hunter2-секрет", oops'); } catch (e) { parseError = e; }
         assert.ok(parseError instanceof SyntaxError);
         const text = describeError(parseError);
         assert.ok(!text.includes('hunter2'), text);
