@@ -189,7 +189,7 @@
 7. Хэш взгляда `ext.view` (6.3, 9.6): граница заявленного свойства (только при настоящих закреплённых ключах обеих сторон).
 8. Сервер: транзакции допуска и входа под блокировкой `rooms` (П16), порядок блокировок ([message-ordering.md](message-ordering.md) 8.1), гонки «вставка сертификата — выход субъекта», лимиты тел и лимитеры `approve`, `join`, `member-certs`; утечки через предпросмотр по коду (раскрывает пригласившего и `snapN`).
 
-**Материалы (после слияния).** `test/membership.test.js` (контрольные векторы 6.6 и два отрицательных вектора Ed25519), `test/membership.protocol.test.js` и серверные/сквозные наборы, перечисленные в разделе 13 дизайна.
+**Материалы.** `test/membership.test.js` (контрольные векторы 6.6 и два отрицательных вектора Ed25519), `test/membership.protocol.test.js` и серверные/сквозные наборы, перечисленные в разделе 13 дизайна.
 
 ### 2.7 A6. Правила клиента вокруг ядра
 
@@ -350,7 +350,8 @@ npm test                  # юнит-тесты, без базы, все test/*.
 | `senderKeyId` (три вектора) | [sealed-sender.md](sealed-sender.md) 9.2 | `test/sender-key-id.test.js` |
 | Дерево журнала, доказательство, головы, SKT | [key-transparency.md](key-transparency.md) раздел 5 | `test/kt-verify.test.js`, `test/kt-log.test.js` |
 | Отрицательные векторы Ed25519 (`R = 01 00…00, S = 0`; кодировки с `x = 0` и битом знака 1) | [signed-membership.md](signed-membership.md) 6.6 | `test/ed25519-strict.test.js` |
-| Сертификаты состава, `memkey`, хэш снимка, ключ приглашения (T4.2) | [signed-membership.md](signed-membership.md) 6.6 | `test/membership.test.js` (после слияния) |
+| Сертификаты состава, `memkey`, хэш снимка, ключ приглашения (T4.2) | [signed-membership.md](signed-membership.md) 6.6 | `test/membership.test.js` |
+| В логах приложения нет идентификаторов, IP, sid, имён и кодов (T5.2) | [logs-retention.md](../ops/logs-retention.md), раздел «Что приложение пишет в лог» | `test/log-guard.test.js` (запрет в коде), `test/log-error-redact.test.js` (чистка ошибок в `logError`), `test/e2e/logs-clean.e2e.test.js` (лог сервера после типичного сценария) |
 | ML-KEM-768 и SHA-3 | эталон — Node/OpenSSL | `test/mlkem.test.js` (статических векторов NIST нет, раздел 4.5) |
 
 ### 4.3 Воспроизводимый манифест
