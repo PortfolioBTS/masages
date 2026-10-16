@@ -43,6 +43,7 @@
 |---|---|
 | [ops/stage-0-checklist.md](ops/stage-0-checklist.md) | Что владелец делает вручную: секреты, очистка истории git, защита `main`, Cloudflare, юрист |
 | [ops/deploy-railway.md](ops/deploy-railway.md) | Деплой на Railway: переменные, первый запуск со сбросом БД, смоук, откат, ротация секретов, мониторинг |
+| [ops/message-key-rotation.md](ops/message-key-rotation.md) | Смена `MESSAGE_ENCRYPTION_KEY`: перетегирование и перешифровка сообщений комнат (`scripts/retag-messages.js`) |
 | [ops/branch-protection.md](ops/branch-protection.md) | Защита `main`, обязательные проверки, настройки GitHub |
 | [ops/backups.md](ops/backups.md) | Резервные копии: срок 7 дней, восстановление, проверка |
 | [ops/logs-retention.md](ops/logs-retention.md) | Логи приложения и платформы, сроки хранения |
