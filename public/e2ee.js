@@ -3324,10 +3324,12 @@
                 const evicted = await moveToArchiveLocked(roomId, userId, existing, { own: true });
                 next.archive = existing.archive;
                 await dropArchivesLocked(roomId, userId, evicted);
-                // Отметки рассылки старого ключа и ответов на его запросы больше ни к чему.
+                // Отметки рассылки старого ключа и ответов на его запросы больше ни к чему; журнал доставок старого
+                // ключа удаляется вместе с его ротацией (signed-membership.md, 8): новый ключ ведёт свой.
                 for (const prefix of [
                     'sharedWith2:' + roomId + ':' + existing.senderKeyId + ':',
                     'keyServed:' + roomId + ':' + existing.senderKeyId + ':',
+                    'delivered:' + roomId + ':' + existing.senderKeyId,
                 ]) {
                     for (const name of await storage.keys(prefix)) await storage.delete(name);
                 }

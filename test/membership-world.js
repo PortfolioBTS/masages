@@ -50,10 +50,10 @@ function makeWorld({ start = Date.UTC(2027, 0, 15, 12, 0, 0) } = {}) {
     const server = makeFakeServer();
     const clock = { t: start, now: () => clock.t, advance(ms) { clock.t += ms; } };
     const lockContext = new AsyncLocalStorage();
-    const world = { server, clock, users: new Map(), lockViolations: [], requests: [], ROOM };
+    const world = { server, clock, users: new Map(), lockViolations: [], requests: [], ROOM, failShares: new Set() };
 
     // Транспорт клиента: ни один вызов не идёт внутри секции withLock; все тела запросов запоминаются.
-    function guard(transport) {
+    function guard(transport, owner) {
         return new Proxy(transport, {
             get(target, name) {
                 const value = target[name];
@@ -61,6 +61,8 @@ function makeWorld({ start = Date.UTC(2027, 0, 15, 12, 0, 0) } = {}) {
                 return (...args) => {
                     if (lockContext.getStore()) world.lockViolations.push(String(name));
                     world.requests.push({ name: String(name), args: JSON.stringify(args) });
+                    // Сбой сети на отправке key-share (проверка журнала доставок: запись делается ДО сетевого вызова).
+                    if (name === 'postKeyShares' && world.failShares.has(owner)) return Promise.reject(new TypeError('fetch failed'));
                     return value.apply(target, args);
                 };
             },
@@ -70,7 +72,7 @@ function makeWorld({ start = Date.UTC(2027, 0, 15, 12, 0, 0) } = {}) {
     world.addUser = async (id, { init = true, storage = new E2EE.MemoryStorage(), inRoom = false, room = ROOM } = {}) => {
         const client = E2EE.createClient({
             userId: id, storage, kem: mlkem, now: clock.now,
-            transport: guard(server.transportFor(id)),
+            transport: guard(server.transportFor(id), id),
             lock: (fn) => lockContext.run(true, fn),
         });
         const user = { id, client, storage, room, chatId: chatOf(id, room) };
@@ -84,7 +86,7 @@ function makeWorld({ start = Date.UTC(2027, 0, 15, 12, 0, 0) } = {}) {
     world.reload = (user) => {
         const client = E2EE.createClient({
             userId: user.id, storage: user.storage, kem: mlkem, now: clock.now,
-            transport: guard(server.transportFor(user.id)),
+            transport: guard(server.transportFor(user.id), user.id),
             lock: (fn) => lockContext.run(true, fn),
         });
         const next = { ...user, client };
