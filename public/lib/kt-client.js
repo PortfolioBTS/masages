@@ -285,7 +285,7 @@
             if (error) return { ok: false, reason: 'network' };
             const data = body(res);
             // Журнал выключен или маршрута нет: для клиента, видевшего журнал, это тревога, а не «недоступно».
-            if ((res.status === 503 && data.code === 'kt-disabled') || res.status === 404) {
+            if ((res.status === 200 && data.enabled === false) || (res.status === 503 && data.code === 'kt-disabled') || res.status === 404) {
                 if (!logSeen) return { ok: false, reason: 'unavailable' };
                 await addAlert('log-disabled', { status: res.status });
                 return { ok: false, reason: 'disabled' };

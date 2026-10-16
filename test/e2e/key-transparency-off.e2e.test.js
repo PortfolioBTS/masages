@@ -36,7 +36,8 @@ test('без KT_SIGNING_KEY: 503 kt-disabled, kt null, журнал пуст', a
     const user = await newUser();
     for (const path of ['/api/kt/head', '/api/kt/roots?gen=1', `/api/kt/proof?user=${user.user.id}&gen=1&epoch=1`, '/api/kt/self?gen=1']) {
         const res = await user.get(path);
-        assert.strictEqual(res.status, 503, path);
+        // head отвечает 200 { enabled:false }: клиент спрашивает его на каждом запуске.
+        assert.strictEqual(res.status, path === '/api/kt/head' ? 200 : 503, path);
         assert.strictEqual(res.body.code, 'kt-disabled');
     }
     const keys = newKeys();
@@ -94,7 +95,8 @@ test('выключение журнала после работы: маршру�
     await suite.server.restart({ env: { KT_SIGNING_KEY: null } });
     const user = suite.existing;
     const res = await user.get('/api/kt/head');
-    assert.strictEqual(res.status, 503);
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.body.enabled, false);
     assert.strictEqual(res.body.code, 'kt-disabled');
     const ids = await user.get(`/api/keys/identities?ids=${user.user.id}`);
     assert.strictEqual(ids.body.identities[0].kt, null, 'без ключа подсказка kt не отдаётся');

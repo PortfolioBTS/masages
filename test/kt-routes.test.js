@@ -102,14 +102,19 @@ async function main() {
         assert.throws(() => registerKtRoutes(makeApp(), {}), TypeError);
     });
 
-    await test('без сессии — 401; без ключа журнала — 503 kt-disabled (и для head, и для proof)', async () => {
+    await test('без сессии — 401; без ключа журнала — 503 kt-disabled, а head — 200 { enabled:false }', async () => {
         const app = makeApp();
         registerKtRoutes(app, { dbGet: makeDb(), kt: makeKt({ enabled: false }) });
         for (const path of app.routes.keys()) {
             assert.strictEqual((await call(app, path, { session: null })).statusCode, 401, path);
             const res = await call(app, path, { query: { user: '6', gen: '1', epoch: '1' } });
-            assert.strictEqual(res.statusCode, 503, path);
-            assert.strictEqual(res.body.code, 'kt-disabled');
+            assert.strictEqual(res.body.code, 'kt-disabled', path);
+            if (path === '/api/kt/head') {
+                assert.strictEqual(res.statusCode === undefined ? 200 : res.statusCode, 200, path);
+                assert.strictEqual(res.body.enabled, false);
+            } else {
+                assert.strictEqual(res.statusCode, 503, path);
+            }
         }
     });
 

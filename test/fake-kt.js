@@ -230,6 +230,7 @@ class FakeKt {
     }
 
     head() {
+        if (this.evil.disabled && !this.evil.networkDown) return respond(200, { success: true, enabled: false, code: 'kt-disabled' });
         this.calls.head++;
         const blocked = this.gate();
         if (blocked) return blocked;
