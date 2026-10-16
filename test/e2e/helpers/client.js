@@ -19,6 +19,7 @@ const { connectSocket } = require('./socket');
 const { REPO_ROOT } = require('./env');
 const { solve } = require(path.join(REPO_ROOT, 'public', 'pow-worker.js'));
 const { fakeEnvelope } = require('./envelope');
+const Membership = require('./membership');
 
 const UNSAFE = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 // Общий признак версии клиента волны 4 (message-ordering.md, 14.1): изменяющие
@@ -171,18 +172,20 @@ class TestClient {
 
     async invite(chatId) { return this.ok(this.get(`/api/chats/invite/${chatId}`), 'код приглашения'); }
 
-    async rotateInvite(chatId, settings = {}) {
-        return this.ok(this.post(`/api/chats/${chatId}/invite/rotate`, settings), 'новый код приглашения');
-    }
+    // Без одобрения (requireApproval: false) приглашение подписывается (helpers/membership.js); в ответе есть secret ссылки.
+    async rotateInvite(chatId, settings = {}) { return Membership.rotateInvite(this, chatId, settings); }
 
     async joinPreview(code) { return this.ok(this.post('/api/chats/join/preview', { code }), 'предпросмотр комнаты'); }
 
-    // { pending: true, requestId } — заявка; { chat } — вход без одобрения.
-    async join(code) { return this.ok(this.post('/api/chats/join', { code }), 'вход по коду'); }
+    // { pending: true, requestId } — заявка; { chat, inviteSnap } — вход без одобрения. Секрет ссылки, созданной помощником
+    // rotateInvite, подставляется сам (opts.secret: строка - свой секрет, null - вход кодом без ссылки, то есть заявка).
+    async join(code, opts) { return Membership.join(this, code, opts); }
+    joinRaw(code, opts) { return Membership.rawJoin(this, code, opts); }
 
     async joinRequests(chatId) { return (await this.ok(this.get(`/api/chats/${chatId}/join-requests`), 'заявки комнаты')).requests; }
 
-    async approve(requestId) { return this.ok(this.post(`/api/join-requests/${requestId}/approve`, {}), 'одобрение заявки'); }
+    // Одобрение подписывается (cert + snap): помощник сам находит заявку среди заявок комнат одобряющего.
+    async approve(requestId, opts) { return Membership.approve(this, requestId, opts); }
 
     async deny(requestId) { return this.ok(this.post(`/api/join-requests/${requestId}/deny`, {}), 'отклонение заявки'); }
 

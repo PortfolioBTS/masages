@@ -806,6 +806,8 @@ const pendingIdentityChanges = new Map();    // userId -> username (для ба�
 const pendingLogMismatches = new Map();      // userId -> username: ключа нет в журнале ключей (там же)
 const notedLogMismatches = new Set();        // 'комната:участник': о чём уже писали в ленту
 const warnedRooms = new Set();               // о каких комнатах уже предупреждали, что не все получили ключ
+const pendingUnconfirmed = new Map();        // userId -> username: неподтверждённые участники открытой комнаты (баннер)
+const notedMembership = new Set();           // 'комната:вид:...': о чём про состав группы уже писали в ленту
 
 function rememberRoomParticipants(roomId, participants) {
     roomParticipants.set(Number(roomId), Array.isArray(participants) ? participants : []);
@@ -883,7 +885,8 @@ function flushSystemNotices() {
 function renderIdentityBanner() {
     const names = Array.from(pendingIdentityChanges.values());
     const mismatched = Array.from(pendingLogMismatches.values());
-    if (!currentRoomId || (names.length === 0 && mismatched.length === 0)) {
+    const unconfirmed = Array.from(pendingUnconfirmed.values());
+    if (!currentRoomId || (names.length === 0 && mismatched.length === 0 && unconfirmed.length === 0)) {
         elements.e2eeBanner.classList.add('hidden');
         elements.e2eeBannerText.textContent = '';
         return;
@@ -896,6 +899,10 @@ function renderIdentityBanner() {
     }
     if (mismatched.length > 0) {
         parts.push(`Сервер показывает для ${mismatched.join(', ')} ключ, которого нет в журнале ключей (или журнал у участников разный). Возможна подмена. Сверьте код безопасности лично. Ключ комнаты ${mismatched.length === 1 ? 'этому участнику' : 'этим участникам'} не отправляется`);
+    }
+    // Подписанный состав группы (signed-membership.md, 10): сервер добавил участника, за которого никто не поручился.
+    if (unconfirmed.length > 0) {
+        parts.push(`В группе есть неподтверждённые участники: ${unconfirmed.join(', ')}. Сообщения им не отправляются`);
     }
     elements.e2eeBannerText.textContent = parts.join('. ');
     elements.e2eeBanner.classList.remove('hidden');
@@ -951,10 +958,88 @@ async function refreshIdentityChanges(client, roomId, participants, reported) {
     renderIdentityBanner();
 }
 
+// Имя участника для строк о составе: текущий участник или бывший (последнее известное имя).
+function memberLabel(roomId, userId) {
+    if (userId == null) return 'участник';
+    const list = roomParticipants.get(Number(roomId)) || [];
+    const current = list.find(p => Number(p.id) === Number(userId));
+    if (current && current.username) return current.username;
+    const former = (roomMemberNames.get(Number(roomId)) || {})[userId];
+    return former || `участник #${userId}`;
+}
+
+// Подпись под именем в окне участников и в ленте: кто и как подтвердил участника (signed-membership.md, 10).
+function membershipHowLine(roomId, entry) {
+    if (!entry) return '';
+    const by = memberLabel(roomId, entry.by);
+    if (entry.status === 'self') {
+        if (entry.how === 'approved') return `Вас одобрил(а) ${by}`;
+        if (entry.how === 'invite') return `Вы вошли по приглашению ${by}`;
+        return 'Вы создали группу';
+    }
+    if (entry.status === 'unconfirmed') {
+        return entry.duplicateKeys
+            ? 'Не подтверждён: ключи шифрования такие же, как у другого участника'
+            : 'Не подтверждён: вошёл без подписи участника';
+    }
+    switch (entry.how) {
+        case 'approved': return `Одобрил(а) ${by}`;
+        case 'invite': return `По приглашению ${by}`;
+        case 'vouched': return `Подтвердил(а) ${by}`;
+        case 'revouched': return `Повторно подтверждён ${by} после выхода прежнего подписавшего`;
+        case 'manual': return 'Подтверждён вами';
+        default: return '';
+    }
+}
+
+const ANCHOR_FAILURE_TEXT = {
+    'no-certificate': 'Не удалось подтвердить состав группы: подписи участника для вас нет на сервере. Участники не подтверждены — подтвердите тех, кого знаете, вручную',
+    'snap-bad': 'Приглашение повреждено: состав группы по нему не подтверждён',
+    'snap-missing': 'Не получен список участников от пригласившего: состав группы не подтверждён',
+    'inviter-key': 'Ключ пригласившего не совпал с подписью приглашения — возможна подмена. Состав группы не подтверждён, сверьте код безопасности лично',
+    'inviter-substituted': 'Ключ пригласившего не совпал с подписью приглашения — возможна подмена. Состав группы не подтверждён, сверьте код безопасности лично',
+    'duplicate-keys': 'У пригласившего и другого участника одинаковые ключи шифрования. Состав группы не подтверждён',
+};
+
+// Состав группы после проверки: баннер, строки ленты, предупреждения (signed-membership.md, 10).
+function handleMembershipResult(roomId, result) {
+    const unconfirmed = Array.isArray(result.unconfirmed) ? result.unconfirmed : [];
+    const skip = new Set((result.identityChanges || []).concat(result.logMismatches || []).map(c => Number(c.userId)));
+    pendingUnconfirmed.clear();
+    unconfirmed.filter(u => !skip.has(Number(u.id))).forEach(u => pendingUnconfirmed.set(Number(u.id), u.username || `участник #${u.id}`));
+    renderIdentityBanner();
+
+    const once = (key) => {
+        const full = `${roomId}:${key}`;
+        if (notedMembership.has(full)) return false;
+        notedMembership.add(full);
+        return true;
+    };
+    if (result.anchor && result.anchor.ok === true && once('anchor-ok')) {
+        appendSystemNotice(roomId, result.anchor.via === 'invite'
+            ? 'Состав группы подтверждён по подписи приглашения'
+            : 'Состав группы подтверждён по подписи одобрившего', 'shield-check');
+    }
+    if (result.anchor && result.anchor.ok === false && once('anchor-' + result.anchor.reason)) {
+        appendSystemNotice(roomId, ANCHOR_FAILURE_TEXT[result.anchor.reason] || 'Не удалось подтвердить состав группы по приглашению', 'shield-alert');
+    }
+    (Array.isArray(result.duplicateKeys) ? result.duplicateKeys : []).forEach((group) => {
+        if (!once('dup:' + group.ids.join(','))) return;
+        const names = group.ids.map(id => memberLabel(roomId, id)).join(', ');
+        appendSystemNotice(roomId, `Ключи шифрования участников ${names} совпадают. Сверьте код безопасности`, 'shield-alert');
+    });
+}
+
 function handleRoomSessionResult(roomId, result) {
     if (!result || Number(roomId) !== Number(currentRoomId)) return;
+    handleMembershipResult(roomId, result);
     const warnings = Array.isArray(result.warnings) ? result.warnings : [];
-    const failedIds = new Set(warnings.filter(w => w && w.userId != null).map(w => Number(w.userId)));
+    const unconfirmedIds = new Set((Array.isArray(result.unconfirmed) ? result.unconfirmed : []).map(u => Number(u.id)));
+    const membersById = new Map((Array.isArray(result.members) ? result.members : []).map(member => [Number(member.id), member]));
+    // Неподтверждённые и дубликаты ключей - не «не настроено шифрование»: о них говорят баннер и отдельная строка.
+    const failedIds = new Set(warnings
+        .filter(w => w && w.userId != null && w.reason !== 'unconfirmed-member' && w.reason !== 'duplicate-keys')
+        .map(w => Number(w.userId)));
     // Участники со сменившимся ключом и с ключом, которого нет в журнале, тоже попадают в warnings, но о них
     // говорят баннер и отдельная строка — здесь они не «без шифрования».
     const changedIds = new Set((result.identityChanges || []).concat(result.logMismatches || []).map(c => Number(c.userId)));
@@ -963,12 +1048,26 @@ function handleRoomSessionResult(roomId, result) {
 
     // Участники со сменившимся ключом тоже попадают в warnings, но о них
     // говорит баннер — здесь они не "без шифрования".
-    const delivered = newMembers.filter(member => !failedIds.has(Number(member.id)) && !changedIds.has(Number(member.id)));
-    const undelivered = newMembers.filter(member => failedIds.has(Number(member.id)) && !changedIds.has(Number(member.id)));
+    const delivered = newMembers.filter(member => !failedIds.has(Number(member.id)) && !changedIds.has(Number(member.id)) && !unconfirmedIds.has(Number(member.id)));
+    const undelivered = newMembers.filter(member => failedIds.has(Number(member.id)) && !changedIds.has(Number(member.id)) && !unconfirmedIds.has(Number(member.id)));
+    const unsigned = newMembers.filter(member => unconfirmedIds.has(Number(member.id)) && !changedIds.has(Number(member.id)));
     if (delivered.length > 0) {
-        const text = `В чат вошли: ${joinNames(delivered)}, им передан ключ шифрования`;
+        // «{имя} в группе — одобрил(а) {имя}»: кто и как подтвердил (подпись участника, а не слово сервера).
+        const lines = delivered.map((member) => {
+            const how = membershipHowLine(roomId, membersById.get(Number(member.id)));
+            return how ? `${member.username || `участник #${member.id}`} в группе — ${how.charAt(0).toLowerCase()}${how.slice(1)}` : null;
+        });
+        const text = lines.every(Boolean)
+            ? `${lines.join('; ')}. Ключ шифрования передан`
+            : `В чат вошли: ${joinNames(delivered)}, им передан ключ шифрования`;
         appendSystemNotice(roomId, text, 'key');
         showToast(text, 'info');
+    }
+    if (unsigned.length > 0) {
+        const verb = unsigned.length === 1 ? 'появился(ась)' : 'появились';
+        const text = `${joinNames(unsigned)} ${verb} в группе без подписи участника. Ключ шифрования ${unsigned.length === 1 ? 'ему' : 'им'} не отправлен`;
+        appendSystemNotice(roomId, text, 'shield-alert');
+        showToast(text, 'info', 6000);
     }
     if (undelivered.length > 0) {
         appendSystemNotice(roomId, `В чат вошли: ${joinNames(undelivered)}, но ключ шифрования им передать не удалось — они пока не смогут читать зашифрованные сообщения`, 'alert-triangle');
@@ -1016,6 +1115,13 @@ function syncE2eeKeyShares(chatId, roomId) {
             if (res && Array.isArray(res.identityChanges) && res.identityChanges.length > 0) {
                 addIdentityChanges(roomId, res.identityChanges);
             }
+            // Сверка взглядов на состав и ключи (signed-membership.md, 9.6): информативная тревога, отправка не блокируется.
+            if (res && res.viewMismatch) {
+                showToast('Участники группы видят разные ключи шифрования (возможна подмена сервером). Сверьте коды безопасности', 'error', 8000);
+            }
+            if (res && res.viewIdsDiverged) {
+                showToast('Состав группы у одного из участников отличается от вашего. Возможно, сервер показывает участникам разные списки', 'info', 8000);
+            }
             return res;
         } catch (err) {
             console.error('E2EE: syncKeyShares failed:', err);
@@ -1048,11 +1154,13 @@ async function runRoomSession(chatId, roomId, { answerKeyRequests = false } = {}
     }
     let result;
     try {
-        result = await client.ensureRoomSession(chatId, roomId, part.participants);
+        // Ответ участников целиком: свои сертификаты, снимки к ним и приглашение комнаты (проверка состава).
+        result = await client.ensureRoomSession(chatId, roomId, part.participants, part);
     } catch (err) {
         console.error('E2EE: не удалось подготовить сессию комнаты:', err);
         return null;
     }
+    scheduleRevouchTimer(chatId, roomId, client);
     if (result && Array.isArray(result.warnings) && result.warnings.length > 0) {
         console.warn('E2EE: не со всеми участниками установлен защищённый канал:', result.warnings);
     }
@@ -1060,6 +1168,19 @@ async function runRoomSession(chatId, roomId, { answerKeyRequests = false } = {}
     await refreshIdentityChanges(client, roomId, part.participants, result && result.identityChanges);
     refreshTransparencyBanner();
     return result;
+}
+
+// Повторный допуск после ухода подписавшего (signed-membership.md, 5.5): задача исполняется по сроку, и открытая вкладка
+// сама перезапускает сессию комнаты, когда срок наступил.
+let revouchTimer = null;
+async function scheduleRevouchTimer(chatId, roomId, client) {
+    clearTimeout(revouchTimer);
+    let wait = null;
+    try { wait = await client.nextRevouchDueMs(roomId); } catch { wait = null; }
+    if (wait === null) return;
+    revouchTimer = setTimeout(() => {
+        if (currentUser && Number(roomId) === Number(currentRoomId)) ensureE2eeRoomSession(chatId, roomId);
+    }, Math.min(Math.max(wait, 5000), 60 * 60 * 1000) + 1000);
 }
 
 function ensureE2eeRoomSession(chatId, roomId, options) {
@@ -2523,7 +2644,8 @@ function setupInviteListeners() {
     });
     elements.copyInviteLinkBtn.addEventListener('click', () => {
         const code = elements.inviteCodeDisplay.dataset.code || '';
-        if (code) copyText(inviteLink(code), 'Ссылка скопирована', 'Не удалось скопировать ссылку');
+        const secret = elements.inviteCodeDisplay.dataset.secret || '';
+        if (code) copyText(inviteLink(code, secret), secret ? 'Ссылка скопирована' : 'Ссылка без секрета скопирована: по ней можно только отправить заявку', 'Не удалось скопировать ссылку');
     });
     elements.requestsBarBtn.addEventListener('click', openRequestsModal);
 }
@@ -2761,8 +2883,14 @@ function setupSocketListeners() {
     // Состав комнаты изменился (вступление по коду, одобренная заявка,
     // выход): забираем новые key-share и пересобираем сессию — новому
     // участнику уходит наш Sender Key, после ухода свой ключ ротируется.
-    socket.on('roomMembersChanged', ({ roomId } = {}) => {
+    socket.on('roomMembersChanged', ({ roomId, inviteRotated } = {}) => {
         if (!currentUser || !roomId) return;
+        // Решение владельца (signed-membership.md, вопрос 17): при выходе любого участника подписанное приглашение
+        // сервер обнуляет и выдаёт новый код; новую подписанную ссылку создаёт следующий, кто нажмёт «Пригласить».
+        if (inviteRotated === true && Number(roomId) === Number(currentRoomId)) {
+            appendSystemNotice(roomId, 'Ссылка-приглашение обновлена: участник вышел из группы', 'link');
+            if (inviteState) inviteState = { ...inviteState, signed: false, linkSecret: null };
+        }
         scheduleRoomMembersRefresh(roomId);
         scheduleLoadChats(); // число участников в списке и в шапке
     });
@@ -3467,8 +3595,9 @@ function setupThemeControls() {
 
 // Ссылка-приглашение: код во фрагменте — он не уходит на сервер ни при
 // открытии ссылки, ни в Referer (см. consumeJoinFragment).
-function inviteLink(code) {
-    return `${location.origin}/#join=${encodeURIComponent(code)}`;
+// С секретом (22 символа base64url, signed-membership.md, 5.3) ссылка впускает без одобрения; без него - только заявка.
+function inviteLink(code, secret) {
+    return `${location.origin}/#join=${encodeURIComponent(code)}${secret ? `.${secret}` : ''}`;
 }
 
 async function copyText(text, okMessage, failMessage) {
@@ -3545,7 +3674,9 @@ function renderInvite(state) {
     elements.copyInviteLinkBtn.disabled = !usable;
     elements.disableInviteBtn.disabled = disabled;
 
-    const shown = usable && drawInviteQr(inviteLink(rawCode));
+    const linkSecret = usable && state.signed !== false ? (state.linkSecret || null) : null;
+    elements.inviteCodeDisplay.dataset.secret = linkSecret || '';
+    const shown = usable && drawInviteQr(inviteLink(rawCode, linkSecret));
     if (!shown) clearInviteQr();
     elements.inviteQr.classList.toggle('hidden', !shown);
 
@@ -3559,7 +3690,12 @@ function renderInvite(state) {
         lines.push(inviteStatusLine('users', max > 0 ? `Участников: ${members} из ${max}` : `Участников: ${members}`));
     }
     if (!disabled && state.requireApproval !== false) lines.push(inviteStatusLine('shield-check', 'Вступление — с одобрением участников'));
-    else if (!disabled) lines.push(inviteStatusLine('unlock', 'Вступление — без одобрения, сразу по коду'));
+    else if (!disabled) {
+        lines.push(inviteStatusLine('unlock', 'Ссылка с секретом впускает сразу; код без ссылки отправляет заявку'));
+        if (state.inviter) lines.push(inviteStatusLine('shield-check', `Приглашение подписано участником ${state.inviter}`));
+        else if (state.signed === false) lines.push(inviteStatusLine('alert-triangle', 'Подписанной ссылки нет: нажмите «Создать новый код», чтобы получить ссылку, которая впускает сразу'));
+        else if (!linkSecret) lines.push(inviteStatusLine('alert-triangle', 'Секрет ссылки есть только на устройстве, где она создана: здесь ссылка и QR впускают лишь через заявку. Создайте новый код, чтобы получить свою ссылку'));
+    }
     elements.inviteStatus.replaceChildren(...lines);
     elements.inviteStatus.classList.toggle('expired', !usable);
 
@@ -3578,8 +3714,31 @@ async function openInviteModal() {
     }
     if (chatId !== currentChatId) return;
     elements.inviteTtl.value = '604800';
-    renderInvite(data);
+    const signing = await loadInviteSigning(chatId, currentRoomId);
+    if (chatId !== currentChatId) return;
+    renderInvite({ ...data, ...signing });
     openModal(elements.inviteModal);
+}
+
+// Подписанное приглашение комнаты (signed-membership.md, 9.3): кто его подписал (проверяется по подписям) и секрет ссылки, если он
+// создан на этом устройстве и сертификат на сервере тот же. Сбой не мешает показать код.
+async function loadInviteSigning(chatId, roomId) {
+    const result = { linkSecret: null, inviter: null };
+    try {
+        const [part, client] = await Promise.all([api(`/api/chats/${chatId}/participants`), getReadyE2eeClient()]);
+        if (!part.success) return result;
+        rememberRoomParticipants(roomId, part.participants);
+        if (client) result.linkSecret = await client.getInviteSecret(roomId, part.invite || null);
+        if (part.invite) {
+            const parsed = NyxoMembership.parseCert(NyxoMembership.fromB64(part.invite) || new Uint8Array(0));
+            if (parsed.ok && parsed.cert.kind === NyxoMembership.KIND.invite && (await NyxoMembership.verifyCertSignatures(parsed.cert)).ok) {
+                result.inviter = memberLabel(roomId, parsed.cert.actorId);
+            }
+        }
+    } catch (err) {
+        console.warn('E2EE: подпись приглашения не прочитана:', err);
+    }
+    return result;
 }
 
 // Лимит участников из поля: пусто — без лимита; иначе целое 2..1000.
@@ -3602,12 +3761,34 @@ async function rotateInviteCode() {
     const hadCode = Boolean(inviteState && inviteState.code && !inviteState.disabled);
     if (hadCode && !confirm('Создать новый код? Старый код сразу перестанет действовать.')) return;
     const chatId = currentChatId;
+    const roomId = currentRoomId;
     const body = {
         ttlSeconds: Number(elements.inviteTtl.value) || 604800,
         maxMembers: max.value,
         requireApproval: elements.inviteApproval.checked,
+        proto: PROTO_VERSION,
     };
     elements.rotateInviteBtn.disabled = true;
+    // Вход без одобрения - только по подписанному приглашению: сертификат и снимок подписывает клиент, секрет ссылки остаётся на устройстве.
+    let signed = null;
+    if (!body.requireApproval) {
+        const client = await getReadyE2eeClient();
+        if (!client) {
+            elements.rotateInviteBtn.disabled = false;
+            showToast('Шифрование недоступно: подписанную ссылку без одобрения создать нельзя', 'error');
+            return;
+        }
+        try {
+            signed = await client.signInvite(roomId, { ttlSeconds: body.ttlSeconds });
+        } catch (err) {
+            console.error('E2EE: signInvite failed:', err);
+            elements.rotateInviteBtn.disabled = false;
+            showToast('Не удалось подписать приглашение', 'error');
+            return;
+        }
+        body.inviteCert = signed.cert;
+        body.inviteSnap = signed.snap;
+    }
     const data = await api(`/api/chats/${chatId}/invite/rotate`, { method: 'POST', body: JSON.stringify(body) });
     elements.rotateInviteBtn.disabled = false;
     if (!data.success) {
@@ -3615,6 +3796,7 @@ async function rotateInviteCode() {
         return;
     }
     if (chatId !== currentChatId) return;
+    const signing = signed ? await loadInviteSigning(chatId, roomId) : { linkSecret: null, inviter: null };
     renderInvite({
         ...(inviteState || {}),
         code: data.code,
@@ -3623,6 +3805,8 @@ async function rotateInviteCode() {
         disabled: false,
         maxMembers: data.maxMembers !== undefined ? data.maxMembers : body.maxMembers,
         requireApproval: data.requireApproval !== undefined ? data.requireApproval : body.requireApproval,
+        signed: Boolean(signed),
+        ...signing,
     });
     showToast(hadCode ? 'Создан новый код. Старый больше не действует' : 'Создан новый код', 'success', 5000);
 }
@@ -3632,14 +3816,17 @@ async function disableInviteCode() {
     if (!confirm('Отключить приглашение? Текущий код сразу перестанет действовать. Новый код можно создать в любой момент.')) return;
     const chatId = currentChatId;
     elements.disableInviteBtn.disabled = true;
-    const data = await api(`/api/chats/${chatId}/invite/disable`, { method: 'POST' });
+    const data = await api(`/api/chats/${chatId}/invite/disable`, { method: 'POST', body: JSON.stringify({ proto: PROTO_VERSION }) });
     elements.disableInviteBtn.disabled = false;
     if (!data.success) {
         showToast(data.message || 'Не удалось отключить приглашение', 'error');
         return;
     }
     if (chatId !== currentChatId) return;
-    renderInvite({ ...(inviteState || {}), code: null, expiresAt: null, disabled: true, expired: false });
+    renderInvite({ ...(inviteState || {}), code: null, expiresAt: null, disabled: true, expired: false, signed: false, linkSecret: null, inviter: null });
+    // Секрет прежней ссылки больше не нужен: приглашение выключено (signed-membership.md, 9.3).
+    const client = await getReadyE2eeClient();
+    if (client && currentRoomId) client.dropInviteSecret(currentRoomId).catch(() => {});
     showToast('Приглашение отключено', 'success');
 }
 
@@ -3650,7 +3837,10 @@ async function disableInviteCode() {
 // экрана входа «У меня есть приглашение»: заголовок «Приглашение в группу»,
 // блока «Создать группу» нет, вместо «Отмена» — «Не сейчас».
 let joinPreviewCode = null;
-let joinPreviewSecret = null;  // секрет ссылки (этап 5.4): хранится, на сервер не уходит
+let joinPreviewSecret = null;  // секрет ссылки (signed-membership.md, 5.3): хранится в памяти, на сервер не уходит
+let joinPreviewRoomId = null;       // комната и сертификат приглашения из предпросмотра: вход по ссылке подписывается ими
+let joinPreviewInviteCert = null;
+let joinPreviewDirect = false;      // true - вход без одобрения по ссылке с секретом, false - заявка
 let joinInviteMode = false;
 let joinBusy = false;
 
@@ -3671,6 +3861,9 @@ function openNewChatModal({ invite = false } = {}) {
 
 function hideJoinPreview() {
     joinPreviewCode = null;
+    joinPreviewRoomId = null;
+    joinPreviewInviteCert = null;
+    joinPreviewDirect = false;
     elements.joinPreview.classList.add('hidden');
     setJoinStatus('');
 }
@@ -3738,11 +3931,18 @@ async function previewJoin() {
     }
     joinPreviewCode = code;
     joinPreviewSecret = parsed.secret || null;
+    joinPreviewRoomId = Number(data.roomId) || null;
+    joinPreviewInviteCert = typeof data.inviteCert === 'string' ? data.inviteCert : null;
+    // Без одобрения впускает только ссылка с секретом к подписанному приглашению; код без секрета - заявка (5.4).
+    joinPreviewDirect = !data.requireApproval && Boolean(joinPreviewSecret && joinPreviewInviteCert && joinPreviewRoomId);
     elements.joinPreviewName.textContent = data.roomName || 'Группа';
     const count = Number(data.memberCount) || 0;
     elements.joinPreviewMeta.textContent = count > 0 ? `${count} ${plural(count, ['участник', 'участника', 'участников'])}` : '';
-    elements.joinPreviewApproval.classList.toggle('hidden', !data.requireApproval);
-    setIconLabel(elements.joinConfirmBtn, data.requireApproval ? 'send' : 'log-in', data.requireApproval ? 'Отправить заявку' : 'Вступить');
+    elements.joinPreviewApproval.classList.toggle('hidden', joinPreviewDirect);
+    setIconLabel(elements.joinConfirmBtn, joinPreviewDirect ? 'log-in' : 'send', joinPreviewDirect ? 'Вступить' : 'Отправить заявку');
+    if (!data.requireApproval && !joinPreviewDirect) {
+        setJoinStatus('Ссылка с секретом впускает сразу; код без ссылки отправляет заявку');
+    }
     elements.joinPreview.classList.remove('hidden');
     elements.joinConfirmBtn.focus({ preventScroll: true });
 }
@@ -3760,6 +3960,19 @@ async function waitForE2eeKeysBeforeJoin() {
     setJoinStatus('');
 }
 
+// Тексты ошибок проверки приглашения на устройстве (prepareJoin).
+function joinPrepareFailureText(err) {
+    switch (err && err.code) {
+        case 'invalid-secret': return 'Ссылка повреждена: секрет не распознан. Попросите новую ссылку';
+        case 'no-invite': return 'В этой группе нет приглашения по ссылке. Отправьте заявку';
+        case 'secret-mismatch': return 'Секрет ссылки не подходит к приглашению. Попросите новую ссылку';
+        case 'invalid-invite': return 'Приглашение повреждено или подписано неверно. Попросите новую ссылку';
+        case 'expired': return 'Срок приглашения истёк. Попросите новую ссылку';
+        case 'clock': return 'Часы на устройстве отстают: приглашение выдано «в будущем». Поправьте время и повторите';
+        default: return 'Не удалось проверить приглашение. Попробуйте ещё раз';
+    }
+}
+
 // Шаг 2: вступление (или заявка, если группе нужно одобрение).
 async function joinChat() {
     const code = joinPreviewCode;
@@ -3770,12 +3983,33 @@ async function joinChat() {
     btn.setAttribute('aria-busy', 'true');
     clearJoinError();
     let data;
+    const roomId = joinPreviewRoomId;
+    let intentWritten = false;
     try {
         await waitForE2eeKeysBeforeJoin();
-        data = await api('/api/chats/join', {
-            method: 'POST',
-            body: JSON.stringify({ code }),
-        });
+        const client = await getReadyE2eeClient();
+        const body = { code, proto: PROTO_VERSION };
+        if (client && roomId) {
+            // Намерение входа создаёт только это действие пользователя (signed-membership.md, 9.2): по ссылке - после
+            // проверки приглашения секретом, по заявке - при нажатии «Отправить заявку».
+            try {
+                const prepared = await client.prepareJoin(roomId, joinPreviewDirect
+                    ? { secret: joinPreviewSecret, inviteCert: joinPreviewInviteCert }
+                    : {});
+                intentWritten = true;
+                if (prepared.joinCert) body.joinCert = prepared.joinCert;
+            } catch (err) {
+                data = { success: false, message: joinPrepareFailureText(err) };
+            }
+        }
+        if (!data) {
+            data = await api('/api/chats/join', { method: 'POST', body: JSON.stringify(body) });
+            if (data.success && data.inviteSnap && client && roomId) {
+                const done = await client.completeJoin(roomId, data.inviteSnap).catch(() => ({ ok: false }));
+                if (!done.ok) showToast('Приглашение повреждено: состав группы по нему не подтвердится', 'error', 8000);
+            }
+            if (!data.success && intentWritten && client) client.cancelJoinIntent(roomId).catch(() => {});
+        }
     } finally {
         joinBusy = false;
         btn.disabled = false;
@@ -3984,7 +4218,32 @@ async function decideJoinRequest(req, approve, row, buttons) {
     buttons.forEach((b) => { b.disabled = true; });
     const chatId = currentChatId;
     const roomId = currentRoomId;
-    const data = await api(`/api/join-requests/${encodeURIComponent(req.id)}/${approve ? 'approve' : 'deny'}`, { method: 'POST' });
+    const body = { proto: PROTO_VERSION };
+    if (approve) {
+        // Одобрение подписывается (signed-membership.md, 5.2): сертификат допуска и снимок состава одобряющего.
+        const client = await getReadyE2eeClient();
+        if (!client || !req.identity) {
+            buttons.forEach((b) => { b.disabled = false; });
+            showToast(client ? 'Пользователь ещё не настроил шифрование: одобрить его пока нельзя' : 'Шифрование недоступно: одобрить заявку нельзя', 'error');
+            return;
+        }
+        const approveBtn = buttons[0];
+        const label = Array.from(approveBtn.childNodes);
+        setIconLabel(approveBtn, 'loader', 'Подписываем…', { className: 'spin' });
+        try {
+            const signed = await client.signApproval(roomId, { userId: req.userId, signingKey: req.identity.signingKey, dhKey: req.identity.dhKey });
+            body.cert = signed.cert;
+            body.snap = signed.snap;
+        } catch (err) {
+            console.error('E2EE: signApproval failed:', err);
+            approveBtn.replaceChildren(...label);
+            buttons.forEach((b) => { b.disabled = false; });
+            showToast('Не удалось подписать допуск', 'error');
+            return;
+        }
+        approveBtn.replaceChildren(...label);
+    }
+    const data = await api(`/api/join-requests/${encodeURIComponent(req.id)}/${approve ? 'approve' : 'deny'}`, { method: 'POST', body: JSON.stringify(body) });
     if (!data.success) {
         buttons.forEach((b) => { b.disabled = false; });
         showToast(data.message || 'Не удалось обработать заявку', 'error');
@@ -4340,6 +4599,91 @@ async function acceptIdentityChange(row, peer, ctx, btn) {
     renderMemberDetails(row, peer, ctx);
 }
 
+// Подтверждение участника вручную (signed-membership.md, 9.7): локальное решение, сертификата не публикует.
+async function trustUnconfirmedMember(peer, ctx, btn, duplicate) {
+    const warning = `Сервер добавил ${peer.username} в группу, но никто из участников это не подписал. Доверяйте, только если знаете, кто это.`
+        + (duplicate ? ' У этого участника такие же ключи шифрования, как у другого: возможно, это подделка.' : '');
+    if (!confirm(warning)) return;
+    btn.disabled = true;
+    let res;
+    try {
+        res = await ctx.client.trustMember(ctx.roomId, peer.id);
+    } catch (err) {
+        console.error('E2EE: trustMember failed:', err);
+        res = { ok: false };
+    }
+    if (!res || !res.ok) {
+        btn.disabled = false;
+        showToast(res && res.reason === 'changed' ? 'Ключ участника изменился: сначала проверьте код безопасности' : 'Не удалось подтвердить участника', 'error');
+        return;
+    }
+    showToast(`${peer.username} подтверждён. Ключ шифрования будет передан автоматически`, 'success', 5000);
+    if (res.cancelledIntent) showToast('Проверка по приглашению отменена: вы подтвердили участников вручную', 'info', 6000);
+    if (Number(ctx.roomId) === Number(currentRoomId)) {
+        pendingUnconfirmed.delete(Number(peer.id));
+        renderIdentityBanner();
+        ensureE2eeRoomSession(ctx.chatId, ctx.roomId);
+    }
+    openMembersModal();
+}
+
+// Явное поручительство (9.5): подписать допуск за участника, подтверждённого вручную. Остальные начнут отправлять ему ключи.
+async function vouchForMember(peer, ctx, btn) {
+    if (!confirm(`Вы подпишете, что знаете ${peer.username}. Остальные участники начнут отправлять ему ключи.`)) return;
+    btn.disabled = true;
+    let res;
+    try {
+        res = await ctx.client.vouchForMember(ctx.chatId, ctx.roomId, peer.id);
+    } catch (err) {
+        console.error('E2EE: vouchForMember failed:', err);
+        res = { ok: false };
+    }
+    if (!res || !res.ok) {
+        btn.disabled = false;
+        showToast((res && res.message) || 'Не удалось поручиться за участника', 'error');
+        return;
+    }
+    showToast(`Вы поручились за ${peer.username}`, 'success', 5000);
+    openMembersModal();
+}
+
+// Строка о составе под именем участника и действие над ним.
+function appendMembershipInfo(li, info, peer, ctx) {
+    const entry = ctx.member;
+    if (!entry) return;
+    const text = membershipHowLine(ctx.roomId, entry);
+    if (text) {
+        const line = document.createElement('small');
+        line.className = 'member-how' + (entry.status === 'unconfirmed' ? ' unconfirmed' : '');
+        line.textContent = text;
+        info.appendChild(line);
+    }
+    if (entry.duplicateKeys && entry.status !== 'unconfirmed') {
+        const warn = document.createElement('small');
+        warn.className = 'member-how unconfirmed';
+        warn.textContent = 'Ключи шифрования такие же, как у другого участника. Сверьте код безопасности';
+        info.appendChild(warn);
+    }
+    if (ctx.isSelf || !ctx.client) return;
+    if (entry.status === 'unconfirmed') {
+        const trust = document.createElement('button');
+        trust.className = 'btn btn-danger btn-sm';
+        trust.type = 'button';
+        setIconLabel(trust, 'user-check', 'Доверять участнику');
+        trust.setAttribute('aria-label', `Доверять участнику ${peer.username}`);
+        trust.addEventListener('click', () => trustUnconfirmedMember(peer, ctx, trust, Boolean(entry.duplicateKeys)));
+        li.appendChild(trust);
+    } else if (entry.status === 'confirmed' && entry.how === 'manual' && !entry.vouchedByMe) {
+        const vouch = document.createElement('button');
+        vouch.className = 'btn btn-secondary btn-sm';
+        vouch.type = 'button';
+        setIconLabel(vouch, 'shield-check', 'Поручиться за участника');
+        vouch.setAttribute('aria-label', `Поручиться за участника ${peer.username}`);
+        vouch.addEventListener('click', () => vouchForMember(peer, ctx, vouch));
+        li.appendChild(vouch);
+    }
+}
+
 function createMemberRow(peer, status, ctx) {
     const li = document.createElement('li');
     li.className = 'member-item';
@@ -4358,12 +4702,16 @@ function createMemberRow(peer, status, ctx) {
     info.appendChild(name);
     head.append(avatar, info);
     li.appendChild(head);
-    if (ctx.isSelf) return li;
+    if (ctx.isSelf) {
+        appendMembershipInfo(li, info, peer, ctx);
+        return li;
+    }
 
     const statusEl = document.createElement('span');
     info.appendChild(statusEl);
     li._statusEl = statusEl;
     setMemberStatus(li, status);
+    appendMembershipInfo(li, info, peer, ctx);
     const ktText = ctx.kt && KT_PEER_TEXT[ctx.kt];
     if (ktText) {
         const ktEl = document.createElement('small');
@@ -4414,6 +4762,22 @@ async function openMembersModal() {
     rememberRoomParticipants(roomId, part.participants);
     const client = await getReadyE2eeClient();
     if (seq !== membersModalSeq || !currentUser) return;
+    // Состав группы (signed-membership.md, 10): статусы и подписи «кто подтвердил» - из свежей проверки состава.
+    const membership = new Map();
+    if (client) {
+        try {
+            const roomResult = await client.ensureRoomSession(chatId, roomId, part.participants, part);
+            (roomResult.members || []).forEach(member => membership.set(Number(member.id), member));
+            (roomResult.unconfirmed || []).forEach((u) => {
+                const entry = membership.get(Number(u.id));
+                if (entry) entry.duplicateKeys = Boolean(u.duplicateKeys);
+            });
+        } catch (err) {
+            console.warn('E2EE: состав группы не проверен:', err);
+        }
+        roomMemberNames.set(Number(roomId), await client.getRoomMemberNames(roomId).catch(() => ({})));
+        if (seq !== membersModalSeq || !currentUser) return;
+    }
     const others = part.participants.filter(p => Number(p.id) !== Number(currentUser.id));
 
     const statuses = new Map();
@@ -4439,12 +4803,12 @@ async function openMembersModal() {
     const me = part.participants.find(p => Number(p.id) === Number(currentUser.id))
         || { id: currentUser.id, username: currentUser.username };
     const fragment = document.createDocumentFragment();
-    fragment.appendChild(createMemberRow(me, null, { ...ctx, isSelf: true }));
+    fragment.appendChild(createMemberRow(me, null, { ...ctx, isSelf: true, member: membership.get(Number(me.id)) }));
     const changed = [];
     others.forEach((peer) => {
         const status = client ? (statuses.get(Number(peer.id)) || 'unknown') : 'unknown';
         if (status === 'changed') changed.push({ userId: peer.id, username: peer.username });
-        fragment.appendChild(createMemberRow(peer, status, { ...ctx, kt: ktStatuses.get(Number(peer.id)) }));
+        fragment.appendChild(createMemberRow(peer, status, { ...ctx, kt: ktStatuses.get(Number(peer.id)), member: membership.get(Number(peer.id)) }));
     });
     elements.membersList.replaceChildren(fragment);
     if (changed.length > 0) addIdentityChanges(roomId, changed);
@@ -6265,6 +6629,13 @@ async function createChat() {
     });
     if (data.success) {
         document.getElementById('new-chat-name').value = '';
+        // Создатель: V = {я}, how = creator, bootstrapDone записываются сразу (signed-membership.md, 5.1).
+        if (data.chat.room_id) {
+            const client = await getReadyE2eeClient();
+            if (client) {
+                try { await client.noteRoomCreated(data.chat.room_id, currentUser.username); } catch (err) { console.warn('E2EE: состав новой группы не записан:', err); }
+            }
+        }
         showToast('Чат создан', 'success');
         closeModal(elements.newChatModal);
         loadChats();

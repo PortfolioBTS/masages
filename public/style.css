@@ -4255,6 +4255,20 @@ a.file-attachment:hover {
     color: var(--text-3);
 }
 
+/* Подписанный состав группы: кто подтвердил участника; неподтверждённый заметнее остальных строк, действие над ним - под строкой. */
+.member-info small.member-how {
+    color: var(--text-2);
+}
+
+.member-info small.member-how.unconfirmed {
+    color: var(--text);
+    font-weight: 600;
+}
+
+.member-item > .btn {
+    margin-top: 8px;
+}
+
 .kt-alert {
     display: flex;
     flex-direction: column;
