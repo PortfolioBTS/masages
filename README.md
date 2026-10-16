@@ -1,313 +1,186 @@
 # Nyxo Messenger
 
-Мессенджер на Node.js/Express/Socket.io с PostgreSQL. Обычная и анонимная
-регистрация, 1:1 и групповые чаты, файлы, реакции, ответы, исчезающие
-сообщения, поиск. Сквозное шифрование (E2EE) в комнатах включено по
-умолчанию: постквантовый гибрид PQXDH (X25519 + ML-KEM-768) и Sender Keys, с
-кодами безопасности как в Signal. Файлы в комнатах шифруются в браузере.
+Анонимный веб-мессенджер со сквозным шифрованием на Node.js, Express, Socket.io и PostgreSQL. Без номера, почты и регистрации: аккаунт временный, имя выдаётся случайное, а когда выбранный срок без активности кончается, аккаунт и его сообщения удаляются. Группы, приглашения по ссылке и QR, файлы, ответы, реакции, исчезающие сообщения. Клиент — обычная страница без фреймворка и сборщика.
 
-## Интерфейс
-
-- Строгий чёрно-белый монохром без цветовых оттенков, тёмная и светлая
-  тема (по умолчанию — как в системе, переключатель в сайдбаре и профиле).
-- Иконки вместо эмодзи: SVG-спрайт на основе Lucide (ISC) и собственный знак
-  Nyxo (`public/icons.js`), реакции тоже иконками.
-- PWA: `manifest.webmanifest`, значки 192/512/maskable, apple-touch-icon.
-- Адаптивная вёрстка (≤ 768 px — одна колонка), фокус с клавиатуры,
-  `prefers-reduced-motion`.
+Что защищено и что нет, сказано честно в [модели угроз](docs/threat-model.md). Коротко: содержимое групп сервер прочитать не может, но видит, кто в каких группах состоит и когда подключён, а код клиента вы получаете от того же сервера.
 
 ## Возможности
 
-- **Исчезающие сообщения на всю комнату** (5 мин / 1 ч / 1 д / 7 д): таймер
-  общий для всех участников, виден в шапке, изменения — служебной строкой.
-- **Приглашения:** код 26 символов и QR-код ссылки `…/#join=КОД` (фрагмент не
-  уходит на сервер), срок действия, лимит участников, вступление после
-  одобрения (включено по умолчанию), отключение кода.
-- **Заявки на вступление:** заявитель видит «ожидает одобрения», участники —
-  полосу заявок и кнопки «Впустить/Отклонить». Принятый участник видит только
-  сообщения после одобрения, ключ E2EE ему передаётся автоматически.
-- **Чаты:** закрепление, режим «без звука», архив.
-- **Приватный режим:** срок жизни аккаунта — пока открыта вкладка / 1 день /
-  7 дней без активности (не дольше 7 дней), обратный отсчёт в сайдбаре.
-- **Журнал безопасности** в профиле: входы, неудачные попытки, смена пароля —
-  без IP, только семейство браузера и ОС.
-- **Выход со стиранием данных устройства:** ключи E2EE и локальные настройки
-  удаляются, ключи отзываются на сервере.
-- **Файлы:** перетаскивание, несколько файлов за раз, прогресс и отмена.
-- Кнопка «вниз» со счётчиком новых сообщений, индикатор соединения,
-  уведомления без текста сообщения и имени отправителя.
+**Аккаунт**
+- Временный анонимный аккаунт: срок хранения выбирается при входе и меняется в «Профиле» — пока открыта вкладка (аккаунт удаляется через 30 минут после закрытия последней вкладки), 1 день или 7 дней без активности. Потолка от даты создания нет: пока человек заходит, аккаунт живёт. В боковой панели постоянно написано, когда аккаунт удалится.
+- Создание аккаунта защищено proof-of-work, лимитами и CSRF-токеном.
+- «Удалить и выйти» удаляет аккаунт, сообщения (в том числе у собеседников), файлы и ключи на сервере и стирает ключи и настройки на устройстве.
+- Восстановления нет: аккаунт живёт только в этом браузере.
+
+**Группы и приглашения**
+- Код приглашения — 26 символов; ссылка `…/#join=КОД.СЕКРЕТ` и QR на неё. Фрагмент ссылки не уходит на сервер.
+- По умолчанию вход идёт через заявку: её одобряет любой участник, и одобрение подписывается его ключом. Если одобрение выключить, ссылка с секретом впускает сразу (вход подписан приглашением), а код без секрета всё равно даёт только заявку.
+- Срок кода (до 30 суток), лимит участников, новый код и отключение; когда участник выходит, код заменяется, а подписанная ссылка сбрасывается.
+- Новый участник не видит сообщения, отправленные до его вступления.
+
+**Шифрование** (обязательно для групп, выключателя нет)
+- Обмен ключами PQXDH: X25519 плюс ML-KEM-768 с одноразовыми PQ-prekey; сообщения — Sender Keys с ротацией раз в 100 сообщений или 7 дней и при выходе участника.
+- Коды безопасности (60 цифр) в окне «Участники и ключи»; смена ключа собеседника блокирует передачу ему ключа группы до явного подтверждения.
+- Подписанный состав группы: участник без подписи допуска помечен «не подтверждён» и ключа группы не получает, пока вы не нажмёте «Доверять участнику».
+- Журнал ключей (прозрачность ключей): работает, если оператор задал `KT_SIGNING_KEY`; выявляет подмену ключа сервером, но не защищает от сервера, который с самого начала показывает разным группам разные журналы.
+- Режим «Не хранить историю на этом устройстве» для группы; исчезающие сообщения стирают ключи вместе с сообщениями.
+- Скрытие автора сообщения на хранении (sealed sender): в базе у сообщения группы автора нет, есть только недельный тег.
+
+**Сообщения и файлы**
+- Ответы, реакции, правка и удаление своих сообщений, общий для группы таймер исчезающих сообщений (5 минут, 1 час, 1 день, 7 дней), время сообщений огрублено до минуты.
+- Отметки о прочтении выключены по умолчанию и работают взаимно; уведомления выключены по умолчанию, приходят только при скрытой вкладке и без текста.
+- Поиск работает только на устройстве: по названиям чатов и по сообщениям, загруженным в браузер.
+- Файлы: фото, видео, PDF и TXT, до 50 МБ и до 10 за раз; метаданные удаляются в браузере до шифрования; в группах файл шифруется на устройстве, сервер видит только размер. PDF со сжатыми метаданными отклоняется.
+- Чат с ботом-помощником (гайд по мессенджеру) сквозным шифрованием не защищён, и интерфейс об этом говорит.
+
+**Проверка кода клиента**
+- Манифест SHA-256 всех файлов клиента (`/client-manifest.json`), релиз с аттестацией, сверка скриптом `scripts/verify-deployment.js`, страница `/verify.html`, ежедневный сторож в CI ([docs/VERIFY.md](docs/VERIFY.md)).
+- Закрепление версии кода в service worker: новая версия включается только после согласия пользователя ([docs/ops/service-worker.md](docs/ops/service-worker.md)).
+
+**Прочее**
+- Onion-сервис для Tor Browser (`tor-service/`, необязателен).
+- Интерфейс: строгий монохром, тёмная и светлая тема, иконки на SVG-спрайте (`public/icons.js`), PWA-манифест, адаптивная вёрстка (до 768 px — одна колонка), `prefers-reduced-motion`.
+- Эксплуатация: `/healthz`, `/readyz`, `/metrics` по токену, `/.well-known/security.txt`, точные лимиты в PostgreSQL.
 
 ## Стек
 
-- Backend: Node.js 24, Express 4, Socket.io 4, PostgreSQL (`pg`)
-- Сессии: `express-session` + `connect-pg-simple` (хранилище сессий — та же БД)
-- Пароли: bcrypt (`bcryptjs`) поверх HMAC-SHA256 — см. `lib/passwords.js`
-- Файлы: `multer` (диск), `sharp` (изображения), собственный изоморфный
-  очиститель метаданных `public/media-sanitizer.js` (видео, аудио, PDF — и на
-  сервере, и в браузере перед шифрованием)
-- Frontend: без фреймворка и сборщика — HTML/CSS/vanilla JS (`public/`)
-- Криптография клиента: только Web Crypto API + собственная реализация
-  ML-KEM-768 по FIPS 203 (`public/mlkem.js`, сверена с реализацией Node побайтно)
-- Отдельные сервисы:
-  - `e2ee-key-server` (Rust, необязательный) — хранение публичных E2EE-ключей
-    отдельным сервисом. По умолчанию ключи хранятся во встроенном хранилище
-    (`lib/key-store.js`) в этой же базе — отдельно разворачивать ничего не нужно;
-  - `anon-service` (Rust, необязательный) — генерация анонимных имён;
-  - `tor-service` (tor + socat, необязательный) — onion-адрес.
+- Сервер: Node.js 24, Express 4, Socket.io 4, PostgreSQL 13+ (`pg`); сессии — `express-session` и `connect-pg-simple` в той же базе.
+- Файлы: `multer` (диск или volume), `sharp` (изображения на сервере для открытых вложений), собственный изоморфный очиститель метаданных `public/media-sanitizer.js` (работает и в браузере перед шифрованием, и на сервере).
+- Клиент: HTML, CSS и vanilla JS из `public/`, без сборщика. Криптография — Web Crypto API и собственная реализация ML-KEM-768 по FIPS 203 (`public/mlkem.js`, сверена с реализацией Node побайтно, независимого аудита не было). Вендорные библиотеки: `socket.io` и `qrcode-generator` (`public/vendor/`).
+- Ключи шифрования клиентов хранит встроенное хранилище `lib/key-store.js` в той же базе: отдельных сервисов для ключей и имён нет. Необязательный отдельный сервис один — `tor-service/` (tor и socat для onion-адреса).
 
 ## Запуск
 
 ```
 npm install
-cp .env.example .env    # заполнить переменные, см. ниже
-npm start                # или: npm run dev (перезапуск при изменении файлов)
-npm test                 # тесты без БД
+cp .env.example .env    # задать SESSION_SECRET, DATABASE_URL, MESSAGE_ENCRYPTION_KEY
+npm start               # или npm run dev (перезапуск при изменении файлов)
 ```
 
-Точка входа — `server.js`. По умолчанию слушает `0.0.0.0:3000`.
+Нужны Node.js 24 и PostgreSQL 13+. По умолчанию сервер слушает `0.0.0.0:3000`; вне production он поднимает HTTPS, если рядом лежат `localhost+1.pem` и `localhost+1-key.pem` (mkcert), иначе HTTP. Для быстрой проверки интерфейса `npm run dev:local -- --port 3101` сам поднимает временный PostgreSQL в Docker ([docs/dev/testing.md](docs/dev/testing.md)).
 
-При старте `server.js` сам создаёт недостающие таблицы и накатывает миграции
-(`initDatabase()`) — отдельный шаг миграции не нужен. Порт открывается только
-после завершения миграций. Миграции идемпотентны: повторный старт ничего не
-перестраивает. `database.sql` — слепок схемы для ручного наката; при
-расхождении верен `server.js`.
+При старте `server.js` сам создаёт схему и накатывает миграции (`initDatabase()`, [docs/dev/migrations.md](docs/dev/migrations.md)); порт открывается только после них. Версия схемы записана в таблице `schema_meta`: если она новее кода, сервер не стартует. Если в базе схема прежней версии 2.0.0, при первом запуске она один раз полностью сбрасывается вместе с файлами вложений: реальных пользователей на тот момент не было ([docs/ops/deploy-railway.md](docs/ops/deploy-railway.md)). Источник истины схемы — `initDatabase()` в `server.js`; `database.sql` — слепок, сгенерированный из него.
 
-Первый запуск этой версии на существующей БД:
-
-- перевыпускает все старые короткие инвайт-коды (уже разосланные коды
-  перестанут работать — участникам нужно отправить новые);
-- обезличивает имена ранее загруженных файлов;
-- физически удаляет строки сообщений, помеченные удалёнными в старой схеме;
-- новые пользователи, комнаты и чаты получают случайные id (старые не меняются).
-
-## Проверка настроек и секретов
-
-При каждом старте сервер печатает в лог отчёт о переменных окружения
-(значения не выводятся): чего не хватает, что похоже на заглушку, короткие
-и одинаковые секреты, `NODE_ENV` на Railway, TLS к базе, volume для
-вложений, режим хранилища ключей. Отдельно узнаёт секреты, утёкшие в
-публичную историю git (сравнение по SHA-256). То же вручную:
+Проверка настроек и секретов выполняется при каждом старте (значения не печатаются) и вручную:
 
 ```
 npm run check-env              # локально, читает .env
 railway run npm run check-env  # с переменными сервиса на Railway
 ```
 
+Развёртывание на Railway шаг за шагом — [docs/ops/stage-0-checklist.md](docs/ops/stage-0-checklist.md) и [docs/ops/deploy-railway.md](docs/ops/deploy-railway.md).
+
 ## Переменные окружения
+
+Полная таблица с рекомендациями, значениями по умолчанию и ротацией — [docs/ops/deploy-railway.md](docs/ops/deploy-railway.md); образец файла — `.env.example`. Главное:
 
 | Переменная | Обязательна | Назначение |
 |---|---|---|
-| `SESSION_SECRET` | да | секрет подписи сессионных cookie, ≥32 символов |
-| `DATABASE_URL` | да | строка подключения к PostgreSQL (13+) |
-| `MESSAGE_ENCRYPTION_KEY` | да | ключ AES-256-GCM (32 байта в base64) для шифрования текста сообщений в БД. Генерация: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"` |
-| `MESSAGE_ENCRYPTION_KEY_PREVIOUS` | нет | старые ключи через запятую — только для расшифровки, для ротации ключа без перешифровки всей таблицы |
-| `NODE_ENV` | нет | `production` — чистый HTTP за прокси хостинга (TLS там), HSTS, Secure-cookie. Иначе — локальный HTTPS через `localhost+1.pem` (mkcert) или HTTP |
-| `PORT`, `HOST` | нет | порт и адрес (по умолчанию `3000`, `0.0.0.0`). Для private network Railway — `HOST=::` |
-| `DB_CA_CERT` | в production — да, кроме случаев ниже | цепочка CA для TLS к Postgres. Без неё сервер в production стартует, только если хост `DATABASE_URL` оканчивается на `.railway.internal` (приватная сеть) или задан `DB_TLS_INSECURE=true` |
-| `DB_TLS_INSECURE` | нет | `true` — осознанно подключаться к Postgres без проверки сертификата |
-| `DUMP_CA` | разовая утилита | `DUMP_CA=true npm start` — печатает цепочку сертификатов БД для `DB_CA_CERT` и завершает процесс |
-| `PG_POOL_MAX` | нет | размер пула соединений (по умолчанию `10`) |
-| `E2EE_KEY_STORE` | нет | где хранить публичные E2EE-ключи: по умолчанию — встроенное хранилище в этой же базе; `remote` — отдельный `e2ee-key-server` |
-| `INTERNAL_KEY_SERVER_SECRET`, `KEY_SERVER_URL` | только при `E2EE_KEY_STORE=remote` | секрет (≥32 символов) и адрес `e2ee-key-server` (на Railway — `http://<сервис>.railway.internal:7420`). Без `E2EE_KEY_STORE=remote` игнорируются |
-| `ANON_SERVICE_URL`, `ANON_SERVICE_SECRET` | нет | адрес и общий секрет `anon-service`. Не задан — встроенный генератор |
-| `UPLOADS_DIR` | нет | папка вложений. По умолчанию — `RAILWAY_VOLUME_MOUNT_PATH`, иначе `./uploads`. Нужен постоянный диск |
-| `UPLOAD_QUOTA_MB` | нет | квота вложений на пользователя (по умолчанию `500`) |
-| `INVITE_TTL_HOURS` | нет | срок жизни инвайт-кода (по умолчанию `168` — неделя) |
-| `ALLOWED_ORIGINS` | нет | дополнительные разрешённые источники (через запятую) для HTTP и WebSocket. Свой хост и onion-адрес разрешены всегда |
-| `POW_DIFFICULTY` | нет | сложность proof-of-work при регистрации, 8..28 бит (по умолчанию `18`, ~0,1 с в браузере с JIT) |
-| `PASSWORD_PEPPER` | нет | секрет для HMAC паролей. После запуска **нельзя менять или терять** — все пароли перестанут сходиться |
-| `HIBP_CHECK` | нет | `true` — проверять новые пароли по базе утечек Have I Been Pwned (k-anonymity). По умолчанию выключено: это запрос к третьей стороне |
-| `ONION_ADDRESS`, `ONION_PORT` | нет | onion-адрес и внутренний порт для `tor-service` — см. `tor-service/README.md` |
-| `CF_IP_RANGES` | нет | переопределение диапазонов IP Cloudflare для доверия `CF-Connecting-IP` |
-| `DEFAULT_MESSAGE_EXPIRY_SECONDS` | нет | если `> 0` — срок жизни новых сообщений, для которых в чате не задан свой |
-| `CLEANUP_INTERVAL_MS` | нет | период удаления просроченных сообщений (по умолчанию `60000`) |
+| `SESSION_SECRET` | да | секрет подписи сессий, не короче 32 символов; из него же выводятся ключи лимитов, CSRF и proof-of-work |
+| `DATABASE_URL` | да | подключение к PostgreSQL; в production хост `*.railway.internal` или заданный `DB_CA_CERT` |
+| `MESSAGE_ENCRYPTION_KEY` | да | ключ слоя шифрования сообщений на сервере (AES-256-GCM, 32 байта в base64); без него сервер не стартует, потеря делает сохранённые сообщения нечитаемыми |
+| `NODE_ENV` | в production — да | `production`: HTTP за прокси хостинга, HSTS, cookie с `Secure` |
+| `UPLOADS_DIR`, `UPLOAD_QUOTA_MB` | нет | папка вложений (на Railway — volume) и квота на 30 суток |
+| `KT_SIGNING_KEY` | нет | ключ подписи журнала ключей; без него журнал выключен. Сброс базы требует нового ключа |
+| `METRICS_TOKEN` | нет | токен для `/metrics`; без него адрес отвечает 404 |
+| `PUBLIC_ORIGIN`, `SECURITY_CONTACT`, `SECURITY_TXT_EXPIRES` | нет | `security.txt` |
+| `HSTS_PRELOAD` | нет | `yes` — HSTS preload (только для своего домена) |
+| `SW_KILL_SWITCH` | нет | `yes` — аварийно снять закрепление кода в service worker |
+| `ONION_ADDRESS`, `ONION_PORT` | нет | onion-адрес и внутренний порт для `tor-service` |
+| `ALLOWED_ORIGINS`, `POW_DIFFICULTY`, `INVITE_TTL_HOURS`, `PG_POOL_MAX`, `DEFAULT_MESSAGE_EXPIRY_SECONDS`, `CLEANUP_INTERVAL_MS`, `CF_IP_RANGES`, `DB_CA_CERT`, `DB_TLS_INSECURE`, `PORT`, `HOST`, `MESSAGE_ENCRYPTION_KEY_PREVIOUS`, `KT_SIGNING_KEY_PREVIOUS` | нет | см. [docs/ops/deploy-railway.md](docs/ops/deploy-railway.md) |
 
-## Безопасность и приватность
+Соединений с базой на экземпляр до 14 при `PG_POOL_MAX=10`: учитывайте `max_connections`.
 
-### Сквозное шифрование (E2EE)
+## Тесты
 
-`public/e2ee.js` — клиент поверх Web Crypto API, без внешних библиотек и
-сборщика. Тот же файл прогоняется в протокольных тестах под Node.
+```
+npm test                  # юнит-тесты, без БД, только Node 24
+npm run test:e2e          # сквозные: настоящий Postgres 16, E2E_DATABASE_URL
+npm run test:e2e:docker   # то же во временном контейнере Docker
+npm run test:all          # юнит, затем сквозные
+```
 
-- **Обмен ключами — PQXDH-гибрид.** X3DH на X25519/Ed25519 плюс ML-KEM-768
-  (`public/mlkem.js`). Подписанный постквантовый prekey обязателен: отката на
-  классический X3DH нет, сервер не может понизить версию протокола.
-- **Сообщения — Sender Keys** (как группы Signal): KDF-цепочка на каждое
-  сообщение, подпись отправителя, AAD с комнатой, отправителем и ключом.
-- **Коды безопасности** (окно «Участники и ключи» в шапке комнаты): 60 цифр,
-  как в Signal. Identity-ключ собеседника закрепляется при первом контакте;
-  смена ключа показывается баннером, и сообщения такому собеседнику не
-  уходят, пока пользователь не примет новый ключ.
-- **Состав комнаты** запоминается на устройстве: вход и выход участников
-  показываются в ленте, при выходе участника свой Sender Key ротируется.
-- **Защита от повтора**: сервер не может выдать старый конверт за новое
-  сообщение.
-- **Паддинг** (Padmé): длина шифротекста не выдаёт длину сообщения.
-- **Файлы** в комнатах: очистка метаданных в браузере → AES-256-GCM со
-  случайным ключом → сервер хранит непрозрачный `.bin` без имени и типа.
-- **Ключи на устройстве** — неизвлекаемые `CryptoKey` в IndexedDB (XSS не
-  может их выгрузить). Signed prekey и PQ-prekey ротируются раз в 7 дней.
-- Канал доставки Sender Key — симметричная цепочка с удалением использованных
-  ключей (прямая секретность).
+Как устроены наборы, как запускать один файл и как проверять руками — [docs/dev/testing.md](docs/dev/testing.md); что проверяет CI и как повторить это локально — [docs/dev/ci.md](docs/dev/ci.md). Тесты-запреты, не дающие вернуться удалённому, — [docs/dev/forbidden-terms.md](docs/dev/forbidden-terms.md).
 
-Честные ограничения E2EE:
+## Безопасность
 
-- код клиента доставляет тот же сервер (свойство любого веб-E2EE);
-- сервер видит метаданные: кто в какой комнате, когда и кому пишет;
-- состав комнаты задаёт сервер — клиент только показывает его изменения;
-- нет post-compromise security для Sender Keys, кроме ротации при выходе
-  участника; ключи истории хранятся на устройстве (иначе после перезагрузки
-  история не открывалась бы);
-- первый контакт — TOFU, пока коды безопасности не сверены;
-- одно устройство на аккаунт;
-- PQ-prekey — один подписанный «last resort» ключ, без одноразовых PQ-prekey.
+- Сообщить об уязвимости: [SECURITY.md](SECURITY.md).
+- Что защищаем, от кого, что видит и хранит сервер: [docs/threat-model.md](docs/threat-model.md) (версия указана в начале).
+- Проверка кода клиента: [docs/VERIFY.md](docs/VERIFY.md).
+- Объём независимого аудита криптографии: [docs/security/audit-scope.md](docs/security/audit-scope.md); аудит ещё не проводился.
+- Дизайн-документы протоколов: [порядок и идентификаторы сообщений](docs/security/message-ordering.md), [скрытие автора](docs/security/sealed-sender.md), [подписанный состав группы](docs/security/signed-membership.md), [прозрачность ключей](docs/security/key-transparency.md).
+- Слой сервера: текст сообщений перед записью в базу шифруется ещё и ключом сервера (`lib/message-crypto.js`, формат `enc:v3` привязан к id сообщения); его снимает тот, у кого есть `MESSAGE_ENCRYPTION_KEY`, поэтому E2EE-слой он не заменяет. Смена ключа — [docs/ops/message-key-rotation.md](docs/ops/message-key-rotation.md).
+- Веб-слой: проверка Origin и CSRF-токен на изменяющих запросах, рукопожатие сокета только со своего Origin, CSP без inline-скриптов, заголовки изоляции, `Referrer-Policy: no-referrer`, вложения с `Cache-Control: no-store`.
 
-### Шифрование в БД
+## Известные ограничения
 
-`lib/message-crypto.js`: текст сообщений (в том числе E2EE-конверты)
-шифруется AES-256-GCM перед записью. Формат `enc:v2` привязан к комнате и
-отправителю через AAD — шифротекст, перенесённый в другую комнату или строку,
-не расшифруется. Ключ выбирается по kid, поэтому его можно ротировать через
-`MESSAGE_ENCRYPTION_KEY_PREVIOUS`. Старые записи `enc:v1` читаются.
+Полный список — раздел 8 [модели угроз](docs/threat-model.md). Главное:
 
-Не защищает от компрометации самого сервера приложения: у кого есть ключ и
-процесс, тот расшифрует незашифрованные E2EE сообщения (например, чат с
-ботом) так же, как сервер.
-
-### Веб-безопасность
-
-- CSRF-токен + проверка Origin на всех небезопасных запросах.
-- Рукопожатие Socket.io — только со своего Origin (защита от Cross-Site
-  WebSocket Hijacking); сессионная кука `SameSite=Lax`.
-- CSP с nonce, без `unsafe-inline`; `worker-src`, `connect-src` ограничены
-  своим хостом; HSTS в production; `Referrer-Policy: no-referrer`.
-- Rate limiting: по IP (с проверкой Cloudflare), по аккаунту (вход, API,
-  сокеты), лимиты на запрос чужих ключей.
-- Регистрация защищена proof-of-work (`lib/pow.js`, `public/pow-worker.js`).
-- Пароли: политика по NIST SP 800-63B (8..256 символов, блок-лист частых
-  паролей, без правил состава), bcrypt поверх HMAC — без обрезки на 72 байтах,
-  старые хэши перехэшируются при входе.
-
-### Анонимность и метаданные
-
-- Анонимный вход без почты и телефона; данные удаляются при выходе или после
-  выбранного срока неактивности (30 минут после закрытия вкладки, 1 день или
-  7 дней, не дольше 7 дней от создания). На устройстве при этом стираются
-  ключи E2EE и локальные настройки, сервер присылает `Clear-Site-Data: "cache"`.
-- Метаданные снимаются со всех разрешённых типов файлов: EXIF/GPS/XMP,
-  GPS-дорожки видео (GoPro, DJI, Apple), теги MP3/OGG/WAV, PDF. Имена файлов
-  обезличиваются.
-- Вложения отдаются с `Cache-Control: no-store`.
-- Случайные id пользователей, комнат и чатов — по ним нельзя восстановить
-  порядок и время регистрации.
-- Отметки о прочтении можно отключить (тогда не видны и чужие — как в Signal).
-- Удалённые и исчезающие сообщения удаляются физически.
-- Инвайт-код — 26 символов (≈130 бит), со сроком жизни, лимитом участников,
-  перевыпуском и одобрением вступления (включено по умолчанию, в том числе для
-  существующих комнат). Новый участник не видит историю до одобрения.
-- Onion-сервис (`tor-service/`) с определением onion-соединений по отдельному
-  внутреннему порту.
-- Удаление аккаунта — полное: сообщения, файлы, ключи, сессии.
-
-### Известные ограничения
-
-- Метаданные PDF внутри сжатых object streams (PDF 1.5+) не затираются.
-- Поиск по тексту работает только по сообщениям без E2EE (последние 500).
-- Лимиты и одноразовые токены proof-of-work живут в памяти процесса — при
-  нескольких репликах нужен общий стор.
-- Rust-сервисы (`e2ee-key-server`, `anon-service`) собираются через свои
-  Dockerfile; см. их README.
+- код клиента доставляет тот же сервер: злонамеренный сервер может выдать изменённый клиент; сверка и закрепление в service worker помогают заметить подмену, но не предотвращают адресную подмену при первом заходе;
+- сервер видит метаданные: кто подключён и когда, в каких группах состоит, названия групп, время сообщений до минуты, размеры; автор сообщения скрыт только на хранении, а в момент отправки известен;
+- первый контакт с собеседником — на доверии, пока вы не сверили коды безопасности; журнал ключей работает без внешнего свидетеля и необязателен;
+- ключи цепочек и seed ML-KEM лежат в IndexedDB открытыми байтами, а история читается, пока ключи не стёрты;
+- одно устройство на аккаунт, восстановления нет; чат с ботом не шифруется сквозным шифрованием;
+- PDF с метаданными в сжатом виде отклоняется, а картинки внутри PDF сохраняют свои метаданные;
+- звук внутри видеоконтейнера не распознаётся, а тип зашифрованного вложения проверяет только клиент отправителя;
+- платформенные журналы хостинга видят IP вместе с номерами групп в адресах запросов;
+- одна реплика сервера: лимиты `/api` и список сокетов живут в памяти процесса ([docs/ops/scaling.md](docs/ops/scaling.md));
+- независимого аудита криптографии не было.
 
 ## Структура проекта
 
 ```
-server.js                  # backend: маршруты, Socket.io, initDatabase()
-lib/
-  message-crypto.js        # шифрование текста сообщений в БД (enc:v2, AAD, ротация)
-  passwords.js             # хэширование и политика паролей
-  pow.js                   # proof-of-work для регистрации
-  security-utils.js        # проверка Origin, инвайт-коды, обезличенные имена, семейство User-Agent
-  invites.js               # параметры приглашений и заявок
-  chat-settings.js         # общий таймер исчезающих сообщений комнаты
-  anon-lifetime.js         # срок жизни анонимного аккаунта по неактивности
-  disappearing-messages.js # таймеры и физическое удаление сообщений
-  metadata-stripper.js     # очистка метаданных вложений на сервере
-  privacy.js               # заголовки приватности, санитайзинг текста
-  e2ee-proxy.js            # прокси к e2ee-key-server (с проверкой общей комнаты)
-  e2ee-groups.js           # участники комнаты + доставка Sender Key
-  tor-support.js           # onion-порт, Onion-Location
-public/
-  index.html, style.css, script.js
-  theme.js                 # тёмная/светлая тема без мигания при загрузке
-  icons.js                 # SVG-спрайт иконок (Lucide, ISC) и window.Icons
-  icons/, manifest.webmanifest  # значки и манифест PWA
-  vendor/qrcode.js         # qrcode-generator (MIT) для QR-кода приглашения
-  e2ee.js                  # клиентский E2EE (PQXDH + Sender Keys)
-  mlkem.js                 # ML-KEM-768 (FIPS 203) на чистом JS
-  media-sanitizer.js       # очистка метаданных (браузер + сервер)
-  pow-worker.js            # Web Worker для proof-of-work
-e2ee-key-server/           # Rust-сервис публичных E2EE-ключей
-anon-service/              # Rust-сервис анонимных имён (необязательный)
-tor-service/               # onion-сервис для Railway (необязательный)
-test/                      # тесты (node test/*.test.js)
-database.sql               # слепок схемы БД
+server.js                  # сервер: маршруты, Socket.io, initDatabase()
+lib/                       # серверные модули (чистые функции и тонкие слои над БД)
+  key-store.js, e2ee-keys.js, e2ee-groups.js, e2ee-envelope.js   # публичные ключи, ключи комнат, форма конверта
+  kt-log.js, kt-service.js, kt-routes.js                         # журнал ключей
+  membership-certs.js, invites.js                                # подписанный состав, приглашения
+  author-tag.js, message-ids.js, message-order-schema.js, coarse-time.js  # скрытие автора, порядок и время
+  message-crypto.js, message-retag.js, derive-key.js             # слой шифрования сервера, ключи от секретов
+  anon-lifetime.js, anon-activity.js, session-store.js, csrf.js, pow.js, pg-limits.js  # аккаунты, сессии, лимиты
+  disappearing-messages.js, chat-settings.js, upload-quota.js, metadata-stripper.js    # таймеры, квоты, вложения
+  bot-guide.js, privacy.js, security-utils.js, security-txt.js, tor-support.js         # бот, заголовки, onion
+  client-manifest.js, client-sri.js, sw-kill-switch.js           # манифест клиента и service worker
+  env-check.js, legacy-reset.js, metrics.js, advisory-locks.js, tx-retry.js, log-error.js, proto.js
+  jobs/, routes/, migrations/                                    # фоновые задачи, вынесенные маршруты, миграции
+public/                    # клиент без сборщика
+  index.html, style.css, script.js, theme.js, icons.js, icons/, manifest.webmanifest
+  e2ee.js, mlkem.js        # клиентское E2EE: PQXDH, Sender Keys; ML-KEM-768 на чистом JS
+  media-sanitizer.js, pow-worker.js
+  sw.js, verify.html, verify.js, verify.css   # service worker и страница сверки файлов
+  lib/                     # модули клиента: порядок сообщений, состав группы (membership*.js), журнал ключей
+                           # (kt*.js), Ed25519, политика E2EE, приглашения, срок аккаунта, поиск, service worker
+  vendor/                  # socket.io и qrcode-generator
+scripts/                   # check-env, dev-local, release-manifest, verify-deployment, update-sri,
+                           # retag-messages, audit-check
+tor-service/               # onion-сервис (tor и socat), необязателен
+docs/                      # документация, оглавление — docs/README.md
+  security/, ops/, dev/, design/, legal/, threat-model.md, VERIFY.md
+test/                      # юнит-тесты (test/*.test.js) и сквозные (test/e2e/)
+.github/workflows/         # CI, CodeQL, релиз, ежедневный сторож
+database.sql               # слепок схемы (генерируется из initDatabase)
+SECURITY.md                # политика сообщений об уязвимостях
 ```
 
 ## API
 
-Аутентификация — сессионная cookie; на все небезопасные методы нужен заголовок
-`X-CSRF-Token`, совпадающий с cookie `csrf_token`, и Origin своего сайта.
+Сессионная cookie; на изменяющие запросы нужны заголовок `X-CSRF-Token`, совпадающий с cookie `csrf_token`, и Origin своего сайта. Клиент передаёт признак версии `proto`: слишком старая страница получает 400 с кодом `client-outdated`.
 
-- `GET /api/pow/challenge?purpose=register|register-anon`
-- `POST /api/register`, `POST /api/register/anonymous` (с `pow: {token, nonce}`),
-  `POST /api/login`, `POST /api/logout`, `GET /api/auth`, `GET /api/user`,
-  `POST /api/user/avatar-color`, `POST /api/user/privacy` (`{readReceipts}`),
-  `POST /api/change-password`, `POST /api/account/delete` (`{password?}`)
-- `GET /api/chats` (с `pinned`, `muted`, `archived`, `member_count`,
-  `expiry_seconds`), `POST /api/chats`, `DELETE /api/chats/:chatId`,
-  `POST /api/chats/:chatId/prefs` (`{pinned?, muted?, archived?}`),
-  `POST /api/chats/:chatId/expiry` (`{seconds}`: 0/300/3600/86400/604800),
-  `GET /api/chats/:chatId/participants`
-- Приглашения: `GET /api/chats/invite/:chatId`,
-  `POST /api/chats/:chatId/invite/rotate` (`{ttlSeconds, maxMembers, requireApproval}`),
-  `POST /api/chats/:chatId/invite/disable`, `POST /api/chats/join/preview`,
-  `POST /api/chats/join` (с одобрением → `{pending, requestId}`)
-- Заявки: `GET /api/chats/:chatId/join-requests`,
-  `POST /api/join-requests/:id/approve`, `POST /api/join-requests/:id/deny`,
-  `GET /api/join-requests/mine`, `DELETE /api/join-requests/:id`
-- `GET /api/security-events`
-- `GET /api/messages/:chatId?before=<id>&limit=<1..200>`,
-  `POST /api/chats/:chatId/read`, `POST /api/messages`,
-  `PUT /api/messages/:messageId`, `DELETE /api/messages/:messageId`,
-  `POST /api/messages/file` (для E2EE: поля `encrypted=true` и `envelope` до файла)
-- `POST /api/reactions`, `DELETE /api/reactions/:messageId/:emoji`
-- `GET /api/search?q=`
-- `POST /api/messages/:messageId/set-expiry`,
-  `POST /api/chats/:chatId/set-default-expiry`, `GET /api/chats/:chatId/settings`
-- E2EE: `PUT /api/keys/identity`, `PUT /api/keys/signed-prekey`,
-  `PUT /api/keys/pq-prekey`, `POST /api/keys/one-time-prekeys`,
-  `GET /api/keys/one-time-prekeys/count`, `GET /api/keys/identities?ids=`,
-  `GET /api/keys/bundle/:targetUserId`, `DELETE /api/keys`,
-  `POST /api/keys/key-shares`, `GET /api/keys/key-shares/:chatId`
-- `GET /uploads/:filename` — только участникам чата, вступившим до сообщения
-- Socket.io: `joinChat` (клиент → сервер); `newMessage`, `messageEdited`,
-  `messageDeleted`, `messagesRead`, `e2eeKeyShare`, `roomMembersChanged`,
-  `chatExpiryChanged`, `joinRequestsChanged`, `joinRequestDecided`,
-  `chatListChanged` (сервер → клиент)
+- Аккаунт: `GET /api/pow/challenge`, `POST /api/register/anonymous`, `GET /api/auth`, `GET /api/user`, `POST /api/user/lifetime`, `POST /api/user/privacy`, `POST /api/logout`, `POST /api/account/delete`
+- Чаты: `GET /api/chats`, `POST /api/chats`, `DELETE /api/chats/:chatId` (выход из группы, `?deleteMessages=1`), `POST /api/chats/:chatId/prefs`, `POST /api/chats/:chatId/expiry`, `GET /api/chats/:chatId/settings`, `GET /api/chats/:chatId/participants`
+- Приглашения и заявки: `GET /api/chats/invite/:chatId`, `POST /api/chats/:chatId/invite/rotate`, `POST /api/chats/:chatId/invite/disable`, `POST /api/chats/join/preview`, `POST /api/chats/join`, `GET /api/chats/:chatId/join-requests`, `POST /api/join-requests/:id/approve`, `POST /api/join-requests/:id/deny`, `GET /api/join-requests/mine`, `DELETE /api/join-requests/:id`
+- Состав группы: `GET` и `POST /api/chats/:chatId/member-certs`
+- Сообщения: `GET /api/messages/:chatId` (курсор `beforeSeq`), `POST /api/chats/:chatId/read`, `POST /api/messages` (в группу — только E2EE-конверт, открытый текст принимает лишь чат с ботом), `PUT` и `DELETE /api/messages/:messageId`, `POST /api/messages/file`, `POST /api/messages/:messageId/set-expiry`, `POST /api/reactions`, `DELETE /api/reactions/:messageId/:emoji`
+- Ключи: `PUT /api/keys/identity`, `PUT /api/keys/signed-prekey`, `PUT /api/keys/pq-prekey`, `POST /api/keys/one-time-prekeys`, `POST` и `DELETE /api/keys/pq-one-time-prekeys`, `GET /api/keys/one-time-prekeys/count`, `GET /api/keys/identities`, `GET /api/keys/bundle/:targetUserId`, `DELETE /api/keys`, `POST /api/keys/key-shares`, `GET /api/keys/key-shares/:chatId`, `POST /api/keys/key-requests`, `GET /api/keys/key-requests/:chatId`, `POST /api/keys/key-requests/done`
+- Журнал ключей: `GET /api/kt/head`, `/api/kt/roots`, `/api/kt/proof`, `/api/kt/self`
+- Файлы: `GET /uploads/:filename` — только участникам чата, вступившим до сообщения
+- Служебные: `GET /healthz`, `/readyz`, `/metrics` (по токену), `/client-manifest.json`, `/.well-known/security.txt`
+- Socket.io: клиент отправляет `joinChat`; сервер присылает `newMessage`, `messageEdited`, `messageDeleted`, `messagesRead`, `e2eeKeyShare`, `e2eeKeyRequest`, `roomMembersChanged`, `chatExpiryChanged`, `chatListChanged`, `joinRequestsChanged`, `joinRequestDecided`
 
-## Тесты
+## Документация
 
-Без Postgres и Rust-сервисов — фейковые БД/сервер в памяти, чистый Node:
+Оглавление — [docs/README.md](docs/README.md): модель угроз, дизайн протоколов, эксплуатация, юридические черновики, документы для разработчиков.
 
-```
-npm test                            # все наборы ниже
-node test/mlkem.test.js            # ML-KEM-768 и SHA-3 против реализации Node
-node test/e2ee.protocol.test.js    # PQXDH, Sender Keys, коды безопасности,
-                                    # смена ключа, повтор, паддинг, файлы, ротация
-node test/media-sanitizer.test.js  # очистка метаданных всех форматов + фазз
-node test/server-routes.test.js    # прокси ключей, участники, key-shares
-node test/server-libs.test.js      # шифрование в БД, пароли, заголовки
-node test/security-utils.test.js   # Origin, инвайт-коды, имена файлов
-node test/pow.test.js              # proof-of-work и onion-порт
-node test/lib.test.js              # metadata-stripper, исчезающие сообщения
-```
+## Лицензия
+
+MIT.
