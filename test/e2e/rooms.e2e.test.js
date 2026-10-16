@@ -38,7 +38,8 @@ test('полный цикл комнаты с сокетами', async (t) => {
     assert.strictEqual(invite.requireApproval, true);
     assert.strictEqual(invite.memberCount, 1);
     const preview = await guest.joinPreview(invite.code);
-    assert.deepStrictEqual(preview, { success: true, roomName: 'Команда', memberCount: 1, requireApproval: true });
+    // Предпросмотр по коду отдаёт roomId и сертификат приглашения (null - в комнате с одобрением); снимка нет (signed-membership.md, 7.2).
+    assert.deepStrictEqual(preview, { success: true, roomId, roomName: 'Команда', memberCount: 1, requireApproval: true, inviteCert: null });
     const wrong = await guest.post('/api/chats/join/preview', { code: 'Z'.repeat(26) });
     assert.deepStrictEqual(wrong.body, { success: false, message: INVALID_INVITE_MESSAGE });
 

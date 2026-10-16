@@ -212,8 +212,11 @@ test('граница видимости: вышедший и вернувший�
     await p.owner.send(p.ownerChat.id, 'сообщение владельца');
     await p.member.leave(p.memberChat.id);
     assert.strictEqual((await suite.query('SELECT count(*)::int AS n FROM user_left_rooms WHERE user_id = $1 AND room_id = $2', [p.member.user.id, p.roomId])).rows[0].n, 1, 'у вышедшего остались сообщения - комната записана');
-    // Возвращается по тому же коду через заявку: новая строка участника с новой границей.
-    const pending = await p.member.join(p.code);
+    // Возвращается через заявку: новая строка участника с новой границей. Код после выхода участника обновлён
+    // сервером (поворот приглашения при выходе, signed-membership.md, вопрос 17) - берётся новый.
+    const freshCode = (await p.owner.invite(p.ownerChat.id)).code;
+    assert.notStrictEqual(freshCode, p.code);
+    const pending = await p.member.join(freshCode);
     await p.owner.approve(pending.requestId);
     const memberChat = (await p.member.chats()).find(c => c.room_id === p.roomId);
     const bound = Number((await suite.query('SELECT visible_from_seq FROM room_participants WHERE room_id = $1 AND user_id = $2', [p.roomId, p.member.user.id])).rows[0].visible_from_seq);

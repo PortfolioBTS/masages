@@ -4269,6 +4269,14 @@ a.file-attachment:hover {
     margin-top: 8px;
 }
 
+/* Сообщение от отправителя вне подтверждённого состава: пометка рядом с именем. */
+.message-author .message-author-flag {
+    margin-left: 6px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-2);
+}
+
 .kt-alert {
     display: flex;
     flex-direction: column;

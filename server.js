@@ -2997,10 +2997,17 @@ async function createJoinRequest(roomId, userId) {
     if (pending.n >= MAX_PENDING_JOIN_REQUESTS_PER_ROOM) {
         return { error: 'В эту группу слишком много заявок. Попробуйте позже.' };
     }
-    const inserted = (await queryWithRetry(
-        'INSERT INTO join_requests (room_id, user_id) VALUES ($1, $2) ON CONFLICT (room_id, user_id) DO NOTHING RETURNING id',
-        [roomId, userId]
-    )).rows[0];
+    let inserted;
+    try {
+        inserted = (await queryWithRetry(
+            'INSERT INTO join_requests (room_id, user_id) VALUES ($1, $2) ON CONFLICT (room_id, user_id) DO NOTHING RETURNING id',
+            [roomId, userId]
+        )).rows[0];
+    } catch (err) {
+        // Комнату снесли между проверкой кода и заявкой (вышел последний участник): код больше не действует.
+        if (err && err.code === '23503') return { error: INVALID_INVITE_MESSAGE };
+        throw err;
+    }
     if (!inserted) {
         // Параллельный такой же запрос успел раньше — это та же заявка.
         const concurrent = await dbGet('SELECT id FROM join_requests WHERE room_id = $1 AND user_id = $2', [roomId, userId]);
@@ -3073,11 +3080,11 @@ app.post('/api/chats/:chatId/invite/rotate', async (req, res) => {
             if (member.rows.length === 0) return null;
             const updated = await client.query(
                 `UPDATE rooms SET code = $1, code_expires_at = NOW() + $2::integer * INTERVAL '1 second',
-                        invite_max_members = $5, invite_require_approval = $6, invite_disabled = FALSE,
-                        invite_cert = $7, invite_snap = $8, invite_actor_id = $9
+                        invite_max_members = $4, invite_require_approval = $5, invite_disabled = FALSE,
+                        invite_cert = $6, invite_snap = $7, invite_actor_id = $8
                  WHERE id = $3
                  RETURNING code, code_expires_at, invite_max_members, invite_require_approval`,
-                [generateInviteCode(), ttlSeconds, chat.room_id, userId, settings.maxMembers, settings.requireApproval,
+                [generateInviteCode(), ttlSeconds, chat.room_id, settings.maxMembers, settings.requireApproval,
                     verdict ? Buffer.from(verdict.raw) : null, verdict ? Buffer.from(verdict.snap) : null, verdict ? userId : null]
             );
             return updated.rows[0];

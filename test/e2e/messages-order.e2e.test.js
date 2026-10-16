@@ -799,7 +799,7 @@ test('вход по коду против выхода последнего уч
         const { code } = await owner.rotateInvite(ownerChat.id, { requireApproval: false });
         await owner.send(ownerChat.id, 'было');
         const responses = await allResponses([
-            guest.post('/api/chats/join', { code }),
+            guest.joinRaw(code),
             later(jitter(round), () => owner.del(`/api/chats/${ownerChat.id}`)),
         ]);
         const room = (await suite.query('SELECT id FROM rooms WHERE id = $1', [ownerChat.room_id])).rows;

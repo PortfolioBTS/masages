@@ -1371,6 +1371,8 @@ async function decryptMessageInPlace(message, roomId) {
                 if (res.file) message._file = res.file;
                 message._ts = res.ts; // время отправителя для показа (раздел 9.5)
                 message._senderId = res.senderId; // автор - только из расшифровки (9.4)
+                // Отправитель вне подтверждённого состава (signed-membership.md, 9.4): сообщение помечается.
+                message._unverified = res.unverifiedSender === true;
             } else {
                 message.text = e2eeFailureText(res.reason);
                 message._e2eeFailed = true;
@@ -3796,6 +3798,11 @@ async function rotateInviteCode() {
         return;
     }
     if (chatId !== currentChatId) return;
+    if (!signed) {
+        // Приглашение с одобрением подписанного сертификата не имеет: секрет прежней ссылки больше не нужен (9.3).
+        const client = await getReadyE2eeClient();
+        if (client) client.dropInviteSecret(roomId).catch(() => {});
+    }
     const signing = signed ? await loadInviteSigning(chatId, roomId) : { linkSecret: null, inviter: null };
     renderInvite({
         ...(inviteState || {}),
@@ -5779,6 +5786,10 @@ function createMessageElement(message, animate) {
         const authorDiv = document.createElement('div');
         authorDiv.className = 'message-author';
         authorDiv.textContent = roomAuthorLabel(message.room_id, message._senderId);
+        if (message._unverified) {
+            authorDiv.classList.add('unverified');
+            authorDiv.appendChild(iconText('span', 'message-author-flag', 'shield-alert', 'не подтверждён', { size: 'sm' }));
+        }
         contentDiv.appendChild(authorDiv);
     }
     if (message.reply_to) {

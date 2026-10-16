@@ -51,6 +51,8 @@ function pqKey(identity, keyId) {
 // Регистрирует identity, SPK и PQ last-resort через настоящие маршруты.
 async function enroll(client, { pq = true } = {}) {
     const identity = newIdentity();
+    // Подписанный состав: допуски и приглашения этого клиента подписываются тем же identity-ключом.
+    client.identity = identity;
     await client.ok(client.put('/api/keys/identity', {
         identity_signing_key: b64(identity.signPub), identity_dh_key: b64(identity.dhPub),
     }), 'identity');
@@ -259,6 +261,7 @@ test('bundle без SPK — 404 и одноразовые PQ-ключи не р�
     const target = suite.client({ name: 'цель без SPK' });
     await target.registerAnon();
     const id = newIdentity();
+    target.identity = id;   // допуски участников подписывает этот же ключ (подписанный состав)
     await target.ok(target.put('/api/keys/identity', { identity_signing_key: b64(id.signPub), identity_dh_key: b64(id.dhPub) }), 'identity');
     await target.ok(target.post('/api/keys/pq-one-time-prekeys', { keys: [pqKey(id, 1)] }), 'загрузка');
     const { callers } = await roomWith(target, 1);

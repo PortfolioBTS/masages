@@ -1081,5 +1081,5 @@
         };
     }
 
-    return Object.freeze({ createMembershipClient, parseViewField, parseCertItems, normalizeTrusted, normalizeRemoved, normalizeIntent, names, REF_HOWS, HOWS });
+    return Object.freeze({ createMembershipClient, parseViewField, parseCertItems, normalizeRevouch, MAX_REVOUCH_TASKS, normalizeTrusted, normalizeRemoved, normalizeIntent, names, REF_HOWS, HOWS });
 });
