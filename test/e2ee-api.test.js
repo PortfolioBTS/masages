@@ -61,6 +61,20 @@ const CLIENT_METHODS = [
     'getSafetyNumber',
     'markPeerVerified',
     'acceptPeerIdentityChange',
+
+    // Прозрачность ключей
+    'checkTransparency',
+    'runKtChecks',
+    'getPeerTransparency',
+    'overrideLogMismatch',
+    'checkApplicantKey',
+    'getTransparencyAlerts',
+    'dismissTransparencyAlerts',
+    'ackSelfEntries',
+    'getPendingLogKey',
+    'acceptLogKey',
+    'startTransparency',
+    'stopTransparency',
 ];
 
 // Имена, которые модуль экспортирует, и их тип.

@@ -117,6 +117,10 @@
 //     комнату; вытесняется запись с наименьшим ts): первое появление сообщения,
 //     очищенное хранилище или вытеснение дают принять любую версию, прошедшую
 //     проверки mid и ts. Таблица повторов ограничена 5000 итерациями на ключ.
+//   - Прозрачность ключей (docs/security/key-transparency.md, public/lib/kt-client.js): ключи
+//     собеседников сверяются с журналом, который ведёт сервер, а своё состояние в журнале клиент
+//     сканирует сам. Журнал не защищает изолированную группу, которой целиком показан поддельный
+//     мир (в том числе ключ журнала на первой синхронизации), и не защищает от подмены кода клиента.
 //   - Порядок и пропажу сообщений не проверяем: сервер может переставить,
 //     задержать или скрыть сообщение (раздел 9.6 контракта).
 
@@ -235,6 +239,10 @@
     const REASON_OUTDATED = 'у собеседника устаревшая версия E2EE';
     const REASON_IDENTITY_CHANGED = 'ключ безопасности собеседника изменился — нужно подтверждение';
     const REASON_KEY_UNBOUND = 'ключ участника не принят: идентификатор не выведен из отправителя';
+    const REASON_LOG_MISMATCH = 'ключа собеседника нет в журнале ключей — нужна сверка кода безопасности';
+    // Сколько ждём проверок журнала внутри ensureRoomSession и списка участников: дольше — работаем без
+    // результата (проверка продолжается в фоне и повторяется), отправка не должна зависеть от журнала.
+    const KT_WAIT_MS = 8000;
 
     // ===================== Ошибки =====================
 
@@ -968,6 +976,11 @@
                 return call('/api/keys/identities?ids=' + list.join(','), 'GET');
             },
             async deleteKeys() { return call('/api/keys', 'DELETE'); },
+            // Журнал ключей (docs/security/key-transparency.md, 6.5).
+            async ktHead() { return call('/api/kt/head', 'GET'); },
+            async ktRoots(gen, from, limit) { return call(`/api/kt/roots?gen=${Number(gen)}&from=${Number(from)}&limit=${Number(limit)}`, 'GET'); },
+            async ktProof(userId, gen, epoch) { return call(`/api/kt/proof?user=${Number(userId)}&gen=${Number(gen)}&epoch=${Number(epoch)}`, 'GET'); },
+            async ktSelf(gen, from, limit) { return call(`/api/kt/self?gen=${Number(gen)}&from=${Number(from)}&limit=${Number(limit)}`, 'GET'); },
             async getParticipants(chatId) { return call('/api/chats/' + encodeURIComponent(chatId) + '/participants', 'GET'); },
             async postKeyShares(chatId, shares) { return call('/api/keys/key-shares', 'POST', { chatId, shares }); },
             async getKeyShares(chatId) { return call('/api/keys/key-shares/' + encodeURIComponent(chatId), 'GET'); },
@@ -990,6 +1003,20 @@
             }
         }
         throw new Error('E2EE: модуль ML-KEM (mlkem.js) не загружен');
+    }
+
+    // Клиент журнала ключей: в браузере — глобальный NyxoKtClient (public/lib/kt-client.js подключается
+    // до e2ee.js), в Node — соседний модуль. Нет модуля — клиент работает без журнала.
+    function resolveKtClient() {
+        if (typeof NyxoKtClient !== 'undefined' && NyxoKtClient) return NyxoKtClient;
+        if (typeof require === 'function') {
+            try {
+                return require('./lib/kt-client.js');
+            } catch {
+                return null;
+            }
+        }
+        return null;
     }
 
     // ===================== Форматы конвертов =====================
@@ -1094,13 +1121,37 @@
     // отдаются, чтобы будущая версия могла добавлять поля, а старая — работать.
     const MAX_EXT_CHARS = 2048;
 
+    // kt: { g, e, h, s } — последняя проверенная подписанная голова журнала отправителя (7.5):
+    // поколение, эпоха, голова (32 байта) и подпись (64 байта) в base64. Строгий разбор — null при порче.
+    function parseKtGossip(raw) {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+        const isU32 = (n) => Number.isInteger(n) && n >= 0 && n <= 0xFFFFFFFF;
+        if (!isU32(raw.g) || raw.g < 1 || !isU32(raw.e)) return null;
+        if (!decodeFixed(raw.h, 32) || !decodeFixed(raw.s, 64)) return null;
+        return { g: raw.g, e: raw.e, h: raw.h, s: raw.s };
+    }
+
     function parseSkdmExt(raw) {
         if (raw === undefined) return {};
         if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
         let json;
         try { json = JSON.stringify(raw); } catch { return null; }
-        if (json.length > MAX_EXT_CHARS) return null;
+        // kt — справочная подсказка, а не условие ключа: при порче или превышении предела ext поле отбрасывается
+        // с предупреждением, SKDM принимается (строго разбирается только prev).
+        let ktDropped = false;
+        if (json.length > MAX_EXT_CHARS) {
+            const { kt: ignored, ...rest } = raw;
+            let restJson;
+            try { restJson = JSON.stringify(rest); } catch { return null; }
+            if (restJson.length > MAX_EXT_CHARS || raw.kt === undefined) return null;
+            ktDropped = true;
+        }
         const ext = {};
+        if (raw.kt !== undefined) {
+            const kt = ktDropped ? null : parseKtGossip(raw.kt);
+            if (kt) ext.kt = kt;
+            else console.warn('E2EE: поле kt в SKDM испорчено или не помещается в ext и отброшено');
+        }
         if (raw.prev !== undefined) {
             const prev = raw.prev;
             if (!prev || typeof prev !== 'object' || Array.isArray(prev)) return null;
@@ -1200,9 +1251,17 @@
         return out;
     }
 
+    // Ключа собеседника нет в журнале (mismatch) — отдельный статус, пока код безопасности не сверен
+    // (markPeerVerified) и пользователь не продолжил явно (overrideLogMismatch). pending журнала статус
+    // не меняет: это «ключ ждёт подтверждения», а не нарушение.
+    function logExcluded(pin) {
+        return Boolean(pin && pin.kt && pin.kt.status === 'mismatch' && !pin.verified && !pin.kt.override);
+    }
+
     function identityStatus(pin) {
         if (!pin) return 'unknown';
         if (pin.pending) return 'changed';
+        if (logExcluded(pin)) return 'log-mismatch';
         return pin.verified ? 'verified' : 'unverified';
     }
 
@@ -1253,6 +1312,41 @@
             return run;
         }
 
+        // Журнал ключей: состояние и проверки — в public/lib/kt-client.js. Сеть вне withLock; в блокировке
+        // клиент журнала только ставит задачи (kt:queue) и пишет результаты (7.6).
+        const ktModule = resolveKtClient();
+        const ktLog = ktModule ? ktModule.createLogClient({
+            storage, transport, withLock, now,
+            getUserId: () => userId,
+            getIdentity: async () => {
+                const identity = await storage.get('identity');
+                return identity ? { signPub: identity.signPub, dhPub: identity.dhPub, createdHour: identity.createdHour } : null;
+            },
+            onAlert: options.onTransparencyAlert,
+            manifestKey: options.ktManifestKey,
+            genEpochs: options.ktGenEpochs,
+            graceEpochs: options.ktGraceEpochs,
+            epochSeconds: options.ktEpochSeconds,
+            schedule: options.ktSchedule,
+        }) : null;
+        const ktOn = () => Boolean(ktLog) && ktLog.supported();
+
+        // Проверки журнала с пределом ожидания: ответ сервера не должен задерживать отправку.
+        async function runKtChecksBounded() {
+            if (!ktOn()) return;
+            let timer = null;
+            try {
+                await Promise.race([
+                    ktLog.runKtChecks(),
+                    new Promise((resolve) => { timer = setTimeout(resolve, KT_WAIT_MS); if (timer.unref) timer.unref(); }),
+                ]);
+            } catch (err) {
+                console.warn('E2EE: проверка журнала ключей не удалась:', err);
+            } finally {
+                if (timer) clearTimeout(timer);
+            }
+        }
+
         async function nextKeyId() {
             const cur = (await storage.get('nextKeyId')) || Math.floor(now() / 1000);
             await storage.set('nextKeyId', cur + 1);
@@ -1280,6 +1374,9 @@
             identity = {
                 dhPub: b64encode(dhKp.pub), dhPriv: dhKp.priv,
                 signPub: b64encode(signKp.pub), signPriv: signKp.priv,
+                // Час создания (с точностью до часа, только на устройстве): диалог «чужое обязательство в
+                // журнале» показывает, что старше этого момента, — вероятно прежние ключи аккаунта (7.4).
+                createdHour: hourOf(now()),
             };
             await storage.set('identity', identity);
             return identity;
@@ -1945,6 +2042,7 @@
             if (!res || !res.data || res.data.success !== true) {
                 throw keyServerError('identity-ключи', res);
             }
+            return res.data;
         }
 
         // 409 от key-server значит "identity не зарегистрирован" (например,
@@ -1967,6 +2065,7 @@
                 pq: await storage.get('pqpk'),
             }));
             const idTag = identity.signPub + ':' + identity.dhPub;
+            let registration = null;
             if ((await storage.get('up:identity')) !== idTag) {
                 // Новый identity (новая установка): ключи прошлой установки на
                 // сервере бесполезны — их приватных частей больше нет. Особенно
@@ -1975,7 +2074,7 @@
                 if (typeof transport.deleteKeys === 'function') {
                     try { await transport.deleteKeys(); } catch { /* best effort */ }
                 }
-                await putIdentity(identity);
+                registration = await putIdentity(identity);
                 // Секретные части одноразовых ключей прошлой установки тоже
                 // бесполезны (на сервере их публичные половины стёрты), а
                 // лежать в хранилище им незачем. До записи up:identity: если
@@ -1984,6 +2083,13 @@
                 await storage.set('up:identity', idTag);
                 await storage.delete('up:spk');
                 await storage.delete('up:pq');
+            }
+            // Регистрация в журнале ключей (key-transparency.md, 6.2): повторный PUT тех же ключей ничего не
+            // меняет, а в ответе — nonce и SKT моих текущих ключей (их же регистрирует и identity, внесённая
+            // до включения журнала). Раньше PUT шёл только при смене identity.
+            if (ktOn()) {
+                if (!registration) registration = await putIdentity(identity);
+                await withLock(() => ktLog.noteOwnLocked(registration.kt));
             }
             if ((await storage.get('up:spk')) !== spk.keyId) {
                 await putWithIdentityRetry(() => transport.putSignedPrekey({
@@ -2285,7 +2391,7 @@
                     if (!chunk.includes(id)) continue;
                     const signPub = canonicalPubKey(item.identity_signing_key);
                     const dhPub = canonicalPubKey(item.identity_dh_key);
-                    if (signPub && dhPub) out.set(id, { signPub, dhPub });
+                    if (signPub && dhPub) out.set(id, { signPub, dhPub, kt: item.kt });
                 }
             }
             return out;
@@ -2299,14 +2405,23 @@
             const me = Number(userId);
             const ids = normalizeIds(userIds).filter(id => id !== me);
             const server = await fetchServerIdentities(ids);
+            await withLock(async () => {
+                for (const id of ids) {
+                    const s = server && server.get(id);
+                    if (!s) continue;
+                    await reconcilePinLocked(id, s.signPub, s.dhPub);
+                    // Ключ собеседника проверит журнал: в блокировке — только задача (7.6).
+                    if (ktOn()) await ktLog.notePeerLocked(id, s.kt);
+                }
+            });
+            await runKtChecksBounded();
             const statuses = await withLock(async () => {
                 const out = [];
                 for (const id of ids) {
-                    const s = server && server.get(id);
-                    const status = s
-                        ? await reconcilePinLocked(id, s.signPub, s.dhPub)
-                        : identityStatus(await storage.get('peer:' + id));
-                    out.push({ userId: id, status });
+                    const pin = await storage.get('peer:' + id);
+                    const entry = { userId: id, status: identityStatus(pin) };
+                    if (pin && pin.kt) entry.kt = pin.kt.status;
+                    out.push(entry);
                 }
                 return out;
             });
@@ -2379,6 +2494,82 @@
             }
             return true;
         }
+
+        // ---- Прозрачность ключей (docs/security/key-transparency.md, 10) ----
+
+        // { status: 'ok' | 'unavailable' | 'inconsistent', peers: [{ userId, status }], self: 'ok' | 'alert' | 'unknown' }.
+        async function checkTransparency() {
+            await ensureLocal();
+            if (!ktLog) return { status: 'unavailable', peers: [], self: 'unknown' };
+            return ktLog.checkTransparency();
+        }
+
+        // Проверки журнала сейчас (вне блокировки; повтор при сетевой ошибке идёт сам).
+        async function runKtChecks() {
+            await ensureLocal();
+            if (ktOn()) await ktLog.runKtChecks();
+        }
+
+        // Статус журнала для ключа собеседника: 'ok' | 'pending' | 'unavailable' | 'mismatch' | null (не проверялся).
+        async function getPeerTransparency(peerId) {
+            const pin = await storage.get('peer:' + Number(peerId));
+            return pin && pin.kt ? { status: pin.kt.status, reason: pin.kt.reason || null, override: Boolean(pin.kt.override) } : null;
+        }
+
+        // Пользователь явно продолжает общение с собеседником, чьего ключа нет в журнале: он снова адресат рассылки
+        // (со следующей ротацией), статус и баннер остаются.
+        async function overrideLogMismatch(peerId) {
+            await ensureLocal();
+            return withLock(async () => {
+                const name = 'peer:' + Number(peerId);
+                const pin = await storage.get(name);
+                if (!pin || !pin.kt || pin.kt.status !== 'mismatch') return false;
+                pin.kt.override = true;
+                await storage.set(name, pin);
+                return true;
+            });
+        }
+
+        // Проверка ключа заявителя до вступления (одобряющий поручается за него): данные из join-requests.
+        async function checkApplicantKey(userIdOfApplicant, identity) {
+            await ensureLocal();
+            if (!ktOn() || !identity) return { status: 'unavailable' };
+            const signPub = canonicalPubKey(identity.signingKey);
+            const dhPub = canonicalPubKey(identity.dhKey);
+            if (!signPub || !dhPub) return { status: 'unavailable' };
+            const result = await ktLog.checkKeys(Number(userIdOfApplicant), signPub, dhPub, identity.kt);
+            return result.retry ? { status: 'unavailable' } : { status: result.status, reason: result.reason || null };
+        }
+
+        async function getTransparencyAlerts() {
+            await ensureLocal();
+            return ktLog ? ktLog.getAlerts() : [];
+        }
+
+        async function dismissTransparencyAlerts(kinds) {
+            await ensureLocal();
+            if (ktLog) await ktLog.dismissAlerts(kinds);
+        }
+
+        // «Это были мои прежние ключи»: гасит тревогу self-foreign-entry для выбранных обязательств.
+        async function ackSelfEntries(list) {
+            await ensureLocal();
+            if (ktLog) await ktLog.ackSelfEntries(list);
+        }
+
+        async function getPendingLogKey() {
+            await ensureLocal();
+            return ktLog ? ktLog.getPendingLogKey() : null;
+        }
+
+        async function acceptLogKey() {
+            await ensureLocal();
+            return ktLog ? ktLog.acceptLogKey() : false;
+        }
+
+        // Плановые проверки раз в час (закрытие эпохи) и самомониторинг; запускает интерфейс после init().
+        function startTransparency() { if (ktOn()) ktLog.startTimers(); }
+        function stopTransparency() { if (ktLog) ktLog.stopTimers(); }
 
         // ---- Попарный канал: я — отправитель key-share ----
 
@@ -2560,12 +2751,17 @@
                 // отправитель и так хранит в cachedKeys.
                 const fromStart = Boolean(own.origin && own.origin.chainKey0)
                     && Array.isArray(own.entitled) && own.entitled.includes(Number(peerId));
+                // ext: прежний ключ (prev) и последняя проверенная подписанная голова журнала (kt, 7.5).
+                const ext = {};
+                if (own.prev) ext.prev = own.prev;
+                const gossip = ktOn() ? await ktLog.gossipHead() : null;
+                if (gossip) ext.kt = gossip;
                 const skdm = buildSkdm(roomId, {
                     senderKeyId: own.senderKeyId,
                     chainKey: fromStart ? own.origin.chainKey0 : own.chainKey,
                     iteration: fromStart ? 0 : own.nextIteration,
                     signingPublicKey: own.signingPublicKey,
-                }, own.prev ? { prev: own.prev } : null);
+                }, ext);
                 const aesKey = await hkdf(messageKey, ZERO32, 'nyxo-e2ee-skdm-v2', 32);
                 const aad = skdmAadV2(roomId, userId, peerId, identity.signPub, identity.dhPub, session.peerSignPub, session.peerDhPub);
                 const { iv, ct } = await aesGcmEncrypt(aesKey, utf8encode(JSON.stringify(skdm)), aad);
@@ -2909,6 +3105,8 @@
                 const keyId = await installSenderKeyLocked(roomId, senderId, opened.skdm, { eph: h.eph, n: env.n });
                 if (keyId === null) return 'unbound';
                 if (onInstalled) onInstalled(keyId);
+                // Голова журнала отправителя (7.5): сверка — вне блокировки, в блокировке только задача.
+                if (ktOn() && opened.skdm.ext && opened.skdm.ext.kt) await ktLog.noteGossipLocked(opened.skdm.ext.kt);
                 return 'applied';
             });
         }
@@ -2921,7 +3119,7 @@
         // entitled — участники (id), которые были в комнате при создании ключа:
         // им ключ выдаётся с начала эпохи (prepareShareForPeer). prev — { id, final }
         // прежнего ключа: уходит в ext каждого SKDM нового ключа.
-        async function newOwnSenderKeyState({ roomId, entitled = [], prev = null } = {}) {
+        async function newOwnSenderKeyState({ roomId, entitled = [], prev = null, logExcluded = [] } = {}) {
             const signKp = await generateEd25519();
             const chainKey = b64encode(randomBytes(32));
             const signingPublicKey = b64encode(signKp.pub);
@@ -2937,6 +3135,10 @@
                 createdAt: now(),
                 origin: { chainKey0: chainKey },
                 entitled: normalizeIds(entitled).filter(id => id !== Number(userId)),
+                // Участники, исключённые из рассылки журналом ключей (log-mismatch) к моменту создания ключа:
+                // решение о ротации из-за mismatch принимается по статусу, а не по отметкам рассылки (sharedWith2),
+                // которые стирает запрос ключа или принятие нового ключа.
+                logExcluded: normalizeIds(logExcluded),
                 archive: [],
             };
             if (prev) state.prev = prev;
@@ -2987,6 +3189,15 @@
             return out;
         }
 
+        // Из ids — те, кого журнал ключей исключил из рассылки (в блокировке).
+        async function logExcludedIdsLocked(ids) {
+            const out = [];
+            for (const id of ids) {
+                if (logExcluded(await storage.get('peer:' + Number(id)))) out.push(Number(id));
+            }
+            return out;
+        }
+
         // Идентификатор своего ключа выведен из (комната, я, ключ подписи)?
         async function ownKeyBoundLocked(roomId, own) {
             try { return (await deriveSenderKeyId(roomId, userId, own.signingPublicKey)) === own.senderKeyId; } catch { return false; }
@@ -3007,9 +3218,12 @@
         // ничего не отправлено, закрывать нечего и prev не пишется.
         async function rotateRoomKeyLocked(roomId, entitled) {
             const existing = await loadOwnSenderKeyLocked(roomId);
-            const ids = entitled || await knownMemberIdsLocked(roomId);
+            const known = await knownMemberIdsLocked(roomId);
+            const excluded = await logExcludedIdsLocked(known);
+            // Исключённые журналом не читают нового ключа с начала эпохи.
+            const ids = (entitled || known).filter(id => !excluded.includes(Number(id)));
             const prev = existing && existing.nextIteration > 0 ? { id: existing.senderKeyId, final: existing.nextIteration - 1 } : null;
-            const next = await newOwnSenderKeyState({ roomId, entitled: ids, prev });
+            const next = await newOwnSenderKeyState({ roomId, entitled: ids, prev, logExcluded: excluded });
             if (existing) {
                 // Свой прежний ключ всегда в индексе: на устройстве с ключом, созданным
                 // до привязки идентификатора, он мог быть не записан, а свои старые
@@ -3073,12 +3287,13 @@
 
             const membership = await withLock(async () => {
                 // Новый ключ с начала эпохи читают все, кто в комнате сейчас.
-                const entitledNow = current.filter(p => p.id !== me).map(p => p.id);
+                const excludedNow = await logExcludedIdsLocked(current.filter(p => p.id !== me).map(p => p.id));
+                const entitledNow = current.filter(p => p.id !== me && !excludedNow.includes(p.id)).map(p => p.id);
                 let own = await loadOwnSenderKeyLocked(roomId);
                 let rotated = false;
                 let rotationReason = null;
                 if (!own) {
-                    own = await newOwnSenderKeyState({ roomId, entitled: entitledNow });
+                    own = await newOwnSenderKeyState({ roomId, entitled: entitledNow, logExcluded: excludedNow });
                     await storage.set(ownKeyName(roomId), own);
                     // Свой ключ в индексе отправителей — до первой отправки.
                     await writeIndexLocked(roomId, own.senderKeyId, userId);
@@ -3131,6 +3346,22 @@
             const { statuses, serverKnown } = await checkPeersWithServer(others.map(p => p.id));
             const changedIds = new Set(statuses.filter(s => s.status === 'changed').map(s => s.userId));
 
+            // Журнал ключей (7.3): собеседник с mismatch исключается из рассылки, а свой ключ комнаты ротируется,
+            // если он мог получить текущий: решение по самому статусу — в состоянии ключа записано, кто был исключён
+            // при его создании. Ротация идёт в каждой общей комнате при её ensureRoomSession.
+            const logMismatchIds = new Set(await withLock(() => logExcludedIdsLocked(others.map(p => p.id))));
+            let logRotated = false;
+            if (logMismatchIds.size > 0) {
+                logRotated = await withLock(async () => {
+                    const ownNow = await loadOwnSenderKeyLocked(roomId);
+                    const excludedAtCreation = new Set(ownNow && Array.isArray(ownNow.logExcluded) ? ownNow.logExcluded : []);
+                    if ([...logMismatchIds].every(id => excludedAtCreation.has(id))) return false;
+                    await rotateRoomKeyLocked(roomId, others.filter(p => !logMismatchIds.has(p.id)).map(p => p.id));
+                    return true;
+                });
+            }
+            const logMismatches = [];
+
             const warnings = [];
             const identityChanges = [];
             const shares = [];
@@ -3142,6 +3373,11 @@
 
             for (const peer of others) {
                 if (changedIds.has(peer.id)) { noteChanged(peer); continue; }
+                if (logMismatchIds.has(peer.id)) {
+                    logMismatches.push({ userId: peer.id, username: peer.username });
+                    warnings.push({ userId: peer.id, reason: REASON_LOG_MISMATCH });
+                    continue;
+                }
                 // У собеседника нет identity на сервере — bundle заведомо 404.
                 // Не запрашиваем его: каждый запрос bundle расходует лимит на
                 // пару (5 в час), и после нескольких открытий комнаты ключ не
@@ -3195,9 +3431,10 @@
                 ok, warnings,
                 newMembers: membership.newMembers,
                 removedMembers: membership.removedMembers,
-                rotated: membership.rotated,
-                rotationReason: membership.rotationReason,
+                rotated: membership.rotated || logRotated,
+                rotationReason: membership.rotationReason || (logRotated ? 'log-mismatch' : null),
                 identityChanges,
+                logMismatches,
                 peers: others.length,
                 keyHolders,
             };
@@ -3226,6 +3463,8 @@
                 }
             }
             await settleKeyRequests(chatId, roomId, Array.from(installed));
+            // Головы журнала из принятых SKDM сверяются в фоне.
+            if (ktOn() && applied > 0) ktLog.runKtChecks().catch(err => console.warn('E2EE: сверка голов журнала не удалась:', err));
             const result = { applied, failed, identityChanges: changes };
             // Предупреждения — только когда есть о чём предупреждать.
             if (warnings.length > 0) result.warnings = warnings;
@@ -3638,6 +3877,20 @@
             getSafetyNumber,
             markPeerVerified,
             acceptPeerIdentityChange,
+
+            // Прозрачность ключей
+            checkTransparency,
+            runKtChecks,
+            getPeerTransparency,
+            overrideLogMismatch,
+            checkApplicantKey,
+            getTransparencyAlerts,
+            dismissTransparencyAlerts,
+            ackSelfEntries,
+            getPendingLogKey,
+            acceptLogKey,
+            startTransparency,
+            stopTransparency,
         };
     }
 
@@ -3680,6 +3933,7 @@
             // Разбор SKDM (поле ext)
             parseSkdm,
             parseSkdmExt,
+            parseKtGossip,
             buildSkdm,
             MAX_EXT_CHARS,
 

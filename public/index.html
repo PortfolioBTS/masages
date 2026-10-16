@@ -79,6 +79,13 @@
                 <svg class="icon icon-sm" aria-hidden="true"><use href="#i-hourglass"></use></svg>
                 <span id="anon-note-text"></span>
             </button>
+            <div id="kt-banner" class="banner banner-warning kt-banner hidden" role="alert">
+                <svg class="icon" aria-hidden="true"><use href="#i-alert-triangle"></use></svg>
+                <span id="kt-banner-text" class="banner-text"></span>
+                <div class="banner-actions">
+                    <button id="kt-banner-btn" class="banner-btn btn btn-sm btn-secondary" type="button">Подробнее</button>
+                </div>
+            </div>
             <div class="search-container">
                 <input type="search" id="search-input" placeholder="Поиск чатов" aria-label="Поиск по названиям чатов" aria-controls="chats-list" autocomplete="off">
             </div>
@@ -415,6 +422,19 @@
         </div>
     </div>
 
+    <div id="kt-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="kt-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h3 id="kt-title">Журнал ключей</h3>
+                <button class="close-modal icon-btn" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+            </div>
+            <div class="modal-body">
+                <p class="members-intro">Журнал ключей — запись, по которой устройство проверяет, что сервер не подменяет ключи шифрования. Он не защищает от сервера, который показывает разным группам разные журналы с самого начала, и от подмены кода самого приложения.</p>
+                <ul id="kt-alert-list" class="members-list" aria-live="polite"></ul>
+            </div>
+        </div>
+    </div>
+
     <div id="requests-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="requests-title">
         <div class="modal-content">
             <div class="modal-header">
@@ -548,6 +568,8 @@
     <script src="media-sanitizer.js"></script>
     <script src="lib/mime-policy.js"></script>
     <script src="lib/ed25519-strict.js"></script>
+    <script src="lib/kt.js"></script>
+    <script src="lib/kt-client.js"></script>
     <script src="lib/membership.js"></script>
     <script src="e2ee.js"></script>
     <script src="vendor/qrcode.js"></script>

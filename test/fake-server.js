@@ -40,7 +40,13 @@ function evictOldest(list, match, max) {
     for (let i = list.length - 1; i >= 0; i--) if (victims.has(list[i])) list.splice(i, 1);
 }
 
-function makeFakeServer() {
+// opts.kt — журнал ключей (test/fake-kt.js): модель либо функция userId -> модель (у каждого пользователя
+// свой «мир», для проверок двуличия); регистрации идут во все модели из opts.ktAll. Без opts.kt сервер
+// ведёт себя, как до журнала: ни kt в ответах, ни маршрутов /api/kt/*.
+function makeFakeServer(opts = {}) {
+    const ktOpt = opts.kt || null;
+    const ktModels = !ktOpt ? [] : (typeof ktOpt === 'function' ? (opts.ktAll || []) : [ktOpt]);
+    const ktOf = (userId) => (!ktOpt ? null : (typeof ktOpt === 'function' ? ktOpt(userId) : ktOpt));
     const identityKeys = new Map(); // userId -> {identity_signing_key, identity_dh_key}
     const signedPrekeys = new Map(); // userId -> {key_id, public_key, signature}
     const pqPrekeys = new Map(); // userId -> {key_id, public_key, signature}
@@ -119,7 +125,9 @@ function makeFakeServer() {
                     pqOneTimePrekeys.delete(userId);
                 }
                 identityKeys.set(userId, { identity_signing_key: body.identity_signing_key, identity_dh_key: body.identity_dh_key });
-                return { status: 200, data: { success: true } };
+                if (!ktOpt) return { status: 200, data: { success: true } };
+                for (const model of ktModels) model.register(userId, body);
+                return { status: 200, data: { success: true, kt: ktOf(userId).hintFor(userId) } };
             },
             async putSignedPrekey(body) {
                 if (shadow) return { status: 200, data: { success: true } };
@@ -251,6 +259,7 @@ function makeFakeServer() {
                     data: {
                         identity_signing_key: identity.identity_signing_key,
                         identity_dh_key: identity.identity_dh_key,
+                        ...(ktOpt ? { kt: ktOf(userId).hintFor(targetUserId) } : {}),
                         signed_prekey: spk,
                         one_time_prekey: otpk,
                         pq_one_time_prekey: pqOne,
@@ -269,7 +278,10 @@ function makeFakeServer() {
                     if (id !== userId && !sharesRoom(userId, id)) continue;
                     const identity = identityKeys.get(effectiveKeysOwner(id));
                     if (!identity) continue;
-                    out.push({ user_id: id, identity_signing_key: identity.identity_signing_key, identity_dh_key: identity.identity_dh_key });
+                    out.push({
+                        user_id: id, identity_signing_key: identity.identity_signing_key, identity_dh_key: identity.identity_dh_key,
+                        ...(ktOpt ? { kt: ktOf(userId).hintFor(id) } : {}),
+                    });
                 }
                 return { status: 200, data: { success: true, identities: out } };
             },
@@ -349,6 +361,11 @@ function makeFakeServer() {
                 return { status: 200, data: { success: true, roomId, shares: mine.map(s => ({ senderId: s.senderId, ciphertext: s.ciphertext })) } };
             },
         };
+        // Журнал ключей (opts.kt): маршруты /api/kt/* от имени userId; «теневой» транспорт их не видит.
+        // Мир пользователя выбирается при каждом вызове: тест может переключить его на другой журнал.
+        if (ktOpt && !shadow) {
+            for (const name of ['ktHead', 'ktRoots', 'ktProof', 'ktSelf']) t[name] = (...args) => ktOf(userId).transportFor(userId)[name](...args);
+        }
         return t;
     }
 
