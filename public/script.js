@@ -975,7 +975,7 @@ function membershipHowLine(roomId, entry) {
     if (entry.status === 'self') {
         if (entry.how === 'approved') return `Вас одобрил(а) ${by}`;
         if (entry.how === 'invite') return `Вы вошли по приглашению ${by}`;
-        return 'Вы создали группу';
+        return entry.how === 'creator' ? 'Вы создали группу' : '';
     }
     if (entry.status === 'unconfirmed') {
         return entry.duplicateKeys

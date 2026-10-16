@@ -2548,6 +2548,8 @@
                     const found = members.find(p => Number(p.id) === peerId);
                     return found && typeof found.username === 'string' ? found.username : '';
                 });
+                // Ключи участника сменились: ключи комнат, которые он получил по прежним ключам, меняются везде (9.1).
+                await rotateCommonRoomsLocked(null, [id]);
                 const list = (await storage.get('pendingShares:' + id)) || [];
                 await storage.delete('pendingShares:' + id);
                 return list;
@@ -3339,6 +3341,28 @@
             return next;
         }
 
+        // События уровня человека (signed-membership.md, 9.1): смена ключа участника (changed), log-mismatch, принятие нового
+        // ключа проверяются во ВСЕХ общих комнатах, а не только в той, где они замечены. Проверка локальная (без сети): по
+        // сохранённым V, списку сервера и журналу доставок собственного ключа каждой комнаты. Новый ключ уходит получателям
+        // при следующем ensureRoomSession этой комнаты; до того он только создан - старый, известный подозреваемому, не живёт.
+        async function rotateCommonRoomsLocked(exceptRoomId, personIds) {
+            const rotated = [];
+            const seen = new Set();
+            for (const personId of personIds) {
+                for (const roomId of await membership.roomsWithMemberLocked(Number(personId))) {
+                    if (seen.has(roomId) || String(roomId) === String(exceptRoomId)) continue;
+                    seen.add(roomId);
+                    const own = await loadOwnSenderKeyLocked(roomId);
+                    if (!own) continue;
+                    const reason = await membership.journalReasonStoredLocked(roomId, own.senderKeyId, Number(userId));
+                    if (!reason) continue;
+                    await rotateRoomKeyLocked(roomId, await membership.currentRecipientsLocked(roomId, Number(userId)));
+                    rotated.push({ roomId, reason });
+                }
+            }
+            return rotated;
+        }
+
         // После ротации нужно вызвать ensureRoomSession, чтобы разослать
         // новый ключ, — и сделать это ДО отправки сообщений новым ключом:
         // участникам, которых не было в комнате при создании ключа, key-share
@@ -3498,6 +3522,9 @@
                 });
             }
             const logMismatches = [];
+            // Те же события в остальных общих комнатах (9.1).
+            const personEvents = [...changedIds, ...logMismatchIds];
+            if (personEvents.length > 0) await withLock(() => rotateCommonRoomsLocked(roomId, personEvents));
 
             const warnings = [];
             const identityChanges = [];

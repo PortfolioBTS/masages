@@ -262,7 +262,9 @@
             const prevSelf = V.get(me.id);
             V.set(me.id, {
                 id: me.id, username: me.username, memkey: meMemkey, status: 'self',
-                how: prevSelf ? prevSelf.how : 'creator', by: prevSelf ? prevSelf.by : null,
+                // Нет записи V: создатель (noteRoomCreated пишет её сразу) либо вошедший, чьё намерение входа ещё не прошло
+                // якорную проверку, - тогда способ входа неизвестен, а не «создал группу».
+                how: prevSelf ? prevSelf.how : (intent ? 'manual' : 'creator'), by: prevSelf ? prevSelf.by : null,
                 certHash: prevSelf ? prevSelf.certHash : null, since: prevSelf ? prevSelf.since : minute,
             });
 
@@ -1039,6 +1041,20 @@
             return rooms;
         }
 
+        // Правило ротации по сохранённому состоянию комнаты, без сети и без перепроверки сертификатов (9.1, уровень человека):
+        // получатели - V в S без изменившегося ключа и без log-mismatch, журнал - собственного ключа комнаты.
+        async function journalReasonStoredLocked(roomId, senderKeyId, meId) {
+            const list = await storage.get(names.delivered(roomId, senderKeyId));
+            if (!Array.isArray(list) || list.length === 0) return null;
+            const members = await storage.get(names.members(roomId));
+            const S = new Map((Array.isArray(members) ? members : []).map(p => [Number(p.id), p]));
+            const trusted = await readTrusted(roomId);
+            const V = new Map(trusted.list.map(e => [e.id, e]));
+            const pins = await loadPins(list.map(pair => pair && pair.id).filter(isId));
+            const recipients = await currentRecipientsLocked(roomId, meId);
+            return journalRotationReasonLocked(roomId, senderKeyId, recipients, S, V, pins);
+        }
+
         // Комнаты, где участник указан в списке сервера (для проверки правила ротации на уровне человека, 9.1).
         async function roomsWithMemberLocked(peerId) {
             const out = [];
@@ -1076,7 +1092,7 @@
             computeViewLocked, encodeView, noteViewLocked, runViewChecks,
             noteRoomCreated, signApproval, signInvite, getInviteSecret, dropInviteSecret, prepareJoin, completeJoin,
             cancelJoinIntent, getJoinIntent, trustMember, vouchForMember, publishDueRevouches, nextRevouchDueMs,
-            getMembers, isTrustedMember, currentRecipientsLocked, trustAfterAcceptLocked, roomsWithMemberLocked,
+            getMembers, isTrustedMember, currentRecipientsLocked, trustAfterAcceptLocked, roomsWithMemberLocked, journalReasonStoredLocked,
             forgetRoomLocked, noteServerInvite, meLocked,
         };
     }

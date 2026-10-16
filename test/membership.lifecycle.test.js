@@ -434,6 +434,31 @@ const statusOf = (result, id) => result.members.find(m => m.id === id).status;
         assert.ok(w.server._keyShares.some(s => s.recipientId === b.id), 'принявший новый ключ участник снова получатель');
     });
 
+    await test('события уровня человека проверяются во всех общих комнатах: смена ключа участника в одной комнате ротирует свой ключ и в другой (локально, без сети)', async () => {
+        const w = makeWorld();
+        const a = await w.addUser(1001);
+        const b = await w.addUser(1002);
+        const attacker = await w.addUser(1666);
+        const second = 101;
+        const a2 = { ...a, room: second, chatId: 1001 * 10 + 1 + 1000 };
+        const b2 = { ...b, room: second, chatId: 1002 * 10 + 1 + 1000 };
+        await w.createRoom(a);
+        await w.approve(a, b); await w.ensure(a);
+        await w.createRoom(a2);
+        await w.approve(a2, b2); await w.ensure(a2);
+        const keyName = (room) => 'senderKey:' + room + ':' + a.id;
+        const before = [(await w.stored(a, keyName(ROOM))).senderKeyId, (await w.stored(a, keyName(second))).senderKeyId];
+        w.server.evil.impersonate(b.id, attacker.id);
+        // Сессия только первой комнаты: во второй ротация происходит по тому же событию.
+        const result = await w.ensure(a);
+        assert.deepStrictEqual(result.identityChanges.map(c => c.userId), [b.id]);
+        assert.notStrictEqual((await w.stored(a, keyName(ROOM))).senderKeyId, before[0]);
+        assert.notStrictEqual((await w.stored(a, keyName(second))).senderKeyId, before[1], 'ключ второй комнаты тоже ротирован');
+        const archived = await a.storage.keys('skArchive:' + second + ':');
+        assert.ok(archived.length >= 1, 'прежний ключ второй комнаты ушёл в архив, свои сообщения остаются читаемыми');
+        w.noViolations();
+    });
+
     await test('entitled - пары recipients на момент создания ключа: подтверждённый позже читает ключ с текущей позиции, а не с начала эпохи', async () => {
         const w = makeWorld();
         const a = await w.addUser(1001);
