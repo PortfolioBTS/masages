@@ -8,7 +8,7 @@
 
 | Кто вы | Читайте |
 |---|---|
-| Владелец проекта: разворачиваете и настраиваете | [Чек-лист этапа 0](ops/stage-0-checklist.md), затем [деплой на Railway](ops/deploy-railway.md) |
+| Владелец проекта: разворачиваете и настраиваете | [Чек-лист владельца](ops/stage-0-checklist.md) (раздел 8 — сводка выката), затем [деплой на Railway](ops/deploy-railway.md) |
 | Хотите понять, что защищено, а что нет | [Модель угроз](threat-model.md) |
 | Нашли уязвимость | [SECURITY.md](../SECURITY.md) |
 | Аудитор криптографии (внешний или заказчик аудита) | [Объём аудита](security/audit-scope.md), затем [модель угроз](threat-model.md) и дизайны `security/*` |
@@ -43,7 +43,7 @@
 
 | Документ | О чём |
 |---|---|
-| [ops/stage-0-checklist.md](ops/stage-0-checklist.md) | Что владелец делает вручную: секреты, очистка истории git, защита `main`, Cloudflare, юрист |
+| [ops/stage-0-checklist.md](ops/stage-0-checklist.md) | Что владелец делает вручную: секреты, очистка истории git, защита `main`, Cloudflare, юрист; сводный чек-лист выката (переменные, первый запуск со сбросом базы, смоук, релиз и сторож, откат, аварийные переключатели) |
 | [ops/deploy-railway.md](ops/deploy-railway.md) | Деплой на Railway: переменные, первый запуск со сбросом БД, смоук, откат, ротация секретов, мониторинг |
 | [ops/message-key-rotation.md](ops/message-key-rotation.md) | Смена `MESSAGE_ENCRYPTION_KEY`: перетегирование и перешифровка сообщений комнат (`scripts/retag-messages.js`) |
 | [ops/branch-protection.md](ops/branch-protection.md) | Защита `main`, обязательные проверки, настройки GitHub |
