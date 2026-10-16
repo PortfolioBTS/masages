@@ -193,7 +193,7 @@ try {
     fs.unlinkSync(probe);
     console.log(`[Uploads] Папка вложений: ${UPLOADS_DIR}`);
 } catch (err) {
-    console.error(`[Uploads] Нет доступа на запись в ${UPLOADS_DIR}: ${err.message} — загрузка файлов работать не будет`);
+    logError(`[Uploads] Нет доступа на запись в ${UPLOADS_DIR}, загрузка файлов работать не будет`, err);
 }
 
 // Удаляет файлы вложений с диска по их file_url ("/uploads/<name>").
@@ -204,7 +204,9 @@ function removeUploadedFiles(fileUrls) {
         const filename = path.basename(url);
         if (!SAFE_FILENAME_RE.test(filename)) continue;
         fs.promises.unlink(path.join(UPLOADS_DIR, filename)).catch(err => {
-            if (err.code !== 'ENOENT') console.error('[Uploads] Не удалось удалить файл', filename, '-', err.message);
+            // Имя файла в лог не идёт (по нему находят сообщение): logError убирает
+            // путь и из текста системной ошибки.
+            if (err.code !== 'ENOENT') logError('[Uploads] Не удалось удалить файл вложения', err);
         });
     }
 }
@@ -617,7 +619,7 @@ metrics.attachRuntime({ pool, io });
 // failover Postgres, сетевой сбой) — необработанное событие 'error',
 // которое завершает весь процесс.
 pool.on('error', (err) => {
-    console.error('[DB] Ошибка простаивающего соединения:', err.message);
+    logError('[DB] Ошибка простаивающего соединения', err);
 });
 
 async function dbGet(query, params = []) {
@@ -667,7 +669,7 @@ const GLOBAL_DEFAULT_EXPIRY_SECONDS = Math.max(0, Number(process.env.DEFAULT_MES
 // транзакцией. Таблицы со своими init*Schema (ключи E2EE, key-share, таймеры
 // исчезающих сообщений) создаются в lib/ рядом с кодом, который ими владеет.
 async function initDatabase() {
-    await maybeDumpCa().catch(err => { console.error('[DUMP_CA] Ошибка:', err.message); process.exit(1); });
+    await maybeDumpCa().catch(err => { logError('[DUMP_CA] Ошибка', err); process.exit(1); });
 
     // Схема версии 2.0.0 (аккаунты с email и паролем) — сбросить до создания
     // таблиц: реальных пользователей нет, а переносить тестовые данные незачем.
@@ -1268,7 +1270,7 @@ io.on('connection', async (socket) => {
             }
             socket.join(roomKey);
         } catch (err) {
-            console.error('joinChat error:', err);
+            logError('joinChat error', err);
         }
     });
 
@@ -1279,7 +1281,7 @@ io.on('connection', async (socket) => {
         const chats = await dbAll('SELECT id, room_id FROM chats WHERE user_id = $1', [userId]);
         socket.join(chats.map(c => getSocketRoomKey(c.id, c.room_id)));
     } catch (err) {
-        console.error('Socket auto-join error:', err.message);
+        logError('Socket auto-join error', err);
     }
 });
 
@@ -1512,7 +1514,7 @@ function readMessageText(stored, row) {
         // AAD не собирается только у строки без обязательных полей (комната без
         // id или тега, чат без владельца, осиротевшее сообщение) — показать её
         // всё равно некому и нечем.
-        console.error('[MessageCrypto] Нет AAD для сообщения:', err.message);
+        logError('[MessageCrypto] Нет AAD для сообщения', err);
         return UNREADABLE_TEXT;
     }
 }
@@ -1828,7 +1830,7 @@ app.post('/api/user/privacy', async (req, res) => {
         if (!row) return res.json({ success: false, message: 'Пользователь не найден' });
         res.json({ success: true, readReceipts: row.read_receipts });
     } catch (error) {
-        console.error('Update privacy error:', error);
+        logError('Update privacy error', error);
         res.json({ success: false, message: 'Ошибка сохранения настроек' });
     }
 });
@@ -2043,7 +2045,7 @@ app.get('/api/chats', async (req, res) => {
             })),
         });
     } catch (error) {
-        console.error('Get chats error:', error);
+        logError('Get chats error', error);
         res.json({ success: false, message: 'Ошибка загрузки чатов' });
     }
 });
@@ -2251,7 +2253,7 @@ app.get('/api/messages/:chatId', async (req, res) => {
             },
         });
     } catch (error) {
-        console.error('Get messages error:', error);
+        logError('Get messages error', error);
         res.json({ success: false, message: 'Ошибка загрузки сообщений' });
     }
 });
@@ -2314,7 +2316,7 @@ function unarchiveForRecipients(chat, senderId) {
         : dbAll('UPDATE chats SET archived = FALSE WHERE id = $1 AND archived AND NOT muted RETURNING user_id', [chat.id]);
     query.then(
         (rows) => { for (const row of rows) notifyChatListChanged(row.user_id); },
-        (err) => console.error('[Chats] Не удалось вернуть чат из архива:', err.message)
+        (err) => logError('[Chats] Не удалось вернуть чат из архива', err)
     );
 }
 
@@ -2380,7 +2382,7 @@ function scheduleBotReply(chat, userText) {
             }
             unarchiveForRecipients(chat, null);
         } catch (e) {
-            console.error('Bot error:', e);
+            logError('Bot error', e);
         }
     }, BOT_REPLY_DELAY_MS);
 }
@@ -2756,7 +2758,7 @@ app.post('/api/messages', async (req, res) => {
         if (chat.is_bot) scheduleBotReply(chat, safeText);
     } catch (error) {
         if (respondIfDeadlock(res, error)) return;
-        console.error('Send message error:', error);
+        logError('Send message error', error);
         res.json({ success: false, message: 'Ошибка отправки' });
     }
 });
@@ -2800,7 +2802,7 @@ app.post('/api/chats', async (req, res) => {
         res.json({ success: true, chat: { id: chatId, name, avatar, online: 0, is_bot: 0, room_id: roomId, invite_code: roomCode } });
     } catch (error) {
         if (respondIfDeadlock(res, error)) return;
-        console.error('Create chat error:', error);
+        logError('Create chat error', error);
         res.json({ success: false, message: 'Ошибка создания чата' });
     }
 });
@@ -3024,7 +3026,7 @@ app.get('/api/chats/invite/:chatId', async (req, res) => {
         if (own.error) return res.json({ success: false, message: own.error });
         res.json({ success: true, ...describeInvite(own.room, own.room.member_count) });
     } catch (error) {
-        console.error('Get invite error:', error);
+        logError('Get invite error', error);
         res.json({ success: false, message: 'Ошибка получения кода' });
     }
 });
@@ -3099,7 +3101,7 @@ app.post('/api/chats/:chatId/invite/rotate', async (req, res) => {
         });
     } catch (error) {
         if (respondIfDeadlock(res, error)) return;
-        console.error('Rotate invite error:', error);
+        logError('Rotate invite error', error);
         res.json({ success: false, message: 'Ошибка обновления кода' });
     }
 });
@@ -3125,7 +3127,7 @@ app.post('/api/chats/:chatId/invite/disable', async (req, res) => {
         if (!room) return res.json({ success: false, message: 'Чат не найден' });
         res.json({ success: true });
     } catch (error) {
-        console.error('Disable invite error:', error);
+        logError('Disable invite error', error);
         res.json({ success: false, message: 'Ошибка отключения кода' });
     }
 });
@@ -3152,7 +3154,7 @@ app.post('/api/chats/join/preview', joinUserLimiter, joinIpLimiter, async (req, 
             inviteCert: room.invite_cert ? Membership.toB64(new Uint8Array(room.invite_cert)) : null,
         });
     } catch (error) {
-        console.error('Join preview error:', error);
+        logError('Join preview error', error);
         res.json({ success: false, message: 'Ошибка проверки кода' });
     }
 });
@@ -3235,7 +3237,7 @@ app.post('/api/chats/join', joinUserLimiter, joinIpLimiter, async (req, res) => 
         res.json(reply);
     } catch (error) {
         if (respondIfDeadlock(res, error)) return;
-        console.error('Join chat error:', error);
+        logError('Join chat error', error);
         res.json({ success: false, message: 'Ошибка входа в чат' });
     }
 });
@@ -3281,7 +3283,7 @@ app.get('/api/chats/:chatId/join-requests', async (req, res) => {
             })),
         });
     } catch (error) {
-        console.error('Get join requests error:', error);
+        logError('Get join requests error', error);
         res.json({ success: false, message: 'Ошибка загрузки заявок' });
     }
 });
@@ -3300,7 +3302,7 @@ app.get('/api/join-requests/mine', async (req, res) => {
         );
         res.json({ success: true, requests: rows.map(r => ({ id: r.id, roomName: r.room_name, createdAt: r.created_at })) });
     } catch (error) {
-        console.error('Get own join requests error:', error);
+        logError('Get own join requests error', error);
         res.json({ success: false, message: 'Ошибка загрузки заявок' });
     }
 });
@@ -3371,7 +3373,7 @@ app.post('/api/join-requests/:id/approve', async (req, res) => {
         res.json({ success: true });
     } catch (error) {
         if (respondIfDeadlock(res, error)) return;
-        console.error('Approve join request error:', error);
+        logError('Approve join request error', error);
         res.json({ success: false, message: 'Ошибка одобрения заявки' });
     }
 });
@@ -3393,7 +3395,7 @@ app.post('/api/join-requests/:id/deny', async (req, res) => {
         notifyJoinRequestDecided(removed.user_id, { requestId: removed.id, approved: false });
         res.json({ success: true });
     } catch (error) {
-        console.error('Deny join request error:', error);
+        logError('Deny join request error', error);
         res.json({ success: false, message: 'Ошибка отклонения заявки' });
     }
 });
@@ -3410,7 +3412,7 @@ app.delete('/api/join-requests/:id', async (req, res) => {
         notifyJoinRequestsChanged(removed.room_id);
         res.json({ success: true });
     } catch (error) {
-        console.error('Cancel join request error:', error);
+        logError('Cancel join request error', error);
         res.json({ success: false, message: 'Ошибка отмены заявки' });
     }
 });
@@ -3525,7 +3527,7 @@ app.delete('/api/chats/:chatId', async (req, res) => {
         res.json({ success: true });
     } catch (error) {
         if (respondIfDeadlock(res, error)) return;
-        console.error('Delete chat error:', error);
+        logError('Delete chat error', error);
         res.json({ success: false, message: 'Ошибка удаления чата' });
     }
 });
@@ -3622,7 +3624,7 @@ app.put('/api/messages/:messageId', async (req, res) => {
 
         res.json({ success: true, edited_at: editedAt, text: newText });
     } catch (error) {
-        console.error('Edit message error:', error);
+        logError('Edit message error', error);
         res.json({ success: false, message: 'Ошибка редактирования' });
     }
 });
@@ -3645,7 +3647,7 @@ app.delete('/api/messages/:messageId', async (req, res) => {
         if (deleted.length === 0) return res.json({ success: false, message: 'Ошибка удаления' });
         res.json({ success: true });
     } catch (error) {
-        console.error('Delete message error:', error);
+        logError('Delete message error', error);
         res.json({ success: false, message: 'Ошибка удаления' });
     }
 });
@@ -3689,7 +3691,7 @@ async function coarsenFileTimes(filePath) {
         const hour = floorToHour();
         await fs.promises.utimes(filePath, hour, hour);
     } catch (err) {
-        console.error('[Uploads] Не удалось округлить время файла:', err.code || err.message);
+        logError('[Uploads] Не удалось округлить время файла', err);
     }
 }
 
@@ -3793,7 +3795,7 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
             // Раньше при исключении здесь проверка молча пропускалась и файл
             // проходил дальше — теоретическая лазейка мимо проверки типа файла.
             // Теперь любая ошибка проверки = отказ (fail closed), а не fail open.
-            console.error('Upload processing error:', magicErr.message);
+            logError('Upload processing error', magicErr);
             // Отказ санитайзера с понятной причиной (userFacing) отдаётся как есть:
             // в нём нет данных файла, только что сделать пользователю.
             return rejectUpload(res, file, 400, magicErr && magicErr.userFacing ? magicErr.message : 'Не удалось проверить содержимое файла');
@@ -3878,7 +3880,7 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
     } catch (error) {
         cleanupUploadedFile(file);
         if (respondIfDeadlock(res, error)) return;
-        console.error('Upload file error:', error);
+        logError('Upload file error', error);
         res.status(500).json({ success: false, message: 'Ошибка отправки файла' });
     }
 });
@@ -3953,7 +3955,7 @@ app.post('/api/reactions', async (req, res) => {
         res.json({ success: true });
     } catch (error) {
         if (respondIfDeadlock(res, error)) return;
-        console.error('Add reaction error:', error);
+        logError('Add reaction error', error);
         res.json({ success: false, message: 'Ошибка добавления реакции' });
     }
 });
@@ -3978,7 +3980,7 @@ app.delete('/api/reactions/:messageId/:emoji', async (req, res) => {
         );
         res.json({ success: true });
     } catch (error) {
-        console.error('Remove reaction error:', error);
+        logError('Remove reaction error', error);
         res.json({ success: false, message: 'Ошибка удаления реакции' });
     }
 });
@@ -4014,7 +4016,7 @@ app.post('/api/messages/:messageId/set-expiry', async (req, res) => {
 
         res.json({ success: true, message: 'Таймер самоуничтожения установлен' });
     } catch (error) {
-        console.error('Set expiry error:', error);
+        logError('Set expiry error', error);
         res.json({ success: false, message: 'Ошибка установки таймера' });
     }
 });
@@ -4051,7 +4053,7 @@ app.post('/api/chats/:chatId/expiry', async (req, res) => {
         if (!chat) return res.json({ success: false, message: 'Чат не найден' });
         res.json({ success: true, seconds: await setChatExpiry(chat, seconds) });
     } catch (error) {
-        console.error('Set chat expiry error:', error);
+        logError('Set chat expiry error', error);
         res.json({ success: false, message: 'Ошибка настройки автоудаления' });
     }
 });
@@ -4081,7 +4083,7 @@ app.post('/api/chats/:chatId/set-default-expiry', async (req, res) => {
             message: seconds > 0 ? 'Автоудаление сообщений настроено для чата' : 'Автоудаление сообщений выключено',
         });
     } catch (error) {
-        console.error('Set chat default expiry error:', error);
+        logError('Set chat default expiry error', error);
         res.json({ success: false, message: 'Ошибка настройки автоудаления' });
     }
 });
@@ -4098,7 +4100,7 @@ app.get('/api/chats/:chatId/settings', async (req, res) => {
         const expiry = await getDefaultExpirySeconds(chat);
         res.json({ success: true, settings: expiry ? { default_message_expiry: expiry } : {} });
     } catch (error) {
-        console.error('Get chat settings error:', error);
+        logError('Get chat settings error', error);
         res.json({ success: false, message: 'Ошибка получения настроек' });
     }
 });
@@ -4128,7 +4130,7 @@ app.post('/api/chats/:chatId/prefs', async (req, res) => {
         notifyChatListChanged(userId);
         res.json({ success: true, pinned: row.pinned, muted: row.muted, archived: row.archived });
     } catch (error) {
-        console.error('Set chat prefs error:', error);
+        logError('Set chat prefs error', error);
         res.json({ success: false, message: 'Ошибка сохранения настроек чата' });
     }
 });
@@ -4156,7 +4158,7 @@ app.use((err, req, res, next) => {
     if (err.type === 'entity.too.large') {
         return res.status(413).json({ success: false, message: 'Слишком большой запрос' });
     }
-    console.error('Unhandled error:', err);
+    logError('Unhandled error', err);
     res.status(500).json({ success: false, message: 'Внутренняя ошибка сервера' });
 });
 
@@ -4296,7 +4298,7 @@ async function deleteUserAccount(userId) {
     try {
         await dbRun(`DELETE FROM session WHERE sess->>'userId' = $1`, [String(userId)]);
     } catch (error) {
-        if (error.code !== '42P01') console.error('[Account] Не удалось удалить сессии:', error.message);
+        if (error.code !== '42P01') logError('[Account] Не удалось удалить сессии', error);
     }
     return true;
 }
@@ -4409,13 +4411,25 @@ jobs.register({
 registerJobModules(jobs, serverContext);
 
 // Страховка: ошибка в фоновой задаче (таймеры, сокеты) не должна ронять
-// весь сервер. Маршруты уже защищены wrapAsync.
+// весь сервер. Маршруты уже защищены wrapAsync. Причина — через logError:
+// объект целиком (console.error(reason)) печатает detail и where ошибок
+// Postgres со значениями строк.
 process.on('unhandledRejection', (reason) => {
-    console.error('[Process] Необработанный reject промиса:', reason);
+    logError('[Process] Необработанный reject промиса', reason);
+});
+// Непойманное исключение по-прежнему завершает процесс (состояние после него
+// неизвестно, хостинг перезапустит), но без обработчика Node печатает ошибку
+// сам — вместе со стеком и полями вроде detail. Здесь пишется то же, что
+// и везде, и сразу выходит.
+process.on('uncaughtException', (err) => {
+    logError('[Process] Необработанное исключение', err);
+    process.exit(1);
 });
 
 function onServerListening() {
-    const addresses = getLocalAddresses();
+    // Адреса сетевых интерфейсов нужны только при разработке (открыть сервер
+    // с телефона); в production и в сквозных тестах IP в лог не пишутся.
+    const addresses = IS_PRODUCTION || process.env.NODE_ENV === 'test' ? [] : getLocalAddresses();
     console.log(`\n${'='.repeat(60)}`);
     console.log(`Nyxo Messenger запущен на порту ${PORT}`);
     console.log(`${'='.repeat(60)}\n`);
