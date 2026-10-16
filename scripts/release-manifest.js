@@ -29,6 +29,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const clientManifest = require('../lib/client-manifest');
+const { logError } = require('../lib/log-error');
 
 const ROOT = path.join(__dirname, '..');
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -129,7 +130,7 @@ if (require.main === module) {
     try {
         main(process.argv.slice(2), process.env);
     } catch (err) {
-        console.error('Ошибка: ' + (err && err.message ? err.message : err));
+        logError('Ошибка', err);
         process.exitCode = 1;
     }
 }
