@@ -323,7 +323,18 @@
             // --- Цепочка ---
             const chain = await extendChains(pins, head);
             if (!chain.ok) return { ok: false, reason: chain.reason };
+            // Голова отстаёт от текущей эпохи на 3 и больше: журнал не обновляется — предупреждение, не блокировка (7.2).
+            if (localEpoch() - head.epoch >= PENDING_EPOCHS) noteStale(head.epoch);
             return { ok: true, head, pins };
+        }
+
+        // Предупреждение stale: не хранится и не делает журнал «несогласованным»; один раз на значение эпохи.
+        let staleReported = null;
+        function noteStale(epoch) {
+            if (staleReported === epoch) return;
+            staleReported = epoch;
+            if (typeof options.onAlert !== 'function') return;
+            try { options.onAlert({ kind: 'stale', epoch, behind: localEpoch() - epoch }); } catch (error) { warn('Журнал ключей: onTransparencyAlert упал:', error); }
         }
 
         // Закрепление TOFU и принятие заявлений о смене. { ok, pins, changed }.

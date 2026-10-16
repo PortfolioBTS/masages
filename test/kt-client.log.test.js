@@ -63,6 +63,19 @@ async function main() {
         assert.ok((await late.storage.get('kt:gen:2')));
     });
 
+    await test('голова журнала отстаёт от текущей эпохи на 3 и больше: предупреждение stale (один раз), не блокировка', async () => {
+        const { world, alice } = await aliceSeeing(2);
+        assert.deepStrictEqual(alice.alerts, []);
+        world.advance(4 * HOUR); // журнал не обновляется, часы идут
+        await alice.check();
+        await alice.check();
+        const stale = alice.alerts.filter(a => a.kind === 'stale');
+        assert.strictEqual(stale.length, 1, 'одно предупреждение на значение эпохи');
+        assert.ok(stale[0].behind >= 3);
+        assert.deepStrictEqual(await alice.client.getTransparencyAlerts(), [], 'stale не хранится');
+        assert.strictEqual((await alice.client.checkTransparency()).status, 'ok', 'не делает журнал несогласованным');
+    });
+
     await test('переписанная история: корень прошлой эпохи заменён — log-fork', async () => {
         const { world, alice } = await aliceSeeing(3);
         await world.kt.rewrite(1, 40001);

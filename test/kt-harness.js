@@ -25,7 +25,9 @@ const { b64encode } = E2EE._internal;
 function makeWorld({ genEpochs = 6, graceEpochs = 4, kt = null, ktOf = null, ktAll = null } = {}) {
     const model = kt || new FakeKt({ genEpochs, graceEpochs });
     const server = makeFakeServer(ktOf ? { kt: ktOf, ktAll } : { kt: model });
-    const clock = { t: Date.UTC(2026, 9, 11, 12, 0, 0) };
+    // Часы мира стоят в эпохе, с которой начинается журнал (test/fake-kt.js): иначе голова журнала выглядела бы
+    // «давно не обновлявшейся» (stale) с первой секунды.
+    const clock = { t: 40000 * HOUR + 5 * 60 * 1000 };
     const world = {
         kt: model, server, clock, genEpochs, graceEpochs, clients: new Map(), lockViolations: [],
         advance(ms) { clock.t += ms; },

@@ -573,7 +573,11 @@ function getE2eeClient() {
                 lock: NyxoE2eeLock.makeLock(typeof navigator !== 'undefined' ? navigator.locks : null, currentUser.id,
                     (message) => console.warn(message)),
                 // Прозрачность ключей: новая тревога журнала сразу попадает в баннер боковой панели.
-                onTransparencyAlert: () => { refreshTransparencyBanner(); },
+                onTransparencyAlert: (alert) => {
+                    // stale — не тревога, а предупреждение: журнал давно не обновлялся (не блокирует работу).
+                    if (alert && alert.kind === 'stale') showToast('Журнал ключей на сервере давно не обновлялся: проверка ключей собеседников может запаздывать', 'info', 8000);
+                    refreshTransparencyBanner();
+                },
             });
             e2eeClientUserId = currentUser.id;
         } catch (err) {
@@ -920,7 +924,9 @@ function handleRoomSessionResult(roomId, result) {
     if (!result || Number(roomId) !== Number(currentRoomId)) return;
     const warnings = Array.isArray(result.warnings) ? result.warnings : [];
     const failedIds = new Set(warnings.filter(w => w && w.userId != null).map(w => Number(w.userId)));
-    const changedIds = new Set((result.identityChanges || []).map(c => Number(c.userId)));
+    // Участники со сменившимся ключом и с ключом, которого нет в журнале, тоже попадают в warnings, но о них
+    // говорят баннер и отдельная строка — здесь они не «без шифрования».
+    const changedIds = new Set((result.identityChanges || []).concat(result.logMismatches || []).map(c => Number(c.userId)));
     const newMembers = Array.isArray(result.newMembers) ? result.newMembers : [];
     const removedMembers = Array.isArray(result.removedMembers) ? result.removedMembers : [];
 
@@ -4052,7 +4058,10 @@ function ktAlertView(alert, pendingKey, client) {
             actions.push({
                 text: 'Принять новый ключ журнала',
                 confirm: 'Отпечаток совпадает с опубликованным в релизе? Принятие сбросит сохранённые цепочки журнала на этом устройстве.',
-                run: async () => { await client.acceptLogKey(); },
+                run: async () => {
+                    // false — ключ не прошёл проверку (малый порядок и т.п.): принять его нельзя.
+                    if (!(await client.acceptLogKey())) throw new Error('ключ журнала не принят');
+                },
             });
         }
     }
