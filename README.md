@@ -89,7 +89,7 @@ railway run npm run check-env  # с переменными сервиса на R
 | `ONION_ADDRESS`, `ONION_PORT` | нет | onion-адрес и внутренний порт для `tor-service` |
 | `ALLOWED_ORIGINS`, `POW_DIFFICULTY`, `INVITE_TTL_HOURS`, `PG_POOL_MAX`, `DEFAULT_MESSAGE_EXPIRY_SECONDS`, `CLEANUP_INTERVAL_MS`, `CF_IP_RANGES`, `DB_CA_CERT`, `DB_TLS_INSECURE`, `PORT`, `HOST`, `MESSAGE_ENCRYPTION_KEY_PREVIOUS`, `KT_SIGNING_KEY_PREVIOUS` | нет | см. [docs/ops/deploy-railway.md](docs/ops/deploy-railway.md) |
 
-Соединений с базой на экземпляр до 14 при `PG_POOL_MAX=10`: учитывайте `max_connections`.
+У каждого экземпляра свой пул соединений (`PG_POOL_MAX`, по умолчанию 10) плюс отдельные соединения под блокировки задач: суммарное число не должно превышать `max_connections` базы ([docs/ops/scaling.md](docs/ops/scaling.md)).
 
 ## Тесты
 
