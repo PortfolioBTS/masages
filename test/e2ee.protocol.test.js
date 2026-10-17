@@ -277,13 +277,13 @@ async function main() {
         assert.ok(countRes.data.count >= 10, 'should have topped up OPK pool, got ' + countRes.data.count);
     });
 
-    await test('basic round trip v2: Alice sends, Bob decrypts', async () => {
+    await test('basic round trip v3: Alice sends, Bob decrypts', async () => {
         const ctx = await setupPair();
         await connectPair(ctx);
         const ct = await ctx.alice.encryptOutgoing(ctx.roomId, 'привет');
         const env = JSON.parse(ct);
-        assert.strictEqual(env.v, 2);
-        assert.strictEqual(env.alg, 'senderkey-v2');
+        assert.strictEqual(env.v, 3);
+        assert.strictEqual(env.alg, 'senderkey-v3');
         const res = await ctx.bob.decryptIncoming(ctx.roomId, 1, ct, 1);
         assert.strictEqual(res.ok, true);
         assert.strictEqual(res.text, 'привет');
@@ -371,7 +371,7 @@ async function main() {
 
     await test('message from a sender with no known Sender Key fails gracefully', async () => {
         const { bob, roomId } = await setupPair();
-        const fake = JSON.stringify({ v: 2, alg: 'senderkey-v2', senderKeyId: b64(randomBytes(16)), iteration: 0, iv: b64(randomBytes(12)), ct: b64(randomBytes(272)), sig: b64(randomBytes(64)) });
+        const fake = JSON.stringify({ v: 3, alg: 'senderkey-v3', senderKeyId: b64(randomBytes(16)), iteration: 0, iv: b64(randomBytes(12)), ct: b64(randomBytes(272)), sig: b64(randomBytes(64)) });
         assert.deepStrictEqual(await bob.decryptIncoming(roomId, 999, fake, 1), { ok: false, reason: 'no-sender-key' });
         assert.deepStrictEqual(await bob.decryptIncoming(roomId, 999, 'not json', 1), { ok: false, reason: 'bad-envelope' });
     });

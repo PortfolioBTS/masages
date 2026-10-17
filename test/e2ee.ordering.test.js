@@ -127,23 +127,22 @@ async function craftEnvelope(storage, roomId, userId, body) {
     }, hkdfKey, 256));
     const aesKey = await subtle.importKey('raw', aesRaw, { name: 'AES-GCM' }, false, ['encrypt']);
     const iv = new Uint8Array(globalThis.crypto.getRandomValues(new Uint8Array(12)));
-    const aad = new TextEncoder().encode('senderkey-v2:' + roomId + ':' + userId + ':' + state.senderKeyId);
+    const aad = new TextEncoder().encode('senderkey-v3:' + roomId + ':' + userId + ':' + state.senderKeyId);
     const padded = padMessage(new TextEncoder().encode(JSON.stringify(body)));
     const ct = new Uint8Array(await subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad }, aesKey, padded));
-    const itBytes = new Uint8Array(4);
-    new DataView(itBytes.buffer).setUint32(0, iteration, false);
-    const idBytes = new TextEncoder().encode(state.senderKeyId);
-    const sigInput = new Uint8Array(iv.length + ct.length + 4 + idBytes.length);
-    sigInput.set(iv, 0);
-    sigInput.set(ct, iv.length);
-    sigInput.set(itBytes, iv.length + ct.length);
-    sigInput.set(idBytes, iv.length + ct.length + 4);
+    // Подпись v3, собранная независимо от кода клиента: метка ‖ u32be(комната) ‖ senderKeyId[16] ‖ u32be(итерация) ‖ iv ‖ ct.
+    const u32 = (n) => { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, n, false); return b; };
+    const label = new TextEncoder().encode('nyxo-skmsg-v3\0');
+    const parts = [label, u32(Number(roomId)), unb64(state.senderKeyId), u32(iteration), iv, ct];
+    const sigInput = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let offset = 0;
+    for (const part of parts) { sigInput.set(part, offset); offset += part.length; }
     const signKey = state.signingPrivateKey && state.signingPrivateKey.kty
         ? await subtle.importKey('jwk', state.signingPrivateKey, { name: 'Ed25519' }, false, ['sign'])
         : state.signingPrivateKey;
     const sig = new Uint8Array(await subtle.sign('Ed25519', signKey, sigInput));
     return JSON.stringify({
-        v: 2, alg: 'senderkey-v2', senderKeyId: state.senderKeyId, iteration, iv: b64(iv), ct: b64(ct), sig: b64(sig),
+        v: 3, alg: 'senderkey-v3', senderKeyId: state.senderKeyId, iteration, iv: b64(iv), ct: b64(ct), sig: b64(sig),
     });
 }
 

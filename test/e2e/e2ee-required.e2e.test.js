@@ -2,7 +2,7 @@
 // Обязательное E2EE в комнатах (R7, план криптографии, раздел 3). Настоящий
 // Postgres и настоящий сервер.
 //
-// * комната принимает только конверт senderkey-v2 правильной формы: открытый
+// * комната принимает только конверт senderkey-v3 правильной формы: открытый
 //   текст, чужой формат, v1, лишний ключ и мусор — 400 { success:false, code,
 //   message } (e2ee-required или bad-envelope), в базу и на диск ничего не попадает;
 // * то же для вложений (POST /api/messages/file): открытый файл в комнате отвергается
@@ -68,10 +68,11 @@ test('конверт неправильной формы — 400 bad-envelope: �
     const parsed = JSON.parse(fakeEnvelope('образец'));
     const cases = [
         ['обычный текст с encrypted: true', 'привет всем'],
-        ['оборванный JSON', '{"v":2,'],
+        ['оборванный JSON', '{"v":3,'],
         ['JSON-массив', '[]'],
-        ['v1 (новые сообщения только v2)', JSON.stringify({ alg: 'senderkey-v1', senderKeyId: parsed.senderKeyId, iteration: 0, iv: parsed.iv, ct: parsed.ct, sig: parsed.sig })],
-        ['v: 1 с алгоритмом v2', envelopeWith({ v: 1 })],
+        ['v1 (новые сообщения только v3)', JSON.stringify({ alg: 'senderkey-v1', senderKeyId: parsed.senderKeyId, iteration: 0, iv: parsed.iv, ct: parsed.ct, sig: parsed.sig })],
+        ['v: 1 с алгоритмом v3', envelopeWith({ v: 1 })],
+        ['v2 (подпись без метки домена и комнаты больше не принимается)', envelopeWith({ v: 2, alg: 'senderkey-v2' })],
         ['чужой алгоритм', envelopeWith({ alg: 'aes-gcm' })],
         ['лишний ключ с открытым текстом', envelopeWith({ text: 'привет всем' })],
         ['нет подписи', envelopeWith({ sig: undefined })],
@@ -156,7 +157,7 @@ test('вложение с конвертом неправильной формы
         ['без конверта', undefined],
         ['пустой конверт', ''],
         ['конверт «x»', 'x'],
-        ['старая форма с короткими полями', '{"v":2,"alg":"senderkey-v2","senderKeyId":"k","iteration":0,"iv":"AA","ct":"AA","sig":"AA"}'],
+        ['старая форма с короткими полями', '{"v":3,"alg":"senderkey-v3","senderKeyId":"k","iteration":0,"iv":"AA","ct":"AA","sig":"AA"}'],
         ['v1', JSON.stringify({ alg: 'senderkey-v1', senderKeyId: 'AAAAAAAAAAAAAAAAAAAAAA==', iteration: 0, iv: 'AAAAAAAAAAAAAAAA', ct: 'AAAA', sig: 'AAAA' })],
         ['лишний ключ', envelopeWith({ caption: 'открытая подпись' })],
     ];

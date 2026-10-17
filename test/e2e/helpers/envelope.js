@@ -22,7 +22,7 @@ function fakeEnvelope(label, { iteration = 0 } = {}) {
     ct.writeUInt32BE(labelBytes.length, 0);
     labelBytes.copy(ct, 4);
     return JSON.stringify({
-        v: 2, alg: 'senderkey-v2',
+        v: 3, alg: 'senderkey-v3',
         senderKeyId: digest.subarray(0, 16).toString('base64'),
         iteration,
         iv: digest.subarray(16, 28).toString('base64'),

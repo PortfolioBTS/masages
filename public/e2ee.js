@@ -41,6 +41,10 @@
 //     использованных ключей (прямая секретность); раз в 7 дней сессия
 //     перезапускается новым PQXDH.
 //   - Повтор конверта под другим messageId распознаётся ('replay').
+//   - Конверт сообщения комнаты — версия 3 ({ v:3, alg:'senderkey-v3', senderKeyId, iteration, iv, ct, sig }).
+//     Подпись Sender Key покрывает метку домена "nyxo-skmsg-v3\0", комнату (u32be), senderKeyId (16 байт),
+//     итерацию, iv и ct (sigInputV3, sealed-sender.md 9.3); AAD шифрования — "senderkey-v3:<комната>:<автор>:<ключ>".
+//     Версия 2 (подпись без метки и комнаты) не принимается: старых конвертов нет (R0).
 //   - Подписи Ed25519 проверяются строго (public/lib/ed25519-strict.js, signed-membership.md 6.1):
 //     ключ малого порядка, неканоническая кодировка точки и S >= L отвергаются ДО платформенного
 //     verify, который принимает такие пары под любым сообщением. Это единственная функция verify
@@ -1121,12 +1125,23 @@
         return concatBytes(PQ_OPK_LABEL, u64be(keyId), publicKey);
     }
 
-    function sigInputV2(iv, ct, iteration, senderKeyId) {
-        return concatBytes(iv, ct, u32be(iteration), utf8encode(senderKeyId));
+    // Подпись конверта сообщения комнаты (версия 3): Ed25519(ключ подписи Sender Key, sigInputV3).
+    //   sigInput = "nyxo-skmsg-v3\0" ‖ u32be(roomId) ‖ senderKeyId[16] ‖ u32be(iteration) ‖ iv[12] ‖ ct
+    // Метка домена (реестр меток, план криптографии 1.1) отличает эту подпись от любой другой подписи
+    // Ed25519 в системе, а комната входит в подписанные байты: конверт, снятый с одной комнаты, не
+    // подходит к другой, даже если сервер подсунул чужой индекс отправителей. Все поля до ct —
+    // фиксированной длины (14 + 4 + 16 + 4 + 12 = 50 байт), ct (не короче 272 байт) идёт последним:
+    // два разных набора полей не дают одну и ту же строку. senderKeyId берётся сырыми 16 байтами,
+    // а не текстом base64, поэтому каноничность записи на подпись не влияет. Прежняя версия
+    // (iv ‖ ct ‖ iteration ‖ keyId без метки и комнаты) не принимается: R0, конвертов v2 нет.
+    const SKMSG_LABEL = utf8encode('nyxo-skmsg-v3\0');
+
+    function sigInputV3(roomId, senderKeyIdBytes, iteration, iv, ct) {
+        return concatBytes(SKMSG_LABEL, u32be(roomId), senderKeyIdBytes, u32be(iteration), iv, ct);
     }
 
-    function msgAadV2(roomId, senderId, senderKeyId) {
-        return utf8encode('senderkey-v2:' + roomId + ':' + senderId + ':' + senderKeyId);
+    function msgAadV3(roomId, senderId, senderKeyId) {
+        return utf8encode('senderkey-v3:' + roomId + ':' + senderId + ':' + senderKeyId);
     }
 
     // AD key-share v2: помимо комнаты и направления — identity-ключи обеих
@@ -3920,10 +3935,12 @@
             });
 
             const aesKey = await hkdf(messageKey, ZERO32, 'nyxo-e2ee-msgkey-v2', 32);
-            const { iv, ct } = await aesGcmEncrypt(aesKey, padded, msgAadV2(roomId, userId, state.senderKeyId));
-            const sig = await sign(state.signingPrivateKey, sigInputV2(iv, ct, iteration, state.senderKeyId));
+            const { iv, ct } = await aesGcmEncrypt(aesKey, padded, msgAadV3(roomId, userId, state.senderKeyId));
+            const keyIdBytes = decodeFixed(state.senderKeyId, 16);
+            if (!isU32(Number(roomId)) || !keyIdBytes) throw new Error('E2EE: некорректный идентификатор комнаты или ключа отправителя');
+            const sig = await sign(state.signingPrivateKey, sigInputV3(Number(roomId), keyIdBytes, iteration, iv, ct));
             const envelope = JSON.stringify({
-                v: 2, alg: 'senderkey-v2',
+                v: 3, alg: 'senderkey-v3',
                 senderKeyId: state.senderKeyId,
                 iteration,
                 iv: b64encode(iv), ct: b64encode(ct),
@@ -3948,7 +3965,7 @@
         // Правка — новая итерация для того же messageId, это легально.
         //
         // Порядок проверок (все до любой записи в хранилище):
-        //   1. форма конверта (v2, senderkey-v2; senderkey-v1 больше нет)  → 'bad-envelope'
+        //   1. форма конверта (v3, senderkey-v3; v1 и v2 больше нет)       → 'bad-envelope'
         //   2. запись skIndex                                              → 'no-sender-key'
         //   3. подсказка ≠ отправителю                                     → 'sender-mismatch';
         //      надгробие (ключ удалён)                                     → 'history-not-kept' | 'key-expired'
@@ -3969,7 +3986,7 @@
             let envelope;
             try { envelope = JSON.parse(text); } catch { return bad; }
             if (!envelope || typeof envelope !== 'object') return bad;
-            if (envelope.v !== 2 || envelope.alg !== 'senderkey-v2') return bad;
+            if (envelope.v !== 3 || envelope.alg !== 'senderkey-v3') return bad;
             if (!Number.isInteger(envelope.iteration) || envelope.iteration < 0 || envelope.iteration > 0xFFFFFFFF) return bad;
             if (!isCanonicalKeyId(envelope.senderKeyId)) return bad;
             const iv = decodeFixed(envelope.iv, 12);
@@ -3978,7 +3995,9 @@
             if (!iv || !sig || !ct || ct.length < 16) return bad;
             const iteration = envelope.iteration;
             const keyId = envelope.senderKeyId;
-            const sigInput = sigInputV2(iv, ct, iteration, keyId);
+            const room = Number(roomId);
+            if (!isU32(room)) return bad;
+            const sigInput = sigInputV3(room, decodeFixed(keyId, 16), iteration, iv, ct);
             const boundId = messageId === undefined || messageId === null ? null : String(messageId);
             const hint = senderIdHint === undefined || senderIdHint === null ? null : Number(senderIdHint);
 
@@ -4042,7 +4061,7 @@
                 let content;
                 try {
                     const aesKey = await hkdf(messageKey, ZERO32, 'nyxo-e2ee-msgkey-v2', 32);
-                    const pt = await aesGcmDecrypt(aesKey, iv, ct, msgAadV2(roomId, senderId, keyId));
+                    const pt = await aesGcmDecrypt(aesKey, iv, ct, msgAadV3(roomId, senderId, keyId));
                     const body = unpadMessage(pt);
                     let decoded = null;
                     if (body) {
