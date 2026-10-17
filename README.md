@@ -145,7 +145,7 @@ lib/                       # серверные модули (чистые фу�
   env-check.js, legacy-reset.js, metrics.js, advisory-locks.js, tx-retry.js, log-error.js, proto.js
   jobs/, routes/, migrations/                                    # фоновые задачи, вынесенные маршруты, миграции
 public/                    # клиент без сборщика
-  index.html, css/ (tokens, controls, auth, app-shell, messages, composer, modals, popups, responsive), script.js, theme.js, icons.js, icons/, manifest.webmanifest
+  index.html, css/ (tokens, controls, auth, app-shell, messages, composer, modals, popups, responsive), js/ (01-state.js … 18-init.js — классические скрипты в порядке подключения), theme.js, icons.js, icons/, manifest.webmanifest
   e2ee.js, mlkem.js        # клиентское E2EE: PQXDH, Sender Keys; ML-KEM-768 на чистом JS
   media-sanitizer.js, pow-worker.js
   sw.js, verify.html, verify.js, verify.css   # service worker и страница сверки файлов
