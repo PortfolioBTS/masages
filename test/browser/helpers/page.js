@@ -146,6 +146,11 @@ class BrowserPage {
         ]);
     }
 
+    // Размер окна страницы: у интерфейса есть узкая раскладка, её тоже снимаем.
+    setViewport(width, height) {
+        return this.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+    }
+
     // ---- Навигация ----
 
     async goto(url, { timeoutMs = 30000 } = {}) {
