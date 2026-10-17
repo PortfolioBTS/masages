@@ -154,8 +154,9 @@ async function approveFirstRequest(page) {
     await page.waitForSelector('#requests-bar:not(.hidden)', { timeoutMs: APP_TIMEOUT_MS });
     await page.click('#requests-bar-btn');
     await page.waitForSelector('#requests-modal:not(.hidden)');
-    await page.click('#requests-list .request-row .btn-primary');
-    await page.waitForGone('#requests-list .request-row');
+    // Строка-заглушка («Загрузка…», «Новых заявок нет») тоже .request-row, но с классом muted.
+    await page.click('#requests-list .request-row:not(.muted) .btn-primary');
+    await page.waitForGone('#requests-list .request-row:not(.muted)');
     await closeModal(page, 'requests-modal');
 }
 
