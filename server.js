@@ -150,11 +150,11 @@ const {
     E2EE_NOT_ALLOWED,
 } = require('./lib/e2ee-envelope');
 
-// ---- T6.1, шаг 3 из 6: часть кода вынесена в src/ ----
+// ---- T6.1, шаг 4 из 6: часть кода вынесена в src/ ----
 // Контекст собирается из фабрик в порядке зависимостей (на последнем шаге этот блок станет
 // src/create-server.js); всё, что ниже в этом файле, ещё не вынесено.
 const { loadConfig } = require('./src/config');
-const { createBase } = require('./src/context');
+const { createBase, createKtContext } = require('./src/context');
 const { createUploads } = require('./src/services/uploads');
 const { createApp } = require('./src/http/create-app');
 const { createRealIp } = require('./src/http/middleware/real-ip');
@@ -177,7 +177,8 @@ const { createRooms } = require('./src/services/rooms');
 const { createBot } = require('./src/services/bot');
 const { createAccounts } = require('./src/services/accounts');
 const { createUploadMiddleware } = require('./src/http/middleware/upload');
-const { MAX_SOCKETS_PER_USER, MAX_SOCKETS_PER_IP, getSocketRoomKey } = require('./src/realtime/io');
+const { createJobs } = require('./src/jobs/index');
+const { registerSocketHandlers } = require('./src/realtime/socket-handlers');
 const {
     JOIN_REQUEST_LIVE_SQL, respondCertVerdict, inviteExpiresAtIso, roomChatPayload, JOIN_REQUEST_NOT_FOUND,
     resetInviteAfterLeave,
@@ -193,6 +194,7 @@ const {
 const { toPositiveInt, isNonEmptyString } = require('./src/http/params');
 const { chatScope } = require('./src/services/chats');
 const { parseRequestedExpiry } = require('./src/services/expiry');
+const { getSocketRoomKey } = require('./src/realtime/io');
 const { EarlyResponse } = require('./src/http/early-response');
 
 const ctx = { ...loadConfig(__dirname) };
@@ -219,23 +221,25 @@ Object.assign(ctx, createRooms(ctx));
 Object.assign(ctx, createBot(ctx));
 Object.assign(ctx, createAccounts(ctx));
 Object.assign(ctx, createUploadMiddleware(ctx));
+Object.assign(ctx, createKtContext(ctx));
+Object.assign(ctx, createJobs(ctx));
+registerSocketHandlers(ctx);
 
 const {
-    app, metrics, resolveRealIp, io, sessionMiddleware, anonActivity, userSocketCount, getClientIp,
-    ipSocketCount, dbGet, dbAll, IS_PRODUCTION, HSTS_PRELOAD, isTrustedOrigin, pool, withTransaction, dbRun,
-    readiness, SESSION_RENEW_MS, csrf, apiLimiter, bundleLimiter, withTransactionRetry, pgLimits,
-    queryWithRetry, keyShareLimiter, keyRequestLimiter, memberCertLimiter, userCanAccessFile, UPLOADS_DIR,
-    registerLimiter, checkPow, respondPowFailure, generateUniqueCodeAsync, generateAnonymousUsernameAsync,
-    startUserSession, deleteUserAccount, endSession, loadAccount, GLOBAL_DEFAULT_EXPIRY_SECONDS, getOwnChat,
-    markChatRead, newMessageExpirySeconds, insertRoomMessage, describeMessageIdUse, advanceSenderMarker,
+    app, metrics, resolveRealIp, IS_PRODUCTION, HSTS_PRELOAD, isTrustedOrigin, serverContext,
+    sessionMiddleware, anonActivity, SESSION_RENEW_MS, csrf, apiLimiter, dbGet, dbAll, bundleLimiter, kt,
+    withTransactionRetry, pgLimits, dbRun, io, queryWithRetry, keyShareLimiter, keyRequestLimiter,
+    memberCertLimiter, userCanAccessFile, UPLOADS_DIR, registerLimiter, checkPow, respondPowFailure,
+    generateUniqueCodeAsync, generateAnonymousUsernameAsync, withTransaction, startUserSession,
+    deleteUserAccount, endSession, loadAccount, GLOBAL_DEFAULT_EXPIRY_SECONDS, getOwnChat, markChatRead,
+    newMessageExpirySeconds, insertRoomMessage, describeMessageIdUse, advanceSenderMarker,
     emitRoomMessageEvent, unarchiveForRecipients, insertChatMessage, scheduleBotReply, INVITE_TTL_SECONDS,
     subscribeUserToChat, notifyChatListChanged, getOwnRoom, identityKeysOf, joinUserLimiter, joinIpLimiter,
     findRoomByInviteCode, createJoinRequest, addRoomMember, notifyJoinRequestDecided,
     notifyJoinRequestsChanged, authorTags, removeUploadedFiles, unsubscribeUserFromChat,
     notifyRoomMembersChanged, findOwnMessage, disappearingMessagesManager, upload, rejectUpload,
     rejectUploadWith, cleanupUploadedFile, UPLOAD_QUOTA_BYTES, userCanAccessMessage, getDefaultExpirySeconds,
-    setChatExpiry, DB_POOL_CONFIG, purgeExpiredAnonymousUsers, purgeExpiredJoinRequests, PORT,
-    initDatabaseExclusive, server, HOST,
+    setChatExpiry, PORT, jobs, initDatabaseExclusive, readiness, server, HOST,
 } = ctx;
 
 // Самым первым: признак onion-запроса (req.isOnion) нужен лимитерам и
@@ -267,104 +271,6 @@ function getLocalAddresses() {
     }
     return addresses;
 }
-
-// Socket.io: источник (allowRequest выше) -> сессия -> авторизация ->
-// лимит подключений на аккаунт и (для clearnet) на IP.
-io.use((socket, next) => {
-    sessionMiddleware(socket.request, socket.request.res || {}, next);
-});
-io.use((socket, next) => {
-    const sess = socket.request.session;
-    // Раньше неавторизованный сокет принимался и тут же отключался уже в
-    // 'connection' — клиент после этого сам не переподключался, и после
-    // входа в аккаунт realtime не работал до перезагрузки страницы.
-    if (!sess || !sess.userId) return next(new Error('Не авторизован'));
-    // Та же проверка, что у HTTP-запросов. Продлить куку сокет не может —
-    // её ставит только HTTP-ответ (клиент для этого вызывает /api/auth).
-    anonActivity.validateSession(sess).then((verdict) => {
-        if (verdict !== 'ok') return next(new Error('Не авторизован'));
-        if (userSocketCount.get(sess.userId) >= MAX_SOCKETS_PER_USER) {
-            return next(new Error('Слишком много подключений'));
-        }
-        // Onion-рукопожатие (сокет принят на ONION_PORT) приходит с адреса
-        // контейнера tor — одного на всех, а его X-Forwarded-For присылает сам
-        // клиент: IP тут ничего не значит.
-        const ip = isOnionSocket(socket.request.socket) ? null : getClientIp(socket.handshake);
-        if (ip && ipSocketCount.get(ip) >= MAX_SOCKETS_PER_IP) {
-            return next(new Error('Слишком много подключений с вашего IP'));
-        }
-        socket.data.clientIp = ip;
-        next();
-    }, (err) => {
-        logError('[Socket] Ошибка проверки сессии', err);
-        next(new Error('Ошибка сервера'));
-    });
-});
-
-io.on('connection', async (socket) => {
-    const userId = socket.request.session.userId;
-
-    // Счётчики растут только для реально установленных соединений. Раньше
-    // счётчик IP увеличивался ещё в middleware, а единственное место
-    // уменьшения — 'disconnect' — для отклонённого рукопожатия не наступает:
-    // IP мог навсегда упереться в лимит. userSocketCount заодно — признак
-    // «в сети на этом экземпляре» для touch и чистки неактивных.
-    const ip = socket.data.clientIp;
-    userSocketCount.increment(userId);
-    if (ip) ipSocketCount.increment(ip);
-    // Подключение — активность (в БД — не чаще раза за корзину).
-    anonActivity.noteActivity(userId);
-    socket.on('disconnect', () => {
-        userSocketCount.decrement(userId);
-        if (ip) ipSocketCount.decrement(ip);
-        // Закрылся последний сокет — отсчёт неактивности начинается отсюда:
-        // корзина этого момента попадает в БД.
-        if (userSocketCount.get(userId) === 0) anonActivity.noteActivity(userId);
-    });
-
-    // Личная комната пользователя (на всех его вкладках/устройствах) —
-    // адресная доставка событий конкретному человеку (E2EE key-share,
-    // подписка на новый чат, принудительный выход).
-    socket.join('user:' + userId);
-
-    socket.on('joinChat', async (roomKey) => {
-        if (typeof roomKey !== 'string' || roomKey.length === 0) return;
-        try {
-            if (roomKey.startsWith('room:')) {
-                const roomId = parseInt(roomKey.slice(5), 10);
-                if (!Number.isFinite(roomId)) return;
-                const participant = await dbGet(
-                    'SELECT id FROM room_participants WHERE room_id = $1 AND user_id = $2',
-                    [roomId, userId]
-                );
-                if (!participant) return;
-            } else if (roomKey.startsWith('chat:')) {
-                const chatId = parseInt(roomKey.slice(5), 10);
-                if (!Number.isFinite(chatId)) return;
-                const chat = await dbGet(
-                    'SELECT id FROM chats WHERE id = $1 AND user_id = $2',
-                    [chatId, userId]
-                );
-                if (!chat) return;
-            } else {
-                return;
-            }
-            socket.join(roomKey);
-        } catch (err) {
-            logError('joinChat error', err);
-        }
-    });
-
-    // Сразу подписываем сокет на ВСЕ чаты пользователя. Раньше подписка
-    // появлялась только при открытии конкретного чата, поэтому новые
-    // сообщения в остальных чатах не обновляли ни список, ни счётчики.
-    try {
-        const chats = await dbAll('SELECT id, room_id FROM chats WHERE user_id = $1', [userId]);
-        socket.join(chats.map(c => getSocketRoomKey(c.id, c.room_id)));
-    } catch (err) {
-        logError('Socket auto-join error', err);
-    }
-});
 
 // Заголовки — первыми, чтобы их получил любой ответ, включая отказы
 // проверок источника и CSRF ниже.
@@ -441,21 +347,6 @@ app.use(express.static(path.join(__dirname, 'public'), {
 // Относительный Location: адрес хоста из запроса в ответ не попадает.
 app.get('/link.my', (req, res) => {
     res.redirect(301, '/');
-});
-
-// Маршруты из lib/routes/ (см. lib/routes/index.js): здесь — те, которым
-// сессия не нужна; ниже, после лимитера /api/, — обычные маршруты API.
-// Журнал ключей: без KT_SIGNING_KEY сервис выключен (kt.enabled = false) — регистраций
-// и задачи эпох нет, kt в ответах null, /api/kt/* отвечает 503. Длина эпохи и поколения —
-// константы протокола; тестовые ручки KT_* действуют только при NODE_ENV=test.
-const kt = createKtService({ pool, withTransaction, onEpochClosed: metrics.ktEpochClosed });
-metrics.attachKt(() => kt.stats());
-
-// serverContext — общий контекст маршрутов и задач из lib/ (lib/jobs).
-const serverContext = Object.freeze({
-    pool, dbGet, dbAll, dbRun, withTransaction, io, logError, isProduction: IS_PRODUCTION, kt,
-    // Мониторинг и security.txt (lib/routes/health.js, lib/routes/well-known.js).
-    metrics, readiness, env: process.env,
 });
 registerPreSessionRoutes(app, serverContext);
 
@@ -2234,64 +2125,6 @@ app.use((err, req, res, next) => {
     logError('Unhandled error', err);
     res.status(500).json({ success: false, message: 'Внутренняя ошибка сервера' });
 });
-
-// ---- Фоновые задачи (lib/jobs/index.js) ----
-//
-// По умолчанию задача идёт под runExclusive (lib/advisory-locks.js): в
-// каждый момент её выполняет один экземпляр сервера на базу, у остальных
-// запуск пропускается. Клиенты блокировок — из отдельного маленького пула:
-// блокировка держит соединение всю задачу, а в основном пуле (в тестах
-// PG_POOL_MAX=3) они отнимали бы соединения у самих задач.
-const jobLockPool = new Pool({ ...DB_POOL_CONFIG, max: 4 });
-jobLockPool.on('error', (err) => logError('[DB] Ошибка простаивающего соединения блокировок', err));
-
-// Тестовые ручки сквозных тестов (NYXO_TEST_*, docs/dev/testing.md):
-// действуют ТОЛЬКО при NODE_ENV=test, в production env-check считает их
-// ошибкой. Целое число мс > 0, иначе null.
-function testKnobMs(name) {
-    if (process.env.NODE_ENV !== 'test') return null;
-    const value = Number(process.env[name]);
-    return Number.isInteger(value) && value > 0 ? value : null;
-}
-
-const jobs = createJobScheduler({
-    runExclusive: createRunExclusive(jobLockPool),
-    // Задачи с maintenance: true — каждые N мс вместо минут.
-    maintenanceMs: testKnobMs('NYXO_TEST_MAINTENANCE_MS'),
-    onRun: metrics.jobRan,
-});
-// Анонимы проверяются каждые 5 минут: самый короткий срок — 30 минут
-// без активности, и опоздание с удалением не должно быть сравнимо с ним.
-jobs.register({
-    name: 'purgeExpiredAnonymousUsers', run: purgeExpiredAnonymousUsers,
-    firstDelayMs: 60 * 1000, intervalMs: 5 * 60 * 1000, maintenance: true, testTick: true,
-});
-// Открытые сокеты ЭТОГО процесса (у каждого экземпляра свои, поэтому без
-// блокировки), раз в 2,5 минуты: активность их пользователей одним UPDATE и
-// строки tab-сессий (кука без срока) — ещё 24 часа: HTTP-ответа, который
-// пересохранил бы строку, может не быть часами, пока вкладка открыта.
-jobs.register({
-    name: 'touchOnlineSockets',
-    run: async () => {
-        const online = userSocketCount.keys();
-        await anonActivity.touch(online);
-        await extendTabSessions(dbRun, online);
-    },
-    intervalMs: ANON_SOCKET_ACTIVITY_INTERVAL_MS, exclusive: false, maintenance: true,
-});
-jobs.register({
-    name: 'purgeExpiredJoinRequests', run: purgeExpiredJoinRequests,
-    firstDelayMs: 90 * 1000, intervalMs: 60 * 60 * 1000, maintenance: true,
-});
-// Брошенные временные файлы обработки вложений — в папке этого процесса.
-// Порог возраста — не меньше двух часов: mtime файлов округлён вниз до часа
-// (coarsenFileTimes), и свежий файл выглядит старше настоящего возраста.
-jobs.register({
-    name: 'cleanupStaleTempFiles', run: () => cleanupStaleTempFiles(UPLOADS_DIR, orphanAgeThresholdMs(60 * 60 * 1000)),
-    intervalMs: 60 * 60 * 1000, exclusive: false,
-});
-// Задачи lib-модулей (JOB_MODULES в lib/jobs/index.js).
-registerJobModules(jobs, serverContext);
 
 // Страховка: ошибка в фоновой задаче (таймеры, сокеты) не должна ронять
 // весь сервер. Маршруты уже защищены wrapAsync. Причина — через logError:
