@@ -71,7 +71,7 @@ Onion-сервис описан отдельно: [tor-service/README.md](../tor
 |---|---|
 | [dev/roadmap.md](dev/roadmap.md) | Итоговый план работ: решения владельца, сквозные решения R0–R14, волны и ворота |
 | [dev/contracts/stage-1.md](dev/contracts/stage-1.md) | Контракт волны 1 (этапы 1–3) |
-| [dev/testing.md](dev/testing.md) | Юнит-тесты, сквозные тесты с настоящим Postgres, ручные запуски |
+| [dev/testing.md](dev/testing.md) | Юнит-тесты, сквозные тесты с настоящим Postgres, [смоук в настоящем браузере](dev/testing.md#смоук-в-настоящем-браузере), ручные запуски |
 | [dev/ci.md](dev/ci.md) | CI: что проверяется, как повторить локально, обновление закреплений |
 | [dev/migrations.md](dev/migrations.md) | Схема базы до первого релиза и миграции после него |
 | [dev/forbidden-terms.md](dev/forbidden-terms.md) | Тесты-запреты: что удалено и не должно вернуться |

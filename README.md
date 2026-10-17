@@ -97,6 +97,7 @@ railway run npm run check-env  # с переменными сервиса на R
 npm test                  # юнит-тесты, без БД, только Node 24
 npm run test:e2e          # сквозные: настоящий Postgres 16, E2E_DATABASE_URL
 npm run test:e2e:docker   # то же во временном контейнере Docker
+npm run test:browser      # смоук в настоящем Chrome/Chromium/Edge (CDP) + Postgres
 npm run test:all          # юнит, затем сквозные
 ```
 
