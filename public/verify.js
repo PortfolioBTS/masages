@@ -124,6 +124,7 @@
                 if (diff.changed.length) parts.push('другие хэши: ' + diff.changed.join(', '));
                 if (diff.onlyInServed.length) parts.push('лишние файлы: ' + diff.onlyInServed.join(', '));
                 if (diff.onlyInReference.length) parts.push('нет файлов: ' + diff.onlyInReference.join(', '));
+                if (diff.keyChanged) parts.push('другой ключ журнала ключей (keys.kt)');
                 problems.push('манифест сервера отличается от эталона' + (parts.length ? ' (' + parts.join('; ') + ')' : ''));
             }
         }

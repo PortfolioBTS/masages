@@ -13,17 +13,27 @@
 //                          commit, время коммита (SOURCE_DATE_EPOCH, не время
 //                          запуска), версия Node, хэш манифеста и хэш sw.js
 //                          (service worker в манифест не входит — он закрепляет
-//                          хэш манифеста, — поэтому его хэш публикуется отдельно);
+//                          хэш манифеста, — поэтому его хэш публикуется отдельно)
+//                          и открытый ключ журнала ключей, если он задан (ниже);
 //   SHA256SUMS           — хэши файлов public/ в формате sha256sum; проверка:
 //                          cd public && sha256sum -c ../release/SHA256SUMS.
 //
-// Запуск: node scripts/release-manifest.js [--out <каталог>] [--manifest-only] [--stdout] [--allow-dirty]
+// Ключ журнала ключей (прозрачность ключей, docs/security/key-transparency.md, раздел 11). Если журнал включён,
+// открытый ключ записывается в манифест (keys.kt) и в release.json (keys.kt): клиент при первом закреплении ключа
+// журнала сверяет его с манифестом, а люди — с опубликованным релизом. Ключ называет оператор: параметр --kt-key или
+// переменная KT_PUBLIC_KEY (в GitHub Actions — переменная репозитория KT_PUBLIC_KEY, см. release.yml); это ОТКРЫТЫЙ
+// ключ, секрет KT_SIGNING_KEY в релиз не попадает. Без ключа манифест такой же, как был до появления поля.
+// Сервер кладёт в свой /client-manifest.json ключ, выведенный из KT_SIGNING_KEY: значения должны совпасть, иначе
+// сторож (watchdog) увидит расхождение манифеста с релизом.
+//
+// Запуск: node scripts/release-manifest.js [--out <каталог>] [--manifest-only] [--stdout] [--allow-dirty] [--kt-key <base64>]
 //   --manifest-only  только client-manifest.json: git не нужен
+//   --kt-key         открытый ключ журнала (base64, 32 байта); важнее KT_PUBLIC_KEY
 //   --stdout         манифест в stdout, файлы не пишутся (удобно для sha256sum)
 //   --allow-dirty    собрать при незакоммиченных правках (для проверки на своей
 //                    машине; в релизе так нельзя: commit не описывал бы файлы)
 // Переменные: GITHUB_SHA — commit, если git недоступен; SOURCE_DATE_EPOCH —
-// время в секундах (иначе время коммита из git).
+// время в секундах (иначе время коммита из git); KT_PUBLIC_KEY — открытый ключ журнала.
 
 const fs = require('fs');
 const path = require('path');
@@ -58,8 +68,8 @@ function resolveEpoch(env) {
 }
 
 // Три файла релиза в виде текстов. Чистая функция: всё внешнее приходит параметрами.
-function buildReleaseFiles({ publicDir = PUBLIC_DIR, version, commit, epoch, nodeVersion }) {
-    const manifest = clientManifest.buildManifest(publicDir);
+function buildReleaseFiles({ publicDir = PUBLIC_DIR, version, commit, epoch, nodeVersion, ktKey }) {
+    const manifest = clientManifest.buildManifest(publicDir, { ktKey });
     const manifestText = clientManifest.serializeManifest(manifest);
     const release = {
         format: RELEASE_FORMAT,
@@ -74,6 +84,8 @@ function buildReleaseFiles({ publicDir = PUBLIC_DIR, version, commit, epoch, nod
             files: manifest.files.length,
         },
     };
+    // Тот же ключ, что в манифесте (нормализованный): release.json удобен людям и скриптам, манифест — клиенту.
+    if (manifest.keys) release.keys = { ...manifest.keys };
     // sw.js вне манифеста (R10): его хэш лежит здесь, и страница сверки показывает хэш того sw.js,
     // который сервер отдаёт сейчас. Без файла (синтетический каталог в тестах) поле не пишется.
     const swPath = path.join(publicDir, 'sw.js');
@@ -86,28 +98,41 @@ function buildReleaseFiles({ publicDir = PUBLIC_DIR, version, commit, epoch, nod
 }
 
 function parseArgs(argv) {
-    const opts = { out: path.join(ROOT, 'release'), manifestOnly: false, stdout: false, allowDirty: false };
+    const opts = { out: path.join(ROOT, 'release'), manifestOnly: false, stdout: false, allowDirty: false, ktKey: null };
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i];
         if (arg === '--out') opts.out = path.resolve(argv[++i] || '');
         else if (arg === '--manifest-only') opts.manifestOnly = true;
         else if (arg === '--stdout') opts.stdout = true;
         else if (arg === '--allow-dirty') opts.allowDirty = true;
+        else if (arg === '--kt-key') opts.ktKey = argv[++i];
         else throw new Error(`неизвестный параметр ${arg}`);
     }
     if (!opts.out) throw new Error('у --out должен быть каталог');
+    if (opts.ktKey === undefined || (opts.ktKey !== null && opts.ktKey.trim() === '')) throw new Error('у --kt-key должно быть значение (открытый ключ журнала, base64)');
     return opts;
+}
+
+// Ключ журнала: параметр важнее переменной окружения; проверка (длина, base64, точка Ed25519) — в normalizeKtKey.
+function resolveKtKey(opts, env) {
+    const raw = opts.ktKey !== null ? opts.ktKey : env.KT_PUBLIC_KEY;
+    try {
+        return clientManifest.normalizeKtKey(raw);
+    } catch (err) {
+        throw new Error((opts.ktKey !== null ? '--kt-key' : 'KT_PUBLIC_KEY') + ': ' + err.message);
+    }
 }
 
 function main(argv, env) {
     const opts = parseArgs(argv);
+    const ktKey = resolveKtKey(opts, env);
     if (opts.stdout) {
-        process.stdout.write(clientManifest.buildManifestText(PUBLIC_DIR));
+        process.stdout.write(clientManifest.buildManifestText(PUBLIC_DIR, { ktKey }));
         return;
     }
     fs.mkdirSync(opts.out, { recursive: true });
     if (opts.manifestOnly) {
-        fs.writeFileSync(path.join(opts.out, MANIFEST_FILE), clientManifest.buildManifestText(PUBLIC_DIR));
+        fs.writeFileSync(path.join(opts.out, MANIFEST_FILE), clientManifest.buildManifestText(PUBLIC_DIR, { ktKey }));
         console.log(`Манифест записан: ${path.join(opts.out, MANIFEST_FILE)}`);
         return;
     }
@@ -115,7 +140,7 @@ function main(argv, env) {
         throw new Error('В рабочем каталоге есть незакоммиченные правки: commit в release.json не описывал бы файлы. Закоммитьте или добавьте --allow-dirty.');
     }
     const version = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
-    const files = buildReleaseFiles({ version, commit: resolveCommit(env), epoch: resolveEpoch(env), nodeVersion: process.version });
+    const files = buildReleaseFiles({ version, commit: resolveCommit(env), epoch: resolveEpoch(env), nodeVersion: process.version, ktKey });
     // Запись без перевода строк по правилам ОС: fs.writeFileSync пишет строку как есть.
     fs.writeFileSync(path.join(opts.out, MANIFEST_FILE), files.manifestText);
     fs.writeFileSync(path.join(opts.out, RELEASE_FILE), files.releaseText);
@@ -123,6 +148,7 @@ function main(argv, env) {
     const release = JSON.parse(files.releaseText);
     console.log(`Релиз ${release.version} (${release.commit.slice(0, 12)}), файлов клиента: ${release.manifest.files}`);
     console.log(`Манифест sha256: ${release.manifest.sha256}`);
+    console.log(release.keys ? `Ключ журнала ключей в манифесте и release.json: ${release.keys.kt}` : 'Ключ журнала ключей не задан (--kt-key, KT_PUBLIC_KEY): в манифесте нет keys.kt');
     console.log(`Записано в ${opts.out}: ${MANIFEST_FILE}, ${RELEASE_FILE}, ${SUMS_FILE}`);
 }
 
@@ -135,4 +161,4 @@ if (require.main === module) {
     }
 }
 
-module.exports = { buildReleaseFiles, parseArgs, RELEASE_FORMAT, MANIFEST_FILE, RELEASE_FILE, SUMS_FILE };
+module.exports = { buildReleaseFiles, parseArgs, resolveKtKey, RELEASE_FORMAT, MANIFEST_FILE, RELEASE_FILE, SUMS_FILE };
