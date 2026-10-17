@@ -11,11 +11,13 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
+const { readClientCss } = require('./client-css');
+
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const read = (name) => fs.readFileSync(path.join(PUBLIC_DIR, name), 'utf8');
 const script = read('script.js');
 const html = read('index.html');
-const css = read('style.css');
+const css = readClientCss();
 
 let passed = 0, failed = 0;
 function test(name, fn) {

@@ -1,0 +1,309 @@
+/* css/responsive.css — адаптив (планшет и телефон — одна колонка) и доступность (без анимаций,
+   высокий контраст). Идёт последним: его правила намеренно перебивают все предыдущие.
+   Вынесено без изменений из бывшего public/style.css (разделы 15–16; строки 4605–4907
+   исходника). Файл 9 из 9. Файлы подключаются из index.html подряд, по номерам: этот порядок и есть
+   порядок каскада, переставлять файлы нельзя. */
+
+/* --------------------------------------------------------------------------
+   15. Адаптив: планшет/телефон — одна колонка (сайдбар ↔ чат).
+   -------------------------------------------------------------------------- */
+
+@media (max-width: 768px) {
+    :root {
+        --header-h: 56px;
+    }
+
+    .sidebar {
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        width: 100%;
+        padding-left: env(safe-area-inset-left);
+        padding-right: env(safe-area-inset-right);
+        border-right: 0;
+        transform: translateX(0);
+        visibility: visible;
+        transition: transform var(--dur-slow) var(--ease), visibility 0s linear 0s;
+    }
+
+    /* visibility убирает скрытый сайдбар из порядка фокуса. */
+    .sidebar.hidden-mobile {
+        transform: translateX(-100%);
+        visibility: hidden;
+        transition: transform var(--dur-slow) var(--ease), visibility 0s linear var(--dur-slow);
+    }
+
+    .main-content {
+        width: 100%;
+    }
+
+    .chat-header {
+        gap: 8px;
+        padding: env(safe-area-inset-top) 8px 0 4px;
+    }
+
+    .chat-header .chat-info {
+        gap: 8px;
+    }
+
+    .chat-avatar {
+        width: 36px;
+        height: 36px;
+        font-size: 14px;
+    }
+
+    .chat-actions {
+        gap: 0;
+    }
+
+    .chat-messages {
+        padding: 12px;
+    }
+
+    .message {
+        max-width: 85%;
+    }
+
+    .message-input-container {
+        padding: 8px 8px max(8px, env(safe-area-inset-bottom));
+    }
+
+    .banner,
+    .e2ee-banner {
+        flex-wrap: wrap;
+        padding: 8px 12px;
+    }
+
+    .banner-text,
+    .e2ee-banner-text {
+        flex-basis: calc(100% - 40px);
+    }
+
+    .banner-actions,
+    .banner > .banner-btn,
+    .e2ee-banner > .banner-btn {
+        margin-left: 32px;
+    }
+
+    .requests-bar {
+        padding: 8px 12px;
+    }
+
+    .auth-container {
+        padding: 32px 24px 24px;
+    }
+
+    /* Окна — снизу, как лист: ближе к большому пальцу. */
+    .modal {
+        align-items: flex-end;
+        padding: max(24px, env(safe-area-inset-top)) 0 0;
+    }
+
+    .modal-content,
+    .modal-content.modal-sm,
+    .modal-content.modal-wide {
+        max-width: none;
+        max-height: 100%;
+        border-bottom: 0;
+        border-radius: var(--radius) var(--radius) 0 0;
+        padding-bottom: env(safe-area-inset-bottom);
+        animation: sheet-in var(--dur-slow) var(--ease);
+    }
+
+    .modal-header {
+        min-height: 56px;
+        padding: 8px 8px 8px 16px;
+    }
+
+    .modal-body {
+        padding: 16px;
+    }
+
+    .modal-footer {
+        padding: 12px 16px max(12px, env(safe-area-inset-bottom));
+    }
+
+    .modal-footer > .btn {
+        flex: 1 1 auto;
+    }
+
+    .safety-number {
+        grid-template-columns: repeat(3, 1fr);
+        font-size: 15px;
+    }
+
+    .member-head {
+        flex-wrap: wrap;
+    }
+
+    .toast {
+        bottom: max(80px, calc(env(safe-area-inset-bottom) + 72px));
+    }
+
+    .jump-down {
+        margin-right: 12px;
+    }
+
+    /* На сенсорных экранах кнопки не меньше 40 px. */
+    .reaction {
+        height: 28px;
+    }
+}
+
+@keyframes sheet-in {
+    from { transform: translateY(24px); opacity: 0; }
+    to { transform: none; opacity: 1; }
+}
+
+/* Узкие телефоны: в шапке комнаты «назад» + до пяти кнопок. */
+@media (max-width: 420px) {
+    .chat-header .icon-btn {
+        width: 36px;
+        height: 36px;
+    }
+
+    .chat-header .chat-avatar {
+        display: none;
+    }
+
+    .chat-details h3 {
+        font-size: 14px;
+    }
+
+    .chat-indicators .indicator span,
+    .indicator-text {
+        display: none;
+    }
+
+    .sidebar-header {
+        padding-left: 12px;
+        padding-right: 8px;
+    }
+
+    .auth-screen {
+        padding-left: 0;
+        padding-right: 0;
+        align-items: flex-start;
+    }
+
+    .auth-container {
+        border: 0;
+        background: transparent;
+        padding: 24px 20px;
+    }
+
+    .auth-hero {
+        margin-bottom: 24px;
+    }
+
+    .auth-hero h1 {
+        font-size: 24px;
+        line-height: 32px;
+    }
+
+    /* На телефоне — крупнее: варианты срока и кнопки по 48 px. */
+    .segmented-option {
+        min-height: 48px;
+    }
+
+    .auth-actions .auth-btn {
+        height: 48px;
+    }
+
+    .auth-points {
+        margin-top: 24px;
+        padding-top: 20px;
+    }
+
+    .invite-code-container code,
+    .invite-code {
+        font-size: 16px;
+        letter-spacing: 0.04em;
+    }
+
+    .message {
+        max-width: 90%;
+    }
+
+    .footer-btn {
+        padding: 0 8px;
+    }
+
+    .request-row {
+        flex-wrap: wrap;
+    }
+
+    .request-actions {
+        width: 100%;
+    }
+
+    .request-actions > * {
+        flex: 1;
+    }
+}
+
+/* Кнопка «назад к списку» — только в одноколоночном режиме. */
+.back-btn {
+    display: none;
+}
+
+@media (max-width: 768px) {
+    .back-btn {
+        display: inline-flex;
+    }
+}
+
+
+/* --------------------------------------------------------------------------
+   16. Доступность: без анимаций, высокий контраст.
+   -------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        transition-delay: 0s !important;
+        scroll-behavior: auto !important;
+    }
+
+    /* Индикатор загрузки остаётся: это состояние, а не украшение. */
+    .spin,
+    .loading,
+    .upload-status .progress:not([aria-valuenow]) .progress-bar,
+    .progress.is-indeterminate .progress-bar {
+        animation-duration: 1.6s !important;
+        animation-iteration-count: infinite !important;
+    }
+}
+
+@media (prefers-contrast: more) {
+    :root,
+    [data-theme] {
+        --border: var(--border-strong);
+        --text-2: var(--text);
+        --text-3: var(--text-2);
+    }
+}
+
+@media (forced-colors: active) {
+    .icon {
+        forced-color-adjust: auto;
+    }
+
+    /* Выбранный срок в режиме высокой контрастности — системной подсветкой. */
+    .segmented-option:has(> input:checked) {
+        forced-color-adjust: none;
+        background: Highlight;
+        color: HighlightText;
+    }
+
+    .toggle-row input[type="checkbox"],
+    .radio-row input[type="radio"],
+    .switch {
+        forced-color-adjust: none;
+        border-color: CanvasText;
+    }
+}

@@ -11,6 +11,7 @@ const path = require('path');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const read = (name) => fs.readFileSync(path.join(PUBLIC_DIR, name), 'utf8');
+const { readClientCss } = require('./client-css');
 const script = read('script.js');
 const html = read('index.html');
 const lib = read('lib/text-search.js');
@@ -96,7 +97,7 @@ test('поиск в чате: нерасшифрованные пропуска�
     assert.match(searchable, /message\._e2eeFailed/);
     assert.match(searchable, /node\.data === message\.text/, 'искать можно только когда DOM совпадает с текстом');
     assert.match(functionBody(script, 'paintSearchHighlights'), /CSS\.highlights\.set\(HIGHLIGHT_ALL/);
-    assert.match(read('style.css'), /::highlight\(nyxo-search\)[^}]*\}[\s\S]*::highlight\(nyxo-search-current\)/);
+    assert.match(readClientCss(), /::highlight\(nyxo-search\)[^}]*\}[\s\S]*::highlight\(nyxo-search-current\)/);
     assert.match(functionBody(script, 'releaseChatResources'), /closeChatSearch\(\)/, 'смена чата закрывает поиск и снимает подсветку');
     // Новые, исправленные и удалённые сообщения помечают результаты устаревшими.
     for (const name of ['appendMessage', 'removeMessageElement', 'applyMessageEdit']) {

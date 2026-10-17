@@ -1,0 +1,1023 @@
+/* css/controls.css — кнопки, формы (поля, сегменты, переключатели) и мелкие компоненты
+   (бейджи, аватары, разделители, служебные классы).
+   Вынесено без изменений из бывшего public/style.css (разделы 4–6; строки 374–1390
+   исходника). Файл 2 из 9. Файлы подключаются из index.html подряд, по номерам: этот порядок и есть
+   порядок каскада, переставлять файлы нельзя. */
+
+/* --------------------------------------------------------------------------
+   4. Кнопки.
+   -------------------------------------------------------------------------- */
+
+.btn,
+.auth-btn,
+.danger-btn,
+.banner-btn,
+.member-code-btn,
+.footer-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: var(--control-h);
+    padding: 0 16px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 500;
+    text-align: center;
+    text-decoration: none;
+    white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+    transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease),
+        color var(--dur) var(--ease), opacity var(--dur) var(--ease);
+}
+
+.btn > .icon,
+.auth-btn > .icon,
+.danger-btn > .icon,
+.footer-btn > .icon {
+    width: 18px;
+    height: 18px;
+    margin-left: -2px;
+}
+
+/* Основная — заливка акцентом (инверсия фона). */
+.btn-primary,
+.auth-btn {
+    background: var(--accent);
+    color: var(--accent-fg);
+    border-color: var(--accent);
+}
+
+.btn-primary:hover,
+.auth-btn:hover {
+    background: color-mix(in srgb, var(--accent) 86%, var(--bg));
+    border-color: color-mix(in srgb, var(--accent) 86%, var(--bg));
+}
+
+.btn-primary:active,
+.auth-btn:active {
+    background: color-mix(in srgb, var(--accent) 74%, var(--bg));
+    border-color: color-mix(in srgb, var(--accent) 74%, var(--bg));
+}
+
+/* Второстепенная — поверхность с рамкой. */
+.btn-secondary,
+.auth-btn.secondary,
+.member-code-btn {
+    background: var(--surface-2);
+    color: var(--text);
+    border-color: var(--border-strong);
+}
+
+.btn-secondary:hover,
+.auth-btn.secondary:hover,
+.member-code-btn:hover {
+    background: var(--surface-3);
+    border-color: var(--text-3);
+}
+
+.btn-secondary:active,
+.auth-btn.secondary:active,
+.member-code-btn:active {
+    background: var(--surface-3);
+    border-color: var(--text-2);
+}
+
+/* Призрачная — без фона, для третьестепенных действий. */
+.btn-ghost,
+.footer-btn {
+    background: transparent;
+    color: var(--text-2);
+    border-color: transparent;
+}
+
+.btn-ghost:hover,
+.footer-btn:hover {
+    background: var(--hover);
+    color: var(--text);
+}
+
+.btn-ghost:active,
+.footer-btn:active {
+    background: var(--pressed);
+    color: var(--text);
+}
+
+/* Опасная — в монохроме без красного: полная обводка цветом текста,
+   полужирный текст и иконка; при наведении — инверсия. */
+.btn-danger,
+.danger-btn {
+    background: transparent;
+    color: var(--text);
+    border-color: var(--text);
+    font-weight: 600;
+}
+
+.btn-danger:hover,
+.danger-btn:hover {
+    background: var(--text);
+    color: var(--bg);
+}
+
+.btn-danger:active,
+.danger-btn:active {
+    background: color-mix(in srgb, var(--text) 82%, var(--bg));
+    border-color: color-mix(in srgb, var(--text) 82%, var(--bg));
+    color: var(--bg);
+}
+
+/* Тихий вариант опасной кнопки («Удалить аккаунт» в профиле). */
+.danger-btn.outline {
+    color: var(--text-2);
+    border-color: var(--border-strong);
+    font-weight: 500;
+}
+
+.danger-btn.outline:hover {
+    background: transparent;
+    color: var(--text);
+    border-color: var(--text);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+
+.btn-sm {
+    height: var(--control-h-sm);
+    padding: 0 12px;
+    gap: 6px;
+    font-size: 13px;
+}
+
+.btn-sm > .icon {
+    width: 16px;
+    height: 16px;
+    stroke-width: 2;
+}
+
+.btn-block,
+.auth-btn,
+.danger-btn {
+    display: flex;
+    width: 100%;
+}
+
+.auth-btn {
+    height: 44px;
+    font-weight: 600;
+}
+
+.btn:disabled,
+.btn[aria-disabled="true"],
+.auth-btn:disabled,
+.danger-btn:disabled,
+.banner-btn:disabled,
+.member-code-btn:disabled,
+.footer-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
+.btn[aria-busy="true"],
+.auth-btn[aria-busy="true"] {
+    cursor: progress;
+}
+
+/* Кнопка, которая выглядит как ссылка: открывает окно, а не переходит
+   по адресу. Высота 44 px — палец попадает и в короткую подпись. */
+.link-btn {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 0 2px;
+    color: var(--text);
+    font-size: 13px;
+    line-height: 20px;
+    font-weight: 500;
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
+}
+
+.link-btn:hover {
+    text-decoration-thickness: 2px;
+}
+
+/* Квадратная кнопка-иконка. Эмодзи-содержимое старой разметки тоже
+   центрируется (font-size), пока его не заменили иконками. */
+.icon-btn,
+.close-modal {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: var(--control-h);
+    height: var(--control-h);
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-2);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease),
+        color var(--dur) var(--ease);
+}
+
+.icon-btn:hover,
+.close-modal:hover {
+    background: var(--hover);
+    color: var(--text);
+}
+
+.icon-btn:active,
+.close-modal:active {
+    background: var(--pressed);
+    color: var(--text);
+}
+
+.icon-btn.is-active,
+.icon-btn[aria-pressed="true"] {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-fg);
+}
+
+.icon-btn.is-active:hover,
+.icon-btn[aria-pressed="true"]:hover {
+    background: color-mix(in srgb, var(--accent) 86%, var(--bg));
+    color: var(--accent-fg);
+}
+
+.icon-btn:disabled,
+.icon-btn[aria-disabled="true"] {
+    opacity: 0.35;
+    cursor: not-allowed;
+    background: transparent;
+    color: var(--text-2);
+}
+
+.icon-btn-sm,
+.close-modal {
+    width: var(--control-h-sm);
+    height: var(--control-h-sm);
+    font-size: 16px;
+}
+
+.close-modal {
+    font-size: 24px;
+    color: var(--text-3);
+}
+
+.icon-btn-sm .icon,
+.close-modal .icon {
+    width: 18px;
+    height: 18px;
+}
+
+/* Бейдж-счётчик поверх кнопки (например, у .jump-down). */
+.icon-btn > .badge,
+.jump-down > .badge {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+}
+
+
+/* --------------------------------------------------------------------------
+   5. Формы.
+   -------------------------------------------------------------------------- */
+
+.field,
+.form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.field-label,
+.form-label,
+.form-group > label:not(.toggle-row):not(.radio-row):not(.switch-row) {
+    display: block;
+    font-size: 13px;
+    line-height: 20px;
+    font-weight: 500;
+    color: var(--text-2);
+}
+
+.field-hint {
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-3);
+}
+
+/* Ошибка поля: текст полужирный, со знаком предупреждения — в монохроме её
+   отличает форма, а не красный цвет. Поле при этом — aria-invalid (пунктир). */
+.field-error {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.field-error::before {
+    content: "";
+    flex: none;
+    width: 14px;
+    height: 14px;
+    margin-top: 1px;
+    background-color: currentColor;
+    -webkit-mask: var(--mask-alert) center / contain no-repeat;
+    mask: var(--mask-alert) center / contain no-repeat;
+}
+
+legend.field-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+legend.field-label .icon {
+    color: var(--text);
+}
+
+/* Заголовок раздела в окне («Журнал безопасности», «Ваши заявки»). */
+h4.field-label {
+    margin: 0 0 8px;
+    font-size: 11px;
+    line-height: 16px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-3);
+}
+
+/* В .field промежутки задаёт gap — отступы между вариантами не нужны. */
+.field > .radio-row + .radio-row,
+.field > .toggle-row + .toggle-row {
+    margin-top: 0;
+}
+
+.field > .btn:not(.btn-block) {
+    align-self: flex-start;
+}
+
+.btn + .field-hint,
+.btn-block + .field-hint,
+.auth-btn + .field-hint {
+    margin-top: 8px;
+}
+
+.field-hint + .btn-block,
+.field-hint + .btn {
+    margin-top: 16px;
+}
+
+.input,
+input[type="text"],
+input[type="number"],
+input[type="search"],
+input[type="url"],
+input[type="tel"],
+textarea,
+.select {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    height: var(--control-h);
+    padding: 0 12px;
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-size: 14px;
+    line-height: 20px;
+    transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease),
+        background-color var(--dur) var(--ease);
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+textarea,
+textarea.input {
+    height: auto;
+    min-height: 80px;
+    padding: 8px 12px;
+    resize: vertical;
+}
+
+.input:hover,
+input[type="text"]:hover,
+input[type="number"]:hover,
+input[type="search"]:hover,
+input[type="url"]:hover,
+input[type="tel"]:hover,
+textarea:hover,
+.select:hover {
+    border-color: var(--border-strong);
+}
+
+/* Поля ввода получают :focus-visible и от мыши — рамка 1 px + кольцо 1 px =
+   те же 2 px, что и у остального фокуса, но без зазора. */
+.input:focus-visible,
+input[type="text"]:focus-visible,
+input[type="number"]:focus-visible,
+input[type="search"]:focus-visible,
+input[type="url"]:focus-visible,
+input[type="tel"]:focus-visible,
+textarea:focus-visible,
+.select:focus-visible {
+    outline: none;
+    border-color: var(--focus);
+    box-shadow: 0 0 0 1px var(--focus);
+}
+
+::placeholder {
+    color: var(--text-3);
+    opacity: 1;
+}
+
+[aria-invalid="true"] {
+    border-style: dashed !important;
+    border-color: var(--text) !important;
+}
+
+.input:disabled,
+input:disabled,
+textarea:disabled,
+.select:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Автозаполнение браузера красит поле жёлтым/голубым — возвращаем монохром. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus {
+    -webkit-text-fill-color: var(--text);
+    caret-color: var(--text);
+    box-shadow: 0 0 0 1000px var(--surface-2) inset;
+    transition: background-color 9999s 0s;
+}
+
+input[type="search"]::-webkit-search-cancel-button,
+input[type="search"]::-webkit-search-decoration {
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+input[type="number"] {
+    font-variant-numeric: tabular-nums;
+}
+
+.select,
+select.input {
+    padding-right: 36px;
+    background-image: var(--glyph-chevron);
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    background-size: 16px 16px;
+    cursor: pointer;
+}
+
+.select option,
+select option {
+    background: var(--surface);
+    color: var(--text);
+}
+
+/* Переключатель: label.toggle-row > input[type=checkbox] + span.
+   Бегунок нарисован radial-gradient'ом — псевдоэлементы у <input> есть не
+   во всех браузерах. */
+.toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    min-height: 48px;
+    padding: 12px 0;
+    cursor: pointer;
+    user-select: none;
+}
+
+.toggle-row > span,
+.toggle-row > .toggle-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 14px;
+    line-height: 20px;
+    color: var(--text);
+}
+
+.toggle-row small,
+.toggle-row .toggle-hint {
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-3);
+}
+
+.toggle-row input[type="checkbox"] {
+    order: 2;
+    flex: none;
+    width: 36px;
+    height: 20px;
+    margin: 0;
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    background-color: var(--surface-3);
+    background-image: radial-gradient(circle, var(--text-2) 0 6px, transparent 6.5px);
+    background-size: 18px 18px;
+    background-position: 0 50%;
+    background-repeat: no-repeat;
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+    transition: background-color var(--dur) var(--ease), background-position var(--dur) var(--ease),
+        border-color var(--dur) var(--ease);
+}
+
+.toggle-row:hover input[type="checkbox"] {
+    border-color: var(--text-3);
+}
+
+.toggle-row input[type="checkbox"]:checked {
+    background-color: var(--accent);
+    border-color: var(--accent);
+    background-image: radial-gradient(circle, var(--accent-fg) 0 6px, transparent 6.5px);
+    background-position: 100% 50%;
+}
+
+.toggle-row input[type="checkbox"]:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.toggle-row:has(input:disabled) {
+    cursor: not-allowed;
+}
+
+/* Ряды настроек одной группой — разделители между ними. */
+.toggle-row + .toggle-row {
+    border-top: 1px solid var(--border);
+}
+
+/* Выбор из вариантов: label.radio-row > input[type=radio] + текст. */
+.radio-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 44px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    cursor: pointer;
+    user-select: none;
+    font-size: 14px;
+    line-height: 20px;
+    transition: border-color var(--dur) var(--ease), background-color var(--dur) var(--ease);
+}
+
+.radio-row + .radio-row {
+    margin-top: 8px;
+}
+
+.radio-row:hover {
+    background: var(--hover);
+    border-color: var(--border-strong);
+}
+
+.radio-row:has(input:checked) {
+    border-color: var(--text);
+    background: var(--surface-2);
+}
+
+.radio-row > span {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.radio-row small {
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-3);
+}
+
+.radio-row input[type="radio"] {
+    flex: none;
+    width: 18px;
+    height: 18px;
+    margin: 0;
+    border: 1.5px solid var(--border-strong);
+    border-radius: 50%;
+    background: transparent;
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+    transition: border-color var(--dur) var(--ease), background-color var(--dur) var(--ease);
+}
+
+.radio-row input[type="radio"]:checked {
+    border-color: var(--text);
+    background: radial-gradient(circle, var(--text) 0 4px, transparent 4.5px);
+}
+
+.radio-row input[type="radio"]:disabled,
+.radio-row:has(input:disabled) {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+/* Группа вариантов в строку (сегменты), если обёрнута в .radio-group. */
+.radio-group {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+    gap: 8px;
+}
+
+.radio-group > .radio-row + .radio-row {
+    margin-top: 0;
+}
+
+/* Сегментированный выбор (срок хранения аккаунта) на настоящих radio в
+   fieldset: Tab попадает в группу на выбранный вариант, стрелки переключают
+   выбор, скринридер объявляет «1 из 3» — без ARIA-имитации. Сам input
+   растянут на весь вариант и прозрачен (не display:none — иначе пропадёт
+   клавиатура). */
+.segmented {
+    display: grid;
+    grid-template-columns: 1.5fr 1fr 1fr;
+    gap: 4px;
+    padding: 4px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--surface-2);
+}
+
+.segmented-option {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+    padding: 6px 8px;
+    border-radius: var(--radius-sm);
+    color: var(--text-2);
+    font-size: 13px;
+    line-height: 16px;
+    font-weight: 500;
+    text-align: center;
+    text-wrap: balance;
+    cursor: pointer;
+    user-select: none;
+    transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.segmented-option > input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: inherit;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.segmented-option:hover {
+    background: var(--hover);
+    color: var(--text);
+}
+
+/* Выбранный вариант — инверсией и жирностью, а не цветом: работает в обеих темах. */
+.segmented-option:has(> input:checked) {
+    background: var(--accent);
+    color: var(--accent-fg);
+    font-weight: 600;
+}
+
+.segmented-option:has(> input:focus-visible) {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+}
+
+.segmented-option:has(> input:disabled) {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Узкий экран (320 px): варианты в столбик — WCAG 1.4.10, без обрезки текста. */
+@media (max-width: 359px) {
+    .segmented {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* Старый переключатель профиля (label.switch-row > .switch-text + input + .switch). */
+.settings-row {
+    margin-bottom: 16px;
+}
+
+.switch-row {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    cursor: pointer;
+}
+
+.switch-row:hover {
+    border-color: var(--border-strong);
+}
+
+.switch-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.switch-title {
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 500;
+    color: var(--text);
+}
+
+.switch-hint {
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-3);
+}
+
+/* Сам чекбокс невидим, но остаётся в порядке фокуса и читается скринридером. */
+.switch-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+}
+
+.switch {
+    position: relative;
+    flex: none;
+    width: 36px;
+    height: 20px;
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    background: var(--surface-3);
+    transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+
+.switch::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--text-2);
+    transition: transform var(--dur) var(--ease), background-color var(--dur) var(--ease);
+}
+
+.switch-input:checked + .switch {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
+.switch-input:checked + .switch::after {
+    background: var(--accent-fg);
+    transform: translateX(16px);
+}
+
+.switch-input:focus-visible + .switch {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+}
+
+.switch-input:disabled + .switch {
+    opacity: 0.4;
+}
+
+
+/* --------------------------------------------------------------------------
+   6. Мелкие компоненты и утилиты.
+   -------------------------------------------------------------------------- */
+
+.badge,
+.chat-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: 10px;
+    background: var(--accent);
+    color: var(--accent-fg);
+    font-size: 11px;
+    line-height: 20px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0;
+}
+
+.chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 24px;
+    padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    color: var(--text-2);
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.chip > .icon {
+    width: 14px;
+    height: 14px;
+    stroke-width: 2;
+}
+
+button.chip {
+    cursor: pointer;
+    transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease),
+        color var(--dur) var(--ease);
+}
+
+button.chip:hover {
+    border-color: var(--border-strong);
+    color: var(--text);
+}
+
+.chip.is-active,
+.chip[aria-pressed="true"] {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-fg);
+}
+
+.divider,
+.auth-divider {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 20px 0;
+    color: var(--text-3);
+    font-size: 12px;
+    line-height: 16px;
+}
+
+.divider::before,
+.divider::after,
+.auth-divider::before,
+.auth-divider::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+}
+
+.divider:empty {
+    gap: 0;
+    margin: 16px 0;
+}
+
+hr.divider {
+    display: block;
+    height: 0;
+    border: 0;
+    border-top: 1px solid var(--border);
+}
+
+.muted {
+    color: var(--text-3);
+}
+
+.mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0;
+}
+
+.inverse {
+    background: var(--bg);
+    color: var(--text);
+}
+
+/* Статус собеседника: точка — залитая (в сети) или кольцо (не в сети). */
+.status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-2);
+}
+
+.status::before {
+    content: "";
+    flex: none;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    border: 1.5px solid var(--text-3);
+}
+
+.status.online {
+    color: var(--text);
+}
+
+.status.online::before {
+    background: var(--text);
+    border-color: var(--text);
+}
+
+.status:empty::before,
+.status:not(.online):not(.offline)::before {
+    display: none;
+}
+
+/* Аватары: всегда монохром — буква или иконка на нейтральном фоне.
+   !important перекрывает цвет, если код где-то ещё ставит el.style.background;
+   при желании тон задаётся классом .avatar-tone-1…5. */
+.avatar,
+.chat-avatar,
+.chat-avatar-small,
+.profile-avatar,
+.member-avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    border-radius: 50%;
+    background: var(--surface-3) !important;
+    color: var(--text) !important;
+    box-shadow: inset 0 0 0 1px var(--border);
+    font-weight: 600;
+    letter-spacing: 0;
+    user-select: none;
+}
+
+.avatar .icon,
+.chat-avatar .icon,
+.chat-avatar-small .icon,
+.member-avatar .icon {
+    width: 50%;
+    height: 50%;
+}
+
+.avatar-tone-1 {
+    background: #f5f5f5 !important;
+    color: #0a0a0a !important;
+}
+
+.avatar-tone-2 {
+    background: #bdbdbd !important;
+    color: #0a0a0a !important;
+}
+
+.avatar-tone-3 {
+    background: #8a8a8a !important;
+    color: #0a0a0a !important;
+}
+
+.avatar-tone-4 {
+    background: #4a4a4a !important;
+    color: #fafafa !important;
+}
+
+.avatar-tone-5 {
+    background: #0a0a0a !important;
+    color: #fafafa !important;
+    box-shadow: inset 0 0 0 1px #474747;
+}
+
+

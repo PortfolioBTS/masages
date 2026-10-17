@@ -41,6 +41,7 @@ function test(name, fn) {
 }
 
 const readPublic = (relative) => fs.readFileSync(path.join(PUBLIC_DIR, relative), 'utf8');
+const { readClientCss } = require('./client-css');
 
 // Звуковые типы во всех видах, в которых их называют браузеры и ОС, плюс
 // контейнеры, которые чаще всего прячут звук. Ни один не должен пройти.
@@ -321,7 +322,7 @@ test('interface texts do not mention audio, voice or a microphone', () => {
 });
 
 test('style.css and script.js have no player or recording leftovers', () => {
-    const css = readPublic('style.css');
+    const css = readClientCss();
     const script = readPublic('script.js');
     assert.ok(!/\.message-audio|\.recording\b|rec-blink|#record-btn/.test(css));
     assert.ok(!/createElement\(\s*['"]audio['"]\s*\)|message_type\s*===\s*['"]audio['"]|message-audio/.test(script));
