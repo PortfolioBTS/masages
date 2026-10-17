@@ -59,7 +59,7 @@ npm start               # или npm run dev (перезапуск при изм
 
 Нужны Node.js 24 и PostgreSQL 13+. По умолчанию сервер слушает `0.0.0.0:3000`; вне production он поднимает HTTPS, если рядом лежат `localhost+1.pem` и `localhost+1-key.pem` (mkcert), иначе HTTP. Для быстрой проверки интерфейса `npm run dev:local -- --port 3101` сам поднимает временный PostgreSQL в Docker ([docs/dev/testing.md](docs/dev/testing.md)).
 
-При старте `server.js` сам создаёт схему и накатывает миграции (`initDatabase()`, [docs/dev/migrations.md](docs/dev/migrations.md)); порт открывается только после них. Версия схемы записана в таблице `schema_meta`: если она новее кода, сервер не стартует. Если в базе схема прежней версии 2.0.0, при первом запуске она один раз полностью сбрасывается вместе с файлами вложений: реальных пользователей на тот момент не было ([docs/ops/deploy-railway.md](docs/ops/deploy-railway.md)). Источник истины схемы — `initDatabase()` в `server.js`; `database.sql` — слепок, сгенерированный из него.
+При старте сервер (`server.js` → `src/lifecycle.js`) сам создаёт схему и накатывает миграции (`initDatabase()`, [docs/dev/migrations.md](docs/dev/migrations.md)); порт открывается только после них. Версия схемы записана в таблице `schema_meta`: если она новее кода, сервер не стартует. Если в базе схема прежней версии 2.0.0, при первом запуске она один раз полностью сбрасывается вместе с файлами вложений: реальных пользователей на тот момент не было ([docs/ops/deploy-railway.md](docs/ops/deploy-railway.md)). Источник истины схемы — `initDatabase()` в `src/db/schema.js`; `database.sql` — слепок, сгенерированный из него.
 
 Проверка настроек и секретов выполняется при каждом старте (значения не печатаются) и вручную:
 
@@ -131,7 +131,8 @@ npm run test:all          # юнит, затем сквозные
 ## Структура проекта
 
 ```
-server.js                  # сервер: маршруты, Socket.io, initDatabase()
+server.js                  # точка входа (запуск); весь код сервера — в src/
+src/                       # config, create-server, context, lifecycle; db/, http/ (middleware/, routes/), realtime/, services/, jobs/
 lib/                       # серверные модули (чистые функции и тонкие слои над БД)
   key-store.js, e2ee-keys.js, e2ee-groups.js, e2ee-envelope.js   # публичные ключи, ключи комнат, форма конверта
   kt-log.js, kt-service.js, kt-routes.js                         # журнал ключей
