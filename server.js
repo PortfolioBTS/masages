@@ -24,7 +24,6 @@ const fs = require('fs');
 const { Server } = require('socket.io');
 const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
-const { ipKeyGenerator } = rateLimit;
 
 // Импорт новых модулей безопасности и приватности
 const { stripMetadataFromFile, cleanupStaleTempFiles } = require('./lib/metadata-stripper');
@@ -151,7 +150,7 @@ const {
     E2EE_NOT_ALLOWED,
 } = require('./lib/e2ee-envelope');
 
-// ---- T6.1, шаг 1 из 6: часть кода вынесена в src/ ----
+// ---- T6.1, шаг 2 из 6: часть кода вынесена в src/ ----
 // Контекст собирается из фабрик в порядке зависимостей (на последнем шаге этот блок станет
 // src/create-server.js); всё, что ниже в этом файле, ещё не вынесено.
 const { loadConfig } = require('./src/config');
@@ -165,9 +164,16 @@ const { createIo } = require('./src/realtime/io');
 const { createEvents } = require('./src/realtime/events');
 const { createPool } = require('./src/db/pool');
 const { createTransactions } = require('./src/db/transactions');
+const { createExpiry } = require('./src/services/expiry');
+const { createSchema } = require('./src/db/schema');
+const { createMigrations } = require('./src/db/migrate');
+const { createRateLimits } = require('./src/http/middleware/rate-limits');
+const { createSession } = require('./src/http/middleware/session');
+const { createActivity } = require('./src/services/activity');
 const { SAFE_FILENAME_RE, readFileHead, coarsenFileTimes } = require('./src/services/uploads');
-const { getSocketRoomKey, MAX_SOCKETS_PER_USER, MAX_SOCKETS_PER_IP } = require('./src/realtime/io');
+const { MAX_SOCKETS_PER_USER, MAX_SOCKETS_PER_IP, getSocketRoomKey } = require('./src/realtime/io');
 const { respondIfDeadlock, withMessageIdRetry } = require('./src/db/transactions');
+const { parseRequestedExpiry } = require('./src/services/expiry');
 
 const ctx = { ...loadConfig(__dirname) };
 Object.assign(ctx, createBase());
@@ -180,15 +186,24 @@ Object.assign(ctx, createIo(ctx));
 Object.assign(ctx, createEvents(ctx));
 Object.assign(ctx, createPool(ctx));
 Object.assign(ctx, createTransactions(ctx));
+Object.assign(ctx, createExpiry(ctx));
+Object.assign(ctx, createSchema(ctx));
+Object.assign(ctx, createMigrations(ctx));
+Object.assign(ctx, createRateLimits(ctx));
+Object.assign(ctx, createSession(ctx));
+Object.assign(ctx, createActivity(ctx));
 
 const {
-    UPLOADS_DIR, app, metrics, resolveRealIp, pool, removeUploadedFiles, io, dbAll, dbGet, sessionSecret,
-    IS_PRODUCTION, dbRun, userSocketCount, getClientIp, ipSocketCount, HSTS_PRELOAD, isTrustedOrigin,
-    withTransaction, readiness, SESSION_RENEW_MS, withTransactionRetry, queryWithRetry,
-    GLOBAL_DEFAULT_EXPIRY_SECONDS, authorTags, notifyChatListChanged, UPLOAD_QUOTA_BYTES,
+    UPLOADS_DIR, app, metrics, resolveRealIp, dbGet, io, sessionMiddleware, anonActivity, userSocketCount,
+    getClientIp, ipSocketCount, dbAll, IS_PRODUCTION, HSTS_PRELOAD, isTrustedOrigin, pool, withTransaction,
+    dbRun, readiness, SESSION_RENEW_MS, csrf, apiLimiter, bundleLimiter, withTransactionRetry, pgLimits,
+    queryWithRetry, keyShareLimiter, keyRequestLimiter, memberCertLimiter, powUsedStore, registerLimiter,
+    startUserSession, endSession, GLOBAL_DEFAULT_EXPIRY_SECONDS, authorTags, disappearingMessagesManager,
+    notifyChatListChanged, applyNewMessageExpiry, UPLOAD_QUOTA_BYTES, newMessageExpirySeconds,
     emitRoomMessageEvent, INVITE_TTL_SECONDS, subscribeUserToChat, notifyRoomMembersChanged,
-    notifyJoinRequestsChanged, notifyJoinRequestDecided, unsubscribeUserFromChat, rejectUpload,
-    rejectUploadWith, cleanupUploadedFile, DB_POOL_CONFIG, PORT, server, HOST,
+    notifyJoinRequestsChanged, joinUserLimiter, joinIpLimiter, notifyJoinRequestDecided, removeUploadedFiles,
+    unsubscribeUserFromChat, rejectUpload, rejectUploadWith, cleanupUploadedFile, getDefaultExpirySeconds,
+    setChatExpiry, DB_POOL_CONFIG, PORT, initDatabaseExclusive, server, HOST,
 } = ctx;
 
 // '.svg' явно в блок-листе как доп. защита (defense-in-depth, п.7 аудита):
@@ -336,480 +351,6 @@ app.use((req, res, next) => {
     next();
 });
 
-const rateLimitKeyGenerator = (req) => ipKeyGenerator(req.realIp || req.ip);
-const sessionUserId = (req) => (req.session && req.session.userId) || null;
-const RATE_LIMIT_DEFAULTS = { standardHeaders: true, legacyHeaders: false };
-
-// Точные лимиты (регистрация, вход по коду, выдача ключей) и одноразовость PoW
-// живут в Postgres и создаются ниже, рядом с пулом и SESSION_SECRET
-// (lib/pg-limits.js). Здесь — общий лимит /api, он только в памяти.
-
-// 300 запросов за 15 минут (~1 в 3 секунды) активный пользователь чата
-// выбирал за несколько минут — особенно когда клиент перезапрашивал
-// список чатов на каждое входящее сообщение — после чего всё приложение
-// "висло" с ошибкой на 15 минут. Залогиненных считаем по аккаунту (за
-// одним NAT или onion-адресом их много), остальных — по IP. Неавторизованные
-// onion-запросы не считаются: у них один IP на всех, и любой исчерпал бы
-// общую квоту за всех onion-посетителей. Их открытый маршрут (регистрация)
-// защищён proof-of-work, а от флуда — защита самого onion-сервиса (см.
-// tor-service/README.md).
-const apiLimiter = rateLimit({
-    ...RATE_LIMIT_DEFAULTS,
-    windowMs: 15 * 60 * 1000,
-    max: 1000,
-    skip: (req) => req.isOnion && !sessionUserId(req),
-    keyGenerator: (req) => (sessionUserId(req) ? `user:${sessionUserId(req)}` : rateLimitKeyGenerator(req)),
-    message: { success: false, message: 'Слишком много запросов. Попробуйте позже.' }
-});
-
-async function maybeDumpCa() {
-    if (process.env.DUMP_CA !== 'true') return;
-    const tls = require('tls');
-    const net = require('net');
-    const dbUrl = process.env.DATABASE_URL;
-    if (!dbUrl) { console.error('DATABASE_URL не задан'); process.exit(1); }
-    const parsed = new URL(dbUrl);
-    const host = parsed.hostname;
-    const port = parseInt(parsed.port) || 5432;
-    console.log(`[DUMP_CA] Подключаемся к ${host}:${port}...`);
-    await new Promise((resolve, reject) => {
-        const socket = net.createConnection(port, host, () => {
-            socket.write(Buffer.from([0x00,0x00,0x00,0x08,0x04,0xd2,0x16,0x2f]));
-        });
-        socket.once('data', (data) => {
-            if (data[0] !== 0x53) { reject(new Error('Сервер не поддерживает SSL')); return; }
-            const tlsSocket = tls.connect({ socket, host, rejectUnauthorized: false }, () => {
-                const chain = [];
-                let current = tlsSocket.getPeerCertificate(true);
-                const seen = new Set();
-                while (current && !seen.has(current.fingerprint)) {
-                    seen.add(current.fingerprint);
-                    chain.push(current);
-                    if (!current.issuerCertificate || current.issuerCertificate === current) break;
-                    current = current.issuerCertificate;
-                }
-                const pemChain = chain.map(c => [
-                    '-----BEGIN CERTIFICATE-----',
-                    c.raw.toString('base64').match(/.{1,64}/g).join('\n'),
-                    '-----END CERTIFICATE-----'
-                ].join('\n')).join('\n');
-                console.log('\n[DUMP_CA] Найдено сертификатов в цепочке: ' + chain.length);
-                chain.forEach((c, i) => {
-                    console.log('[DUMP_CA] [' + i + '] subject:', JSON.stringify(c.subject));
-                    console.log('[DUMP_CA] [' + i + '] issuer:', JSON.stringify(c.issuer));
-                });
-                console.log('\n[DUMP_CA] ========= СКОПИРУЙ ВСЁ ЭТО В ПЕРЕМЕННУЮ DB_CA_CERT =========');
-                console.log(pemChain);
-                console.log('[DUMP_CA] ===================== КОНЕЦ =====================\n');
-                tlsSocket.destroy();
-                resolve();
-            });
-            tlsSocket.on('error', reject);
-        });
-        socket.on('error', reject);
-        socket.setTimeout(10000, () => { socket.destroy(); reject(new Error('Таймаут')); });
-    });
-    process.exit(0);
-}
-// Менеджер исчезающих сообщений. Удалённые им сообщения сразу пропадают
-// и у открытых клиентов (раньше — только после перезагрузки страницы), а
-// их вложения удаляются с диска.
-const disappearingMessagesManager = new DisappearingMessagesManager(pool, {
-    cleanupIntervalMs: process.env.CLEANUP_INTERVAL_MS,
-    onMessagesDeleted: (rows) => {
-        removeUploadedFiles(rows.map(r => r.file_url));
-        for (const row of rows) {
-            // У строки комнаты chat_id нет (sealed-sender.md, 8.1): событие несёт только room_id.
-            io.to(getSocketRoomKey(row.chat_id, row.room_id)).emit('messageDeleted', row.room_id
-                ? { id: String(row.id), room_id: row.room_id }
-                : { id: String(row.id), chat_id: row.chat_id, room_id: null });
-        }
-    },
-});
-
-// ---- Итоговая схема базы (roadmap R0) ----
-//
-// Пока новая версия не выкачена, схема описана прямо в DDL initDatabase: все
-// изменения волн вносятся в эти CREATE TABLE, без ALTER-миграций, а после
-// выката схему меняют только файлы lib/migrations/ (docs/dev/migrations.md).
-// Шагов совместимости со старыми схемами здесь нет: схема версии 2.0.0 при
-// первом старте сбрасывается целиком (lib/legacy-reset.js), а локальные и
-// тестовые базы создаются заново.
-//
-// initDatabase идемпотентна и идёт под блокировкой миграций на каждом старте:
-// CREATE ... IF NOT EXISTS по готовой схеме ничего не меняет. Внешние ключи и
-// их ON DELETE заданы прямо в CREATE TABLE. Ключи на users — без каскада:
-// deleteUserAccount удаляет строки пользователя сам, в нужном порядке, одной
-// транзакцией. Таблицы со своими init*Schema (ключи E2EE, key-share, таймеры
-// исчезающих сообщений) создаются в lib/ рядом с кодом, который ими владеет.
-async function initDatabase() {
-    await maybeDumpCa().catch(err => { logError('[DUMP_CA] Ошибка', err); process.exit(1); });
-
-    // Схема версии 2.0.0 (аккаунты с email и паролем) — сбросить до создания
-    // таблиц: реальных пользователей нет, а переносить тестовые данные незачем.
-    await resetLegacyDatabase({ pool, uploadsDir: UPLOADS_DIR });
-
-    // Аккаунты только временные (roadmap R2): срок жизни и последняя активность
-    // обязательны, по ним чистка удаляет неактивных. created_at — до минуты:
-    // точное время регистрации никому не нужно и лишь помогает сопоставить
-    // аккаунт с логами. Отметки прочтения выключены, пока пользователь их не
-    // включит (POST /api/user/privacy).
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY,
-            unique_code TEXT UNIQUE NOT NULL,
-            username TEXT UNIQUE NOT NULL,
-            avatar TEXT DEFAULT '',
-            created_at TIMESTAMPTZ NOT NULL DEFAULT date_trunc('minute', now()),
-            read_receipts BOOLEAN NOT NULL DEFAULT FALSE,
-            anon_lifetime TEXT NOT NULL CHECK (anon_lifetime IN ('tab', 'day', 'week')),
-            last_active_at TIMESTAMPTZ NOT NULL
-        )
-    `);
-    // Чистка неактивных аккаунтов (раз в несколько минут) идёт по сроку жизни и
-    // последней активности, без прохода по всей таблице users.
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_users_lifetime ON users(anon_lifetime, last_active_at)');
-
-    // База счётчиков seq комнат и чатов с ботом (DEFAULT rooms.msg_seq и
-    // chats.msg_seq): равномерно из [0; 2^30). 2^32 делится на 2^30 без
-    // остатка, поэтому смещения нет, а запас до переполнения INTEGER — 2^30
-    // сообщений в одной области. Функция нужна до CREATE TABLE rooms/chats.
-    await pool.query(`
-        CREATE OR REPLACE FUNCTION nyxo_random_seq_base() RETURNS integer
-        LANGUAGE sql VOLATILE AS $fn$
-          SELECT (('x' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 8))::bit(32)::bigint % 1073741824)::integer
-        $fn$
-    `);
-
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS rooms (
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            code TEXT UNIQUE NOT NULL,
-            -- последний выданный seq сообщений комнаты (триггер nyxo_message_seq).
-            -- Начинается со случайной базы: новичок по seq не узнает, сколько
-            -- сообщений было до него
-            msg_seq INTEGER NOT NULL DEFAULT nyxo_random_seq_base(),
-            created_at TIMESTAMPTZ NOT NULL DEFAULT date_trunc('minute', now()),
-            -- срок жизни кода приглашения (INVITE_TTL_HOURS)
-            code_expires_at TIMESTAMPTZ,
-            -- параметры кода (POST /api/chats/:chatId/invite/rotate): лимит
-            -- участников (NULL — без лимита), вступление только с одобрения
-            -- участника, выключенный код
-            invite_max_members INTEGER,
-            invite_require_approval BOOLEAN NOT NULL DEFAULT TRUE,
-            invite_disabled BOOLEAN NOT NULL DEFAULT FALSE,
-            -- подписанное приглашение (signed-membership.md, 7.1): сертификат
-            -- приглашения (335 байт), снимок состава автора (16 байт на участника)
-            -- и автор приглашения (без внешнего ключа: выход или удаление аккаунта
-            -- автора обнуляет все три столбца). NULL - код принимает только заявки
-            invite_cert BYTEA CHECK (invite_cert IS NULL OR octet_length(invite_cert) = 335),
-            invite_snap BYTEA CHECK (invite_snap IS NULL OR (octet_length(invite_snap) % 16 = 0 AND octet_length(invite_snap) <= 16384)),
-            invite_actor_id INTEGER,
-            CONSTRAINT rooms_invite_signed CHECK (
-                (invite_cert IS NULL) = (invite_snap IS NULL) AND (invite_cert IS NULL) = (invite_actor_id IS NULL)
-            )
-        )
-    `);
-
-    // chats.id у каждого участника своя (личная строка), общий для всех —
-    // room_id. Комната удаляется целиком — строки chats уходят вместе с ней.
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS chats (
-            id INTEGER PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            room_id INTEGER REFERENCES rooms(id) ON DELETE CASCADE,
-            name TEXT NOT NULL,
-            avatar TEXT NOT NULL,
-            online INTEGER DEFAULT 0,
-            is_bot INTEGER DEFAULT 0,
-            -- счётчик seq чата с ботом (у комнаты он в rooms.msg_seq)
-            msg_seq INTEGER NOT NULL DEFAULT nyxo_random_seq_base(),
-            -- непрочитанные: seq последнего прочитанного сообщения в личной
-            -- строке chats каждого участника. Задаёт приложение при создании
-            -- строки (счётчик области на этот момент): «фантомно непрочитанных»
-            -- нет, а колонка без DEFAULT не даст забыть об этом
-            last_read_seq INTEGER NOT NULL,
-            -- порядок чатов без сообщений: id случайные и порядка не несут
-            created_at TIMESTAMPTZ NOT NULL DEFAULT date_trunc('minute', now()),
-            -- личные флаги чата (POST /api/chats/:chatId/prefs): собеседники их
-            -- не видят
-            pinned BOOLEAN NOT NULL DEFAULT FALSE,
-            muted BOOLEAN NOT NULL DEFAULT FALSE,
-            archived BOOLEAN NOT NULL DEFAULT FALSE
-        )
-    `);
-
-    // Sealed sender на хранении (docs/security/sealed-sender.md): в строке
-    // сообщения КОМНАТЫ нет ни user_id, ни chat_id (личная строка отправителя) —
-    // вместо них author_tag, псевдоним автора на неделю (lib/author-tag.js).
-    // Строка чата с БОТОМ наоборот: chat_id и user_id (владелец; у ответов бота
-    // тоже), без тега. Взаимоисключение держит CHECK messages_author_scope.
-    // chat_id ... ON DELETE CASCADE: SET NULL нарушил бы CHECK для строк бота при
-    // удалении строки chats; файлы каскадно удалённых строк убирает уборщик
-    // файлов-сирот. Комната удаляется — сообщения уходят каскадом; ответ на
-    // удалённое сообщение теряет связь с оригиналом (SET NULL), а не блокирует
-    // удаление. Приложение и так удаляет в правильном порядке (DELETE
-    // /api/chats/:chatId, deleteUserAccount), каскады — страховка на случай,
-    // если порядок там по ошибке изменят.
-    //
-    // Порядок сообщений внутри области (комнаты или чата с ботом) задаёт seq, а
-    // не id и не created_at (docs/security/message-ordering.md): id случайный
-    // (комнатные сообщения его выбирает клиент до шифрования, остальным id
-    // выдаёт DEFAULT), created_at огрублён до минуты. seq выдаёт триггер
-    // nyxo_message_seq из счётчика строки области; значение из INSERT он
-    // игнорирует. Колонки time (HH:MM в часовом поясе сервера) и deleted
-    // (удаление физическое) не нужны: клиент форматирует created_at сам.
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY,
-            seq INTEGER NOT NULL,
-            chat_id INTEGER REFERENCES chats(id) ON DELETE CASCADE,
-            room_id INTEGER REFERENCES rooms(id) ON DELETE CASCADE,
-            user_id INTEGER REFERENCES users(id),
-            author_tag BYTEA,
-            text TEXT NOT NULL,
-            file_url TEXT,
-            file_name TEXT,
-            file_type TEXT,
-            message_type TEXT DEFAULT 'text',
-            sent INTEGER DEFAULT 1,
-            status TEXT DEFAULT 'sent',
-            edited_at TIMESTAMPTZ,
-            reply_to_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
-            -- E2EE: text хранит клиентский шифроконверт вместо обычного текста
-            -- (public/e2ee.js). Серверное шифрование "at rest" (lib/message-crypto.js)
-            -- применяется поверх в обоих случаях — флаг только про то, что лежит
-            -- ВНУТРИ после его снятия.
-            encrypted BOOLEAN NOT NULL DEFAULT FALSE,
-            -- время хранится с точностью до минуты (раздел 11 контракта):
-            -- порядок задаёт seq, точное время лежит только внутри E2EE-конверта
-            created_at TIMESTAMPTZ NOT NULL DEFAULT date_trunc('minute', now()),
-            -- размер вложения — для квоты UPLOAD_QUOTA_MB
-            file_size BIGINT,
-            -- В комнате только E2EE-конверты (roadmap R7). Маршруты это уже
-            -- проверяют (lib/e2ee-envelope.js); ограничение — второй рубеж на
-            -- случай ошибки в коде: открытый текст комнаты не ляжет в базу вовсе.
-            CONSTRAINT messages_room_e2ee CHECK (room_id IS NULL OR encrypted),
-            CONSTRAINT messages_author_scope CHECK (
-                   (room_id IS NULL     AND chat_id IS NOT NULL AND user_id IS NOT NULL AND author_tag IS NULL)
-                OR (room_id IS NOT NULL AND chat_id IS NULL     AND user_id IS NULL     AND author_tag IS NOT NULL
-                    AND octet_length(author_tag) = 16)
-            )
-        )
-    `);
-
-    // Новичок видит только сообщения комнаты, отправленные ПОСЛЕ его вступления
-    // (visible_from_seq — seq последнего сообщения на тот момент; видно
-    // сообщения с seq > visible_from_seq). Уникальный (room_id, user_id):
-    // проверка "участник ли комнаты" идёт на каждый файл, реакцию и joinChat, и
-    // один пользователь не может оказаться в комнате дважды (с двумя
-    // visible_from_seq).
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS room_participants (
-            id SERIAL PRIMARY KEY,
-            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            visible_from_seq INTEGER NOT NULL,
-            UNIQUE (room_id, user_id)
-        )
-    `);
-
-    // Сертификаты состава группы (signed-membership.md, 7.1): допуск (vouch, 1), вход по
-    // приглашению (join, 3) и повторный допуск (revouch, 4); приглашение (invite) лежит
-    // в rooms. Времени создания нет: минута допуска внутри сертификата. Субъекта нет
-    // среди внешних ключей: строки удаляет приложение вместе с выходом или удалением
-    // аккаунта субъекта и подписавшего (порядок блокировок message-ordering.md, 8.1:
-    // после chats, до user_left_rooms), комната - каскадом.
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS room_member_certs (
-            room_id    INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-            subject_id INTEGER NOT NULL,
-            actor_id   INTEGER NOT NULL,
-            kind       SMALLINT NOT NULL CHECK (kind IN (1, 3, 4)),
-            cert       BYTEA NOT NULL CHECK (octet_length(cert) IN (271, 335)),
-            aux        BYTEA CHECK (aux IS NULL OR octet_length(aux) = 335),
-            snap       BYTEA CHECK (snap IS NULL OR (octet_length(snap) % 16 = 0 AND octet_length(snap) <= 16384)),
-            PRIMARY KEY (room_id, subject_id, actor_id, kind),
-            CONSTRAINT room_member_certs_length CHECK (octet_length(cert) = CASE kind WHEN 3 THEN 335 ELSE 271 END)
-        )
-    `);
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_rmc_subject ON room_member_certs(subject_id)');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_rmc_actor ON room_member_certs(actor_id)');
-
-    // Комнаты, откуда пользователь вышел, оставив там сообщения (sealed-sender.md,
-    // 5 и 12): удаление аккаунта удаляет их во всех таких комнатах, а теги без
-    // этой записи найти было бы негде. Запись создаётся только если у пользователя
-    // там остались сообщения. Ключ на users - без каскада (как у остальных таблиц
-    // пользователя: deleteUserAccount удаляет строки сам), на rooms - с каскадом.
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS user_left_rooms (
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-            PRIMARY KEY (user_id, room_id)
-        )
-    `);
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_user_left_rooms_room ON user_left_rooms(room_id)');
-    // Квота вложений под псевдонимом qkey (lib/upload-quota.js): в users столбцов
-    // окна нет, а в самой таблице нет user_id.
-    await initUploadQuotaSchema(pool);
-
-    // Реакции исчезают вместе со своим сообщением: иначе снос всех сообщений
-    // комнаты падал бы на внешнем ключе, как только у любого есть реакция.
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS reactions (
-            id SERIAL PRIMARY KEY,
-            message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            emoji TEXT NOT NULL,
-            UNIQUE (message_id, user_id, emoji)
-        )
-    `);
-    await initJoinRequests();
-
-    // Сессии: тот же DDL, что у connect-pg-simple (его table.sql). Стор создал
-    // бы таблицу сам при первом запросе, но индекс по пользователю нужен сразу:
-    // выход и удаление аккаунта сбрасывают все его сессии (sess->>'userId'), и
-    // без индекса это проход по всей таблице.
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS session (
-            sid VARCHAR NOT NULL COLLATE "default",
-            sess JSON NOT NULL,
-            expire TIMESTAMP(6) NOT NULL,
-            CONSTRAINT session_pkey PRIMARY KEY (sid)
-        )
-    `);
-    await pool.query('CREATE INDEX IF NOT EXISTS "IDX_session_expire" ON session(expire)');
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_session_user ON session((sess->>'userId'))`);
-
-    await initE2eeGroupsSchema(pool);
-    // Лимиты и использованные решения PoW (UNLOGGED, lib/pg-limits.js).
-    await initPgLimitsSchema(pool);
-    // Публичные E2EE-ключи хранятся в этой же базе (lib/key-store.js).
-    await initKeyStoreSchema(pool);
-    // Таблицы message_expiry/chat_settings/room_settings ссылаются на
-    // messages/chats/rooms, поэтому создаются только после них.
-    await disappearingMessagesManager.initialize();
-
-    // Индексы для выборок "сообщения области по seq". Это же уникальные
-    // индексы порядка (O1 контракта): пара (область, seq) не повторяется, а
-    // seq растёт в порядке фиксации вставок. Включённые колонки позволяют
-    // последнему сообщению, счётчику непрочитанного, странице истории и
-    // кандидатам поиска читаться index-only scan'ом: без них планировщик
-    // выбирал бы обратный проход по первичному ключу с фильтром по room_id —
-    // для "тихой" комнаты это просмотр почти всей таблицы. В списке INCLUDE нет
-    // ни id, ни seq: они уже в ключе или в первичном ключе. Каскад удаления
-    // комнаты обслуживает префикс (room_id).
-    await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_room_seq ON messages(room_id, seq) INCLUDE (sent, encrypted) WHERE room_id IS NOT NULL');
-    await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_chat_seq ON messages(chat_id, seq) INCLUDE (user_id, sent, encrypted) WHERE room_id IS NULL');
-    // Внешний ключ messages.chat_id ... ON DELETE CASCADE: частичный индекс
-    // выше по условию запроса RI (chat_id = $1, без room_id IS NULL) не
-    // применим, и без этого индекса удаление каждой строки chats сканировало бы
-    // всю таблицу messages (выход из комнаты, удаление аккаунта).
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id) WHERE chat_id IS NOT NULL');
-    // Внешний ключ messages.user_id (только чат с ботом): запрос RI при удалении
-    // users - `WHERE user_id = $1`, и частичный индекс с условием по room_id он
-    // бы не использовал. Условие user_id IS NOT NULL следует из равенства, а
-    // строки комнат (user_id NULL) в индекс не попадают.
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id) WHERE user_id IS NOT NULL');
-    // Тег автора: правка, удаление, прочитано, выход и удаление аккаунта ищут
-    // строки комнаты по (комната, набор тегов).
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_room_author ON messages(room_id, author_tag) WHERE room_id IS NOT NULL');
-    // Каждая картинка/файл в чате проверяет доступ поиском по file_url —
-    // без индекса это был бы полный проход по всей таблице messages на КАЖДЫЙ
-    // запрос /uploads/*.
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_file_url ON messages(file_url) WHERE file_url IS NOT NULL');
-    // Для ON DELETE SET NULL по reply_to_id: без индекса удаление каждого
-    // сообщения сканировало бы всю таблицу в поисках ответов на него (снос
-    // комнаты с N сообщениями — N полных проходов).
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_reply_to_id ON messages(reply_to_id) WHERE reply_to_id IS NOT NULL');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_chats_user_id ON chats(user_id)');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_chats_room_id ON chats(room_id)');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_room_participants_user ON room_participants(user_id)');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_reactions_msg_user ON reactions(message_id, user_id)');
-    // Авто-разархивация получателей идёт на КАЖДОЕ новое сообщение комнаты;
-    // по частичному индексу она читает только архивные строки комнаты
-    // (обычно ни одной), а не строки всех её участников.
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_chats_archived ON chats(room_id) WHERE archived');
-
-    await setRandomIdDefaults();
-    // Надгробия id, триггеры seq и проверки id (lib/message-order-schema.js):
-    // нужны messages, rooms, chats и DEFAULT id выше.
-    await initMessageOrderSchema(pool);
-
-    console.log('База данных инициализирована');
-}
-
-// ---- Случайные id для users, rooms, chats, join_requests, messages ----
-//
-// Последовательные id выдавали размер и темп роста сервиса (id свежей
-// регистрации = число пользователей) и порядок событий: по id комнаты или
-// чата было видно, кто и когда создал её раньше. Поэтому id этих таблиц —
-// случайные из [1 000 000, 2^31 - 1]: 48 бит из gen_random_uuid() (PG 13+,
-// внутри pg_strong_random — криптостойкий ГСЧ; первые 12 hex-цифр UUIDv4
-// случайны целиком) по модулю размера диапазона (смещение ~2^-17 — не
-// различимо), с перепроверкой занятости в цикле. У messages порядок и
-// непрочитанное держатся не на id, а на seq (message-ordering.md); id
-// сообщений комнаты выбирает клиент, DEFAULT нужен чату с ботом.
-//
-// Тело функции — константа: database.sql содержит ту же функцию.
-const RANDOM_ID_FUNCTION_BODY = `
-DECLARE
-    candidate integer;
-    taken boolean;
-BEGIN
-    LOOP
-        candidate := (1000000 + ('x' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 12))::bit(48)::bigint % 2146483648)::integer;
-        EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s WHERE id = $1)', target) INTO taken USING candidate;
-        IF NOT taken THEN
-            RETURN candidate;
-        END IF;
-    END LOOP;
-END
-`;
-const RANDOM_ID_TABLES = ['users', 'rooms', 'chats', 'join_requests', 'messages'];
-
-// DEFAULT со ссылкой на таблицу (nyxo_random_id('users'::regclass)) можно
-// задать только после CREATE TABLE: внутри него таблицы ещё нет, поэтому
-// отдельным ALTER. ALTER берёт ACCESS EXCLUSIVE блокировку, и повторять его на
-// каждом старте незачем: он выполняется только там, где DEFAULT ещё не задан.
-async function setRandomIdDefaults() {
-    await pool.query(`
-        CREATE OR REPLACE FUNCTION nyxo_random_id(target regclass) RETURNS integer
-        LANGUAGE plpgsql VOLATILE AS $fn$${RANDOM_ID_FUNCTION_BODY}$fn$
-    `);
-    const current = await dbAll(
-        `SELECT table_name, column_default FROM information_schema.columns
-         WHERE table_schema = current_schema() AND column_name = 'id' AND table_name = ANY($1::text[])`,
-        [RANDOM_ID_TABLES]
-    );
-    for (const table of RANDOM_ID_TABLES) {
-        const row = current.find(r => r.table_name === table);
-        if (!String((row && row.column_default) || '').includes('nyxo_random_id(')) {
-            await pool.query(`ALTER TABLE ${table} ALTER COLUMN id SET DEFAULT nyxo_random_id('${table}'::regclass)`);
-        }
-    }
-}
-
-// Заявки на вступление (комнаты с одобрением). join_requests.id виден
-// заявителю и участникам комнаты — он случайный, как id пользователей и
-// комнат (DEFAULT ставит setRandomIdDefaults), чтобы по нему нельзя было
-// судить, сколько заявок подают по всему сервису. Внешний ключ на users без
-// каскада — как у остальных таблиц: deleteUserAccount удаляет строки сам.
-async function initJoinRequests() {
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS join_requests (
-            id INTEGER PRIMARY KEY,
-            room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            created_at TIMESTAMPTZ NOT NULL DEFAULT date_trunc('minute', now()),
-            UNIQUE (room_id, user_id)
-        )
-    `);
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_join_requests_user ON join_requests(user_id)');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_join_requests_created ON join_requests(created_at)');
-}
-
 function getLocalAddresses() {
     const nets = os.networkInterfaces();
     const addresses = [];
@@ -841,102 +382,6 @@ async function generateAnonymousUsernameAsync() {
     }
     throw new Error('Could not generate anonymous username');
 }
-
-// ---- Точные лимиты в Postgres (lib/pg-limits.js, roadmap R11) ----
-//
-// Регистрация, вход по коду, выдача bundle ключей и одноразовость решений PoW
-// переживают рестарт: счётчики лежат в UNLOGGED-таблицах, ключи клиентов (IP,
-// id) — только как HMAC от SESSION_SECRET. Ошибка хранилища закрывает лимит:
-// 503 {success:false, code:'busy'}. Ключ PoW тоже выводится из SESSION_SECRET,
-// чтобы выданные задачи действовали и после рестарта.
-setPowSecret(sessionSecret);
-const pgLimits = createPgLimits({
-    pool,
-    secret: sessionSecret,
-    hooks: { limited: metrics.rateLimited, storeError: metrics.limitStoreError },
-});
-const powUsedStore = pgLimits.powUsedStore();
-const bundleLimiter = pgLimits.slidingLimiter('bundle');
-// Отправки key-share (30 в час на пару «пользователь, комната») и запросы ключа (10 в час).
-const keyShareLimiter = pgLimits.slidingLimiter('keyshare');
-const keyRequestLimiter = pgLimits.slidingLimiter('keyreq');
-// Публикация и чтение сертификатов состава (signed-membership.md, 7.2).
-const memberCertLimiter = pgLimits.slidingLimiter('memcert');
-
-// CSRF-токен привязан к сессии: ключ выводится из SESSION_SECRET (HKDF), так что
-// смена секрета заодно сбрасывает все выданные токены.
-const csrf = createCsrf({ secret: sessionSecret, onRejected: metrics.csrfRejected });
-
-// Массовую регистрацию сдерживает proof-of-work (lib/pow.js). IP-лимит остался
-// мягким и только для clearnet: для onion он запер бы регистрацию всем сразу
-// (общий IP контейнера tor).
-const registerLimiter = pgLimits.rateLimiter('register', {
-    windowMs: 60 * 60 * 1000,
-    max: 10,
-    skip: (req) => req.isOnion,
-    keyGenerator: rateLimitKeyGenerator,
-    message: { success: false, message: 'Слишком много регистраций. Попробуйте позже.' }
-});
-
-// Вход в комнату по коду: даже 130-битный код не должен перебираться
-// с бесконечной скоростью, и утёкший список кодов — массово проверяться.
-const joinUserLimiter = pgLimits.rateLimiter('join-user', {
-    windowMs: 15 * 60 * 1000,
-    max: 20,
-    skip: (req) => !sessionUserId(req),
-    keyGenerator: (req) => `user:${sessionUserId(req)}`,
-    message: { success: false, message: 'Слишком много попыток входа в чат. Попробуйте позже.' }
-});
-const joinIpLimiter = pgLimits.rateLimiter('join-ip', {
-    windowMs: 15 * 60 * 1000,
-    max: 60,
-    skip: (req) => req.isOnion,
-    keyGenerator: rateLimitKeyGenerator,
-    message: { success: false, message: 'Слишком много попыток входа в чат. Попробуйте позже.' }
-});
-
-// NyxoPgStore (lib/session-store.js) — стор connect-pg-simple, который пишет
-// время в таблицу session огрублённым до 5 минут и без createdAt.
-const NyxoPgStore = createNyxoPgStore(session);
-const sessionMiddleware = session({
-    store: new NyxoPgStore({
-        pool: pool,
-        tableName: 'session',
-        createTableIfMissing: true,
-        // touch стора писал бы строку session на КАЖДЫЙ запрос. Сессия
-        // продлевается явно: маркером renewSession не чаще раза в интервал
-        // (middleware после sessionMiddleware) и touch открытых сокетов.
-        disableTouch: true
-    }),
-    secret: sessionSecret,
-    resave: false,
-    saveUninitialized: false,
-    proxy: true,
-    cookie: {
-        maxAge: 24 * 60 * 60 * 1000,
-        httpOnly: true,
-        // 'auto' — Secure по фактическому протоколу запроса (req.secure с
-        // учётом X-Forwarded-Proto от доверенного прокси; для .onion его
-        // выставляет onionMiddleware). Жёсткий secure: true ломал вход везде,
-        // где до приложения доходит plain http.
-        secure: IS_PRODUCTION ? 'auto' : false,
-        // Раньше в production было 'none' — кука уходила с любого сайта, в том
-        // числе в межсайтовое WebSocket-рукопожатие и POST-формы. 'lax'
-        // оставляет её только своим запросам и переходам по ссылке.
-        sameSite: 'lax'
-    }
-});
-
-// ---- Срок жизни анонимного аккаунта (lib/anon-lifetime.js, lib/anon-activity.js) ----
-//
-// Аккаунт удаляется после выбранного срока БЕЗ АКТИВНОСТИ (30 минут /
-// сутки / неделя); потолка от создания нет. Активность — HTTP-запрос
-// (middleware после sessionMiddleware) и открытый сокет: подключение,
-// отключение последнего и touch раз в 2,5 минуты (задача touchOnlineSockets).
-// Источник истины — users.last_active_at (корзина 5 минут, округление
-// вверх): по нему удаляет purgeExpiredAnonymousUsers, его же видят другие
-// экземпляры сервера; anonActivity — кэш процесса поверх него.
-const anonActivity = createAnonActivity({ dbGet, dbRun });
 
 // Socket.io: источник (allowRequest выше) -> сессия -> авторизация ->
 // лимит подключений на аккаунт и (для clearnet) на IP.
@@ -1262,21 +707,6 @@ function readMessageText(stored, row) {
     }
 }
 
-// Новая сессия с защитой от фиксации (regenerate): id сессии, который был
-// у браузера до регистрации, к аккаунту не привязывается.
-function startUserSession(req, fields) {
-    return new Promise((resolve, reject) => {
-        req.session.regenerate((err) => {
-            if (err) return reject(err);
-            Object.assign(req.session, fields);
-            // Новая сессия — новая привязка CSRF-токена: токен «до входа» или от
-            // прежней сессии больше не подходит, клиент получает новый в этом же ответе.
-            csrf.issue(req, req.res);
-            resolve();
-        });
-    });
-}
-
 // Proof-of-work (lib/pow.js): решение одноразовое и привязано к цели.
 // Цель одна — регистрация временного аккаунта; ?purpose=register — 400.
 const POW_PURPOSES = new Set(['register-anon']);
@@ -1405,22 +835,6 @@ app.post('/api/register/anonymous', registerLimiter, async (req, res) => {
         res.json({ success: false, message: 'Ошибка сервера' });
     }
 });
-
-// Завершает сессию после удаления аккаунта. Clear-Site-Data: "cache" —
-// браузер выбрасывает кэш сайта (страницы, вложения), чтобы на общем
-// устройстве не оставалось следов переписки.
-function endSession(req, res, message) {
-    req.session.destroy((err) => {
-        if (err) logError('[Account] Не удалось удалить сессию', err);
-        res.clearCookie('connect.sid');
-        // CSRF-куку не удаляем, а выдаём новую (под привязку «до входа», с новым
-        // nyxo_pre): страница после удаления не перезагружается, и следующая
-        // регистрация без куки получила бы 403 «неверный CSRF-токен».
-        csrf.issue(req, res, { freshPre: true });
-        res.set('Clear-Site-Data', '"cache"');
-        res.json({ success: true, message });
-    });
-}
 
 // Удаление аккаунта со всеми данными (см. deleteUserAccount). Подтверждения
 // не нужно: аккаунт временный, и войти в него иначе, чем этой сессией, нельзя.
@@ -1969,23 +1383,6 @@ app.post('/api/chats/:chatId/read', async (req, res) => {
     res.json({ success: true });
 });
 
-// Действующий срок новых сообщений чата: общий таймер комнаты (для чата с
-// ботом — личный), иначе DEFAULT_MESSAGE_EXPIRY_SECONDS; null — не исчезают.
-async function getDefaultExpirySeconds(chat) {
-    const settings = chat.room_id
-        ? await disappearingMessagesManager.getRoomSettings(chat.room_id)
-        : await disappearingMessagesManager.getChatSettings(chat.id);
-    return (settings && settings.default_message_expiry) || GLOBAL_DEFAULT_EXPIRY_SECONDS || null;
-}
-
-// Срок жизни только что созданного сообщения (текст или файл, E2EE или
-// нет, от любого участника): общий таймер чата; личный срок из запроса
-// отправителя — только если он не длиннее общего (effectiveMessageExpiry).
-async function applyNewMessageExpiry(chat, messageId, requestedSeconds = null) {
-    const expiry = effectiveMessageExpiry(requestedSeconds, await getDefaultExpirySeconds(chat));
-    if (expiry) await disappearingMessagesManager.setMessageExpiry(messageId, expiry, false);
-}
-
 // Новое сообщение возвращает архивный чат из архива — у получателей и
 // только если чат не "без звука" (заглушённый архивный чат так и лежит в
 // архиве). senderId = null — ответ бота владельцу чата. Не на пути ответа
@@ -2002,13 +1399,6 @@ function unarchiveForRecipients(chat, senderId) {
         (rows) => { for (const row of rows) notifyChatListChanged(row.user_id); },
         (err) => logError('[Chats] Не удалось вернуть чат из архива', err)
     );
-}
-
-// expirySeconds из тела запроса: null — не задан, число — валидный срок;
-// некорректное значение бросает RangeError с текстом для пользователя.
-function parseRequestedExpiry(value) {
-    if (value === undefined || value === null || value === '' || Number(value) === 0) return null;
-    return DisappearingMessagesManager.normalizeExpirySeconds(value);
 }
 
 // Небольшая пауза перед ответом: он должен выглядеть ответом на сообщение, а
@@ -2188,12 +1578,6 @@ function respondRoomSendError(res, error) {
     if (error === 'no-room') return res.status(404).json({ success: false, message: 'Комната не найдена' });
     if (error === 'not-member') return res.status(403).json({ success: false, message: 'Вы не участник этой комнаты' });
     return res.status(413).json({ success: false, message: 'Превышена квота хранилища вложений' });
-}
-
-// Срок жизни нового сообщения в секундах (общий таймер чата; личный срок из
-// запроса — только если он не длиннее общего) или null — не исчезает.
-async function newMessageExpirySeconds(chat, requestedSeconds = null) {
-    return effectiveMessageExpiry(requestedSeconds, await getDefaultExpirySeconds(chat)) || null;
 }
 
 // Правило R7: в комнате принимается только E2EE-конверт правильной формы, в чате с
@@ -3633,24 +3017,6 @@ app.post('/api/messages/:messageId/set-expiry', async (req, res) => {
     }
 });
 
-// Таймер исчезающих сообщений чата. В комнате — общий для всех участников
-// (room_settings), и менять его может любой участник, как и код
-// приглашения; в чате с ботом — личный (chat_settings). Действует на
-// сообщения, отправленные после изменения. Возвращается действующий срок
-// (выключенный таймер — DEFAULT_MESSAGE_EXPIRY_SECONDS, если он задан).
-async function setChatExpiry(chat, seconds) {
-    if (chat.room_id) await disappearingMessagesManager.setRoomDefaultExpiry(chat.room_id, seconds);
-    else await disappearingMessagesManager.setChatDefaultExpiry(chat.id, seconds);
-    const effective = seconds || GLOBAL_DEFAULT_EXPIRY_SECONDS || 0;
-    // В комнате chatId не отправляется: у каждого участника он свой.
-    io.to(getSocketRoomKey(chat.id, chat.room_id)).emit('chatExpiryChanged', {
-        roomId: chat.room_id || null,
-        chatId: chat.room_id ? null : chat.id,
-        seconds: effective,
-    });
-    return effective;
-}
-
 app.post('/api/chats/:chatId/expiry', async (req, res) => {
     const userId = req.session.userId;
     if (!userId) return res.json({ success: false, message: 'Не авторизован' });
@@ -4066,35 +3432,6 @@ function onServerListening() {
     console.log('  + E2EE: ключи во встроенном хранилище (эта же база)');
     if (ONION_ADDRESS && ONION_PORT) console.log(`  + Onion-сервис: http://${ONION_ADDRESS} (внутренний порт ${ONION_PORT})`);
     console.log(`\n${'='.repeat(60)}\n`);
-}
-
-// Миграции — под advisory-блокировкой (lib/advisory-locks.js): два
-// одновременно стартующих экземпляра (реплики, деплой без простоя) раньше
-// выполняли DDL наперегонки, и один из них падал. На время миграций у их
-// запросов короткий lock_timeout: DDL, не дождавшийся блокировки таблицы
-// (её держат запросы работающего экземпляра), не стоит в очереди,
-// задерживая за собой все запросы к этой таблице, а падает, и миграции
-// повторяются целиком (они идемпотентны). Не помогли и повторы — сервер
-// выходит с ошибкой, хостинг его перезапускает.
-//
-// Новые изменения схемы — не в initDatabase, а файлами lib/migrations/
-// (см. lib/migrations/index.js): они выполняются после initDatabase, а
-// версия схемы в schema_meta не даёт старому коду стартовать на новой схеме.
-async function initDatabaseExclusive() {
-    // DUMP_CA=true — служебный режим (TLS к базе ещё не настроен): он
-    // завершает процесс в начале initDatabase и не должен ждать соединения.
-    if (process.env.DUMP_CA === 'true') return initDatabase();
-    // Файлы миграций читаются до первого соединения: ошибка в них — сразу.
-    const migrations = loadMigrations();
-    return runMigrationsExclusive(pool, ({ client }) => migrateSchema({
-        pool,
-        client,
-        migrations,
-        initialSteps: initDatabase,
-        config: Object.freeze({ isProduction: IS_PRODUCTION, uploadsDir: UPLOADS_DIR, env: process.env }),
-    }), {
-        createMigrationPool: (options) => new Pool({ ...DB_POOL_CONFIG, ...options }),
-    });
 }
 
 // Порт открывается только ПОСЛЕ миграций. Раньше listen() вызывался сразу,
