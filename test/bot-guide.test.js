@@ -492,6 +492,7 @@ test('welcomeText: неизвестный срок считается самым
 // public/js/*.js (T6.2): его читает readClientScript() — склейка в порядке index.html.
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const readPublic = name => fs.readFileSync(path.join(PUBLIC_DIR, name), 'utf8');
+const { readClientCss } = require('./client-css');
 
 // Тело функции по имени: от первой «{» после заголовка до парной «}».
 function functionBody(source, name) {
@@ -557,7 +558,7 @@ test('плейсхолдер поля ввода и статус шапки ча
 });
 
 test('style.css: ряд подсказок прокручивается на телефоне без полосы, на сенсорном экране кнопки 40 px', () => {
-    const css = readPublic('style.css');
+    const css = readClientCss();
     assert.match(css, /\.suggestions\s*\{[^}]*display:\s*flex;[^}]*flex-wrap:\s*wrap;[^}]*gap:\s*8px;/);
     assert.match(css, /\.suggestion\s*\{[^}]*height:\s*32px;[^}]*font-size:\s*13px;/);
     assert.match(css, /@media \(max-width: 768px\)\s*\{\s*\.suggestions\s*\{[^}]*flex-wrap:\s*nowrap;[^}]*overflow-x:\s*auto;[^}]*scrollbar-width:\s*none;/);

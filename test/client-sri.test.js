@@ -112,7 +112,7 @@ test('findSriTags находит все скрипты и стили насто�
     const html = fs.readFileSync(INDEX, 'utf8');
     const tags = findSriTags(html);
     assert.ok(tags.length >= 10, 'в index.html найдено подозрительно мало тегов: ' + tags.length);
-    for (const required of [...clientScriptFiles().map((file) => '/' + file), '/e2ee.js', '/style.css', '/vendor/socket.io.min.js']) {
+    for (const required of [...clientScriptFiles().map((file) => '/' + file), '/e2ee.js', '/css/tokens.css', '/css/responsive.css', '/vendor/socket.io.min.js']) {
         assert.ok(tags.some((tag) => tag.urlPath === required), `нет ${required}`);
     }
     // pow-worker.js — Worker, а не <script>: у него нет integrity, он не должен попасть сюда.
