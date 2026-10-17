@@ -15,6 +15,9 @@
 //     crypto.getRandomValues. Это и требование CSP (script-src 'self'), и то,
 //     что делает файл исполнимым один-в-один в браузере и в Node — на этом
 //     построены протокольные тесты test/e2ee.protocol.test.js.
+//   - Чистые функции без состояния клиента (кодирование и Padmé, обёртки Web Crypto и KDF-цепочка, разбор и
+//     сборка форматов, нормализация записей) вынесены в public/lib/e2ee-*.js (roadmap R14); здесь остаётся то,
+//     что зависит от createClient, хранилища и транспорта. Эти модули подключаются в index.html до e2ee.js.
 //
 // Что закрыто в протоколе v2:
 //   - Приватные ключи подписи и обмена (identity, SPK, OPK, подпись Sender Key) —
@@ -206,18 +209,7 @@
 
     // ---- Пределы состояния: кэши ключей, пропуски цепочек, таблицы повторов ----
 
-    // Ключей сообщений в одной цепочке (текущей или архивной). Это защита от
-    // раздувания записи, а не бюджет истории: при обрезке запоминается
-    // expiredBelow, и расшифровка выдаёт 'key-expired', а не немое 'no-message-key'.
-    const MAX_KEYS_PER_CHAIN = 5000;
-    // Насколько далеко вперёд по цепочке Sender Key можно "перескочить" за
-    // одно сообщение. Без предела конверт с iteration = 10^9 (его может
-    // подписать любой участник комнаты) заставлял клиента получателя
-    // посчитать миллиард HMAC подряд — вкладка намертво зависала.
-    const MAX_SKIP = 5000;
-    // То же для попарной цепочки key-share: передач ключей на порядки
-    // меньше, чем сообщений.
-    const MAX_PW_SKIP = 1000;
+    // MAX_KEYS_PER_CHAIN, MAX_SKIP и MAX_PW_SKIP (пределы цепочек) заданы рядом с самой цепочкой, в lib/e2ee-crypto.js.
     // Бюджет истории комнаты: ключей сообщений во всех цепочках (текущих и
     // архивных) всех отправителей, около 1,2 МБ. Сверх бюджета удаляются самые
     // старые архивы (maintainRoomKeysLocked).
@@ -237,11 +229,9 @@
 
     // ---- Размеры: дополнение, конверты, пакеты key-share ----
 
-    const MSG_PAD_MIN = 256;
-    const FILE_PAD_MIN = 4096;
+    // MSG_PAD_MIN и FILE_PAD_MIN (минимум дополнения Padmé) заданы рядом с Padmé, в lib/e2ee-codec.js.
     // Сервер принимает зашифрованный текст до 12000 символов.
     const MAX_ENVELOPE_CHARS = 12000;
-    const MAX_FILE_FIELD = 1024;
     // Сервер принимает до 200 получателей и 8192 символа на один share;
     // пачки по 50 держат тело запроса небольшим.
     const SHARE_BATCH = 50;
@@ -249,10 +239,8 @@
 
     // ---- Код безопасности и ML-KEM ----
 
-    const FINGERPRINT_ITERATIONS = 5200;
-    const PQ_PUBLIC_KEY_BYTES = 1184;
-    const PQ_CIPHERTEXT_BYTES = 1088;
-    const PQ_SEED_BYTES = 64;
+    // FINGERPRINT_ITERATIONS (раунды хэша кода безопасности) задана рядом с расчётом, в lib/e2ee-crypto.js.
+    // Размеры ML-KEM-768 (PQ_PUBLIC_KEY_BYTES, PQ_CIPHERTEXT_BYTES, PQ_SEED_BYTES) заданы рядом с форматами, в lib/e2ee-formats.js.
 
     // ---- Пул одноразовых prekey и версия хранилища ----
 
@@ -350,67 +338,50 @@
         return err;
     }
 
-    // ===================== Кодирование =====================
-
-    const B64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-
-    function b64encode(bytes) {
-        const arr = bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : bytes;
-        let out = '';
-        let i = 0;
-        for (; i + 3 <= arr.length; i += 3) {
-            const n = (arr[i] << 16) | (arr[i + 1] << 8) | arr[i + 2];
-            out += B64_CHARS[(n >> 18) & 63] + B64_CHARS[(n >> 12) & 63] + B64_CHARS[(n >> 6) & 63] + B64_CHARS[n & 63];
-        }
-        const rem = arr.length - i;
-        if (rem === 1) {
-            const n = arr[i] << 16;
-            out += B64_CHARS[(n >> 18) & 63] + B64_CHARS[(n >> 12) & 63] + '==';
-        } else if (rem === 2) {
-            const n = (arr[i] << 16) | (arr[i + 1] << 8);
-            out += B64_CHARS[(n >> 18) & 63] + B64_CHARS[(n >> 12) & 63] + B64_CHARS[(n >> 6) & 63] + '=';
-        }
-        return out;
-    }
-
-    // Таблица строится один раз, а не на каждый вызов b64decode.
-    const B64_LOOKUP = new Int16Array(256).fill(-1);
-    for (let i = 0; i < B64_CHARS.length; i++) B64_LOOKUP[B64_CHARS.charCodeAt(i)] = i;
-
-    function b64decode(str) {
-        const clean = String(str || '').replace(/[^A-Za-z0-9+/]/g, '');
-        const lookup = B64_LOOKUP;
-        const len = clean.length;
-        const outLen = Math.floor((len * 6) / 8);
-        const out = new Uint8Array(outLen);
-        let bits = 0, value = 0, pos = 0;
-        for (let i = 0; i < len; i++) {
-            const c = lookup[clean.charCodeAt(i)];
-            if (c === -1) continue;
-            value = (value << 6) | c;
-            bits += 6;
-            if (bits >= 8) {
-                bits -= 8;
-                out[pos++] = (value >> bits) & 0xff;
+    // ===================== Чистые модули ядра =====================
+    // Функции без состояния клиента вынесены в public/lib/e2ee-*.js (roadmap R14): кодирование и Padmé,
+    // обёртки Web Crypto с KDF-цепочкой, разбор и сборка форматов, нормализация записей. Здесь остаётся
+    // то, что зависит от createClient, хранилища и транспорта. В браузере модули - глобальные Nyxo*
+    // (подключаются до e2ee.js, порядок - в index.html), в Node - соседние файлы. Без любого из них клиент
+    // не работает: молча подменять разбор форматов или криптографию нечем.
+    function resolveCoreModule(loaded, nodePath, label) {
+        if (loaded) return loaded;
+        if (typeof require === 'function') {
+            try {
+                return require(nodePath);
+            } catch (cause) {
+                throw new Error('E2EE: модуль ' + label + ' не загружен', { cause });
             }
         }
-        return out.slice(0, pos);
+        throw new Error('E2EE: модуль ' + label + ' не загружен');
     }
 
-    // Строгое декодирование поля фиксированной длины из недоверенного JSON.
-    function decodeFixed(str, len) {
-        if (typeof str !== 'string') return null;
-        const bytes = b64decode(str);
-        return bytes.length === len ? bytes : null;
-    }
-
-    // Публичный ключ X25519/Ed25519 в каноническом base64. Сравниваем ключи
-    // строками, поэтому разные написания одних и тех же байт недопустимы.
-    function canonicalPubKey(str) {
-        const bytes = decodeFixed(str, 32);
-        if (!bytes || isAllZero(bytes)) return null;
-        return b64encode(bytes);
-    }
+    const Codec = resolveCoreModule(typeof NyxoE2eeCodec !== 'undefined' ? NyxoE2eeCodec : null, './lib/e2ee-codec.js', 'lib/e2ee-codec.js');
+    const CryptoOps = resolveCoreModule(typeof NyxoE2eeCrypto !== 'undefined' ? NyxoE2eeCrypto : null, './lib/e2ee-crypto.js', 'lib/e2ee-crypto.js');
+    const Formats = resolveCoreModule(typeof NyxoE2eeFormats !== 'undefined' ? NyxoE2eeFormats : null, './lib/e2ee-formats.js', 'lib/e2ee-formats.js');
+    const KeyState = resolveCoreModule(typeof NyxoE2eeState !== 'undefined' ? NyxoE2eeState : null, './lib/e2ee-state.js', 'lib/e2ee-state.js');
+    const {
+        MSG_PAD_MIN, FILE_PAD_MIN, b64encode, b64decode, decodeFixed, canonicalPubKey,
+        utf8encode, utf8decode, concatBytes, bytesEqual, toBytes, isKeyId,
+        isU32, isCanonicalKeyId, padmeLength, padMessage, unpadMessage, filePaddedLength,
+    } = Codec;
+    const {
+        MAX_KEYS_PER_CHAIN, MAX_SKIP, MAX_PW_SKIP, randomBytes, generateX25519, generateEd25519,
+        isCryptoKey, toPrivateKey, dh, sign, hkdf, aesGcmEncrypt,
+        aesGcmDecrypt, chainStep, getOrDeriveMessageKey, trimNumericMap, dropKeys, trimChain,
+        closeChain, takePairwiseKey, encryptFile, decryptFile, computeSafetyNumber, deriveSenderKeyId,
+    } = CryptoOps;
+    const {
+        PQ_PUBLIC_KEY_BYTES, PQ_CIPHERTEXT_BYTES, PQ_SEED_BYTES, pqOneTimeSigInput, sigInputV3, msgAadV3,
+        skdmAadV2, parseShareEnvelope, MAX_EXT_CHARS, parseKtGossip, parseSkdmExt, parseSkdm,
+        buildSkdm, encodeContent, decodeContent, isValidMessageId, canonicalSigningKey,
+    } = Formats;
+    const {
+        archiveEntryId, archiveHas, missingKeyReason, normalizePolicy, normalizeIds, normalizeParticipants,
+        logExcluded, identityStatus, stateName, archiveName, seenName, archivePrefix,
+        skIndexName, skIndexPrefix, keyRequestName, keyServedName, editPrefix, editName,
+        sharedMarkName, tombstoneArchive, sessionMatchesPin, envelopeKeyId,
+    } = KeyState;
 
     // Строгая проверка Ed25519 (public/lib/ed25519-strict.js, signed-membership.md 6.1): ключ малого
     // порядка или некорректная кодировка принимаются платформенным verify для ЛЮБОГО сообщения
@@ -429,117 +400,10 @@
     }
     const ed25519Strict = resolveEd25519Strict();
 
-    // Ключ подписи Ed25519 из чужого ввода: каноническое base64 и строгая проверка ключа.
-    function canonicalSigningKey(str) {
-        const canonical = canonicalPubKey(str);
-        if (!canonical || !ed25519Strict.isStrictKey(b64decode(canonical))) return null;
-        return canonical;
-    }
-
-    function utf8encode(str) {
-        return new TextEncoder().encode(str);
-    }
-
-    function utf8decode(bytes) {
-        return new TextDecoder().decode(bytes);
-    }
-
-    function concatBytes(...parts) {
-        let len = 0;
-        for (const p of parts) len += p.length;
-        const out = new Uint8Array(len);
-        let off = 0;
-        for (const p of parts) { out.set(p, off); off += p.length; }
-        return out;
-    }
-
-    function bytesEqual(a, b) {
-        if (a.length !== b.length) return false;
-        let diff = 0;
-        for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
-        return diff === 0;
-    }
-
-    function u32be(n) {
-        return new Uint8Array([(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff]);
-    }
-
-    // Целое до 2^53 в восемь байт, старшие первыми: u32be(n div 2^32) ‖ u32be(n mod 2^32).
-    function u64be(n) {
-        return concatBytes(u32be(Math.floor(n / 0x100000000)), u32be(n >>> 0));
-    }
-
-    function toBytes(data) {
-        if (data instanceof Uint8Array) return data;
-        if (data instanceof ArrayBuffer) return new Uint8Array(data);
-        if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-        throw new TypeError('E2EE: ожидались байты (Uint8Array/ArrayBuffer)');
-    }
-
-    function isKeyId(v) {
-        return Number.isSafeInteger(v) && v >= 0;
-    }
-
     // ===================== Примитивы =====================
 
     const ZERO32 = new Uint8Array(32);
     const FF32 = new Uint8Array(32).fill(0xff);
-
-    function randomBytes(n) {
-        return crypto.getRandomValues(new Uint8Array(n));
-    }
-
-    // Приватные ключи создаются неизвлекаемыми: их можно использовать, но не
-    // выгрузить наружу (exportKey кидает). Публичная половина пары по
-    // спецификации WebCrypto извлекаема всегда.
-    async function generateX25519() {
-        const kp = await subtle.generateKey({ name: 'X25519' }, false, ['deriveBits']);
-        const pub = new Uint8Array(await subtle.exportKey('raw', kp.publicKey));
-        return { pub, priv: kp.privateKey };
-    }
-
-    async function generateEd25519() {
-        const kp = await subtle.generateKey({ name: 'Ed25519' }, false, ['sign', 'verify']);
-        const pub = new Uint8Array(await subtle.exportKey('raw', kp.publicKey));
-        return { pub, priv: kp.privateKey };
-    }
-
-    function isCryptoKey(v) {
-        return Boolean(v) && typeof v === 'object' && typeof v.type === 'string' && Boolean(v.algorithm) && typeof v.extractable === 'boolean';
-    }
-
-    function isJwk(v) {
-        return Boolean(v) && typeof v === 'object' && typeof v.kty === 'string';
-    }
-
-    // Миграция: JWK, записанный прежней версией, импортируется как
-    // неизвлекаемый CryptoKey (после перезаписи в хранилище JWK исчезает).
-    async function toPrivateKey(value, algName, usages) {
-        if (isCryptoKey(value)) return value;
-        if (isJwk(value)) return subtle.importKey('jwk', value, { name: algName }, false, usages);
-        throw new Error('E2EE: повреждён приватный ключ в хранилище');
-    }
-
-    // low-order/identity точка на Curve25519 — та же defense-in-depth
-    // проверка, что уже есть на сервере ключей (crypto.rs::decode_pubkey).
-    function isAllZero(bytes) {
-        for (let i = 0; i < bytes.length; i++) if (bytes[i] !== 0) return false;
-        return true;
-    }
-
-    async function dh(privKey, pubRawBytes) {
-        if (pubRawBytes.length !== 32 || isAllZero(pubRawBytes)) {
-            throw new Error('E2EE: получен вырожденный (all-zero) публичный ключ');
-        }
-        const pub = await subtle.importKey('raw', pubRawBytes, { name: 'X25519' }, false, []);
-        const bits = new Uint8Array(await subtle.deriveBits({ name: 'X25519', public: pub }, privKey, 256));
-        if (isAllZero(bits)) throw new Error('E2EE: вырожденный результат DH (точка малого порядка)');
-        return bits;
-    }
-
-    async function sign(privKey, data) {
-        return new Uint8Array(await subtle.sign('Ed25519', privKey, data));
-    }
 
     // Импорт публичного ключа стоит заметно дороже самой проверки, а ключи
     // подписи Sender Key одни и те же для тысяч сообщений истории.
@@ -563,314 +427,6 @@
         } catch {
             return false;
         }
-    }
-
-    async function hkdf(ikm, salt, infoStr, lengthBytes) {
-        const key = await subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']);
-        const bits = await subtle.deriveBits(
-            { name: 'HKDF', hash: 'SHA-256', salt, info: utf8encode(infoStr) },
-            key,
-            lengthBytes * 8
-        );
-        return new Uint8Array(bits);
-    }
-
-    async function hmacSha256(keyBytes, dataBytes) {
-        const key = await subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-        return new Uint8Array(await subtle.sign('HMAC', key, dataBytes));
-    }
-
-    async function aesGcmEncrypt(rawKey32, plaintext, aad) {
-        const key = await subtle.importKey('raw', rawKey32, { name: 'AES-GCM' }, false, ['encrypt']);
-        const iv = randomBytes(12);
-        const ct = new Uint8Array(await subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad }, key, plaintext));
-        return { iv, ct };
-    }
-
-    async function aesGcmDecrypt(rawKey32, iv, ct, aad) {
-        const key = await subtle.importKey('raw', rawKey32, { name: 'AES-GCM' }, false, ['decrypt']);
-        const pt = await subtle.decrypt({ name: 'AES-GCM', iv, additionalData: aad }, key, ct);
-        return new Uint8Array(pt);
-    }
-
-    // ===================== KDF-цепочка =====================
-    // Стандартная схема Signal: messageKey = HMAC(chainKey, 0x01),
-    // nextChainKey = HMAC(chainKey, 0x02). Продвижение необратимо —
-    // предыдущий chainKey нельзя восстановить из следующего. Одна и та же
-    // схема у Sender Key и у попарного канала key-share.
-
-    async function chainStep(chainKey) {
-        const messageKey = await hmacSha256(chainKey, new Uint8Array([0x01]));
-        const nextChainKey = await hmacSha256(chainKey, new Uint8Array([0x02]));
-        return { messageKey, nextChainKey };
-    }
-
-    // Возвращает messageKey для нужной iteration, продвигая цепочку и
-    // кэшируя "пропущенные" (и уже использованные — см. шапку файла про
-    // историю чата) ключи по пути. hour — часовой индекс «сейчас»: он
-    // записывается в keyTimes для каждого выведенного ключа и нужен таймеру
-    // комнаты (maintainRoomKeysLocked).
-    async function getOrDeriveMessageKey(state, targetIteration, hour) {
-        if (targetIteration < state.nextIteration) {
-            const cached = state.cachedKeys[targetIteration];
-            if (!cached) return null; // ключ удалён (таймер, бюджет, «не хранить историю») или не сохранялся
-            return b64decode(cached);
-        }
-        let chainKey = b64decode(state.chainKey);
-        if (!state.keyTimes) state.keyTimes = {};
-        for (let it = state.nextIteration; it <= targetIteration; it++) {
-            const { messageKey, nextChainKey } = await chainStep(chainKey);
-            state.cachedKeys[it] = b64encode(messageKey);
-            state.keyTimes[it] = hour;
-            chainKey = nextChainKey;
-        }
-        state.chainKey = b64encode(chainKey);
-        state.nextIteration = targetIteration + 1;
-        trimChain(state);
-        const key = state.cachedKeys[targetIteration];
-        return key ? b64decode(key) : null;
-    }
-
-    function trimNumericMap(map, max) {
-        const keys = Object.keys(map);
-        if (keys.length <= max) return;
-        keys.map(Number).sort((a, b) => a - b)
-            .slice(0, keys.length - max)
-            .forEach(k => { delete map[k]; });
-    }
-
-    // Удаляет ключи сообщений, для которых shouldDrop(итерация) истинно, и
-    // запоминает в expiredBelow, что на этой цепочке ключи удаляли намеренно:
-    // отсутствие ключа ниже этой границы — не «никогда не было», а «удалён»
-    // ('key-expired'). Возвращает число удалённых ключей.
-    function dropKeys(rec, shouldDrop) {
-        let dropped = 0;
-        let highest = -1;
-        for (const name of Object.keys(rec.cachedKeys)) {
-            const it = Number(name);
-            if (!shouldDrop(it)) continue;
-            delete rec.cachedKeys[name];
-            if (rec.keyTimes) delete rec.keyTimes[name];
-            dropped++;
-            if (it > highest) highest = it;
-        }
-        if (dropped > 0) rec.expiredBelow = Math.max(rec.expiredBelow || 0, highest + 1);
-        return dropped;
-    }
-
-    // Предел ключей в одной цепочке: самые старые уходят первыми.
-    function trimChain(rec) {
-        const names = Object.keys(rec.cachedKeys);
-        if (names.length <= MAX_KEYS_PER_CHAIN) return;
-        const sorted = names.map(Number).sort((a, b) => a - b);
-        const boundary = sorted[names.length - MAX_KEYS_PER_CHAIN];
-        dropKeys(rec, it => it < boundary);
-    }
-
-    // Закрывает архивную цепочку чужого ключа по prev.final: выводит оставшиеся
-    // ключи до final включительно (не больше MAX_SKIP — абсурдный final не
-    // заставит считать миллиарды HMAC), кэширует их и стирает chainKey: больше
-    // эта цепочка ничего не даёт. false — цепочки нет или final меньше уже
-    // прочитанного (противоречие: не трогаем). final при обрезке по MAX_SKIP
-    // записывается обрезанным: что дальше, прочитать всё равно нельзя.
-    async function closeChain(rec, final, hour) {
-        if (!rec.chainKey || !Number.isInteger(rec.nextIteration)) return false;
-        if (final < rec.nextIteration - 1) return false;
-        const last = Math.min(final, rec.nextIteration + MAX_SKIP - 1);
-        if (last >= rec.nextIteration) await getOrDeriveMessageKey(rec, last, hour);
-        delete rec.chainKey;
-        rec.final = last;
-        return true;
-    }
-
-    // Ключ сообщения n попарной цепочки. В отличие от Sender Key здесь
-    // использованный ключ сразу удаляется, а в сессии остаются только
-    // следующий chainKey и ключи ещё не пришедших (пропущенных) передач —
-    // это и есть прямая секретность канала key-share.
-    async function takePairwiseKey(session, n) {
-        if (n < session.n) {
-            const stored = session.skipped[n];
-            if (!stored) return null; // уже использован (повтор) или слишком старый
-            delete session.skipped[n];
-            return b64decode(stored);
-        }
-        if (n - session.n > MAX_PW_SKIP) return null;
-        let chainKey = b64decode(session.ck);
-        let target = null;
-        for (let i = session.n; i <= n; i++) {
-            const { messageKey, nextChainKey } = await chainStep(chainKey);
-            if (i === n) target = messageKey;
-            else session.skipped[i] = b64encode(messageKey);
-            chainKey = nextChainKey;
-        }
-        session.ck = b64encode(chainKey);
-        session.n = n + 1;
-        trimNumericMap(session.skipped, MAX_PW_SKIP);
-        return target;
-    }
-
-    // ===================== Паддинг (Padmé) =====================
-    // Padmé (Nikitin et al., PETS 2019): округляет длину так, что утечка
-    // ограничена O(log log L) бит, а накладные расходы — не более ~12%.
-
-    function bitLength(n) {
-        let bits = 0;
-        while (n >= 1) { n = Math.floor(n / 2); bits++; }
-        return bits;
-    }
-
-    function padmeLength(len) {
-        if (len < 2) return len;
-        const e = bitLength(len) - 1;   // floor(log2 L)
-        const s = bitLength(e);         // floor(log2 E) + 1
-        const step = 2 ** (e - s);
-        return Math.ceil(len / step) * step;
-    }
-
-    // Текст: 4 байта длины (big-endian) ‖ данные ‖ нули до длины Padmé,
-    // но не меньше 256 байт — короткие сообщения неотличимы по размеру.
-    function padMessage(bytes) {
-        const out = new Uint8Array(Math.max(MSG_PAD_MIN, padmeLength(4 + bytes.length)));
-        out.set(u32be(bytes.length), 0);
-        out.set(bytes, 4);
-        return out;
-    }
-
-    function unpadMessage(buf) {
-        if (buf.length < 4) return null;
-        const len = ((buf[0] << 24) >>> 0) + (buf[1] << 16) + (buf[2] << 8) + buf[3];
-        if (len > buf.length - 4) return null;
-        return buf.subarray(4, 4 + len);
-    }
-
-    function filePaddedLength(size) {
-        return Math.max(FILE_PAD_MIN, padmeLength(size));
-    }
-
-    // ===================== Содержимое сообщения v2 =====================
-
-    function normalizeFileDescriptor(o) {
-        if (!o || typeof o !== 'object') return null;
-        const { mime, name, size, key, iv } = o;
-        if (typeof mime !== 'string' || mime.length > MAX_FILE_FIELD) return null;
-        if (typeof name !== 'string' || name.length > MAX_FILE_FIELD) return null;
-        if (!Number.isSafeInteger(size) || size < 0) return null;
-        if (!decodeFixed(key, 32) || !decodeFixed(iv, 12)) return null;
-        return { mime, name, size, key, iv };
-    }
-
-    // Формат содержимого (message-ordering.md, раздел 9.1):
-    //   { t:'text', b, mid, ts, e?:1 }
-    //   { t:'file', mime, name, size, key, iv, caption, mid, ts }
-    // mid — String(id сообщения), ts — время отправителя в мс, e:1 — правка
-    // (правятся только текстовые сообщения).
-    function encodeContent(content, { mid, ts, edit = false }) {
-        if (typeof content === 'string') {
-            const text = { t: 'text', b: content, mid, ts };
-            if (edit) text.e = 1;
-            return text;
-        }
-        if (content && typeof content === 'object' && content.type === 'file') {
-            if (edit) throw new Error('E2EE: правятся только текстовые сообщения');
-            const file = normalizeFileDescriptor(content);
-            if (!file) throw new Error('E2EE: некорректное описание файла');
-            const caption = content.caption === undefined || content.caption === null ? '' : content.caption;
-            if (typeof caption !== 'string') throw new Error('E2EE: подпись к файлу должна быть строкой');
-            return { t: 'file', mime: file.mime, name: file.name, size: file.size, key: file.key, iv: file.iv, caption, mid, ts };
-        }
-        throw new Error('E2EE: неподдерживаемое содержимое сообщения');
-    }
-
-    // Разбор формы содержимого. mid и ts здесь не проверяются: это делает
-    // decryptIncoming по порядку раздела 9.4 (сначала 'no-mid', потом
-    // 'id-mismatch', потом 'bad-plaintext' для ts). Признак правки допустим
-    // только у текста.
-    function decodeContent(obj) {
-        if (!obj || typeof obj !== 'object') return null;
-        let content;
-        if (obj.t === 'text' && typeof obj.b === 'string') {
-            content = { text: obj.b, edit: obj.e === 1 };
-        } else if (obj.t === 'file') {
-            const file = normalizeFileDescriptor(obj);
-            if (!file || typeof obj.caption !== 'string' || obj.e !== undefined) return null;
-            content = { text: obj.caption, file, edit: false };
-        } else {
-            return null;
-        }
-        content.mid = obj.mid;
-        content.ts = obj.ts;
-        return content;
-    }
-
-    // Id сообщения (раздел 6.1): строка ^[1-9]\d{6,9}$, не больше 2^31-1.
-    function isValidMessageId(value) {
-        return typeof value === 'string' && /^[1-9]\d{6,9}$/.test(value) && Number(value) <= 2147483647;
-    }
-
-    // ===================== Файлы =====================
-    // Каждый файл — свой случайный ключ AES-256-GCM и iv; ключ, iv и
-    // исходный размер передаются внутри E2EE-сообщения (encryptOutgoing с
-    // объектом { type:'file', ... }), серверу достаётся только шифротекст
-    // Padmé-длины.
-
-    const FILE_AAD = utf8encode('nyxo-file-v1');
-
-    async function encryptFile(bytes) {
-        const data = toBytes(bytes);
-        const padded = new Uint8Array(filePaddedLength(data.length));
-        padded.set(data, 0);
-        const key = randomBytes(32);
-        const { iv, ct } = await aesGcmEncrypt(key, padded, FILE_AAD);
-        return { ciphertext: ct, key: b64encode(key), iv: b64encode(iv), size: data.length };
-    }
-
-    async function decryptFile(ciphertext, key, iv, size) {
-        const keyBytes = decodeFixed(key, 32);
-        const ivBytes = decodeFixed(iv, 12);
-        if (!keyBytes || !ivBytes) throw new Error('E2EE: некорректный ключ файла');
-        if (!Number.isSafeInteger(size) || size < 0) throw new Error('E2EE: некорректный размер файла');
-        let pt;
-        try {
-            pt = await aesGcmDecrypt(keyBytes, ivBytes, toBytes(ciphertext), FILE_AAD);
-        } catch {
-            throw new Error('E2EE: файл повреждён или подменён');
-        }
-        // Размер пришёл в подписанном сообщении; несовпадение с длиной
-        // расшифрованного — признак чужого файла или испорченного описания.
-        if (pt.length !== filePaddedLength(size)) throw new Error('E2EE: размер файла не совпадает');
-        for (let i = size; i < pt.length; i++) {
-            if (pt[i] !== 0) throw new Error('E2EE: некорректный паддинг файла');
-        }
-        return pt.slice(0, size);
-    }
-
-    // ===================== Код безопасности =====================
-    // Как NumericFingerprintGenerator в Signal: для каждой стороны
-    // hash0 = 0x0000 ‖ signPub ‖ dhPub ‖ utf8(userId), затем 5200 раз
-    // hash = SHA-512(hash ‖ signPub ‖ dhPub); первые 30 байт → 6 блоков по
-    // 5 байт → uint40 mod 100000 → по 5 цифр. Половины упорядочены по
-    // числовому userId, поэтому обе стороны видят одну и ту же строку.
-
-    async function fingerprintHalf(userId, signPubB64, dhPubB64) {
-        const keys = concatBytes(b64decode(signPubB64), b64decode(dhPubB64));
-        let hash = concatBytes(new Uint8Array([0, 0]), keys, utf8encode(String(userId)));
-        for (let i = 0; i < FINGERPRINT_ITERATIONS; i++) {
-            hash = new Uint8Array(await subtle.digest('SHA-512', concatBytes(hash, keys)));
-        }
-        let out = '';
-        for (let i = 0; i < 30; i += 5) {
-            let v = 0;
-            for (let j = 0; j < 5; j++) v = v * 256 + hash[i + j];
-            out += String(v % 100000).padStart(5, '0');
-        }
-        return out;
-    }
-
-    async function computeSafetyNumber(idA, signA, dhA, idB, signB, dhB) {
-        const halfA = await fingerprintHalf(idA, signA, dhA);
-        const halfB = await fingerprintHalf(idB, signB, dhB);
-        const digits = Number(idA) <= Number(idB) ? halfA + halfB : halfB + halfA;
-        return digits.match(/.{5}/g).join(' ');
     }
 
     // ===================== Хранилище (внедряется) =====================
@@ -1113,267 +669,9 @@
     }
     const membershipModules = resolveMembershipModules();
 
-    // ===================== Форматы конвертов =====================
-
-    // Подпись одноразового PQ-prekey: Ed25519(IK, метка ‖ u64be(key_id) ‖ pk).
-    // Метка и привязка к key_id отличают её от подписи SPK (32 байта) и PQ
-    // last-resort («сырые» 1184 байта): сервер не может выдать один вид ключа
-    // за другой, а подпись нельзя перенести на другой key_id. Все части
-    // фиксированной длины (14 + 8 + 1184).
-    const PQ_OPK_LABEL = utf8encode('nyxo-pqopk-v1\0');
-    function pqOneTimeSigInput(keyId, publicKey) {
-        return concatBytes(PQ_OPK_LABEL, u64be(keyId), publicKey);
-    }
-
-    // Подпись конверта сообщения комнаты (версия 3): Ed25519(ключ подписи Sender Key, sigInputV3).
-    //   sigInput = "nyxo-skmsg-v3\0" ‖ u32be(roomId) ‖ senderKeyId[16] ‖ u32be(iteration) ‖ iv[12] ‖ ct
-    // Метка домена (реестр меток, план криптографии 1.1) отличает эту подпись от любой другой подписи
-    // Ed25519 в системе, а комната входит в подписанные байты: конверт, снятый с одной комнаты, не
-    // подходит к другой, даже если сервер подсунул чужой индекс отправителей. Все поля до ct —
-    // фиксированной длины (14 + 4 + 16 + 4 + 12 = 50 байт), ct (не короче 272 байт) идёт последним:
-    // два разных набора полей не дают одну и ту же строку. senderKeyId берётся сырыми 16 байтами,
-    // а не текстом base64, поэтому каноничность записи на подпись не влияет. Прежняя версия
-    // (iv ‖ ct ‖ iteration ‖ keyId без метки и комнаты) не принимается: R0, конвертов v2 нет.
-    const SKMSG_LABEL = utf8encode('nyxo-skmsg-v3\0');
-
-    function sigInputV3(roomId, senderKeyIdBytes, iteration, iv, ct) {
-        return concatBytes(SKMSG_LABEL, u32be(roomId), senderKeyIdBytes, u32be(iteration), iv, ct);
-    }
-
-    function msgAadV3(roomId, senderId, senderKeyId) {
-        return utf8encode('senderkey-v3:' + roomId + ':' + senderId + ':' + senderKeyId);
-    }
-
-    // AD key-share v2: помимо комнаты и направления — identity-ключи обеих
-    // сторон (требование X3DH: AD = IK_A ‖ IK_B). Подмена identity любой из
-    // сторон ломает AEAD, даже если сессионный ключ каким-то образом совпал.
-    function skdmAadV2(roomId, senderUserId, recipientUserId, senderSignPub, senderDhPub, recipientSignPub, recipientDhPub) {
-        return concatBytes(
-            utf8encode('nyxo-skdm-v2:' + roomId + ':' + senderUserId + ':' + recipientUserId),
-            b64decode(senderSignPub), b64decode(senderDhPub),
-            b64decode(recipientSignPub), b64decode(recipientDhPub)
-        );
-    }
-
-    // Идентификатор ключа отправителя ПРИВЯЗАН к отправителю (sealed-sender.md, 9.2):
-    //   senderKeyId = base64( SHA-256( "nyxo-skid-v1" ‖ u32be(roomId) ‖ u32be(senderId) ‖ signingPublicKey[32] )[0..16] )
-    // Вход — 52 байта: метка (12 байт, без нулевого) и поля фиксированной длины.
-    // Формат значения тот же, что у прежнего случайного идентификатора (16 байт в
-    // каноническом base64). Занять чужой идентификатор нельзя: для этого нужен
-    // прообраз SHA-256 по 128 битам, а не просто знание чужих keyId и открытого
-    // ключа из конвертов. Поэтому на один keyId в комнате приходится ровно один
-    // отправитель, и индекс отправителей (skIndex) не знает «кандидатов».
-    const SKID_LABEL = utf8encode('nyxo-skid-v1');
-
-    function isU32(n) {
-        return Number.isInteger(n) && n >= 0 && n <= 0xFFFFFFFF;
-    }
-
-    async function deriveSenderKeyId(roomId, senderId, signingPublicKey) {
-        const room = Number(roomId);
-        const sender = Number(senderId);
-        const pub = typeof signingPublicKey === 'string' ? decodeFixed(signingPublicKey, 32) : null;
-        if (!isU32(room) || !isU32(sender) || !pub) throw new TypeError('E2EE: не из чего вывести идентификатор ключа отправителя');
-        const digest = new Uint8Array(await subtle.digest('SHA-256', concatBytes(SKID_LABEL, u32be(room), u32be(sender), pub)));
-        return b64encode(digest.subarray(0, 16));
-    }
-
-    // Конверт key-share v2: { v:2, type:'skdm', n, iv, ct, init:{...} }.
-    // Заголовок PQXDH (init) повторяется в каждой передаче сессии: получатель
-    // узнаёт сессию по эфемерному ключу, а если первая передача потерялась
-    // (или была отложена до подтверждения смены identity) — выводит её из
-    // заголовка любой следующей.
-    function parseShareEnvelope(ciphertext) {
-        let env;
-        try { env = JSON.parse(ciphertext); } catch { return null; }
-        if (!env || typeof env !== 'object' || env.v !== 2 || env.type !== 'skdm') return null;
-        if (!Number.isSafeInteger(env.n) || env.n < 0) return null;
-        const iv = decodeFixed(env.iv, 12);
-        const ct = typeof env.ct === 'string' ? b64decode(env.ct) : null;
-        if (!iv || !ct || ct.length < 16) return null;
-        const h = env.init;
-        if (!h || typeof h !== 'object') return null;
-        const signPub = canonicalSigningKey(h.senderIdentitySignPub);
-        const dhPub = canonicalPubKey(h.senderIdentityDhPub);
-        const eph = canonicalPubKey(h.senderEphemeralPub);
-        const opkId = h.usedOneTimePrekeyId === null || h.usedOneTimePrekeyId === undefined ? null : h.usedOneTimePrekeyId;
-        // Без PQ-части заголовок не принимается вовсе: иначе сервер мог бы
-        // "понизить" обмен до классического X3DH.
-        const pqCt = decodeFixed(h.pqCiphertext, PQ_CIPHERTEXT_BYTES);
-        if (!signPub || !dhPub || !eph || !pqCt) return null;
-        if (!isKeyId(h.usedSignedPrekeyId) || !isKeyId(h.usedPqPrekeyId) || (opkId !== null && !isKeyId(opkId))) return null;
-        // pqOneTime: true — usedPqPrekeyId указывает на одноразовый PQ-prekey
-        // (pqopk:<id>), иначе на запасной (pqpk). Поле в заголовок не
-        // подписано, но подмена безвредна: с ключом не той роли общий секрет
-        // ML-KEM не сойдётся (implicit rejection) и AEAD отвергнет share.
-        const pqOneTime = h.pqOneTime === true;
-        return {
-            n: env.n, iv, ct,
-            init: { signPub, dhPub, eph, spkId: h.usedSignedPrekeyId, opkId, pqId: h.usedPqPrekeyId, pqOneTime, pqCt },
-        };
-    }
-
-    // Поле ext в SKDM (roadmap R9): расширяемый словарь внутри AEAD key-share,
-    // то есть под защитой попарного канала. Сегодня в нём одно известное поле:
-    //   prev: { id, final } — прежний ключ отправителя в этой комнате и последняя
-    //                         использованная им итерация (5.2). Получатель
-    //                         выводит оставшиеся ключи до final и стирает chainKey
-    //                         старой цепочки. Дальше сюда лягут view (5.4) и голова
-    //                         журнала ключей (5.6).
-    // Правила разбора: известное поле обязано быть корректным, иначе SKDM
-    // отвергается целиком (испорченный ext — признак сбоя или подделки, молча
-    // принять половину нельзя); неизвестные поля игнорируются и наружу не
-    // отдаются, чтобы будущая версия могла добавлять поля, а старая — работать.
-    const MAX_EXT_CHARS = 2048;
-
-    // kt: { g, e, h, s } — последняя проверенная подписанная голова журнала отправителя (7.5):
-    // поколение, эпоха, голова (32 байта) и подпись (64 байта) в base64. Строгий разбор — null при порче.
-    function parseKtGossip(raw) {
-        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-        const isU32 = (n) => Number.isInteger(n) && n >= 0 && n <= 0xFFFFFFFF;
-        if (!isU32(raw.g) || raw.g < 1 || !isU32(raw.e)) return null;
-        if (!decodeFixed(raw.h, 32) || !decodeFixed(raw.s, 64)) return null;
-        return { g: raw.g, e: raw.e, h: raw.h, s: raw.s };
-    }
-
-    function parseSkdmExt(raw) {
-        if (raw === undefined) return {};
-        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-        let json;
-        try { json = JSON.stringify(raw); } catch { return null; }
-        // kt и view - справочные подсказки, а не условие ключа: при порче или превышении предела ext эти поля
-        // отбрасываются с предупреждением, SKDM принимается (строго разбирается только prev).
-        let hintsDropped = false;
-        if (json.length > MAX_EXT_CHARS) {
-            const { kt: ignoredKt, view: ignoredView, ...rest } = raw;
-            let restJson;
-            try { restJson = JSON.stringify(rest); } catch { return null; }
-            if (restJson.length > MAX_EXT_CHARS || (raw.kt === undefined && raw.view === undefined)) return null;
-            hintsDropped = true;
-        }
-        const ext = {};
-        if (raw.kt !== undefined) {
-            const kt = hintsDropped ? null : parseKtGossip(raw.kt);
-            if (kt) ext.kt = kt;
-            else console.warn('E2EE: поле kt в SKDM испорчено или не помещается в ext и отброшено');
-        }
-        if (raw.view !== undefined) {
-            const view = hintsDropped || !membershipModules ? null : membershipModules.client.parseViewField(raw.view);
-            if (view) ext.view = view;
-            else console.warn('E2EE: поле view в SKDM испорчено или не помещается в ext и отброшено');
-        }
-        if (raw.prev !== undefined) {
-            const prev = raw.prev;
-            if (!prev || typeof prev !== 'object' || Array.isArray(prev)) return null;
-            if (!isCanonicalKeyId(prev.id)) return null;
-            if (!Number.isInteger(prev.final) || prev.final < 0 || prev.final > 0xFFFFFFFF) return null;
-            ext.prev = { id: prev.id, final: prev.final };
-        }
-        return ext;
-    }
-
-    // senderKeyId попадает в имена записей хранилища (skArchive:…, seen:…):
-    // только каноническое base64 ровно 16 байт, без посторонних символов.
-    function isCanonicalKeyId(value) {
-        if (typeof value !== 'string') return false;
-        const bytes = decodeFixed(value, 16);
-        return Boolean(bytes) && b64encode(bytes) === value;
-    }
-
-    function parseSkdm(pt, roomId) {
-        let skdm;
-        try { skdm = JSON.parse(utf8decode(pt)); } catch { return null; }
-        if (!skdm || skdm.v !== 2 || skdm.type !== 'skdm' || Number(skdm.roomId) !== Number(roomId)) return null;
-        if (!isCanonicalKeyId(skdm.senderKeyId)) return null;
-        if (!decodeFixed(skdm.chainKey, 32)) return null;
-        if (!Number.isInteger(skdm.iteration) || skdm.iteration < 0 || skdm.iteration > 0xFFFFFFFF) return null;
-        const signingPublicKey = canonicalSigningKey(skdm.signingPublicKey);
-        if (!signingPublicKey) return null;
-        const ext = parseSkdmExt(skdm.ext);
-        if (!ext) return null;
-        return {
-            senderKeyId: skdm.senderKeyId,
-            chainKey: skdm.chainKey,
-            iteration: skdm.iteration,
-            signingPublicKey,
-            ext,
-        };
-    }
-
-    // SKDM к отправке. ext пишется только когда в нём есть поля: ключ без
-    // истории (первый в комнате) уходит ровно в прежнем виде.
-    function buildSkdm(roomId, key, ext) {
-        const skdm = {
-            v: 2, type: 'skdm', roomId,
-            senderKeyId: key.senderKeyId,
-            chainKey: key.chainKey,
-            iteration: key.iteration,
-            signingPublicKey: key.signingPublicKey,
-        };
-        if (ext && Object.keys(ext).length > 0) skdm.ext = ext;
-        return skdm;
-    }
-
-    // ---- Записи ключей: индекс архива, часы вывода ----
+    // ---- Часы вывода ключей (индекс архива и нормализаторы записей - в lib/e2ee-state.js) ----
 
     const hourOf = (t) => Math.floor(t / HOUR_MS);
-    const archiveEntryId = (entry) => (typeof entry === 'string' ? entry : entry && entry.id);
-    const archiveHas = (state, keyId) => (state.archive || []).some(entry => archiveEntryId(entry) === keyId);
-
-    // Почему нет ключа сообщения, которое ниже позиции цепочки (раздел 5 и 6
-    // плана криптографии): удалено режимом «не хранить историю», удалено по
-    // сроку или бюджету, либо ключа не было вовсе (цепочка началась позже).
-    function missingKeyReason(rec, iteration) {
-        if (iteration < (rec.forgottenBelow || 0)) return 'history-not-kept';
-        if (iteration < (rec.expiredBelow || 0)) return 'key-expired';
-        return 'no-message-key';
-    }
-
-    // Политика комнаты на устройстве (roomPolicy:<комната>): режим истории и
-    // срок исчезающих сообщений. Любой мусор в записи сводится к значениям по умолчанию.
-    function normalizePolicy(raw) {
-        const p = raw && typeof raw === 'object' ? raw : {};
-        return {
-            historyMode: p.historyMode === 'none' ? 'none' : 'keep',
-            expirySeconds: Number.isSafeInteger(p.expirySeconds) && p.expirySeconds > 0 ? p.expirySeconds : null,
-            updatedAt: Number.isFinite(p.updatedAt) ? p.updatedAt : 0,
-        };
-    }
-
-    function normalizeIds(list) {
-        const out = [];
-        for (const v of Array.isArray(list) ? list : []) {
-            const id = Number(v);
-            if (Number.isSafeInteger(id) && id > 0 && !out.includes(id)) out.push(id);
-        }
-        return out;
-    }
-
-    function normalizeParticipants(list) {
-        const out = [];
-        const seen = new Set();
-        for (const p of Array.isArray(list) ? list : []) {
-            const id = Number(p && p.id);
-            if (!Number.isSafeInteger(id) || id <= 0 || seen.has(id)) continue;
-            seen.add(id);
-            out.push({ id, username: p && typeof p.username === 'string' ? p.username : '' });
-        }
-        return out;
-    }
-
-    // Ключа собеседника нет в журнале (mismatch) — отдельный статус, пока код безопасности не сверен
-    // (markPeerVerified) и пользователь не продолжил явно (overrideLogMismatch). pending журнала статус
-    // не меняет: это «ключ ждёт подтверждения», а не нарушение.
-    function logExcluded(pin) {
-        return Boolean(pin && pin.kt && pin.kt.status === 'mismatch' && !pin.verified && !pin.kt.override);
-    }
-
-    function identityStatus(pin) {
-        if (!pin) return 'unknown';
-        if (pin.pending) return 'changed';
-        if (logExcluded(pin)) return 'log-mismatch';
-        return pin.verified ? 'verified' : 'unverified';
-    }
 
     // ===================== Клиент =====================
 
@@ -1555,10 +853,7 @@
         //     и умирает вместе со своим ключом.
         //   roomPolicy:<комната> — { historyMode, expirySeconds, updatedAt }.
 
-        const stateName = (roomId, senderId) => 'senderKey:' + roomId + ':' + senderId;
-        const archiveName = (roomId, senderId, keyId) => 'skArchive:' + roomId + ':' + senderId + ':' + keyId;
-        const seenName = (roomId, senderId, keyId) => 'seen:' + roomId + ':' + senderId + ':' + keyId;
-        const archivePrefix = (roomId) => 'skArchive:' + roomId + ':';
+        // Имена записей (stateName, archiveName, seenName, archivePrefix) заданы в lib/e2ee-state.js.
         // Индекс отправителей (sealed-sender.md, 9.2): keyId → отправитель. В строке
         // сообщения комнаты автора нет, автора находит клиент по keyId из конверта.
         //   skIndex:<комната>:<senderKeyId> = { v:1, sender }              — ключ есть
@@ -1567,8 +862,7 @@
         // 'history-not-kept', а не 'no-sender-key' (иначе интерфейс счёл бы ключ
         // потерянным и слал лишние запросы ключа). Флаг unverifiedSender в индексе
         // НЕ хранится: он считается при каждой расшифровке по текущему составу.
-        const skIndexName = (roomId, keyId) => 'skIndex:' + roomId + ':' + keyId;
-        const skIndexPrefix = (roomId) => 'skIndex:' + roomId + ':';
+        // skIndexName и skIndexPrefix - там же, в lib/e2ee-state.js.
 
         function ownKeyName(roomId) {
             return stateName(roomId, userId);
@@ -1763,14 +1057,6 @@
         async function goneKeyReasonLocked(roomId, state) {
             if (state && state.forgottenBelow > 0) return 'history-not-kept';
             return (await readPolicyLocked(roomId)).historyMode === 'none' ? 'history-not-kept' : 'key-expired';
-        }
-
-        // В индексе архива запись превращается в надгробие (просто id): ключ
-        // удалён, но заменённый ротацией ключ обратно уже не поставить.
-        function tombstoneArchive(state, keyId) {
-            const list = state.archive || [];
-            const i = list.findIndex(entry => archiveEntryId(entry) === keyId);
-            if (i >= 0 && typeof list[i] !== 'string') list[i] = keyId;
         }
 
         // Убирает из таблицы повторов итерации ниже границы: их ключи удалены, а
@@ -2714,11 +2000,6 @@
 
         // ---- Попарный канал: я — отправитель key-share ----
 
-        function sessionMatchesPin(session, pin) {
-            return Boolean(session && pin && !pin.pending
-                && session.peerSignPub === pin.signPub && session.peerDhPub === pin.dhPub);
-        }
-
         async function fetchBundle(peerId) {
             let res;
             try { res = await transport.getBundle(peerId); } catch { return { error: 'не удалось получить ключи собеседника' }; }
@@ -3462,10 +2743,6 @@
             return Boolean(await storage.get(ownKeyName(roomId)));
         }
 
-        function sharedMarkName(roomId, senderKeyId, peerId) {
-            return 'sharedWith2:' + roomId + ':' + senderKeyId + ':' + peerId;
-        }
-
         // Что клиент знает о составе из ответа GET participants (signed-membership.md, 7.2): свои сертификаты,
         // снимки к ним и сертификат приглашения. Всё разбирается строго: сервер недоверенный.
         function normalizeMembershipInfo(info, meId) {
@@ -3752,15 +3029,6 @@
         // его с начала эпохи, если мы имели на неё право. Для архивных ключей
         // (ротированных) переотправки нет.
 
-        const keyRequestName = (roomId, keyId) => 'keyReq:' + roomId + ':' + keyId;
-        const keyServedName = (roomId, keyId, requesterId) => 'keyServed:' + roomId + ':' + keyId + ':' + requesterId;
-
-        function envelopeKeyId(text) {
-            let envelope;
-            try { envelope = JSON.parse(text); } catch { return null; }
-            return envelope && typeof envelope === 'object' && isCanonicalKeyId(envelope.senderKeyId) ? envelope.senderKeyId : null;
-        }
-
         // envelopes — тексты конвертов, которые не удалось расшифровать из-за
         // 'no-sender-key' или 'stale-sender-key'. Один и тот же ключ запрашивается
         // не чаще раза в час; не больше MAX_KEY_REQUEST_IDS ключей за раз.
@@ -3866,8 +3134,7 @@
         // версии не переписывает всю карту. Предел MAX_EDIT_ENTRIES на комнату,
         // вытесняется запись с наименьшим ts: вытесненный mid теряет защиту от
         // отката и подмены автора. Функции *Locked — только внутри withLock.
-        const editPrefix = (roomId) => 'edit:' + roomId + ':';
-        const editName = (roomId, mid) => editPrefix(roomId) + mid;
+        // editPrefix и editName (имена записей о версиях) заданы в lib/e2ee-state.js.
         // Сколько записей в комнате было при последнем пересчёте. Чужая вкладка
         // может дописать своих — тогда при достижении предела пересчитаем по хранилищу.
         const editCounts = new Map();
