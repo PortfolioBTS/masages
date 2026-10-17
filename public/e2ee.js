@@ -41,6 +41,11 @@
 //     использованных ключей (прямая секретность); раз в 7 дней сессия
 //     перезапускается новым PQXDH.
 //   - Повтор конверта под другим messageId распознаётся ('replay').
+//   - Подписи Ed25519 проверяются строго (public/lib/ed25519-strict.js, signed-membership.md 6.1):
+//     ключ малого порядка, неканоническая кодировка точки и S >= L отвергаются ДО платформенного
+//     verify, который принимает такие пары под любым сообщением. Это единственная функция verify
+//     (SPK, PQ-prekey, конверты Sender Key); ключи подписи из чужого ввода (identity, SKDM)
+//     отвергаются при разборе.
 //   - Содержимое привязано к сообщению (docs/security/message-ordering.md,
 //     раздел 9): внутри шифротекста лежат mid (id сообщения, который клиент
 //     выбирает ДО шифрования), ts (время отправителя) и признак правки e.
@@ -403,6 +408,30 @@
         return b64encode(bytes);
     }
 
+    // Строгая проверка Ed25519 (public/lib/ed25519-strict.js, signed-membership.md 6.1): ключ малого
+    // порядка или некорректная кодировка принимаются платформенным verify для ЛЮБОГО сообщения
+    // (подпись R = 01 00…00, S = 0), поэтому каждая проверка подписи в этом файле идёт через verify()
+    // ниже, а ключи подписи из чужого ввода (identity, SKDM) отвергаются ещё при разборе.
+    // В браузере - глобальный NyxoEd25519Strict (подключается до e2ee.js), в Node - соседний модуль.
+    // Без него клиент не работает: молча проверять подписи по-старому нельзя.
+    function resolveEd25519Strict() {
+        if (typeof NyxoEd25519Strict !== 'undefined' && NyxoEd25519Strict) return NyxoEd25519Strict;
+        if (typeof require === 'function') {
+            try {
+                return require('./lib/ed25519-strict.js');
+            } catch { /* ниже общая ошибка */ }
+        }
+        throw new Error('E2EE: модуль строгой проверки Ed25519 (lib/ed25519-strict.js) не загружен');
+    }
+    const ed25519Strict = resolveEd25519Strict();
+
+    // Ключ подписи Ed25519 из чужого ввода: каноническое base64 и строгая проверка ключа.
+    function canonicalSigningKey(str) {
+        const canonical = canonicalPubKey(str);
+        if (!canonical || !ed25519Strict.isStrictKey(b64decode(canonical))) return null;
+        return canonical;
+    }
+
     function utf8encode(str) {
         return new TextEncoder().encode(str);
     }
@@ -511,9 +540,14 @@
     // Импорт публичного ключа стоит заметно дороже самой проверки, а ключи
     // подписи Sender Key одни и те же для тысяч сообщений истории.
     const verifyKeyCache = new Map();
+    // ЕДИНСТВЕННОЕ место, где проверяется подпись Ed25519 (SPK, PQ-prekey, конверты Sender Key): строгая
+    // проверка ключа и подписи (ключ малого порядка, неканонические кодировки, S >= L) выполняется ДО
+    // платформенного verify, который сам такие пары принимает. Статический тест следит, что других
+    // вызовов subtle.verify в файле нет.
     async function verify(pubRawBytes, sig, data) {
         try {
             if (pubRawBytes.length !== 32 || sig.length !== 64) return false;
+            if (!ed25519Strict.isStrictKey(pubRawBytes) || !ed25519Strict.checkSignature(sig).ok) return false;
             const cacheKey = b64encode(pubRawBytes);
             let pub = verifyKeyCache.get(cacheKey);
             if (!pub) {
@@ -1144,7 +1178,7 @@
         if (!iv || !ct || ct.length < 16) return null;
         const h = env.init;
         if (!h || typeof h !== 'object') return null;
-        const signPub = canonicalPubKey(h.senderIdentitySignPub);
+        const signPub = canonicalSigningKey(h.senderIdentitySignPub);
         const dhPub = canonicalPubKey(h.senderIdentityDhPub);
         const eph = canonicalPubKey(h.senderEphemeralPub);
         const opkId = h.usedOneTimePrekeyId === null || h.usedOneTimePrekeyId === undefined ? null : h.usedOneTimePrekeyId;
@@ -1238,7 +1272,7 @@
         if (!isCanonicalKeyId(skdm.senderKeyId)) return null;
         if (!decodeFixed(skdm.chainKey, 32)) return null;
         if (!Number.isInteger(skdm.iteration) || skdm.iteration < 0 || skdm.iteration > 0xFFFFFFFF) return null;
-        const signingPublicKey = canonicalPubKey(skdm.signingPublicKey);
+        const signingPublicKey = canonicalSigningKey(skdm.signingPublicKey);
         if (!signingPublicKey) return null;
         const ext = parseSkdmExt(skdm.ext);
         if (!ext) return null;
@@ -2684,7 +2718,7 @@
 
         // PQXDH со стороны инициатора. Возвращает { session } | { changed } | { error }.
         async function startSendSessionLocked(identity, peerId, bundle) {
-            const signPub = canonicalPubKey(bundle.identity_signing_key);
+            const signPub = canonicalSigningKey(bundle.identity_signing_key);
             const dhPub = canonicalPubKey(bundle.identity_dh_key);
             if (!signPub || !dhPub) return { error: 'некорректные identity-ключи собеседника' };
 
@@ -4193,6 +4227,10 @@
 
             // Идентификатор ключа отправителя (привязан к комнате, отправителю и ключу подписи)
             deriveSenderKeyId,
+
+            // Проверка подписи Ed25519 (строгая, единственная в файле) и разбор ключа подписи из чужого ввода
+            verify,
+            canonicalSigningKey,
 
             // Разбор SKDM (поле ext)
             parseSkdm,

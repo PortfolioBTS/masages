@@ -13,6 +13,8 @@ const { deriveSenderKeyId, b64encode, b64decode } = I;
 
 const PUB = b64encode(new Uint8Array(Array.from({ length: 32 }, (_, i) => 0x20 + i)));
 const PUB_OTHER = b64encode(new Uint8Array(Array.from({ length: 32 }, (_, i) => 0x40 + i)));
+// parseSkdm принимает только строгий ключ Ed25519 (T5.4): байты 20 21 … 3f ключом не являются, для разбора нужен настоящий.
+const REAL_PUB = b64encode(new Uint8Array(require('crypto').generateKeyPairSync('ed25519').publicKey.export({ format: 'der', type: 'spki' }).subarray(-32)));
 
 (async () => {
     console.log('senderKeyId, привязанный к отправителю\n');
@@ -42,7 +44,7 @@ const PUB_OTHER = b64encode(new Uint8Array(Array.from({ length: 32 }, (_, i) => 
             assert.strictEqual(b64encode(bytes), id, 'каноническая запись');
             const skdm = I.parseSkdm(new TextEncoder().encode(JSON.stringify({
                 v: 2, type: 'skdm', roomId: room, senderKeyId: id,
-                chainKey: b64encode(new Uint8Array(32).fill(7)), iteration: 0, signingPublicKey: PUB,
+                chainKey: b64encode(new Uint8Array(32).fill(7)), iteration: 0, signingPublicKey: REAL_PUB,
             })), room);
             assert.ok(skdm && skdm.senderKeyId === id, 'parseSkdm принимает производный идентификатор');
         }

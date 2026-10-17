@@ -15,6 +15,8 @@ const {
 const I = E2EE._internal;
 const { b64encode: b64 } = I;
 const ROOM = 100;
+// parseSkdm принимает только строгий ключ Ed25519 (T5.4): случайные 32 байта годятся лишь примерно в половине случаев.
+const realSigningKey = () => b64(new Uint8Array(nodeCrypto.generateKeyPairSync('ed25519').publicKey.export({ format: 'der', type: 'spki' }).subarray(-32)));
 
 // Alice (1) и Bob (2) в комнате; Alice раздала ключ, Bob его забрал.
 async function pair(opts = {}) {
@@ -53,7 +55,7 @@ function rawSkdm(extra = {}, overrides = {}) {
         senderKeyId: b64(nodeCrypto.randomBytes(16)),
         chainKey: b64(nodeCrypto.randomBytes(32)),
         iteration: 3,
-        signingPublicKey: b64(nodeCrypto.randomBytes(32)),
+        signingPublicKey: realSigningKey(),
     };
     return new TextEncoder().encode(JSON.stringify(Object.assign(base, overrides, extra)));
 }
@@ -121,7 +123,7 @@ function rawSkdm(extra = {}, overrides = {}) {
     await test('buildSkdm: ext пишется только когда в нём есть поля; круг build → parse', () => {
         const key = {
             senderKeyId: b64(nodeCrypto.randomBytes(16)), chainKey: b64(nodeCrypto.randomBytes(32)),
-            iteration: 9, signingPublicKey: b64(nodeCrypto.randomBytes(32)),
+            iteration: 9, signingPublicKey: realSigningKey(),
         };
         assert.ok(!('ext' in I.buildSkdm(ROOM, key)));
         assert.ok(!('ext' in I.buildSkdm(ROOM, key, {})));
