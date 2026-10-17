@@ -14,6 +14,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { readClientScript, clientScriptFiles } = require('./client-script-source');
 const { spawnSync } = require('child_process');
 
 const manifestLib = require('../lib/client-manifest');
@@ -407,10 +408,10 @@ const FIXED = { version: '1.2.3', commit: 'a'.repeat(40), epoch: 1800000000, nod
     });
 
     await test('script.js подключает ktManifestKey к клиенту E2EE, а kt-client.js загружается до него', () => {
-        const script = fs.readFileSync(path.join(PUBLIC_DIR, 'script.js'), 'utf8');
+        const script = readClientScript();
         assert.match(script, /ktManifestKey: \(\) => \(typeof NyxoKtClient !== 'undefined' \? NyxoKtClient\.fetchManifestKey\(\) : null\)/);
         const html = fs.readFileSync(path.join(PUBLIC_DIR, 'index.html'), 'utf8');
-        assert.ok(html.indexOf('lib/kt-client.js') > 0 && html.indexOf('lib/kt-client.js') < html.indexOf('src="script.js"'));
+        assert.ok(html.indexOf('lib/kt-client.js') > 0 && html.indexOf('lib/kt-client.js') < html.indexOf(`src="${clientScriptFiles()[0]}"`));
     });
 
     console.log('\n' + passed + ' passed, ' + failed + ' failed');

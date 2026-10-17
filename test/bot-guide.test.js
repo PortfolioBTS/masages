@@ -9,6 +9,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const guide = require('../lib/bot-guide');
+const { readClientScript } = require('./client-script-source');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -487,8 +488,8 @@ test('welcomeText: неизвестный срок считается самым
 
 // ---------- Клиентская часть (статические проверки) ----------
 
-// Исходники клиента читаются как текст. Если script.js или style.css разобьют
-// на части (волна 6), список файлов здесь придётся обновить.
+// Исходники клиента читаются как текст. Скрипт приложения (бывший script.js) разбит на
+// public/js/*.js (T6.2): его читает readClientScript() — склейка в порядке index.html.
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const readPublic = name => fs.readFileSync(path.join(PUBLIC_DIR, name), 'utf8');
 const { readClientCss } = require('./client-css');
@@ -522,7 +523,7 @@ test('index.html: контейнер подсказок скрыт, пуст, п
 });
 
 test('script.js: пределы клиента вмещают подписи сервера, подписи берутся из chat.quickReplies', () => {
-    const script = readPublic('script.js');
+    const script = readClientScript();
     const maxCount = Number((/const MAX_BOT_SUGGESTIONS = (\d+);/.exec(script) || [])[1]);
     const maxLength = Number((/const MAX_BOT_SUGGESTION_LENGTH = (\d+);/.exec(script) || [])[1]);
     assert.strictEqual(maxCount, 6, 'не больше 6 кнопок');
@@ -533,7 +534,7 @@ test('script.js: пределы клиента вмещают подписи с�
 });
 
 test('script.js: подсказки рисуются через textContent и нажатие идёт в запомненный чат через sendText', () => {
-    const script = readPublic('script.js');
+    const script = readClientScript();
     const render = functionBody(script, 'renderBotSuggestions');
     assert.ok(render.includes('.textContent = label'));
     assert.doesNotMatch(render, /innerHTML|insertAdjacentHTML|outerHTML/);
@@ -552,7 +553,7 @@ test('плейсхолдер поля ввода и статус шапки ча
     assert.strictEqual(policy.PLACEHOLDERS.bot, 'Спросите бота или выберите тему');
     const view = policy.composerView({ inRoom: false, plaintextOk: true, e2ee: 'ready', initError: null, block: null });
     assert.strictEqual(view.placeholder, 'Спросите бота или выберите тему');
-    const script = readPublic('script.js');
+    const script = readClientScript();
     assert.ok(script.includes("'Бот · без сквозного шифрования'"));
 });
 

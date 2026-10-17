@@ -15,6 +15,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { clientScriptFiles } = require('./client-script-source');
 const { spawnSync } = require('child_process');
 const manifestLib = require('../lib/client-manifest');
 const clientManifestRoute = require('../lib/routes/client-manifest');
@@ -80,7 +81,7 @@ test('в манифесте все файлы статики (кроме точ�
         .filter((url) => !url.split('/').some((part) => part.startsWith('.')) && !url.startsWith('/uploads/') && url !== '/sw.js');
     const inManifest = manifestLib.buildManifest(PUBLIC_DIR).files.map((file) => file.path);
     assert.deepStrictEqual([...inManifest].sort(), [...onDisk].sort());
-    for (const required of ['/index.html', '/vendor/socket.io.min.js', '/e2ee.js', '/script.js', '/pow-worker.js', '/css/tokens.css', '/css/responsive.css', '/vendor/qrcode.js']) {
+    for (const required of ['/index.html', '/vendor/socket.io.min.js', '/e2ee.js', ...clientScriptFiles().map((file) => '/' + file), '/pow-worker.js', '/css/tokens.css', '/css/responsive.css', '/vendor/qrcode.js']) {
         assert.ok(inManifest.includes(required), `в манифесте нет ${required}`);
     }
 });

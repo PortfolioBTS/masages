@@ -11,6 +11,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const { clientScriptFiles } = require('./client-script-source');
 const core = require('../public/lib/sw-core');
 const client = require('../public/lib/sw-client');
 const { FakeCacheStorage } = require('./sw-fakes');
@@ -215,7 +216,7 @@ async function main() {
 
     await test('index.html: ядро и клиент подключены до script.js; баннер, окно-предупреждение и профиль на месте', () => {
         const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
-        const order = ['lib/sw-core.js', 'lib/sw-client.js', 'script.js'].map((src) => html.indexOf(`<script src="${src}"></script>`));
+        const order = ['lib/sw-core.js', 'lib/sw-client.js', clientScriptFiles()[0]].map((src) => html.indexOf(`<script src="${src}"></script>`));
         assert.ok(order.every((position) => position > 0), 'не все скрипты подключены');
         assert.ok(order[0] < order[1] && order[1] < order[2]);
         for (const id of ['code-banner', 'code-banner-text', 'code-banner-apply', 'code-banner-dismiss', 'code-warning-modal', 'code-protection-status', 'code-protection-check', 'code-protection-toggle']) {

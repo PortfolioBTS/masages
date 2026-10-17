@@ -15,7 +15,8 @@ const { readClientCss } = require('./client-css');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const read = (name) => fs.readFileSync(path.join(PUBLIC_DIR, name), 'utf8');
-const script = read('script.js');
+const { readClientScript, clientScriptFiles } = require('./client-script-source');
+const script = readClientScript();
 const html = read('index.html');
 const css = readClientCss();
 
@@ -114,7 +115,7 @@ test('разметка: значок шифрования в шапке, сос�
     const status = html.indexOf('id="composer-status"');
     const fileInput = html.indexOf('id="file-input"');
     assert.ok(sendBtn > 0 && status > sendBtn && fileInput > status, 'строка состояния стоит под полем ввода');
-    assert.ok(html.indexOf('<script src="lib/e2ee-policy.js">') > 0 && html.indexOf('lib/e2ee-policy.js') < html.indexOf('<script src="script.js">'));
+    assert.ok(html.indexOf('<script src="lib/e2ee-policy.js">') > 0 && html.indexOf('lib/e2ee-policy.js') < html.indexOf(`<script src="${clientScriptFiles()[0]}">`));
     // Значок открывает «Участники и ключи».
     assert.match(functionBody(script, 'setupE2eeListeners'), /e2eeIndicator\.addEventListener\('click', openMembersModal\)/);
 });

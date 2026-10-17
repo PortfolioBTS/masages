@@ -18,6 +18,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const { readClientScript, clientScriptFiles } = require('./client-script-source');
 const vm = require('vm');
 
 const policy = require('../public/lib/mime-policy');
@@ -231,14 +232,14 @@ function tagWithId(id) {
     return match ? match[0] : null;
 }
 
-test('index.html: the module script is loaded exactly once and before script.js', () => {
+test('index.html: the module script is loaded exactly once and before the app scripts (js/*.js)', () => {
     const sources = [...html.matchAll(/<script\b[^>]*\ssrc="([^"]+)"/g)].map(m => m[1]);
     const moduleAt = sources.indexOf('lib/mime-policy.js');
-    const scriptAt = sources.indexOf('script.js');
+    const scriptAt = sources.indexOf(clientScriptFiles()[0]);
     assert.ok(moduleAt >= 0, 'lib/mime-policy.js is not linked from index.html: ' + sources.join(', '));
     assert.ok(scriptAt >= 0);
     assert.strictEqual(sources.lastIndexOf('lib/mime-policy.js'), moduleAt, 'linked more than once');
-    assert.ok(moduleAt < scriptAt, 'script.js would start without MimePolicy');
+    assert.ok(moduleAt < scriptAt, 'the app scripts (js/*.js) would start without MimePolicy');
     assert.ok(fs.existsSync(MODULE_FILE));
 });
 
@@ -295,7 +296,7 @@ function listFiles(dir, base) {
 
 test('public/ (except vendor) has no voice recording, microphone or audio code (criterion 2.4)', () => {
     const files = listFiles(PUBLIC_DIR, '');
-    assert.ok(files.includes('script.js') && files.includes('index.html') && files.includes('lib/mime-policy.js'), 'file list is broken');
+    assert.ok(files.includes('js/01-state.js') && files.includes('index.html') && files.includes('lib/mime-policy.js'), 'file list is broken');
     const forbidden = /record|mic|голосов|MediaRecorder|getUserMedia|audio\/|\bmusic\b/i;
     const hits = [];
     for (const file of files) {
@@ -323,7 +324,7 @@ test('interface texts do not mention audio, voice or a microphone', () => {
 
 test('style.css and script.js have no player or recording leftovers', () => {
     const css = readClientCss();
-    const script = readPublic('script.js');
+    const script = readClientScript();
     assert.ok(!/\.message-audio|\.recording\b|rec-blink|#record-btn/.test(css));
     assert.ok(!/createElement\(\s*['"]audio['"]\s*\)|message_type\s*===\s*['"]audio['"]|message-audio/.test(script));
     assert.ok(!/\brecordBtn\b/.test(script));

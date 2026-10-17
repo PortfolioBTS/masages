@@ -9,6 +9,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const { readClientScript } = require('./client-script-source');
 const vm = require('vm');
 const { PROTO_CURRENT } = require('../lib/proto');
 
@@ -25,7 +26,7 @@ async function test(name, fn) {
     }
 }
 
-const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'script.js'), 'utf8').replace(/\r\n/g, '\n');
+const source = readClientScript().replace(/\r\n/g, '\n');
 
 // Тело функции верхнего уровня: от «function name(» до парной закрывающей скобки
 // (строки и комментарии пропускаются; регулярных выражений в нужных функциях нет).

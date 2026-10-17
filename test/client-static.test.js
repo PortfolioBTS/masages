@@ -21,13 +21,14 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const { clientScriptFiles } = require('./client-script-source');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const INDEX_HTML = path.join(PUBLIC_DIR, 'index.html');
 
 // Файлы клиента, чьи ссылки на id проверяются. Появился новый файл, который
 // обращается к элементам страницы, — допишите его сюда.
-const CLIENT_SCRIPTS = ['script.js', 'lib/invite.js', 'lib/lifetime.js', 'lib/mime-policy.js', 'lib/message-order.js', 'lib/e2ee-lock.js', 'lib/e2ee-policy.js', 'lib/text-search.js', 'lib/sw-client.js', 'lib/ed25519-strict.js', 'lib/kt.js', 'lib/kt-client.js', 'lib/membership.js', 'lib/membership-client.js'];
+const CLIENT_SCRIPTS = [...clientScriptFiles(), 'lib/invite.js', 'lib/lifetime.js', 'lib/mime-policy.js', 'lib/message-order.js', 'lib/e2ee-lock.js', 'lib/e2ee-policy.js', 'lib/text-search.js', 'lib/sw-client.js', 'lib/ed25519-strict.js', 'lib/kt.js', 'lib/kt-client.js', 'lib/membership.js', 'lib/membership-client.js'];
 
 let passed = 0, failed = 0;
 function test(name, fn) {

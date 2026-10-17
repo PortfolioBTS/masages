@@ -18,6 +18,7 @@ const assert = require('assert');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { clientScriptFiles } = require('./client-script-source');
 const { spawnSync } = require('child_process');
 const { applySri, findSriTags, hasAnyIntegrity, localUrlPath } = require('../lib/client-sri');
 
@@ -111,7 +112,7 @@ test('findSriTags находит все скрипты и стили насто�
     const html = fs.readFileSync(INDEX, 'utf8');
     const tags = findSriTags(html);
     assert.ok(tags.length >= 10, 'в index.html найдено подозрительно мало тегов: ' + tags.length);
-    for (const required of ['/script.js', '/e2ee.js', '/css/tokens.css', '/css/responsive.css', '/vendor/socket.io.min.js']) {
+    for (const required of [...clientScriptFiles().map((file) => '/' + file), '/e2ee.js', '/css/tokens.css', '/css/responsive.css', '/vendor/socket.io.min.js']) {
         assert.ok(tags.some((tag) => tag.urlPath === required), `нет ${required}`);
     }
     // pow-worker.js — Worker, а не <script>: у него нет integrity, он не должен попасть сюда.
@@ -142,7 +143,7 @@ if (!SRI_ENABLED) {
 test('scripts/update-sri.js --check: пока SRI выключен, сообщает об отсутствующих атрибутах (код 1), когда включён — код 0', () => {
     const run = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'update-sri.js'), '--check'], { cwd: ROOT, encoding: 'utf8' });
     assert.strictEqual(run.status, SRI_ENABLED ? 0 : 1, run.stdout + run.stderr);
-    if (!SRI_ENABLED) assert.match(run.stderr, /нет integrity: \/script\.js/);
+    if (!SRI_ENABLED) assert.match(run.stderr, /нет integrity: \/js\/01-state\.js/);
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
