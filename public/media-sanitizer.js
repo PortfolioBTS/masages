@@ -47,6 +47,8 @@
 //   sanitize-jpeg.js - JPEG;
 //   sanitize-png-gif.js - PNG и GIF;
 //   sanitize-webp.js - WebP;
+//   sanitize-mp4.js - MP4/MOV (ISO BMFF);
+//   sanitize-webm.js - WebM (Matroska/EBML);
 // В браузере части - глобальные Nyxo* (index.html подключает их ДО этого файла), в Node - соседние файлы через
 // require. Без любой из частей санитайзер не загружается: молча пропустить формат нельзя (fail closed).
 
@@ -57,6 +59,8 @@
             require('./lib/sanitize-jpeg.js'),
             require('./lib/sanitize-png-gif.js'),
             require('./lib/sanitize-webp.js'),
+            require('./lib/sanitize-mp4.js'),
+            require('./lib/sanitize-webm.js'),
         );
     } else {
         root.MediaSanitizer = factory(
@@ -64,9 +68,11 @@
             root.NyxoSanitizeJpeg,
             root.NyxoSanitizePngGif,
             root.NyxoSanitizeWebp,
+            root.NyxoSanitizeMp4,
+            root.NyxoSanitizeWebm,
         );
     }
-})(typeof self !== 'undefined' ? self : this, function (Common, Jpeg, PngGif, Webp) {
+})(typeof self !== 'undefined' ? self : this, function (Common, Jpeg, PngGif, Webp, Mp4, Webm) {
     'use strict';
 
     // Части санитайзера обязательны: формат, чей разборщик не загрузился, нельзя "пропускать как есть".
@@ -75,18 +81,21 @@
         [Jpeg, 'lib/sanitize-jpeg.js'],
         [PngGif, 'lib/sanitize-png-gif.js'],
         [Webp, 'lib/sanitize-webp.js'],
+        [Mp4, 'lib/sanitize-mp4.js'],
+        [Webm, 'lib/sanitize-webm.js'],
     ];
     for (const [part, label] of PARTS) {
         if (!part) throw new Error('MediaSanitizer: модуль ' + label + ' не загружен');
     }
 
     const {
-        MediaSanitizeError, fail, refuse, makeGuard, need, u8, u16be, u24be, u32be, u64be, s32be, fourcc, asciiAt,
-        writeAscii, latin1, toUint8Array, crc32, PDF_WS,
+        MediaSanitizeError, fail, refuse, makeGuard, need, u32be, asciiAt, latin1, toUint8Array, crc32, PDF_WS,
     } = Common;
     const { sanitizeJpeg } = Jpeg;
     const { sanitizePng, sanitizeGif } = PngGif;
     const { sanitizeWebp } = Webp;
+    const { sanitizeBmff } = Mp4;
+    const { sanitizeMatroska } = Webm;
 
     const SUPPORTED_TYPES = Object.freeze([
         'image/jpeg', 'image/png', 'image/gif', 'image/webp',
@@ -100,487 +109,6 @@
         'image/jpg': 'image/jpeg',
         'image/pjpeg': 'image/jpeg',
     };
-
-    // ===================== MP4 / MOV (ISO BMFF) =====================
-    //
-    // Всё на месте: метаданные превращаются в бокс 'free' того же размера
-    // с обнулённым содержимым, поэтому смещения чанков (stco/co64) и
-    // фрагментов не меняются.
-
-    const BMFF_CONTAINERS = new Set(['moov', 'trak', 'mdia', 'minf', 'stbl', 'edts', 'moof', 'traf', 'mvex']);
-    // udta — ©xyz, модель устройства, ©day; meta — Apple keys/ilst с
-    // com.apple.quicktime.location.ISO6709; uuid — XMP и вендорские данные;
-    // prft — абсолютное время записи (NTP) во фрагментированных файлах.
-    const BMFF_METADATA_BOXES = new Set(['udta', 'meta', 'uuid', 'XMP_', 'prft']);
-    const BMFF_TIME_BOXES = new Set(['mvhd', 'tkhd', 'mdhd']);
-    const BMFF_SAMPLE_TABLES = new Set(['stsz', 'stz2', 'stsc', 'stco', 'co64']);
-    // Дорожки таймированных метаданных: GoPro (GPMF, покадровый GPS), Google
-    // CAMM, DJI, Sony rtmd, Apple mebx, а также субтитры (DJI пишет в них
-    // координаты) и таймкод (время суток съёмки). Дорожка удаляется целиком,
-    // её сэмплы в mdat обнуляются.
-    const BMFF_METADATA_HANDLERS = new Set(['meta', 'camm', 'text', 'sbtl', 'subt', 'clcp', 'tmcd']);
-    const BMFF_METADATA_SAMPLE_ENTRIES = new Set(['gpmd', 'camm', 'mebx', 'djmd', 'dbgi', 'rtmd']);
-    const BMFF_MAX_DEPTH = 16;
-
-    function isPrintableFourcc(b, o) {
-        for (let i = 0; i < 4; i++) if (b[o + i] < 0x20 || b[o + i] > 0x7E) return false;
-        return true;
-    }
-
-    function readBmffBox(b, pos, end) {
-        if (end - pos < 8) fail('обрезан заголовок бокса');
-        let size = u32be(b, pos);
-        const type = fourcc(b, pos + 4);
-        let header = 8;
-        if (size === 1) { // largesize: 64-битный размер после типа
-            if (end - pos < 16) fail('обрезан заголовок бокса');
-            size = u64be(b, pos + 8);
-            header = 16;
-        } else if (size === 0) { // "до конца родителя"
-            size = end - pos;
-        }
-        if (size < header || size > end - pos) fail('бокс выходит за границы родителя');
-        return { type, start: pos, payload: pos + header, end: pos + size };
-    }
-
-    function neutralizeBmffBox(b, box) {
-        writeAscii(b, box.start + 4, 'free');
-        b.fill(0, box.payload, box.end); // у uuid сюда попадает и 16-байтный usertype
-    }
-
-    function zeroBmffTimes(b, box) {
-        const version = u8(b, box.payload);
-        if (version > 1) fail('неизвестная версия бокса ' + box.type);
-        // version 0: creation_time и modification_time по 32 бита, version 1 — по 64.
-        const len = version === 1 ? 16 : 8;
-        if (box.payload + 4 + len > box.end) fail('обрезан бокс ' + box.type);
-        b.fill(0, box.payload + 4, box.payload + 4 + len);
-    }
-
-    function walkBmff(b, start, end, depth, ctx, parentType, track) {
-        if (depth > BMFF_MAX_DEPTH) fail('слишком глубокая вложенность боксов');
-        let pos = start;
-        while (pos < end) {
-            ctx.guard();
-            if (end - pos < 8) {
-                // Хвост короче заголовка допустим только как нулевое выравнивание.
-                for (let i = pos; i < end; i++) if (b[i] !== 0) fail('мусор в конце контейнера');
-                return;
-            }
-            const box = readBmffBox(b, pos, end);
-            const t = box.type;
-            if (depth === 0) {
-                if (!isPrintableFourcc(b, box.start + 4)) fail('не похоже на ISO BMFF');
-                if (t === 'moov') ctx.sawMoov = true;
-                else if (t === 'mdat') ctx.mdats.push(box);
-                else if (t === 'moof') ctx.moofs.push(box);
-            }
-            if (BMFF_METADATA_BOXES.has(t)) {
-                neutralizeBmffBox(b, box);
-            } else if (t === 'free' || t === 'skip') {
-                // В "свободном месте" редакторы оставляют старые копии метаданных.
-                b.fill(0, box.payload, box.end);
-            } else if (t === 'cmov') {
-                fail('сжатый заголовок moov не поддерживается');
-            } else if (BMFF_TIME_BOXES.has(t)) {
-                if (t === 'tkhd' && track) {
-                    const v = u8(b, box.payload);
-                    const idPos = box.payload + (v === 1 ? 20 : 12);
-                    if (idPos + 4 > box.end) fail('обрезан бокс tkhd');
-                    track.id = u32be(b, idPos);
-                }
-                zeroBmffTimes(b, box);
-            } else if (t === 'trak') {
-                const tr = { box, id: null, handler: null, entry: null, tables: {} };
-                walkBmff(b, box.payload, box.end, depth + 1, ctx, t, tr);
-                ctx.tracks.push(tr);
-            } else if (BMFF_CONTAINERS.has(t)) {
-                walkBmff(b, box.payload, box.end, depth + 1, ctx, t, track);
-            } else if (t === 'trex' && parentType === 'mvex') {
-                if (box.payload + 20 > box.end) fail('обрезан бокс trex');
-                ctx.trex.set(u32be(b, box.payload + 4), u32be(b, box.payload + 16));
-            } else if (track) {
-                // hdlr бывает и в minf (QuickTime data handler 'alis') — нужен именно из mdia.
-                if (t === 'hdlr' && parentType === 'mdia' && box.payload + 12 <= box.end) {
-                    track.handler = fourcc(b, box.payload + 8);
-                } else if (t === 'stsd' && box.payload + 16 <= box.end) {
-                    track.entry = fourcc(b, box.payload + 12);
-                } else if (BMFF_SAMPLE_TABLES.has(t) && parentType === 'stbl') {
-                    track.tables[t] = box;
-                }
-            }
-            pos = box.end;
-        }
-    }
-
-    // Обнуляет диапазон, только если он целиком внутри какого-то mdat:
-    // испорченная таблица смещений не должна затирать структуру файла.
-    function zeroInMdat(b, off, len, ctx) {
-        if (len === 0) return;
-        for (const m of ctx.mdats) {
-            if (off >= m.payload && off + len <= m.end) {
-                b.fill(0, off, off + len);
-                return;
-            }
-        }
-        fail('данные дорожки метаданных лежат вне mdat');
-    }
-
-    function zeroTrackSamples(b, tr, ctx) {
-        const t = tr.tables;
-        const co = t.stco || t.co64;
-        if (!co) return; // нет таблицы чанков — нет и данных в mdat
-        const wide = !t.stco;
-        const chunkCount = u32be(b, co.payload + 4);
-        if (chunkCount === 0) return;
-        const chunkBase = co.payload + 8;
-        if (chunkCount > (co.end - chunkBase) / (wide ? 8 : 4)) fail('таблица чанков повреждена');
-        const stsc = t.stsc;
-        if (!stsc) fail('нет таблицы stsc');
-        const scCount = u32be(b, stsc.payload + 4);
-        if (scCount === 0 || scCount > (stsc.end - stsc.payload - 8) / 12) fail('таблица stsc повреждена');
-
-        let constSize = 0;
-        let sampleCount = 0;
-        let sizeAt = null;
-        if (t.stsz) {
-            constSize = u32be(b, t.stsz.payload + 4);
-            sampleCount = u32be(b, t.stsz.payload + 8);
-            const base = t.stsz.payload + 12;
-            if (constSize === 0) {
-                if (sampleCount > (t.stsz.end - base) / 4) fail('таблица stsz повреждена');
-                sizeAt = (i) => u32be(b, base + 4 * i);
-            }
-        } else if (t.stz2) {
-            const field = u8(b, t.stz2.payload + 7);
-            sampleCount = u32be(b, t.stz2.payload + 8);
-            const base = t.stz2.payload + 12;
-            if (field !== 4 && field !== 8 && field !== 16) fail('таблица stz2 повреждена');
-            if (Math.ceil(sampleCount * field / 8) > t.stz2.end - base) fail('таблица stz2 повреждена');
-            if (field === 16) sizeAt = (i) => u16be(b, base + 2 * i);
-            else if (field === 8) sizeAt = (i) => b[base + i];
-            else sizeAt = (i) => (i & 1 ? b[base + (i >> 1)] & 0x0F : b[base + (i >> 1)] >> 4);
-        } else {
-            fail('нет таблицы размеров сэмплов');
-        }
-
-        let sc = 0;
-        let sample = 0;
-        for (let c = 1; c <= chunkCount; c++) {
-            while (sc + 1 < scCount && u32be(b, stsc.payload + 8 + (sc + 1) * 12) <= c) sc++;
-            if (u32be(b, stsc.payload + 8 + sc * 12) > c) fail('таблица stsc повреждена');
-            const perChunk = u32be(b, stsc.payload + 12 + sc * 12);
-            if (perChunk > sampleCount - sample) fail('таблицы сэмплов не согласованы');
-            let bytes = 0;
-            if (sizeAt) {
-                for (let k = 0; k < perChunk; k++) bytes += sizeAt(sample + k);
-            } else {
-                bytes = perChunk * constSize;
-            }
-            sample += perChunk;
-            const off = wide ? u64be(b, chunkBase + 8 * (c - 1)) : u32be(b, chunkBase + 4 * (c - 1));
-            zeroInMdat(b, off, bytes, ctx);
-        }
-    }
-
-    // Во фрагментированном файле сэмплы удалённых дорожек описаны в moof/traf/trun.
-    // Правила базового смещения — ISO/IEC 14496-12, 8.8.7 и 8.8.8.
-    function zeroFragmentSamples(b, moof, removed, ctx) {
-        let prevDataEnd = moof.start;
-        let firstTraf = true;
-        let pos = moof.payload;
-        while (pos + 8 <= moof.end) {
-            ctx.guard();
-            const traf = readBmffBox(b, pos, moof.end);
-            pos = traf.end;
-            if (traf.type !== 'traf') continue;
-            let tfhd = null;
-            const truns = [];
-            let q = traf.payload;
-            while (q + 8 <= traf.end) {
-                ctx.guard();
-                const child = readBmffBox(b, q, traf.end);
-                if (child.type === 'tfhd') tfhd = child;
-                else if (child.type === 'trun') truns.push(child);
-                q = child.end;
-            }
-            if (!tfhd) fail('traf без tfhd');
-            const flags = u24be(b, tfhd.payload + 1);
-            const trackId = u32be(b, tfhd.payload + 4);
-            let p = tfhd.payload + 8;
-            let base = null;
-            if (flags & 0x1) { base = u64be(b, p); p += 8; }
-            if (flags & 0x2) p += 4;
-            if (flags & 0x8) p += 4;
-            let defaultSize = ctx.trex.has(trackId) ? ctx.trex.get(trackId) : null;
-            if (flags & 0x10) { defaultSize = u32be(b, p); p += 4; }
-            if (flags & 0x20) p += 4;
-            if (p > tfhd.end) fail('обрезан бокс tfhd');
-            if (base === null) base = (flags & 0x20000) || firstTraf ? moof.start : prevDataEnd;
-            const isRemoved = removed.has(trackId);
-
-            let cursor = base;
-            for (const trun of truns) {
-                const tf = u24be(b, trun.payload + 1);
-                const count = u32be(b, trun.payload + 4);
-                let r = trun.payload + 8;
-                if (tf & 0x1) { cursor = base === null ? null : base + s32be(b, r); r += 4; }
-                if (tf & 0x4) r += 4;
-                let rec = 0;
-                for (const f of [0x100, 0x200, 0x400, 0x800]) if (tf & f) rec += 4;
-                if (r > trun.end || count * rec > trun.end - r) fail('обрезан бокс trun');
-                let bytes = null;
-                if (tf & 0x200) {
-                    const sizeOffset = tf & 0x100 ? 4 : 0;
-                    bytes = 0;
-                    for (let k = 0; k < count; k++) bytes += u32be(b, r + k * rec + sizeOffset);
-                } else if (defaultSize !== null) {
-                    bytes = count * defaultSize;
-                }
-                if (isRemoved) {
-                    if (cursor === null || bytes === null) fail('не удалось найти данные фрагмента');
-                    zeroInMdat(b, cursor, bytes, ctx);
-                }
-                cursor = cursor === null || bytes === null ? null : cursor + bytes;
-            }
-            if (truns.length) prevDataEnd = cursor;
-            firstTraf = false;
-        }
-    }
-
-    function sanitizeBmff(src) {
-        const b = new Uint8Array(src);
-        const ctx = {
-            guard: makeGuard(),
-            sawMoov: false,
-            mdats: [],
-            moofs: [],
-            tracks: [],
-            trex: new Map(),
-        };
-        if (b.length < 8) fail('файл слишком короткий');
-        walkBmff(b, 0, b.length, 0, ctx, null, null);
-        if (!ctx.sawMoov) fail('нет бокса moov');
-
-        const removed = new Set();
-        for (const tr of ctx.tracks) {
-            if (!BMFF_METADATA_HANDLERS.has(tr.handler) && !BMFF_METADATA_SAMPLE_ENTRIES.has(tr.entry)) continue;
-            zeroTrackSamples(b, tr, ctx); // до обнуления trak: там же лежат таблицы
-            if (tr.id !== null) removed.add(tr.id);
-            neutralizeBmffBox(b, tr.box);
-        }
-        if (removed.size) {
-            for (const moof of ctx.moofs) zeroFragmentSamples(b, moof, removed, ctx);
-        }
-        return b;
-    }
-
-    // ===================== WebM / Matroska (EBML) =====================
-
-    const EBML_HEADER = 0x1A45DFA3;
-    const MKV_SEGMENT = 0x18538067;
-    const MKV_SEEK_HEAD = 0x114D9B74;
-    const MKV_INFO = 0x1549A966;
-    const MKV_TRACKS = 0x1654AE6B;
-    const MKV_CLUSTER = 0x1F43B675;
-    const MKV_CUES = 0x1C53BB6B;
-    const MKV_ATTACHMENTS = 0x1941A469;
-    const MKV_CHAPTERS = 0x1043A770;
-    const MKV_TAGS = 0x1254C367;
-    const MKV_VOID = 0xEC;
-    const MKV_CRC32 = 0xBF;
-    const MKV_SEEK = 0x4DBB;
-    const MKV_SEEK_ID = 0x53AB;
-    const MKV_TRACK_ENTRY = 0xAE;
-    const MKV_TRACK_NAME = 0x536E;
-
-    // Элементы, которые целиком превращаются в Void: теги (в т.ч. GPS,
-    // автор, дата), вложения (обложки, шрифты), главы (названия).
-    const MKV_REMOVED = new Set([MKV_TAGS, MKV_ATTACHMENTS, MKV_CHAPTERS]);
-    // ID уровня Segment: кластер неизвестного размера заканчивается там, где
-    // встретился один из них.
-    const MKV_SEGMENT_LEVEL = new Set([
-        MKV_SEEK_HEAD, MKV_INFO, MKV_TRACKS, MKV_CLUSTER, MKV_CUES,
-        MKV_ATTACHMENTS, MKV_CHAPTERS, MKV_TAGS, MKV_VOID,
-    ]);
-    // В Info обнуляются: Title, MuxingApp, WritingApp, DateUTC (время
-    // записи), а также имена исходных файлов SegmentFilename/Prev/NextFilename.
-    const MKV_INFO_BLANK = new Set([0x7BA9, 0x4D80, 0x5741, 0x4461, 0x7384, 0x3C83BB, 0x3E83BB]);
-
-    // vint: длина кодируется числом ведущих нулей первого байта. Для ID
-    // маркер длины остаётся частью значения, для размера — нет; размер из
-    // одних единиц означает "неизвестен".
-    function readVint(b, pos, end, maxLen, isId) {
-        if (pos >= end) fail('обрезан элемент EBML');
-        const first = b[pos];
-        const len = Math.clz32(first) - 23;
-        if (len > maxLen) fail('некорректное число переменной длины');
-        if (pos + len > end) fail('обрезан элемент EBML');
-        const mask = 0xFF >> len;
-        let value = isId ? first : first & mask;
-        let allOnes = (first & mask) === mask;
-        for (let i = 1; i < len; i++) {
-            const x = b[pos + i];
-            value = value * 256 + x;
-            if (x !== 0xFF) allOnes = false;
-        }
-        return { value, len, unknown: !isId && allOnes };
-    }
-
-    function readEbmlElement(b, pos, end) {
-        const id = readVint(b, pos, end, 4, true);
-        const size = readVint(b, pos + id.len, end, 8, false);
-        const dataStart = pos + id.len + size.len;
-        if (size.unknown) return { id: id.value, start: pos, dataStart, size: -1, end: -1 };
-        if (size.value > end - dataStart) fail('элемент выходит за границы родителя');
-        return { id: id.value, start: pos, dataStart, size: size.value, end: dataStart + size.value };
-    }
-
-    function writeVint(b, pos, len, value) {
-        for (let i = len - 1; i >= 0; i--) {
-            b[pos + i] = value % 256;
-            value = Math.floor(value / 256);
-        }
-        b[pos] |= 0x80 >> (len - 1);
-    }
-
-    // Превращает [start, end) в Void той же длины. ID у Void однобайтовый,
-    // а у заменяемых элементов — четырёхбайтовый, поэтому payload Void
-    // больше исходного на разницу; размер кодируем 8-байтовым vint (или
-    // короче, если элемент совсем маленький).
-    function voidifyEbml(b, start, end) {
-        const total = end - start;
-        if (total < 2) fail('элемент слишком короткий');
-        const sizeLen = Math.min(8, total - 1);
-        const payload = total - 1 - sizeLen;
-        b[start] = MKV_VOID;
-        writeVint(b, start + 1, sizeLen, payload);
-        b.fill(0, start + 1 + sizeLen, end);
-    }
-
-    function forEachEbmlChild(b, el, guard, fn) {
-        let pos = el.dataStart;
-        while (pos < el.end) {
-            guard();
-            const child = readEbmlElement(b, pos, el.end);
-            if (child.size < 0) fail('элемент неизвестного размера внутри ' + el.id.toString(16));
-            fn(child);
-            pos = child.end;
-        }
-    }
-
-    // mkvmerge кладёт первым ребёнком элемента CRC-32 от всех остальных
-    // детей; после правки содержимого его нужно пересчитать, иначе
-    // строгие демультиплексоры сочтут элемент повреждённым.
-    function fixEbmlCrc(b, el) {
-        if (el.size <= 0) return;
-        const first = readEbmlElement(b, el.dataStart, el.end);
-        if (first.id !== MKV_CRC32 || first.size !== 4) return;
-        const crc = crc32(b, first.end, el.end);
-        b[first.dataStart] = crc & 0xFF;
-        b[first.dataStart + 1] = (crc >>> 8) & 0xFF;
-        b[first.dataStart + 2] = (crc >>> 16) & 0xFF;
-        b[first.dataStart + 3] = (crc >>> 24) & 0xFF;
-    }
-
-    function readEbmlUint(b, el) {
-        let v = 0;
-        for (let i = el.dataStart; i < el.end && i < el.dataStart + 8; i++) v = v * 256 + b[i];
-        return el.size > 8 ? -1 : v;
-    }
-
-    function sanitizeMkvInfo(b, el, guard) {
-        forEachEbmlChild(b, el, guard, (child) => {
-            if (MKV_INFO_BLANK.has(child.id)) b.fill(0, child.dataStart, child.end);
-        });
-        fixEbmlCrc(b, el);
-    }
-
-    function sanitizeMkvTracks(b, el, guard) {
-        forEachEbmlChild(b, el, guard, (entry) => {
-            if (entry.id !== MKV_TRACK_ENTRY) return;
-            forEachEbmlChild(b, entry, guard, (child) => {
-                if (child.id === MKV_TRACK_NAME) b.fill(0, child.dataStart, child.end);
-            });
-            fixEbmlCrc(b, entry);
-        });
-        fixEbmlCrc(b, el);
-    }
-
-    // Ссылки SeekHead на удалённые элементы тоже убираем: иначе в индексе
-    // остался бы след "здесь были теги".
-    function sanitizeMkvSeekHead(b, el, guard) {
-        forEachEbmlChild(b, el, guard, (seek) => {
-            if (seek.id !== MKV_SEEK) return;
-            let target = -1;
-            forEachEbmlChild(b, seek, guard, (child) => {
-                if (child.id === MKV_SEEK_ID) target = readEbmlUint(b, child);
-            });
-            if (MKV_REMOVED.has(target)) voidifyEbml(b, seek.start, seek.end);
-        });
-        fixEbmlCrc(b, el);
-    }
-
-    // Кластер неизвестного размера (так пишут потоковые энкодеры, которым
-    // длина заранее неизвестна) кончается там, где начинается элемент уровня
-    // Segment или новый EBML/Segment.
-    function skipUnknownCluster(b, pos, end, guard) {
-        while (pos < end) {
-            guard();
-            const id = readVint(b, pos, end, 4, true).value;
-            if (MKV_SEGMENT_LEVEL.has(id) || id === EBML_HEADER || id === MKV_SEGMENT) return pos;
-            const child = readEbmlElement(b, pos, end);
-            if (child.size < 0) fail('элемент неизвестного размера внутри Cluster');
-            pos = child.end;
-        }
-        return end;
-    }
-
-    function sanitizeMkvSegment(b, seg, fileEnd, guard) {
-        const unknown = seg.size < 0;
-        const end = unknown ? fileEnd : seg.end;
-        let pos = seg.dataStart;
-        while (pos < end) {
-            guard();
-            const el = readEbmlElement(b, pos, end);
-            // Сегмент неизвестного размера кончается там, где начинается следующий.
-            if (unknown && (el.id === EBML_HEADER || el.id === MKV_SEGMENT)) return pos;
-            if (el.size < 0) {
-                if (el.id !== MKV_CLUSTER) fail('элемент неизвестного размера на уровне Segment');
-                pos = skipUnknownCluster(b, el.dataStart, end, guard);
-                continue;
-            }
-            if (MKV_REMOVED.has(el.id)) voidifyEbml(b, el.start, el.end);
-            else if (el.id === MKV_INFO) sanitizeMkvInfo(b, el, guard);
-            else if (el.id === MKV_TRACKS) sanitizeMkvTracks(b, el, guard);
-            else if (el.id === MKV_SEEK_HEAD) sanitizeMkvSeekHead(b, el, guard);
-            pos = el.end;
-        }
-        return end;
-    }
-
-    function sanitizeMatroska(src) {
-        const b = new Uint8Array(src);
-        const n = b.length;
-        const guard = makeGuard();
-        if (n < 4 || u32be(b, 0) !== EBML_HEADER) fail('нет заголовка EBML');
-        let pos = 0;
-        let segments = 0;
-        while (pos < n) {
-            guard();
-            const el = readEbmlElement(b, pos, n);
-            if (el.id === MKV_SEGMENT) {
-                pos = sanitizeMkvSegment(b, el, n, guard);
-                segments++;
-                continue;
-            }
-            if (el.size < 0) fail('элемент неизвестного размера на верхнем уровне');
-            if (el.id !== EBML_HEADER && el.id !== MKV_VOID) fail('неожиданный элемент верхнего уровня');
-            pos = el.end;
-        }
-        if (!segments) fail('нет элемента Segment');
-        return b;
-    }
 
     // ===================== Inflate (RFC 1950 + RFC 1951) =====================
     //
