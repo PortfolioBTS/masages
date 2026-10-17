@@ -31,6 +31,7 @@ const KEYS = {
     Enter: { code: 'Enter', vk: 13, text: '\r' },
     Escape: { code: 'Escape', vk: 27 },
     Tab: { code: 'Tab', vk: 9 },
+    Backspace: { code: 'Backspace', vk: 8 },
     ArrowDown: { code: 'ArrowDown', vk: 40 },
     ArrowUp: { code: 'ArrowUp', vk: 38 },
 };
@@ -331,6 +332,16 @@ class BrowserPage {
             }, selector);
         }
         await this.send('Input.insertText', { text });
+    }
+
+    // Очистить поле: клик, «выделить всё», Backspace.
+    async clear(selector, opts = {}) {
+        await this.click(selector, opts);
+        await this.evaluate((sel) => {
+            const el = document.querySelector(sel);
+            if (el && typeof el.select === 'function') el.select();
+        }, selector);
+        await this.press('Backspace');
     }
 
     async press(key) {
