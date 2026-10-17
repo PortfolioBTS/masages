@@ -6,9 +6,14 @@
 // rejection, проверки ввода. Запуск: node test/mlkem.test.js
 //
 // Node печатает ExperimentalWarning про ML-KEM-768 — это ожидаемо.
+//
+// Контрольные ответы (KAT) — отдельный раздел внизу: официальные векторы NIST ACVP для ML-KEM-768 из
+// test/fixtures/mlkem768-acvp.json (источник, коммиты и дата получения — в самом файле).
 
 const assert = require('assert');
 const nodeCrypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { performance } = require('perf_hooks');
 const MLKEM = require('../public/mlkem.js');
 
@@ -403,6 +408,89 @@ async function main() {
         const nodePublic = await nodeImportPublic(a.publicKey);
         const enc = await nodeEncapsulate(nodePublic);
         assertBytesEqual(MLKEM.decapsulate(a.secretKey, enc.ciphertext), enc.sharedSecret, 'Node → случайный ключ');
+    });
+
+    // ===================== Контрольные ответы NIST ACVP (KAT) =====================
+    //
+    // Векторы взяты из официального набора NIST ACVP-Server (usnistgov/ACVP-Server, ML-KEM-keyGen-FIPS203 и
+    // ML-KEM-encapDecap-FIPS203, internalProjection.json; коммиты и дата получения — в test/fixtures/mlkem768-acvp.json).
+    // Это ответы, посчитанные не нами и не Node/OpenSSL: проверка идёт против данных NIST, а не против второй реализации.
+    // Входы детерминированы: keyGen — (d, z), encapsulation — (ek, m), decapsulation — (dk, c).
+
+    const kat = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'mlkem768-acvp.json'), 'utf8'));
+    const hex = (value) => new Uint8Array(Buffer.from(value, 'hex'));
+
+    await test('KAT NIST ACVP: набор векторов на месте и размеры полей по FIPS 203 (ek 1184, dk 2400, c 1088, d/z/m/k по 32 байта)', () => {
+        assert.strictEqual(kat.keyGen.length, 3);
+        assert.strictEqual(kat.encapsulation.length, 3);
+        assert.strictEqual(kat.decapsulation.length, 2);
+        for (const v of kat.keyGen) {
+            assert.strictEqual(hex(v.d).length, 32); assert.strictEqual(hex(v.z).length, 32);
+            assert.strictEqual(hex(v.dk).length, 2400);
+            if (v.ek) assert.strictEqual(hex(v.ek).length, 1184);
+        }
+        for (const v of kat.encapsulation) {
+            assert.strictEqual(hex(v.ek).length, 1184); assert.strictEqual(hex(v.m).length, 32);
+            assert.strictEqual(hex(v.c).length, 1088); assert.strictEqual(hex(v.k).length, 32);
+        }
+        for (const v of kat.decapsulation) {
+            assert.strictEqual(hex(v.dk).length, 2400); assert.strictEqual(hex(v.c).length, 1088); assert.strictEqual(hex(v.k).length, 32);
+        }
+    });
+
+    await test('KAT NIST ACVP, keyGen: keygen(d ‖ z) даёт ek и dk NIST (и ek внутри dk), Node выводит из того же seed тот же ek', async () => {
+        for (const v of kat.keyGen) {
+            const seed = new Uint8Array([...hex(v.d), ...hex(v.z)]);
+            const ours = MLKEM.keygen(seed);
+            assertBytesEqual(ours.secretKey, hex(v.dk), 'dk tcId ' + v.tcId);
+            // ek в векторе есть не у всех (в dk он лежит целиком: dk_PKE ‖ ek ‖ H(ek) ‖ z).
+            assertBytesEqual(ours.publicKey, v.ek ? hex(v.ek) : hex(v.dk).subarray(384 * K, 768 * K + 32), 'ek tcId ' + v.tcId);
+            assertBytesEqual(ours.secretKey.subarray(768 * K + 64), hex(v.z), 'z в конце dk, tcId ' + v.tcId);
+            const node = await nodeKeysFromSeed(seed);
+            assertBytesEqual(node.rawPublic, ours.publicKey, 'Node: ek tcId ' + v.tcId);
+        }
+    });
+
+    await test('KAT NIST ACVP, encapsulation: encapsulate(ek, m) даёт c и K NIST, результат определён одним m; ключ NIST принимает и Node', async () => {
+        for (const v of kat.encapsulation) {
+            const r = MLKEM.encapsulate(hex(v.ek), hex(v.m));
+            assertBytesEqual(r.ciphertext, hex(v.c), 'c tcId ' + v.tcId);
+            assertBytesEqual(r.sharedSecret, hex(v.k), 'K tcId ' + v.tcId);
+            // Определённость: тот же m — те же c и K (кроме m, случайность не используется).
+            assertBytesEqual(MLKEM.encapsulate(hex(v.ek), hex(v.m)).ciphertext, hex(v.c), 'повтор с тем же m, tcId ' + v.tcId);
+            // Ключ NIST принимает и Node.
+            const nodePublic = await nodeImportPublic(hex(v.ek));
+            const enc = await nodeEncapsulate(nodePublic);
+            assert.strictEqual(enc.ciphertext.length, 1088);
+        }
+    });
+
+    await test('KAT NIST ACVP, decapsulation: decapsulate(dk, c) даёт K NIST — и для верного шифртекста, и для изменённого (неявный отказ J(z ‖ c)); Node даёт то же', async () => {
+        for (const v of kat.decapsulation) {
+            const ours = MLKEM.decapsulate(hex(v.dk), hex(v.c));
+            assertBytesEqual(ours, hex(v.k), v.reason + ', tcId ' + v.tcId);
+            const nodePrivate = nodeCrypto.createPrivateKey({ key: pkcs8ExpandedKey(hex(v.dk)), format: 'der', type: 'pkcs8' });
+            assertBytesEqual(nodeCrypto.decapsulate(nodePrivate, hex(v.c)), hex(v.k), 'Node: ' + v.reason + ', tcId ' + v.tcId);
+            if (v.reason === 'modified ciphertext') {
+                // K = SHAKE256(z ‖ c): z лежит в конце dk.
+                assertBytesEqual(hex(v.k), nodeHash('shake256', Buffer.concat([hex(v.dk).subarray(768 * K + 64), hex(v.c)]), 32), 'K̄ = J(z ‖ c), tcId ' + v.tcId);
+            }
+        }
+        assert.deepStrictEqual(kat.decapsulation.map(v => v.reason), ['valid decapsulation', 'modified ciphertext']);
+    });
+
+    await test('KAT NIST ACVP: искажение одного бита входа ломает ответ (проверка самих векторов)', () => {
+        const e = kat.encapsulation[0];
+        const ek = hex(e.ek); ek[100] ^= 1;
+        let r = null;
+        try { r = MLKEM.encapsulate(ek, hex(e.m)); } catch { r = null; }
+        assert.ok(r === null || !bytesEqual(r.ciphertext, hex(e.c)), 'другой ek — другой c');
+        const m = hex(e.m); m[0] ^= 1;
+        const r2 = MLKEM.encapsulate(hex(e.ek), m);
+        assert.ok(!bytesEqual(r2.ciphertext, hex(e.c)) && !bytesEqual(r2.sharedSecret, hex(e.k)), 'другой m — другие c и K');
+        const d = kat.decapsulation[0];
+        const c = hex(d.c); c[5] ^= 1;
+        assert.ok(!bytesEqual(MLKEM.decapsulate(hex(d.dk), c), hex(d.k)), 'другой c — другой K');
     });
 
     await test('timings (informational)', () => {

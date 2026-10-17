@@ -51,7 +51,13 @@ jobs:
         run: npm test
       # commit берётся из GITHUB_SHA, время — из коммита (SOURCE_DATE_EPOCH не
       # нужен): два прогона одного коммита дают одни и те же файлы.
+      # Открытый ключ журнала ключей (прозрачность ключей) попадает в манифест и release.json. Значение задаёт
+      # оператор переменной репозитория KT_PUBLIC_KEY (Settings → Variables): это ОТКРЫТЫЙ ключ, секрета тут нет.
+      # Пусто — журнал выключен, манифест без keys.kt. Должно совпасть с ключом, выведенным сервером из
+      # KT_SIGNING_KEY, иначе сторож покажет расхождение (docs/VERIFY.md, docs/security/key-transparency.md, раздел 11).
       - name: Манифест клиента и файлы релиза
+        env:
+          KT_PUBLIC_KEY: ${{ vars.KT_PUBLIC_KEY }}
         run: node scripts/release-manifest.js --out release-out
       - name: Сохранить файлы релиза
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

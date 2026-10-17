@@ -51,6 +51,43 @@
     const isUint = (n, max = U32_MAX) => Number.isSafeInteger(n) && n >= 0 && n <= max;
     const posOf = (gen, epoch) => ({ gen, epoch });
 
+    // ---------- Ключ журнала из манифеста релиза (R10) ----------
+
+    const MANIFEST_PATH = '/client-manifest.json';
+    const MANIFEST_TIMEOUT_MS = 8000;
+
+    // Открытый ключ журнала из манифеста клиента (keys.kt, docs/security/key-transparency.md, раздел 11):
+    // строка base64 или null — манифеста нет, в нём нет ключа (журнал выключен или релиз без ключа) или он не разбирается.
+    // Любая неудача — null, а не ошибка: сверка с манифестом — дополнительная защита, а не условие работы журнала;
+    // ключ, который не удалось сверить, закрепляется как раньше (TOFU). Сеть: тот же источник, что и сам клиент.
+    // Честно: манифест приходит с того же сервера, что и журнал; сверка ловит рассинхрон (релиз и сервер с разными
+    // ключами) и подмену ключа в обход релиза, а против сервера, подменившего и клиент, и манифест, не защищает
+    // (docs/threat-model.md): ценность даёт service worker, закрепивший манифест, и сверка с опубликованным релизом.
+    async function fetchManifestKey(fetchImpl, options = {}) {
+        const doFetch = fetchImpl || (typeof fetch === 'function' ? fetch : null);
+        if (!doFetch) return null;
+        try {
+            const init = { cache: 'no-store', credentials: 'omit', redirect: 'error' };
+            if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') init.signal = AbortSignal.timeout(options.timeoutMs || MANIFEST_TIMEOUT_MS);
+            const response = await doFetch(options.url || MANIFEST_PATH, init);
+            if (!response || !response.ok) return null;
+            return manifestKeyFromText(await response.text());
+        } catch {
+            return null;
+        }
+    }
+
+    // Ключ из текста манифеста: каноническое base64 ровно 32 байт, строгая проверка точки (малый порядок и т.п.).
+    function manifestKeyFromText(text) {
+        if (typeof text !== 'string' || text.length > 4 * 1024 * 1024) return null;
+        let data;
+        try { data = JSON.parse(text); } catch { return null; }
+        const value = data && data.keys && typeof data.keys === 'object' ? data.keys.kt : null;
+        if (typeof value !== 'string') return null;
+        const bytes = Kt.b64decode(value, 32);
+        return bytes && Kt.isValidLogKey(bytes) ? value : null;
+    }
+
     // ---------- Разбор ответов сервера (всё, что пришло, проверяется по форме) ----------
 
     function parseHead(data) {
@@ -1144,5 +1181,5 @@
         };
     }
 
-    return { createLogClient, parseHint, parseGossip, parseHead, INCONSISTENT_KINDS, PENDING_EPOCHS, PENDING_MS };
+    return { createLogClient, fetchManifestKey, manifestKeyFromText, parseHint, parseGossip, parseHead, INCONSISTENT_KINDS, PENDING_EPOCHS, PENDING_MS };
 });

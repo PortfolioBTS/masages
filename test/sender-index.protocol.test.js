@@ -89,11 +89,13 @@ async function forge(client, room, { iteration = 0, plaintext, aadSender, mid = 
     const iv = new Uint8Array(nodeCrypto.randomBytes(12));
     const body = plaintext || I.padMessage(enc(JSON.stringify({ t: 'text', b: 'подделка', mid, ts })));
     const sender = aadSender === undefined ? client._userId : aadSender;
-    const aad = enc('senderkey-v2:' + room + ':' + sender + ':' + st.senderKeyId);
+    const aad = enc('senderkey-v3:' + room + ':' + sender + ':' + st.senderKeyId);
     const ct = new Uint8Array(await subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad }, aesKey, body));
-    const sigInput = new Uint8Array([...iv, ...ct, ...new Uint8Array([(iteration >>> 24) & 255, (iteration >>> 16) & 255, (iteration >>> 8) & 255, iteration & 255]), ...enc(st.senderKeyId)]);
+    // Подпись v3, собранная независимо от кода клиента: метка ‖ u32be(комната) ‖ senderKeyId[16] ‖ u32be(итерация) ‖ iv ‖ ct.
+    const u32 = (n) => [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255];
+    const sigInput = new Uint8Array([...enc('nyxo-skmsg-v3\0'), ...u32(Number(room)), ...b64decode(st.senderKeyId), ...u32(iteration), ...iv, ...ct]);
     const sig = new Uint8Array(await subtle.sign('Ed25519', st.signingPrivateKey, sigInput));
-    return JSON.stringify({ v: 2, alg: 'senderkey-v2', senderKeyId: st.senderKeyId, iteration, iv: b64(iv), ct: b64(ct), sig: b64(sig) });
+    return JSON.stringify({ v: 3, alg: 'senderkey-v3', senderKeyId: st.senderKeyId, iteration, iv: b64(iv), ct: b64(ct), sig: b64(sig) });
 }
 
 // Конверт с изменённым полем (подпись и AEAD при этом не пересчитываются).
@@ -259,7 +261,7 @@ const tweak = (envelope, patch) => JSON.stringify(Object.assign(JSON.parse(envel
 
     // ===================== Порядок причин отказа =====================
 
-    await test('порядок причин: bad-envelope (в том числе senderkey-v1), no-sender-key, bad-signature, stale-sender-key, too-far-ahead, replay, decrypt-failed, bad-plaintext; после отказа хранилище не изменилось', async () => {
+    await test('порядок причин: bad-envelope (в том числе senderkey-v1 и senderkey-v2), no-sender-key, bad-signature, stale-sender-key, too-far-ahead, replay, decrypt-failed, bad-plaintext; после отказа хранилище не изменилось', async () => {
         const ctx = await trio({ ids: [1, 2] });
         await share(ctx, 'alice');
         await sync(ctx, 'bob');
@@ -272,7 +274,8 @@ const tweak = (envelope, patch) => JSON.stringify(Object.assign(JSON.parse(envel
             ['bad-envelope', 'не JSON'],
             ['bad-envelope', '"строка"'],
             ['bad-envelope', JSON.stringify({ v: 1, alg: 'senderkey-v1', senderKeyId: env.senderKeyId, iteration: 0, iv: env.iv, ct: env.ct, sig: env.sig })],
-            ['bad-envelope', tweak(m.env, { alg: 'senderkey-v3' })],
+            ['bad-envelope', tweak(m.env, { alg: 'senderkey-v2' })],
+            ['bad-envelope', tweak(m.env, { v: 2, alg: 'senderkey-v2' })],
             ['bad-envelope', tweak(m.env, { senderKeyId: 'не-ключ' })],
             ['bad-envelope', tweak(m.env, { senderKeyId: b64(new Uint8Array(15)) })],
             ['bad-envelope', tweak(m.env, { iteration: -1 })],

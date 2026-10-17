@@ -572,6 +572,9 @@ function getE2eeClient() {
                 // Без Web Locks lock = null — работает внутренняя очередь клиента, в консоли предупреждение.
                 lock: NyxoE2eeLock.makeLock(typeof navigator !== 'undefined' ? navigator.locks : null, currentUser.id,
                     (message) => console.warn(message)),
+                // Ключ журнала ключей из манифеста релиза (keys.kt в /client-manifest.json): клиент сверяет с ним ключ при
+                // первом закреплении, несовпадение — тревога «ключ журнала изменился». Нет манифеста или ключа в нём — null.
+                ktManifestKey: () => (typeof NyxoKtClient !== 'undefined' ? NyxoKtClient.fetchManifestKey() : null),
                 // Прозрачность ключей: новая тревога журнала сразу попадает в баннер боковой панели.
                 onTransparencyAlert: (alert) => {
                     // stale — не тревога, а предупреждение: журнал давно не обновлялся (не блокирует работу).

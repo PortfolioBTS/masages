@@ -41,6 +41,15 @@
 //     использованных ключей (прямая секретность); раз в 7 дней сессия
 //     перезапускается новым PQXDH.
 //   - Повтор конверта под другим messageId распознаётся ('replay').
+//   - Конверт сообщения комнаты — версия 3 ({ v:3, alg:'senderkey-v3', senderKeyId, iteration, iv, ct, sig }).
+//     Подпись Sender Key покрывает метку домена "nyxo-skmsg-v3\0", комнату (u32be), senderKeyId (16 байт),
+//     итерацию, iv и ct (sigInputV3, sealed-sender.md 9.3); AAD шифрования — "senderkey-v3:<комната>:<автор>:<ключ>".
+//     Версия 2 (подпись без метки и комнаты) не принимается: старых конвертов нет (R0).
+//   - Подписи Ed25519 проверяются строго (public/lib/ed25519-strict.js, signed-membership.md 6.1):
+//     ключ малого порядка, неканоническая кодировка точки и S >= L отвергаются ДО платформенного
+//     verify, который принимает такие пары под любым сообщением. Это единственная функция verify
+//     (SPK, PQ-prekey, конверты Sender Key); ключи подписи из чужого ввода (identity, SKDM)
+//     отвергаются при разборе.
 //   - Содержимое привязано к сообщению (docs/security/message-ordering.md,
 //     раздел 9): внутри шифротекста лежат mid (id сообщения, который клиент
 //     выбирает ДО шифрования), ts (время отправителя) и признак правки e.
@@ -403,6 +412,30 @@
         return b64encode(bytes);
     }
 
+    // Строгая проверка Ed25519 (public/lib/ed25519-strict.js, signed-membership.md 6.1): ключ малого
+    // порядка или некорректная кодировка принимаются платформенным verify для ЛЮБОГО сообщения
+    // (подпись R = 01 00…00, S = 0), поэтому каждая проверка подписи в этом файле идёт через verify()
+    // ниже, а ключи подписи из чужого ввода (identity, SKDM) отвергаются ещё при разборе.
+    // В браузере - глобальный NyxoEd25519Strict (подключается до e2ee.js), в Node - соседний модуль.
+    // Без него клиент не работает: молча проверять подписи по-старому нельзя.
+    function resolveEd25519Strict() {
+        if (typeof NyxoEd25519Strict !== 'undefined' && NyxoEd25519Strict) return NyxoEd25519Strict;
+        if (typeof require === 'function') {
+            try {
+                return require('./lib/ed25519-strict.js');
+            } catch { /* ниже общая ошибка */ }
+        }
+        throw new Error('E2EE: модуль строгой проверки Ed25519 (lib/ed25519-strict.js) не загружен');
+    }
+    const ed25519Strict = resolveEd25519Strict();
+
+    // Ключ подписи Ed25519 из чужого ввода: каноническое base64 и строгая проверка ключа.
+    function canonicalSigningKey(str) {
+        const canonical = canonicalPubKey(str);
+        if (!canonical || !ed25519Strict.isStrictKey(b64decode(canonical))) return null;
+        return canonical;
+    }
+
     function utf8encode(str) {
         return new TextEncoder().encode(str);
     }
@@ -511,9 +544,14 @@
     // Импорт публичного ключа стоит заметно дороже самой проверки, а ключи
     // подписи Sender Key одни и те же для тысяч сообщений истории.
     const verifyKeyCache = new Map();
+    // ЕДИНСТВЕННОЕ место, где проверяется подпись Ed25519 (SPK, PQ-prekey, конверты Sender Key): строгая
+    // проверка ключа и подписи (ключ малого порядка, неканонические кодировки, S >= L) выполняется ДО
+    // платформенного verify, который сам такие пары принимает. Статический тест следит, что других
+    // вызовов subtle.verify в файле нет.
     async function verify(pubRawBytes, sig, data) {
         try {
             if (pubRawBytes.length !== 32 || sig.length !== 64) return false;
+            if (!ed25519Strict.isStrictKey(pubRawBytes) || !ed25519Strict.checkSignature(sig).ok) return false;
             const cacheKey = b64encode(pubRawBytes);
             let pub = verifyKeyCache.get(cacheKey);
             if (!pub) {
@@ -1087,12 +1125,23 @@
         return concatBytes(PQ_OPK_LABEL, u64be(keyId), publicKey);
     }
 
-    function sigInputV2(iv, ct, iteration, senderKeyId) {
-        return concatBytes(iv, ct, u32be(iteration), utf8encode(senderKeyId));
+    // Подпись конверта сообщения комнаты (версия 3): Ed25519(ключ подписи Sender Key, sigInputV3).
+    //   sigInput = "nyxo-skmsg-v3\0" ‖ u32be(roomId) ‖ senderKeyId[16] ‖ u32be(iteration) ‖ iv[12] ‖ ct
+    // Метка домена (реестр меток, план криптографии 1.1) отличает эту подпись от любой другой подписи
+    // Ed25519 в системе, а комната входит в подписанные байты: конверт, снятый с одной комнаты, не
+    // подходит к другой, даже если сервер подсунул чужой индекс отправителей. Все поля до ct —
+    // фиксированной длины (14 + 4 + 16 + 4 + 12 = 50 байт), ct (не короче 272 байт) идёт последним:
+    // два разных набора полей не дают одну и ту же строку. senderKeyId берётся сырыми 16 байтами,
+    // а не текстом base64, поэтому каноничность записи на подпись не влияет. Прежняя версия
+    // (iv ‖ ct ‖ iteration ‖ keyId без метки и комнаты) не принимается: R0, конвертов v2 нет.
+    const SKMSG_LABEL = utf8encode('nyxo-skmsg-v3\0');
+
+    function sigInputV3(roomId, senderKeyIdBytes, iteration, iv, ct) {
+        return concatBytes(SKMSG_LABEL, u32be(roomId), senderKeyIdBytes, u32be(iteration), iv, ct);
     }
 
-    function msgAadV2(roomId, senderId, senderKeyId) {
-        return utf8encode('senderkey-v2:' + roomId + ':' + senderId + ':' + senderKeyId);
+    function msgAadV3(roomId, senderId, senderKeyId) {
+        return utf8encode('senderkey-v3:' + roomId + ':' + senderId + ':' + senderKeyId);
     }
 
     // AD key-share v2: помимо комнаты и направления — identity-ключи обеих
@@ -1144,7 +1193,7 @@
         if (!iv || !ct || ct.length < 16) return null;
         const h = env.init;
         if (!h || typeof h !== 'object') return null;
-        const signPub = canonicalPubKey(h.senderIdentitySignPub);
+        const signPub = canonicalSigningKey(h.senderIdentitySignPub);
         const dhPub = canonicalPubKey(h.senderIdentityDhPub);
         const eph = canonicalPubKey(h.senderEphemeralPub);
         const opkId = h.usedOneTimePrekeyId === null || h.usedOneTimePrekeyId === undefined ? null : h.usedOneTimePrekeyId;
@@ -1238,7 +1287,7 @@
         if (!isCanonicalKeyId(skdm.senderKeyId)) return null;
         if (!decodeFixed(skdm.chainKey, 32)) return null;
         if (!Number.isInteger(skdm.iteration) || skdm.iteration < 0 || skdm.iteration > 0xFFFFFFFF) return null;
-        const signingPublicKey = canonicalPubKey(skdm.signingPublicKey);
+        const signingPublicKey = canonicalSigningKey(skdm.signingPublicKey);
         if (!signingPublicKey) return null;
         const ext = parseSkdmExt(skdm.ext);
         if (!ext) return null;
@@ -2684,7 +2733,7 @@
 
         // PQXDH со стороны инициатора. Возвращает { session } | { changed } | { error }.
         async function startSendSessionLocked(identity, peerId, bundle) {
-            const signPub = canonicalPubKey(bundle.identity_signing_key);
+            const signPub = canonicalSigningKey(bundle.identity_signing_key);
             const dhPub = canonicalPubKey(bundle.identity_dh_key);
             if (!signPub || !dhPub) return { error: 'некорректные identity-ключи собеседника' };
 
@@ -3886,10 +3935,12 @@
             });
 
             const aesKey = await hkdf(messageKey, ZERO32, 'nyxo-e2ee-msgkey-v2', 32);
-            const { iv, ct } = await aesGcmEncrypt(aesKey, padded, msgAadV2(roomId, userId, state.senderKeyId));
-            const sig = await sign(state.signingPrivateKey, sigInputV2(iv, ct, iteration, state.senderKeyId));
+            const { iv, ct } = await aesGcmEncrypt(aesKey, padded, msgAadV3(roomId, userId, state.senderKeyId));
+            const keyIdBytes = decodeFixed(state.senderKeyId, 16);
+            if (!isU32(Number(roomId)) || !keyIdBytes) throw new Error('E2EE: некорректный идентификатор комнаты или ключа отправителя');
+            const sig = await sign(state.signingPrivateKey, sigInputV3(Number(roomId), keyIdBytes, iteration, iv, ct));
             const envelope = JSON.stringify({
-                v: 2, alg: 'senderkey-v2',
+                v: 3, alg: 'senderkey-v3',
                 senderKeyId: state.senderKeyId,
                 iteration,
                 iv: b64encode(iv), ct: b64encode(ct),
@@ -3914,7 +3965,7 @@
         // Правка — новая итерация для того же messageId, это легально.
         //
         // Порядок проверок (все до любой записи в хранилище):
-        //   1. форма конверта (v2, senderkey-v2; senderkey-v1 больше нет)  → 'bad-envelope'
+        //   1. форма конверта (v3, senderkey-v3; v1 и v2 больше нет)       → 'bad-envelope'
         //   2. запись skIndex                                              → 'no-sender-key'
         //   3. подсказка ≠ отправителю                                     → 'sender-mismatch';
         //      надгробие (ключ удалён)                                     → 'history-not-kept' | 'key-expired'
@@ -3935,7 +3986,7 @@
             let envelope;
             try { envelope = JSON.parse(text); } catch { return bad; }
             if (!envelope || typeof envelope !== 'object') return bad;
-            if (envelope.v !== 2 || envelope.alg !== 'senderkey-v2') return bad;
+            if (envelope.v !== 3 || envelope.alg !== 'senderkey-v3') return bad;
             if (!Number.isInteger(envelope.iteration) || envelope.iteration < 0 || envelope.iteration > 0xFFFFFFFF) return bad;
             if (!isCanonicalKeyId(envelope.senderKeyId)) return bad;
             const iv = decodeFixed(envelope.iv, 12);
@@ -3944,7 +3995,9 @@
             if (!iv || !sig || !ct || ct.length < 16) return bad;
             const iteration = envelope.iteration;
             const keyId = envelope.senderKeyId;
-            const sigInput = sigInputV2(iv, ct, iteration, keyId);
+            const room = Number(roomId);
+            if (!isU32(room)) return bad;
+            const sigInput = sigInputV3(room, decodeFixed(keyId, 16), iteration, iv, ct);
             const boundId = messageId === undefined || messageId === null ? null : String(messageId);
             const hint = senderIdHint === undefined || senderIdHint === null ? null : Number(senderIdHint);
 
@@ -4008,7 +4061,7 @@
                 let content;
                 try {
                     const aesKey = await hkdf(messageKey, ZERO32, 'nyxo-e2ee-msgkey-v2', 32);
-                    const pt = await aesGcmDecrypt(aesKey, iv, ct, msgAadV2(roomId, senderId, keyId));
+                    const pt = await aesGcmDecrypt(aesKey, iv, ct, msgAadV3(roomId, senderId, keyId));
                     const body = unpadMessage(pt);
                     let decoded = null;
                     if (body) {
@@ -4193,6 +4246,10 @@
 
             // Идентификатор ключа отправителя (привязан к комнате, отправителю и ключу подписи)
             deriveSenderKeyId,
+
+            // Проверка подписи Ed25519 (строгая, единственная в файле) и разбор ключа подписи из чужого ввода
+            verify,
+            canonicalSigningKey,
 
             // Разбор SKDM (поле ext)
             parseSkdm,

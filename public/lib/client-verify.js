@@ -9,7 +9,9 @@
 //                                      (бросает Error с понятным текстом);
 //   compareObserved(manifest, seen)  — сверка того, что скачано, с манифестом;
 //                                      seen: { "/путь": { sha256, bytes } | { error } };
-//   diffManifests(reference, served) — чем манифест сервера отличается от эталона.
+//   diffManifests(reference, served) — чем манифест сервера отличается от эталона
+//                                      (файлы и ключ журнала keys.kt);
+//   ktKeyOf(manifest)                — открытый ключ журнала ключей из манифеста или null.
 //
 // Честная оговорка: это сравнение, а не доказательство. Если сверка идёт с
 // манифестом того же сервера, она ловит только случайные расхождения (неполный
@@ -59,7 +61,25 @@
         for (const from of Object.keys(aliases)) {
             if (!from.startsWith('/') || !seen.has(aliases[from])) throw new Error(`алиас ${from} ведёт на неизвестный файл`);
         }
+        // Ключи развёртывания (необязательно): keys.kt — открытый ключ журнала ключей. По нему клиент сверяет ключ,
+        // который закрепляет, поэтому форма строгая: каноническое base64 ровно 32 байт.
+        if (data.keys !== undefined) {
+            if (!data.keys || typeof data.keys !== 'object' || Array.isArray(data.keys)) throw new Error('keys в манифесте должен быть объектом');
+            if (data.keys.kt !== undefined && !isKtKeyText(data.keys.kt)) throw new Error('keys.kt в манифесте: нужно каноническое base64 ровно 32 байт');
+        }
         return data;
+    }
+
+    // Каноническое base64 ровно 32 байт: длина 44 символа, последний — "=", допустимый алфавит, нулевые лишние биты.
+    function isKtKeyText(value) {
+        if (typeof value !== 'string' || !/^[A-Za-z0-9+/]{43}=$/.test(value)) return false;
+        const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+        return (alphabet.indexOf(value[42]) & 3) === 0;
+    }
+
+    // Ключ журнала из разобранного манифеста: строка base64 или null (манифест без keys.kt).
+    function ktKeyOf(manifest) {
+        return manifest && manifest.keys && typeof manifest.keys.kt === 'string' ? manifest.keys.kt : null;
     }
 
     // Что нужно скачать для сверки: все файлы манифеста и адреса-алиасы («/»).
@@ -103,14 +123,16 @@
         return { ok: problems.length === 0, entries, problems };
     }
 
-    // Чем манифест сервера отличается от эталона: { onlyInReference, onlyInServed, changed }.
+    // Чем манифест сервера отличается от эталона: { onlyInReference, onlyInServed, changed, keyChanged }.
+    // keyChanged: ключ журнала (keys.kt) в двух манифестах разный или есть только в одном.
     function diffManifests(reference, served) {
         const refMap = new Map(reference.files.map((file) => [file.path, file]));
         const servedMap = new Map(served.files.map((file) => [file.path, file]));
         const onlyInReference = [...refMap.keys()].filter((p) => !servedMap.has(p)).sort();
         const onlyInServed = [...servedMap.keys()].filter((p) => !refMap.has(p)).sort();
         const changed = [...refMap.keys()].filter((p) => servedMap.has(p) && servedMap.get(p).sha256 !== refMap.get(p).sha256).sort();
-        return { onlyInReference, onlyInServed, changed, same: onlyInReference.length + onlyInServed.length + changed.length === 0 };
+        const keyChanged = ktKeyOf(reference) !== ktKeyOf(served);
+        return { onlyInReference, onlyInServed, changed, keyChanged, same: onlyInReference.length + onlyInServed.length + changed.length === 0 && !keyChanged };
     }
 
     // Строки в формате sha256sum (`хэш  путь`) для ручной сверки: хэши того, что реально
@@ -136,5 +158,5 @@
             'выберите эталонный манифест из релиза или проверьте файлы вручную.';
     }
 
-    return { MANIFEST_FORMAT, toHex, parseManifest, pathsToFetch, compareObserved, diffManifests, formatSums, describeOutcome };
+    return { MANIFEST_FORMAT, toHex, parseManifest, ktKeyOf, pathsToFetch, compareObserved, diffManifests, formatSums, describeOutcome };
 });

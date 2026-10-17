@@ -24,6 +24,8 @@ const DELETED = { success: true, message: 'Аккаунт и все данные
 // 1×1 PNG: вложение, которое должно уйти с диска вместе с аккаунтом.
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
 const KEY_B64 = () => crypto.randomBytes(32).toString('base64');
+// Ключ подписи identity: сервер принимает только настоящий Ed25519 (строгая проверка, T5.4), случайные 32 байта не подходят.
+const SIGN_KEY_B64 = () => crypto.generateKeyPairSync('ed25519').publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64');
 
 const uploads = () => (fs.existsSync(suite.server.uploadsDir) ? fs.readdirSync(suite.server.uploadsDir) : []);
 const onDisk = (message) => uploads().includes(path.basename(message.file_url));
@@ -122,7 +124,7 @@ test('удаление стирает всё: сообщения, файлы, к
         [friendMessage.id, vId, victimSharedMessage.id, friend.user.id]);
     // Публичные ключи и key-share в обе стороны.
     for (const client of [v, f]) {
-        await client.ok(client.put('/api/keys/identity', { identity_signing_key: KEY_B64(), identity_dh_key: KEY_B64() }), 'публикация ключей');
+        await client.ok(client.put('/api/keys/identity', { identity_signing_key: SIGN_KEY_B64(), identity_dh_key: KEY_B64() }), 'публикация ключей');
     }
     // Остальные публичные ключи — прямой вставкой: подпись prekey проверяется по-настоящему, а набору нужны строки.
     await suite.query('INSERT INTO signed_prekeys (user_id, key_id, public_key, signature) VALUES ($1, 1, $2, $3)', [vId, crypto.randomBytes(32), crypto.randomBytes(64)]);

@@ -39,7 +39,7 @@ const b64 = (length, fill = 7) => Buffer.alloc(length, fill).toString('base64');
 // Правильный конверт с возможностью подменить поля; поле undefined — удалить.
 function envelope(overrides = {}) {
     const base = {
-        v: 2, alg: 'senderkey-v2',
+        v: 3, alg: 'senderkey-v3',
         senderKeyId: b64(16, 1), iteration: 5,
         iv: b64(12, 2), ct: b64(MIN_CT_BYTES, 3), sig: b64(64, 4),
     };
@@ -63,21 +63,24 @@ async function main() {
         bad('{', 'оборванный JSON');
         bad('null', 'null');
         bad('[]', 'массив');
-        bad('"senderkey-v2"', 'JSON-строка');
+        bad('"senderkey-v3"', 'JSON-строка');
         bad('42', 'число');
         bad(undefined, 'undefined');
         bad(null, 'null как значение');
         bad(42, 'число как значение');
-        bad({ v: 2 }, 'объект вместо строки: сервер ждёт текст');
+        bad({ v: 3 }, 'объект вместо строки: сервер ждёт текст');
     });
 
-    await test('версия и алгоритм: только v2/senderkey-v2, v1 запрещён', () => {
+    await test('версия и алгоритм: только v3/senderkey-v3, v1 и v2 запрещены (R0: подпись v2 была без метки домена и комнаты)', () => {
         bad(envelope({ v: 1 }), 'v: 1');
-        bad(envelope({ v: '2' }), 'v строкой');
-        bad(envelope({ v: 3 }), 'v: 3');
+        bad(envelope({ v: 2 }), 'v: 2');
+        bad(envelope({ v: 2, alg: 'senderkey-v2' }), 'настоящий v2');
+        bad(envelope({ v: '3' }), 'v строкой');
+        bad(envelope({ v: 4 }), 'v: 4');
         bad(envelope({ v: undefined }), 'нет v');
         bad(envelope({ alg: 'senderkey-v1' }), 'alg v1');
-        bad(envelope({ alg: 'senderkey-v3' }), 'alg v3');
+        bad(envelope({ alg: 'senderkey-v2' }), 'alg v2');
+        bad(envelope({ alg: 'senderkey-v4' }), 'alg v4');
         bad(envelope({ alg: undefined }), 'нет alg');
         bad(JSON.stringify({ alg: 'senderkey-v1', senderKeyId: b64(16), iteration: 0, iv: b64(12), ct: b64(300), sig: b64(64) }), 'настоящий v1 без v');
     });
@@ -156,7 +159,7 @@ async function main() {
     await test('лишние и недостающие ключи верхнего уровня', () => {
         bad(envelope({ extra: 1 }), 'лишний ключ');
         bad(envelope({ text: 'открытый текст' }), 'открытый текст в лишнем ключе');
-        bad(`{"__proto__":{},"v":2,"alg":"senderkey-v2","senderKeyId":"${b64(16)}","iteration":0,"iv":"${b64(12)}","ct":"${b64(300)}","sig":"${b64(64)}"}`, '__proto__ в исходной строке');
+        bad(`{"__proto__":{},"v":3,"alg":"senderkey-v3","senderKeyId":"${b64(16)}","iteration":0,"iv":"${b64(12)}","ct":"${b64(300)}","sig":"${b64(64)}"}`, '__proto__ в исходной строке');
         for (const key of ['v', 'alg', 'senderKeyId', 'iteration', 'iv', 'ct', 'sig']) {
             bad(envelope({ [key]: undefined }), `нет ${key}`);
         }

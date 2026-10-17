@@ -122,6 +122,7 @@ async function verifyDeployment({ baseUrl, referenceText = null, fetchImpl = fet
                 if (diff.changed.length) parts.push(`другие хэши: ${diff.changed.join(', ')}`);
                 if (diff.onlyInServed.length) parts.push(`лишние файлы: ${diff.onlyInServed.join(', ')}`);
                 if (diff.onlyInReference.length) parts.push(`нет файлов: ${diff.onlyInReference.join(', ')}`);
+                if (diff.keyChanged) parts.push('другой ключ журнала ключей (keys.kt)');
                 report.problems.push('манифест сайта отличается от эталона' + (parts.length ? ' (' + parts.join('; ') + ')' : ' (состав тот же, байты разные)'));
             }
         }
