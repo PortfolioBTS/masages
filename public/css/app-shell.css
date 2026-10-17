@@ -1,0 +1,738 @@
+/* css/app-shell.css — каркас приложения и сайдбар со списком чатов; основная область: шапка чата,
+   баннеры, заявки.
+   Вынесено без изменений из бывшего public/style.css (разделы 8–9; строки 1599–2330
+   исходника). Файл 4 из 9. Файлы подключаются из index.html подряд, по номерам: этот порядок и есть
+   порядок каскада, переставлять файлы нельзя. */
+
+/* --------------------------------------------------------------------------
+   8. Каркас приложения и сайдбар.
+   -------------------------------------------------------------------------- */
+
+.app {
+    display: flex;
+    height: 100vh;
+    height: 100dvh;
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+    background: var(--bg);
+}
+
+.sidebar {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    flex: none;
+    width: var(--sidebar-w);
+    min-width: 0;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+}
+
+.sidebar-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex: none;
+    height: calc(var(--header-h) + env(safe-area-inset-top));
+    padding: env(safe-area-inset-top) 12px 0 16px;
+    border-bottom: 1px solid var(--border);
+}
+
+.sidebar-actions,
+.sidebar-header > div:last-child:not(.logo-small) {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.logo-small {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    font-size: 16px;
+    line-height: 24px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--text);
+    white-space: nowrap;
+}
+
+.logo-small .icon {
+    width: 24px;
+    height: 24px;
+}
+
+.search-container {
+    position: relative;
+    flex: none;
+    padding: 12px 12px 8px;
+}
+
+.search-container > .icon {
+    position: absolute;
+    top: 50%;
+    left: 24px;
+    width: 16px;
+    height: 16px;
+    margin-top: 2px;
+    transform: translateY(-50%);
+    color: var(--text-3);
+    stroke-width: 2;
+}
+
+.search-container input {
+    height: 36px;
+    padding-left: 36px;
+    background-color: var(--surface-2);
+}
+
+/* Лупа фоном — пока в разметке нет иконки-элемента. */
+.search-container:not(:has(> .icon)) input {
+    background-image: var(--glyph-search);
+    background-repeat: no-repeat;
+    background-position: 12px center;
+    background-size: 16px 16px;
+}
+
+/* Фильтр по названиям ничего не нашёл. */
+.chats-empty {
+    flex: none;
+    padding: 16px 20px;
+    color: var(--text-3);
+    font-size: 13px;
+    line-height: 20px;
+}
+
+/* Совпадение в названии чата: инверсная метка, как у выбранного. */
+.chat-name mark {
+    padding: 0 1px;
+    border-radius: 2px;
+    background: var(--accent);
+    color: var(--accent-fg);
+}
+
+.chats-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 4px 8px 12px;
+}
+
+.chats-section-title,
+.search-section-title {
+    padding: 16px 12px 8px;
+    font-size: 11px;
+    line-height: 16px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-3);
+}
+
+.chats-section-title:first-child,
+.search-section-title:first-child {
+    padding-top: 8px;
+}
+
+.chat-item {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 64px;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    cursor: pointer;
+    user-select: none;
+    transition: background-color var(--dur-fast) var(--ease);
+}
+
+.chat-item + .chat-item {
+    margin-top: 2px;
+}
+
+.chat-item:hover {
+    background: var(--hover);
+}
+
+.chat-item:active {
+    background: var(--pressed);
+}
+
+.chat-item:focus-visible {
+    outline-offset: -2px;
+}
+
+/* Открытый чат: поверхность плотнее + вертикальная черта слева. */
+.chat-item.active,
+.chat-item.is-active {
+    background: var(--surface-3);
+}
+
+.chat-item.active::before,
+.chat-item.is-active::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 12px;
+    bottom: 12px;
+    width: 2px;
+    border-radius: 0 2px 2px 0;
+    background: var(--text);
+}
+
+.chat-avatar-small {
+    width: 44px;
+    height: 44px;
+    font-size: 16px;
+    line-height: 20px;
+}
+
+.chat-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.chat-name {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.chat-last {
+    font-size: 13px;
+    line-height: 20px;
+    color: var(--text-2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.chat-last svg.icon {
+    width: 14px;
+    height: 14px;
+    margin: -2px 4px 0 0;
+    stroke-width: 2;
+}
+
+/* Флаги чата: закреплён, без звука, исчезающие сообщения. */
+.chat-item-flags {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+    color: var(--text-3);
+}
+
+/* Плотный контекст: размер фиксирован и важнее icon-sm из скрипта. */
+.chat-item-flags svg.icon {
+    width: 14px;
+    height: 14px;
+    stroke-width: 2;
+}
+
+.chat-item-flags:empty {
+    display: none;
+}
+
+/* Правая колонка элемента (время/бейдж), если скрипт её выделит. */
+.chat-item-side {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+    flex: none;
+}
+
+.chat-time {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 16px;
+    color: var(--text-3);
+    font-variant-numeric: tabular-nums;
+}
+
+.chat-item.is-muted .chat-badge,
+.chat-item.is-muted .badge {
+    background: transparent;
+    color: var(--text-2);
+    box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+.chat-item.is-muted .chat-name {
+    font-weight: 500;
+}
+
+.chat-item.is-archived {
+    opacity: 0.72;
+}
+
+.chat-item.is-archived:hover,
+.chat-item.is-archived.active,
+.chat-item.is-archived.is-active {
+    opacity: 1;
+}
+
+/* «Архив (N)» внизу списка. */
+.archive-toggle {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-height: 44px;
+    margin-top: 8px;
+    padding: 0 12px;
+    border: 0;
+    border-top: 1px solid var(--border);
+    border-radius: 0;
+    background: none;
+    color: var(--text-2);
+    font-size: 13px;
+    line-height: 20px;
+    font-weight: 500;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.archive-toggle:hover {
+    background: var(--hover);
+    color: var(--text);
+}
+
+.archive-toggle .icon {
+    width: 18px;
+    height: 18px;
+}
+
+.archive-toggle .badge {
+    margin-left: auto;
+    background: transparent;
+    color: var(--text-2);
+    box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+.archive-toggle[aria-expanded="true"] {
+    color: var(--text);
+}
+
+.sidebar-footer {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+    padding: 8px 8px max(8px, env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+}
+
+.footer-btn {
+    flex: 1;
+    min-width: 0;
+    height: 36px;
+    padding: 0 12px;
+    font-size: 13px;
+}
+
+/* Заметка о сроке хранения аккаунта — кнопка, открывающая профиль. */
+.anon-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    flex: none;
+    width: 100%;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text-2);
+    font-size: 12px;
+    line-height: 16px;
+    text-align: left;
+    transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+button.anon-note:hover {
+    background: var(--surface-3);
+    color: var(--text);
+}
+
+/* Обводка фокуса — внутрь: снаружи её срезал бы край сайдбара. */
+button.anon-note:focus-visible {
+    outline-offset: -2px;
+}
+
+/* Внизу сайдбара (над кнопками) — линия сверху, а не снизу. */
+.chats-list + .anon-note {
+    border-top: 1px solid var(--border);
+    border-bottom: 0;
+}
+
+.anon-note .icon {
+    width: 16px;
+    height: 16px;
+    color: var(--text);
+    stroke-width: 2;
+}
+
+.anon-note strong,
+.anon-note b {
+    color: var(--text);
+    font-weight: 600;
+}
+
+.theme-toggle {
+    position: relative;
+}
+
+/* Если .theme-toggle — самостоятельная кнопка, а не .icon-btn. */
+button.theme-toggle:not(.icon-btn):not(.btn) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--control-h);
+    height: var(--control-h);
+    border-radius: var(--radius-sm);
+    color: var(--text-2);
+    transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+button.theme-toggle:not(.icon-btn):not(.btn):hover {
+    background: var(--hover);
+    color: var(--text);
+}
+
+/* Состояние соединения: видно, только когда что-то не так. */
+.connection-status {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    flex: none;
+    min-height: 32px;
+    padding: 6px 16px;
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 500;
+    text-align: center;
+}
+
+.connection-status .icon {
+    width: 16px;
+    height: 16px;
+    stroke-width: 2;
+}
+
+.connection-status.is-offline {
+    display: flex;
+    background: var(--bg);
+    color: var(--text);
+}
+
+.connection-status.is-reconnecting {
+    display: flex;
+    background: var(--surface-2);
+    color: var(--text-2);
+    border-bottom: 1px solid var(--border);
+}
+
+.connection-status-icon {
+    display: inline-flex;
+    flex: none;
+}
+
+/* Сам по себе в <body> (вне сайдбара и ленты) — всплывающая плашка сверху. */
+body > .connection-status {
+    position: fixed;
+    top: max(8px, env(safe-area-inset-top));
+    left: 50%;
+    z-index: 250;
+    min-height: 32px;
+    padding: 6px 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow);
+    transform: translateX(-50%);
+    white-space: nowrap;
+    animation: fade-in var(--dur) var(--ease);
+}
+
+body > .connection-status.is-offline {
+    border-color: var(--bg);
+}
+
+body > .connection-status.is-reconnecting {
+    border-color: var(--border-strong);
+}
+
+
+/* --------------------------------------------------------------------------
+   9. Основная область: шапка чата, баннеры, заявки.
+   -------------------------------------------------------------------------- */
+
+.main-content {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    background: var(--bg);
+}
+
+.chat-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex: none;
+    height: calc(var(--header-h) + env(safe-area-inset-top));
+    padding: env(safe-area-inset-top) 12px 0 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+}
+
+/* Только шапка чата: без .chat-header этот ряд применялся бы и к .chat-info
+   в списке чатов. */
+.chat-header .chat-info {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+}
+
+.chat-avatar {
+    width: 40px;
+    height: 40px;
+    font-size: 15px;
+    line-height: 20px;
+}
+
+/* Имя сверху, под ним в одну строку статус и индикаторы режима. */
+.chat-details {
+    display: grid;
+    grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+    align-items: center;
+    column-gap: 8px;
+    row-gap: 2px;
+    min-width: 0;
+}
+
+.chat-details h3 {
+    grid-column: 1 / -1;
+    font-size: 15px;
+    line-height: 20px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.chat-details .status {
+    white-space: nowrap;
+}
+
+.chat-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+}
+
+/* Индикаторы режима чата в шапке: «исчезающие 1 ч», «без звука» и т. п.
+   В одну строку: при нехватке места обрезаются, а не растягивают шапку
+   по высоте. */
+.chat-indicators {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.chat-indicators:empty,
+.chat-indicators:not(:has(> :not(.hidden))) {
+    display: none;
+}
+
+.indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 20px;
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-2);
+    font-size: 11px;
+    line-height: 16px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.indicator svg.icon {
+    width: 12px;
+    height: 12px;
+    stroke-width: 2.25;
+}
+
+.indicator.is-on {
+    border-color: var(--text);
+    color: var(--text);
+    font-weight: 600;
+}
+
+button.indicator {
+    cursor: pointer;
+    background: none;
+    transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+button.indicator:hover {
+    border-color: var(--border-strong);
+    color: var(--text);
+}
+
+/* Баннеры над лентой. Предупреждение — инверсная плашка с alert-triangle;
+   иконка рисуется псевдоэлементом, если в разметке своей нет. */
+.banner,
+.e2ee-banner {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: none;
+    min-height: 48px;
+    padding: 8px 16px 8px 20px;
+    font-size: 13px;
+    line-height: 20px;
+}
+
+.banner-warning,
+.e2ee-banner {
+    background: var(--bg);
+    color: var(--text);
+    font-weight: 500;
+}
+
+.banner-info {
+    background: var(--surface);
+    color: var(--text-2);
+    border-bottom: 1px solid var(--border);
+}
+
+.banner > .icon,
+.e2ee-banner > .icon {
+    width: 20px;
+    height: 20px;
+}
+
+.banner-warning:not(:has(> .icon))::before,
+.e2ee-banner:not(:has(> .icon))::before,
+.banner-info:not(:has(> .icon))::before {
+    content: "";
+    flex: none;
+    width: 20px;
+    height: 20px;
+    background-color: currentColor;
+    -webkit-mask: var(--mask-alert) center / contain no-repeat;
+    mask: var(--mask-alert) center / contain no-repeat;
+}
+
+.banner-info:not(:has(> .icon))::before {
+    -webkit-mask-image: var(--mask-info);
+    mask-image: var(--mask-info);
+}
+
+.banner-text,
+.e2ee-banner-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.banner-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: none;
+}
+
+/* Кнопка на инверсной плашке — снова инверсия: «чёрная на белом». */
+.banner-btn {
+    flex: none;
+    height: var(--control-h-sm);
+    padding: 0 12px;
+    background: var(--accent);
+    color: var(--accent-fg);
+    border-color: var(--accent);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.banner-btn:hover {
+    background: color-mix(in srgb, var(--accent) 84%, var(--bg));
+}
+
+/* Закрепление кода (service worker, lib/sw-client.js): «Доступна новая версия»
+   и сообщения о проверке. Поверх приложения, а не в потоке: приложение занимает
+   весь экран (100dvh), и плашка в потоке сдвинула бы вёрстку. Ниже оверлея (99) и окон:
+   блокирующее предупреждение о подмене не должно оставлять рядом кнопку «Обновить». */
+body > .code-banner {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 90;
+    padding-top: max(8px, env(safe-area-inset-top));
+    border-bottom: 1px solid var(--border-strong);
+    box-shadow: var(--shadow);
+    animation: fade-in var(--dur) var(--ease);
+}
+
+.code-banner .banner-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+/* Заявки на вступление: полоса над лентой. */
+.requests-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: none;
+    min-height: 48px;
+    padding: 8px 16px 8px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    font-size: 13px;
+    line-height: 20px;
+    font-weight: 500;
+    color: var(--text);
+}
+
+.requests-bar > .icon {
+    width: 18px;
+    height: 18px;
+    color: var(--text-2);
+}
+
+.requests-bar > :not(.icon):not(button):not(.btn):not(.badge) {
+    flex: 1;
+    min-width: 0;
+}
+
+.requests-bar .badge {
+    margin-left: -4px;
+}
+
+

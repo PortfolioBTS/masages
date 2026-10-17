@@ -1,0 +1,739 @@
+/* css/messages.css — лента сообщений (сообщения, реакции, вложения, системные заметки, пустые
+   состояния, зона перетаскивания файлов).
+   Вынесено без изменений из бывшего public/style.css (раздел 10; строки 2331–3063
+   исходника). Файл 5 из 9. Файлы подключаются из index.html подряд, по номерам: этот порядок и есть
+   порядок каскада, переставлять файлы нельзя. */
+
+/* --------------------------------------------------------------------------
+   10. Лента сообщений.
+   -------------------------------------------------------------------------- */
+
+.chat-messages {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    /* Колонка ленты не шире --feed-max: на широком экране строки не
+       растягиваются на всю ширину. */
+    padding: 20px max(24px, calc((100% - var(--feed-max)) / 2));
+}
+
+.message {
+    position: relative;
+    max-width: min(72%, 560px);
+    padding: 8px 12px;
+    border-radius: var(--radius);
+    font-size: 15px;
+    line-height: 20px;
+}
+
+.message.received {
+    align-self: flex-start;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 2px;
+    color: var(--text);
+}
+
+/* Своё сообщение — инверсия (набор токенов противоположной темы, см. §1). */
+.message.sent {
+    align-self: flex-end;
+    background: var(--bg);
+    border: 1px solid var(--bg);
+    border-bottom-right-radius: 2px;
+    color: var(--text);
+}
+
+.message.message-new {
+    animation: rise-in var(--dur-slow) var(--ease);
+}
+
+/* Подсветка сообщения, к которому перешли (например, из цитаты). */
+.message.is-highlighted {
+    outline: 2px solid var(--text-2);
+    outline-offset: 2px;
+}
+
+.message-content {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.message-author {
+    margin-bottom: 2px;
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 600;
+    color: var(--text-2);
+}
+
+.message-text {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.message-text:empty {
+    display: none;
+}
+
+.message-text.e2ee-failed {
+    color: var(--text-3);
+}
+
+.message-text .icon {
+    width: 16px;
+    height: 16px;
+    margin: -3px 6px 0 0;
+    stroke-width: 2;
+}
+
+.edited-label {
+    margin-top: 2px;
+    font-size: 11px;
+    line-height: 16px;
+    color: var(--text-3);
+    text-align: right;
+}
+
+/* Цитата в ответе. */
+.reply-to {
+    display: block;
+    margin-bottom: 8px;
+    padding: 4px 8px 4px 10px;
+    border-left: 2px solid currentColor;
+    border-radius: 0 4px 4px 0;
+    background: var(--hover);
+    color: var(--text-2);
+    font-size: 13px;
+    line-height: 20px;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+}
+
+.reply-to small {
+    font-size: inherit;
+}
+
+.reply-to .icon {
+    width: 14px;
+    height: 14px;
+    margin: -2px 4px 0 0;
+    stroke-width: 2;
+}
+
+button.reply-to,
+.reply-to[role="button"] {
+    width: 100%;
+    text-align: left;
+    cursor: pointer;
+}
+
+.reply-to[role="button"]:hover,
+button.reply-to:hover {
+    background: var(--pressed);
+}
+
+.message-meta {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 4px;
+    font-size: 11px;
+    line-height: 16px;
+    color: var(--text-3);
+}
+
+.message-time {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0;
+}
+
+.message-lock,
+.message-status,
+.message-expiry {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 11px;
+}
+
+.message-lock svg.icon,
+.message-expiry svg.icon {
+    width: 13px;
+    height: 13px;
+    stroke-width: 2.25;
+}
+
+.message-status .icon {
+    width: 16px;
+    height: 16px;
+    stroke-width: 2;
+}
+
+/* Прочитано — полный цвет текста, отправлено — приглушённо. */
+.message-status.is-read,
+.message-status[data-state="read"],
+.message-status[data-status="read"] {
+    color: var(--text);
+}
+
+/* Реакции: иконка + число. Моя реакция — инверсия. */
+.reactions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 8px;
+}
+
+.reaction {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 24px;
+    padding: 0 8px;
+    border: 1px solid var(--border-strong);
+    border-radius: 12px;
+    background: transparent;
+    color: var(--text);
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+    transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease),
+        color var(--dur-fast) var(--ease);
+}
+
+.reaction .icon {
+    width: 14px;
+    height: 14px;
+    stroke-width: 2;
+}
+
+.reaction:hover {
+    background: var(--hover);
+    border-color: var(--text-3);
+}
+
+.reaction.is-active,
+.reaction.is-mine,
+.reaction[aria-pressed="true"] {
+    background: var(--text);
+    border-color: var(--text);
+    color: var(--bg);
+}
+
+.reaction-picker {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 4px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    animation: drop-in var(--dur-fast) var(--ease);
+}
+
+.reaction-option {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--text-2);
+    cursor: pointer;
+    transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease),
+        transform var(--dur-fast) var(--ease);
+}
+
+.reaction-option .icon {
+    width: 22px;
+    height: 22px;
+}
+
+.reaction-option:hover {
+    background: var(--hover);
+    color: var(--text);
+    transform: translateY(-1px);
+}
+
+.reaction-option:active {
+    background: var(--pressed);
+    transform: none;
+}
+
+.reaction-option.is-active,
+.reaction-option[aria-pressed="true"] {
+    background: var(--surface-3);
+    color: var(--text);
+}
+
+/* Панель реакций внутри контекстного меню — без собственной рамки. */
+.context-menu .reaction-picker {
+    display: flex;
+    justify-content: space-between;
+    padding: 0 0 4px;
+    margin-bottom: 4px;
+    border: 0;
+    border-bottom: 1px solid var(--border);
+    border-radius: 0;
+    box-shadow: none;
+    background: none;
+    animation: none;
+}
+
+/* Вложения. */
+.message-image {
+    display: block;
+    max-width: min(320px, 100%);
+    max-height: 360px;
+    margin-bottom: 4px;
+    border-radius: var(--radius-sm);
+    object-fit: cover;
+    cursor: zoom-in;
+    transition: opacity var(--dur) var(--ease);
+}
+
+.message-image:hover {
+    opacity: 0.9;
+}
+
+.message-video {
+    display: block;
+    max-width: min(320px, 100%);
+    margin-bottom: 4px;
+    border-radius: var(--radius-sm);
+}
+
+.file-attachment {
+    margin-bottom: 4px;
+}
+
+.file-attachment a,
+a.file-attachment {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 100%;
+    min-height: 40px;
+    padding: 8px 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    color: var(--text);
+    font-size: 13px;
+    line-height: 20px;
+    font-weight: 500;
+    text-decoration: none;
+    overflow-wrap: anywhere;
+    transition: border-color var(--dur) var(--ease), background-color var(--dur) var(--ease);
+}
+
+.file-attachment a:hover,
+a.file-attachment:hover {
+    border-color: var(--text);
+    text-decoration: none;
+}
+
+.file-attachment .icon {
+    width: 18px;
+    height: 18px;
+}
+
+.file-attachment a > span {
+    min-width: 0;
+}
+
+/* Значок «скачать» в конце ссылки — вторичный. */
+.file-attachment a > svg.icon:last-child:not(:first-child) {
+    width: 16px;
+    height: 16px;
+    color: var(--text-3);
+}
+
+.file-size {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-3);
+    font-variant-numeric: tabular-nums;
+}
+
+.encrypted-attachment {
+    margin-bottom: 4px;
+}
+
+.attachment-status,
+.attachment-loading {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 40px;
+    padding: 8px 12px;
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius-sm);
+    color: var(--text-2);
+    font-size: 13px;
+    line-height: 20px;
+}
+
+.attachment-status .icon,
+.attachment-loading .icon {
+    width: 16px;
+    height: 16px;
+    stroke-width: 2;
+}
+
+.attachment-status.e2ee-failed {
+    color: var(--text-3);
+}
+
+/* Служебная строка в ленте: текст по центру между тонкими линиями. */
+.system-notice {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    align-self: stretch;
+    margin: 8px 0;
+    color: var(--text-2);
+    font-size: 12px;
+    line-height: 16px;
+    text-align: center;
+}
+
+.system-notice::before,
+.system-notice::after {
+    content: "";
+    flex: 1 1 24px;
+    min-width: 24px;
+    height: 1px;
+    background: var(--border);
+}
+
+.system-notice .icon {
+    width: 14px;
+    height: 14px;
+    stroke-width: 2;
+    margin-right: -6px;
+}
+
+/* Свёрнутая серия сообщений, истории которых нет на устройстве («Не хранить историю»):
+   первое сообщение серии превращается в служебную строку, остальные скрыты. */
+.message.history-gap {
+    align-self: stretch;
+    max-width: none;
+    padding: 0;
+    background: none;
+    border: 0;
+    color: var(--text-2);
+    font-size: 12px;
+    line-height: 16px;
+    text-align: center;
+}
+
+.message.history-gap .message-text,
+.message.history-gap .message-text.e2ee-failed {
+    color: var(--text-2);
+}
+
+.message.history-gap .message-meta,
+.message.history-gap .reactions,
+.message.history-gap .reply-to,
+.message.history-gap .edited-label {
+    display: none;
+}
+
+/* Плавающая «вниз». Ставится в .main-content сразу после #chat-messages:
+   order держит её над полем ввода, отрицательные поля — поверх ленты без
+   сдвига вёрстки. Внутри самой ленты — липкая к низу. */
+.jump-down {
+    position: relative;
+    z-index: 5;
+    order: 1;
+    align-self: flex-end;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 40px;
+    height: 40px;
+    margin: -56px 16px 16px 0;
+    border: 1px solid var(--border-strong);
+    border-radius: 50%;
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.24);
+    cursor: pointer;
+    animation: rise-in var(--dur) var(--ease);
+    transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+
+.jump-down:hover {
+    background: var(--surface-3);
+    border-color: var(--text-3);
+}
+
+.jump-down .icon {
+    width: 20px;
+    height: 20px;
+}
+
+/* Пока показано пустое состояние, пустая лента не делит с ним высоту. */
+.main-content:has(> .empty-state:not(.hidden)) > .chat-messages:empty {
+    display: none;
+}
+
+.main-content > .message-input-container,
+.main-content > .empty-state,
+.main-content > .composer {
+    order: 2;
+}
+
+.chat-messages > .jump-down {
+    position: sticky;
+    bottom: 0;
+    order: 9999;
+    margin: -40px 0 0;
+}
+
+/* Оверлей перетаскивания файлов. */
+.drop-zone {
+    position: absolute;
+    inset: 12px;
+    z-index: 30;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    border: 2px dashed var(--text);
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--bg) 92%, transparent);
+    color: var(--text);
+    font-size: 15px;
+    line-height: 20px;
+    font-weight: 600;
+    text-align: center;
+}
+
+.drop-zone.is-active {
+    display: flex;
+    animation: fade-in var(--dur-fast) var(--ease);
+}
+
+.drop-zone .icon {
+    width: 32px;
+    height: 32px;
+    stroke-width: 1.5;
+}
+
+.drop-zone:not(:has(.icon))::before {
+    content: "";
+    width: 32px;
+    height: 32px;
+    background-color: currentColor;
+    -webkit-mask: var(--mask-upload) center / contain no-repeat;
+    mask: var(--mask-upload) center / contain no-repeat;
+}
+
+.drop-zone small,
+.drop-zone .field-hint {
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 400;
+    color: var(--text-2);
+}
+
+/* Карточка заявки: «Ожидает одобрения» у заявителя и предпросмотр группы
+   перед вступлением. Строка: иконка | текст | действия (действия
+   переносятся вниз, если не помещаются). */
+.pending-card {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 12px;
+    width: 100%;
+    padding: 12px 12px 12px 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    text-align: left;
+    animation: rise-in var(--dur-slow) var(--ease);
+}
+
+/* Только что отправленная заявка — выделена рамкой цвета текста. */
+.pending-card.is-active {
+    border-color: var(--text);
+}
+
+.pending-card + .pending-card {
+    margin-top: 8px;
+}
+
+.pending-card > .icon {
+    width: 20px;
+    height: 20px;
+    color: var(--text);
+}
+
+.pending-card > div:not([class]),
+.pending-card > .join-preview-body {
+    flex: 1 1 160px;
+    min-width: 0;
+}
+
+.pending-card h2,
+.pending-card h3,
+.pending-card h4,
+.pending-card strong {
+    margin: 0;
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 600;
+    text-transform: none;
+    letter-spacing: normal;
+    color: var(--text);
+    overflow-wrap: anywhere;
+}
+
+.pending-card p {
+    margin: 0;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-2);
+}
+
+.pending-card p.field-hint {
+    margin-top: 4px;
+    color: var(--text-3);
+}
+
+.pending-card > .invite-actions {
+    flex-basis: 100%;
+    justify-content: flex-end;
+    margin-top: 4px;
+}
+
+.pending-card > .invite-actions > .btn {
+    flex: none;
+}
+
+/* Предпросмотр группы по коду: в окне «Новый чат» под кнопкой «Продолжить». */
+.join-preview {
+    margin-top: 16px;
+    padding: 16px;
+    border-color: var(--border-strong);
+    background: var(--surface);
+}
+
+.join-preview > .icon {
+    align-self: flex-start;
+    width: 24px;
+    height: 24px;
+}
+
+.join-preview h4 {
+    font-size: 16px;
+    line-height: 24px;
+}
+
+.my-requests {
+    margin-top: 24px;
+}
+
+/* В ленте (вместо сообщений) — крупная карточка по центру. */
+.chat-messages > .pending-card,
+.pending-card.is-centered {
+    flex-direction: column;
+    flex-wrap: nowrap;
+    max-width: 400px;
+    margin: auto;
+    padding: 32px 24px;
+    border-radius: var(--radius);
+    background: var(--surface);
+    text-align: center;
+}
+
+.chat-messages > .pending-card > .icon,
+.pending-card.is-centered > .icon {
+    width: 32px;
+    height: 32px;
+    stroke-width: 1.5;
+}
+
+.chat-messages > .pending-card > div:not([class]),
+.pending-card.is-centered > div:not([class]) {
+    flex: none;
+}
+
+.pending-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    width: 100%;
+    max-width: 400px;
+    margin: auto;
+}
+
+.pending-list .pending-card {
+    margin: 0;
+}
+
+/* Пустое состояние. */
+.empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    flex: 1;
+    padding: 32px 24px;
+    text-align: center;
+    color: var(--text-2);
+}
+
+.empty-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 64px;
+    height: 64px;
+    margin-bottom: 16px;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    color: var(--text);
+    font-size: 28px;
+    line-height: 1;
+}
+
+.empty-icon .icon {
+    width: 28px;
+    height: 28px;
+    stroke-width: 1.5;
+}
+
+.empty-state h2 {
+    font-size: 20px;
+    line-height: 28px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+}
+
+.empty-state p {
+    max-width: 360px;
+    font-size: 14px;
+    line-height: 20px;
+}
+
+

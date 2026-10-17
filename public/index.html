@@ -10,7 +10,16 @@
     <link rel="manifest" href="manifest.webmanifest">
     <script src="theme.js"></script>
     <script src="icons.js"></script>
-    <link rel="stylesheet" href="style.css">
+    <!-- Стили разбиты на части; порядок подключения = порядок каскада, переставлять нельзя. -->
+    <link rel="stylesheet" href="css/tokens.css">
+    <link rel="stylesheet" href="css/controls.css">
+    <link rel="stylesheet" href="css/auth.css">
+    <link rel="stylesheet" href="css/app-shell.css">
+    <link rel="stylesheet" href="css/messages.css">
+    <link rel="stylesheet" href="css/composer.css">
+    <link rel="stylesheet" href="css/modals.css">
+    <link rel="stylesheet" href="css/popups.css">
+    <link rel="stylesheet" href="css/responsive.css">
 </head>
 <body>
     <main id="auth-screen" class="auth-screen" aria-labelledby="auth-title">

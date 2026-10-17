@@ -1,0 +1,881 @@
+/* css/modals.css — модальные окна (профиль, «О приложении», приглашения, заявки, участники группы,
+   предупреждения журнала ключей, номер безопасности).
+   Вынесено без изменений из бывшего public/style.css (раздел 12; строки 3514–4388
+   исходника). Файл 7 из 9. Файлы подключаются из index.html подряд, по номерам: этот порядок и есть
+   порядок каскада, переставлять файлы нельзя. */
+
+/* --------------------------------------------------------------------------
+   12. Модальные окна.
+   -------------------------------------------------------------------------- */
+
+.overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 99;
+    background: var(--overlay);
+    animation: fade-in var(--dur) var(--ease);
+}
+
+.modal {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+        max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+    animation: fade-in var(--dur) var(--ease);
+}
+
+.modal-content {
+    position: relative;
+    z-index: 101;
+    width: 100%;
+    max-width: 440px;
+    max-height: 100%;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    animation: drop-in var(--dur-slow) var(--ease);
+}
+
+.modal-content.modal-sm {
+    max-width: 360px;
+}
+
+.modal-content.modal-wide {
+    max-width: 560px;
+}
+
+.modal-header {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 64px;
+    padding: 12px 12px 12px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+}
+
+.modal-header h3 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    font-size: 16px;
+    line-height: 24px;
+    font-weight: 600;
+}
+
+.modal-header h3 .icon {
+    width: 20px;
+    height: 20px;
+}
+
+.modal-body {
+    padding: 24px;
+}
+
+/* :not(.modal-body) лишь поднимает специфичность: у последнего блока
+   (например, .invite-hint) не должно оставаться нижнего поля. */
+.modal-body > :last-child:not(.modal-body) {
+    margin-bottom: 0;
+}
+
+:where(.modal-body) > p {
+    margin-bottom: 16px;
+    color: var(--text-2);
+    font-size: 14px;
+    line-height: 20px;
+}
+
+:where(.modal-body) h4 {
+    margin: 24px 0 12px;
+    font-size: 11px;
+    line-height: 16px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-3);
+}
+
+:where(.modal-body) > h4:first-child {
+    margin-top: 0;
+}
+
+.modal-body > .auth-btn + .auth-btn,
+.modal-body > .btn-block + .btn-block {
+    margin-top: 8px;
+}
+
+.modal-footer {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 16px 24px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+}
+
+.modal-footer > .spacer,
+.modal-footer > .modal-footer-start {
+    margin-right: auto;
+}
+
+/* Предупреждение в окне — инверсная плашка с alert-triangle. */
+.modal-warning,
+.member-warning,
+.members-note {
+    position: relative;
+    margin-bottom: 16px;
+    padding: 12px 16px 12px 44px;
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+    line-height: 20px;
+    font-weight: 500;
+}
+
+.modal-warning::before,
+.member-warning::before,
+.members-note::before {
+    content: "";
+    position: absolute;
+    top: 12px;
+    left: 16px;
+    width: 18px;
+    height: 18px;
+    margin-top: 1px;
+    background-color: currentColor;
+    -webkit-mask: var(--mask-alert) center / contain no-repeat;
+    mask: var(--mask-alert) center / contain no-repeat;
+}
+
+.modal-warning:has(> .icon),
+.member-warning:has(> .icon),
+.members-note:has(> .icon) {
+    display: flex;
+    gap: 10px;
+    padding-left: 16px;
+}
+
+.modal-warning:has(> .icon)::before,
+.member-warning:has(> .icon)::before,
+.members-note:has(> .icon)::before {
+    display: none;
+}
+
+.modal-warning > .icon,
+.member-warning > .icon,
+.members-note > .icon {
+    width: 18px;
+    height: 18px;
+    margin-top: 1px;
+}
+
+.modal-warning:empty,
+.members-note:empty {
+    display: none;
+}
+
+/* Профиль. */
+.profile-info {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.profile-avatar {
+    width: 64px;
+    height: 64px;
+    font-size: 24px;
+    line-height: 32px;
+}
+
+.profile-details {
+    min-width: 0;
+}
+
+.profile-details h4 {
+    margin: 0 0 2px;
+    font-size: 18px;
+    line-height: 24px;
+    font-weight: 600;
+    text-transform: none;
+    letter-spacing: -0.01em;
+    color: var(--text);
+    overflow-wrap: anywhere;
+}
+
+.profile-details p {
+    font-size: 13px;
+    line-height: 20px;
+    color: var(--text-2);
+    overflow-wrap: anywhere;
+}
+
+.profile-details p:empty {
+    display: none;
+}
+
+.profile-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 24px;
+}
+
+.profile-lifetime {
+    margin-bottom: 24px;
+}
+
+/* «Защита кода» в профиле: статус и три действия столбиком, как .profile-actions. */
+.profile-code {
+    margin-top: 24px;
+}
+
+.profile-code-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+/* Когда аккаунт удалится — главное в этом блоке, поэтому ярче подсказки. */
+.profile-lifetime-status {
+    color: var(--text-2);
+}
+
+.profile-section + .profile-section {
+    margin-top: 24px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+}
+
+/* Окно «Как это работает»: разделы с заголовками обычным регистром —
+   это текст для чтения, а не подписи групп настроек. */
+.about-section + .about-section {
+    margin-top: 20px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+}
+
+.modal-body .about-section h4 {
+    margin: 0 0 8px;
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 600;
+    text-transform: none;
+    letter-spacing: -0.01em;
+    color: var(--text);
+}
+
+.about-section p,
+.about-list {
+    color: var(--text-2);
+    font-size: 14px;
+    line-height: 20px;
+}
+
+.about-section p.field-hint {
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-3);
+}
+
+.about-section > * + * {
+    margin-top: 8px;
+}
+
+.about-section > h4 + * {
+    margin-top: 0;
+}
+
+.about-list {
+    display: grid;
+    gap: 6px;
+    padding-left: 20px;
+}
+
+/* Раздел про Tor получает фокус по ссылке «Открыть через Tor». */
+.about-section:focus-visible {
+    outline-offset: 4px;
+}
+
+.about-onion {
+    display: grid;
+    gap: 8px;
+}
+
+.about-onion code {
+    display: block;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    color: var(--text);
+    font-size: 13px;
+    line-height: 20px;
+    overflow-wrap: anywhere;
+    user-select: all;
+}
+
+.about-onion-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+/* Приглашения (старые классы окна + новые из К1). */
+.invite-text {
+    margin-bottom: 12px;
+    color: var(--text-2);
+}
+
+.invite-code-container {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 8px 8px 16px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+}
+
+/* 26 символов группами по 5 — переносится по пробелам между группами. */
+.invite-code-container code,
+.invite-code {
+    font-family: var(--font-mono);
+    font-size: 18px;
+    line-height: 28px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    word-spacing: 0.2em;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+    user-select: all;
+}
+
+.invite-code-container code {
+    flex: 1;
+    min-width: 0;
+}
+
+.invite-code {
+    display: block;
+    padding: 12px 16px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    text-align: center;
+}
+
+.invite-code-container .invite-code {
+    display: block;
+    padding: 0;
+    border: 0;
+    background: none;
+    text-align: left;
+}
+
+.invite-code.is-expired,
+.invite-code.is-disabled {
+    color: var(--text-3);
+    text-decoration: line-through;
+    text-decoration-thickness: 2px;
+}
+
+/* Код недействителен (истёк или выключен): пунктир и приглушённый текст —
+   зачёркивание не подходит к надписи «Приглашение выключено». */
+.invite-code-container.expired {
+    border-style: dashed;
+    background: transparent;
+}
+
+.invite-code-container.expired code {
+    color: var(--text-3);
+    font-family: var(--font);
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 500;
+    letter-spacing: normal;
+    word-spacing: normal;
+    user-select: text;
+}
+
+/* «Скопировать ссылку» под QR — по центру; без QR (код выключен) —
+   с отступом от поля кода. */
+.invite-qr + .btn {
+    display: flex;
+    margin: 12px auto 8px;
+}
+
+.invite-meta {
+    margin-top: 8px;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-2);
+}
+
+.invite-meta.expired {
+    font-weight: 600;
+    color: var(--text);
+}
+
+.invite-hint {
+    margin: 12px 0;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-3);
+}
+
+/* QR всегда чёрным по белому в обеих темах — иначе его не отсканировать. */
+.invite-qr {
+    display: grid;
+    place-items: center;
+    width: fit-content;
+    max-width: 100%;
+    margin: 16px auto;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: #ffffff;
+    color: #000000;
+    color-scheme: light;
+}
+
+.invite-qr canvas,
+.invite-qr img,
+.invite-qr svg {
+    display: block;
+    width: 216px;
+    max-width: 100%;
+    height: auto;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+}
+
+.invite-qr.is-expired,
+.invite-qr.is-disabled {
+    opacity: 0.2;
+}
+
+.invite-settings {
+    display: grid;
+    gap: 16px;
+    margin: 16px 0;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+}
+
+.invite-settings > .field,
+.invite-settings > .form-group {
+    margin-bottom: 0;
+}
+
+.invite-settings > legend {
+    color: var(--text);
+    font-weight: 600;
+}
+
+.invite-settings > .toggle-row {
+    padding: 0;
+    min-height: 40px;
+}
+
+.invite-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+.invite-actions > .btn {
+    flex: 1 1 auto;
+}
+
+.invite-status {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 12px;
+    font-size: 13px;
+    line-height: 20px;
+    color: var(--text-2);
+}
+
+.invite-status:empty {
+    display: none;
+}
+
+.invite-status-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* Первая строка — срок кода: главное, что нужно знать. */
+.invite-status-line:first-child {
+    color: var(--text);
+    font-weight: 500;
+}
+
+.invite-status.expired .invite-status-line:first-child {
+    font-weight: 600;
+}
+
+.invite-status .icon {
+    width: 16px;
+    height: 16px;
+    stroke-width: 2;
+}
+
+.invite-status.is-warning,
+.invite-status.is-expired,
+.invite-status.is-disabled {
+    color: var(--text);
+    font-weight: 600;
+}
+
+/* Заявки в окне. */
+.request-list,
+.requests-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.request-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 56px;
+    padding: 8px 0;
+}
+
+.request-row + .request-row {
+    border-top: 1px solid var(--border);
+}
+
+.request-row > .member-info,
+.request-row > .request-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.request-row .member-actions {
+    flex: none;
+    margin-top: 0;
+}
+
+/* Заглушка «Новых заявок нет». */
+.request-row.muted {
+    justify-content: center;
+    min-height: 0;
+    padding: 16px 0;
+    font-size: 13px;
+}
+
+.request-row > .avatar {
+    width: 36px;
+    height: 36px;
+    font-size: 14px;
+}
+
+.request-info {
+    display: flex;
+    flex-direction: column;
+}
+
+.request-name {
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.request-time {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 16px;
+    color: var(--text-3);
+    font-variant-numeric: tabular-nums;
+}
+
+.request-actions {
+    display: flex;
+    gap: 8px;
+    flex: none;
+}
+
+/* Участники и ключи. */
+.members-intro {
+    margin-bottom: 16px;
+    font-size: 13px;
+    line-height: 20px;
+    color: var(--text-2);
+}
+
+.members-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.members-placeholder {
+    padding: 16px;
+    color: var(--text-3);
+    font-size: 13px;
+    text-align: center;
+}
+
+.member-item {
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+}
+
+.member-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.member-avatar {
+    width: 36px;
+    height: 36px;
+    font-size: 14px;
+    line-height: 20px;
+}
+
+.member-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+    min-width: 0;
+}
+
+.member-info small {
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-3);
+}
+
+.member-name {
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.member-status {
+    display: inline-flex;
+    align-items: center;
+    align-self: flex-start;
+    gap: 4px;
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 500;
+    color: var(--text-2);
+}
+
+.member-status svg.icon {
+    width: 12px;
+    height: 12px;
+    stroke-width: 2.5;
+}
+
+.member-status.verified {
+    color: var(--text);
+    font-weight: 600;
+}
+
+.member-status.verified:not(:has(.icon))::before {
+    content: "";
+    width: 12px;
+    height: 12px;
+    background-color: currentColor;
+    -webkit-mask: var(--mask-check) center / contain no-repeat;
+    mask: var(--mask-check) center / contain no-repeat;
+}
+
+/* Ключ сменился — инверсная метка: главное, что должно броситься в глаза. */
+.member-status.changed {
+    padding: 0 6px;
+    border-radius: 4px;
+    background: var(--text);
+    color: var(--bg);
+    font-weight: 600;
+}
+
+.member-status.unverified {
+    color: var(--text-2);
+}
+
+.member-status.unknown {
+    color: var(--text-3);
+}
+
+/* Журнал ключей: строка под статусом участника и записи в окне «Журнал ключей». */
+.member-info small.member-kt {
+    color: var(--text-3);
+}
+
+/* Подписанный состав группы: кто подтвердил участника; неподтверждённый заметнее остальных строк, действие над ним - под строкой. */
+.member-info small.member-how {
+    color: var(--text-2);
+}
+
+.member-info small.member-how.unconfirmed {
+    color: var(--text);
+    font-weight: 600;
+}
+
+.member-item > .btn {
+    margin-top: 8px;
+}
+
+/* Сообщение от отправителя вне подтверждённого состава: пометка рядом с именем. */
+.message-author .message-author-flag {
+    margin-left: 6px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-2);
+}
+
+.kt-alert {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.kt-alert:last-child {
+    border-bottom: 0;
+}
+
+.kt-alert-title {
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.kt-alert p,
+.kt-alert-list-item {
+    margin: 0;
+    font-size: 13px;
+    line-height: 20px;
+    color: var(--text-2);
+}
+
+.kt-fingerprint {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 12px;
+    line-height: 18px;
+    word-break: break-all;
+    color: var(--text);
+}
+
+.member-code-btn {
+    flex: none;
+    height: var(--control-h-sm);
+    padding: 0 12px;
+    font-size: 13px;
+}
+
+.member-code-btn[aria-expanded="true"] {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-fg);
+}
+
+.member-details {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+}
+
+.member-warning {
+    margin-bottom: 12px;
+}
+
+/* Код безопасности: 12 групп по 5 цифр сеткой, чтобы сверять вслух. */
+.safety-number {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px 16px;
+    padding: 16px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    font-family: var(--font-mono);
+    font-size: 16px;
+    line-height: 24px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+    color: var(--text);
+}
+
+.safety-number.unavailable {
+    display: block;
+    font-family: var(--font);
+    font-size: 13px;
+    line-height: 20px;
+    font-weight: 400;
+    letter-spacing: normal;
+    color: var(--text-3);
+    border-style: dashed;
+}
+
+.safety-hint {
+    margin: 8px 0;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-3);
+}
+
+.member-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.member-actions .auth-btn,
+.member-actions .danger-btn {
+    height: var(--control-h);
+    font-size: 14px;
+}
+
+
