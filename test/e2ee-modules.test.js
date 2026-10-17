@@ -78,8 +78,8 @@ test('e2ee.js не объявляет заново функции, вынесе�
     for (const mod of loaded) {
         const api = require(path.join(PUBLIC_DIR, mod.file));
         for (const name of Object.keys(api)) {
-            // Только верхний уровень модуля (отступ 4): одноимённые локальные помощники внутри функций не в счёт.
-            const declared = new RegExp(`^ {4}(?:async\\s+)?function\\s+${name}\\s*\\(|^ {4}const\\s+${name}\\s*=`, 'm');
+            // Верхний уровень модуля (отступ 4) и верхний уровень createClient (отступ 8); глубже - локальные имена.
+            const declared = new RegExp(`^ {4}(?: {4})?(?:async\\s+)?function\\s+${name}\\s*\\(|^ {4}(?: {4})?const\\s+${name}\\s*=`, 'm');
             assert.ok(!declared.test(source), `${name} объявлена и в ${mod.file}, и в e2ee.js`);
         }
     }

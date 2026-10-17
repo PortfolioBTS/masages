@@ -4,17 +4,22 @@
 //   - индекс архива ключей: archiveEntryId, archiveHas;
 //   - missingKeyReason: почему нет ключа сообщения ниже позиции цепочки;
 //   - normalizePolicy, normalizeIds, normalizeParticipants: любой мусор сводится к безопасному виду;
-//   - logExcluded, identityStatus: статус закреплённой identity собеседника.
+//   - logExcluded, identityStatus: статус закреплённой identity собеседника;
+//   - имена записей хранилища (stateName, archiveName, seenName, skIndexName, keyRequestName, editName и др.),
+//     sharedMarkName, tombstoneArchive, sessionMatchesPin, envelopeKeyId - мелкие помощники, которые лежали внутри
+//     createClient, но не пользовались его замыканием.
 // Файл исполняется и в браузере (window.NyxoE2eeState, подключается до e2ee.js), и в Node (require).
 
 (function (root, factory) {
     if (typeof module !== 'undefined' && module.exports) {
-        module.exports = factory();
+        module.exports = factory(require('./e2ee-codec.js'));
     } else {
-        root.NyxoE2eeState = factory();
+        root.NyxoE2eeState = factory(root.NyxoE2eeCodec);
     }
-})(typeof self !== 'undefined' ? self : this, function () {
+})(typeof self !== 'undefined' ? self : this, function (Codec) {
     'use strict';
+
+    const { isCanonicalKeyId } = Codec;
 
     // ---- Записи ключей: индекс архива ----
 
@@ -76,8 +81,49 @@
         return pin.verified ? 'verified' : 'unverified';
     }
 
+    // ---- Имена записей хранилища и мелкие помощники (прежде внутри createClient) ----
+
+    const stateName = (roomId, senderId) => 'senderKey:' + roomId + ':' + senderId;
+    const archiveName = (roomId, senderId, keyId) => 'skArchive:' + roomId + ':' + senderId + ':' + keyId;
+    const seenName = (roomId, senderId, keyId) => 'seen:' + roomId + ':' + senderId + ':' + keyId;
+    const archivePrefix = (roomId) => 'skArchive:' + roomId + ':';
+
+    const skIndexName = (roomId, keyId) => 'skIndex:' + roomId + ':' + keyId;
+    const skIndexPrefix = (roomId) => 'skIndex:' + roomId + ':';
+
+    const keyRequestName = (roomId, keyId) => 'keyReq:' + roomId + ':' + keyId;
+    const keyServedName = (roomId, keyId, requesterId) => 'keyServed:' + roomId + ':' + keyId + ':' + requesterId;
+
+    const editPrefix = (roomId) => 'edit:' + roomId + ':';
+    const editName = (roomId, mid) => editPrefix(roomId) + mid;
+
+    function sharedMarkName(roomId, senderKeyId, peerId) {
+        return 'sharedWith2:' + roomId + ':' + senderKeyId + ':' + peerId;
+    }
+
+    // В индексе архива запись превращается в надгробие (просто id): ключ
+    // удалён, но заменённый ротацией ключ обратно уже не поставить.
+    function tombstoneArchive(state, keyId) {
+        const list = state.archive || [];
+        const i = list.findIndex(entry => archiveEntryId(entry) === keyId);
+        if (i >= 0 && typeof list[i] !== 'string') list[i] = keyId;
+    }
+
+    function sessionMatchesPin(session, pin) {
+        return Boolean(session && pin && !pin.pending
+            && session.peerSignPub === pin.signPub && session.peerDhPub === pin.dhPub);
+    }
+
+    function envelopeKeyId(text) {
+        let envelope;
+        try { envelope = JSON.parse(text); } catch { return null; }
+        return envelope && typeof envelope === 'object' && isCanonicalKeyId(envelope.senderKeyId) ? envelope.senderKeyId : null;
+    }
+
     return Object.freeze({
         archiveEntryId, archiveHas, missingKeyReason, normalizePolicy, normalizeIds, normalizeParticipants,
-        logExcluded, identityStatus,
+        logExcluded, identityStatus, stateName, archiveName, seenName, archivePrefix,
+        skIndexName, skIndexPrefix, keyRequestName, keyServedName, editPrefix, editName,
+        sharedMarkName, tombstoneArchive, sessionMatchesPin, envelopeKeyId,
     });
 });

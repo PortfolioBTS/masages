@@ -378,7 +378,9 @@
     } = Formats;
     const {
         archiveEntryId, archiveHas, missingKeyReason, normalizePolicy, normalizeIds, normalizeParticipants,
-        logExcluded, identityStatus,
+        logExcluded, identityStatus, stateName, archiveName, seenName, archivePrefix,
+        skIndexName, skIndexPrefix, keyRequestName, keyServedName, editPrefix, editName,
+        sharedMarkName, tombstoneArchive, sessionMatchesPin, envelopeKeyId,
     } = KeyState;
 
     // Строгая проверка Ed25519 (public/lib/ed25519-strict.js, signed-membership.md 6.1): ключ малого
@@ -851,10 +853,7 @@
         //     и умирает вместе со своим ключом.
         //   roomPolicy:<комната> — { historyMode, expirySeconds, updatedAt }.
 
-        const stateName = (roomId, senderId) => 'senderKey:' + roomId + ':' + senderId;
-        const archiveName = (roomId, senderId, keyId) => 'skArchive:' + roomId + ':' + senderId + ':' + keyId;
-        const seenName = (roomId, senderId, keyId) => 'seen:' + roomId + ':' + senderId + ':' + keyId;
-        const archivePrefix = (roomId) => 'skArchive:' + roomId + ':';
+        // Имена записей (stateName, archiveName, seenName, archivePrefix) заданы в lib/e2ee-state.js.
         // Индекс отправителей (sealed-sender.md, 9.2): keyId → отправитель. В строке
         // сообщения комнаты автора нет, автора находит клиент по keyId из конверта.
         //   skIndex:<комната>:<senderKeyId> = { v:1, sender }              — ключ есть
@@ -863,8 +862,7 @@
         // 'history-not-kept', а не 'no-sender-key' (иначе интерфейс счёл бы ключ
         // потерянным и слал лишние запросы ключа). Флаг unverifiedSender в индексе
         // НЕ хранится: он считается при каждой расшифровке по текущему составу.
-        const skIndexName = (roomId, keyId) => 'skIndex:' + roomId + ':' + keyId;
-        const skIndexPrefix = (roomId) => 'skIndex:' + roomId + ':';
+        // skIndexName и skIndexPrefix - там же, в lib/e2ee-state.js.
 
         function ownKeyName(roomId) {
             return stateName(roomId, userId);
@@ -1059,14 +1057,6 @@
         async function goneKeyReasonLocked(roomId, state) {
             if (state && state.forgottenBelow > 0) return 'history-not-kept';
             return (await readPolicyLocked(roomId)).historyMode === 'none' ? 'history-not-kept' : 'key-expired';
-        }
-
-        // В индексе архива запись превращается в надгробие (просто id): ключ
-        // удалён, но заменённый ротацией ключ обратно уже не поставить.
-        function tombstoneArchive(state, keyId) {
-            const list = state.archive || [];
-            const i = list.findIndex(entry => archiveEntryId(entry) === keyId);
-            if (i >= 0 && typeof list[i] !== 'string') list[i] = keyId;
         }
 
         // Убирает из таблицы повторов итерации ниже границы: их ключи удалены, а
@@ -2010,11 +2000,6 @@
 
         // ---- Попарный канал: я — отправитель key-share ----
 
-        function sessionMatchesPin(session, pin) {
-            return Boolean(session && pin && !pin.pending
-                && session.peerSignPub === pin.signPub && session.peerDhPub === pin.dhPub);
-        }
-
         async function fetchBundle(peerId) {
             let res;
             try { res = await transport.getBundle(peerId); } catch { return { error: 'не удалось получить ключи собеседника' }; }
@@ -2758,10 +2743,6 @@
             return Boolean(await storage.get(ownKeyName(roomId)));
         }
 
-        function sharedMarkName(roomId, senderKeyId, peerId) {
-            return 'sharedWith2:' + roomId + ':' + senderKeyId + ':' + peerId;
-        }
-
         // Что клиент знает о составе из ответа GET participants (signed-membership.md, 7.2): свои сертификаты,
         // снимки к ним и сертификат приглашения. Всё разбирается строго: сервер недоверенный.
         function normalizeMembershipInfo(info, meId) {
@@ -3048,15 +3029,6 @@
         // его с начала эпохи, если мы имели на неё право. Для архивных ключей
         // (ротированных) переотправки нет.
 
-        const keyRequestName = (roomId, keyId) => 'keyReq:' + roomId + ':' + keyId;
-        const keyServedName = (roomId, keyId, requesterId) => 'keyServed:' + roomId + ':' + keyId + ':' + requesterId;
-
-        function envelopeKeyId(text) {
-            let envelope;
-            try { envelope = JSON.parse(text); } catch { return null; }
-            return envelope && typeof envelope === 'object' && isCanonicalKeyId(envelope.senderKeyId) ? envelope.senderKeyId : null;
-        }
-
         // envelopes — тексты конвертов, которые не удалось расшифровать из-за
         // 'no-sender-key' или 'stale-sender-key'. Один и тот же ключ запрашивается
         // не чаще раза в час; не больше MAX_KEY_REQUEST_IDS ключей за раз.
@@ -3162,8 +3134,7 @@
         // версии не переписывает всю карту. Предел MAX_EDIT_ENTRIES на комнату,
         // вытесняется запись с наименьшим ts: вытесненный mid теряет защиту от
         // отката и подмены автора. Функции *Locked — только внутри withLock.
-        const editPrefix = (roomId) => 'edit:' + roomId + ':';
-        const editName = (roomId, mid) => editPrefix(roomId) + mid;
+        // editPrefix и editName (имена записей о версиях) заданы в lib/e2ee-state.js.
         // Сколько записей в комнате было при последнем пересчёте. Чужая вкладка
         // может дописать своих — тогда при достижении предела пересчитаем по хранилищу.
         const editCounts = new Map();
