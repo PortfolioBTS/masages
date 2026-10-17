@@ -15,8 +15,9 @@
 const { test } = require('node:test');
 const assert = require('assert');
 const crypto = require('crypto');
-const { createSuite, roomWithMember } = require('./helpers/scenarios');
+const { createSuite, roomWithMember, waitUntil } = require('./helpers/scenarios');
 const { purgeExpiredKeyRequests, KEY_REQUEST_TTL_HOURS, MAX_PENDING_KEY_REQUESTS } = require('../../lib/e2ee-groups');
+const { advisoryLockKey } = require('../../lib/advisory-locks');
 
 const suite = createSuite('sender-keys');
 
@@ -52,6 +53,37 @@ const share = (recipientUserId, text = 'x') => ({ recipientUserId, ciphertext: `
 const getShares = async (who) => (await who.client.get(`/api/keys/key-shares/${who.chatId}`)).body;
 const askKeys = (who, ids) => who.client.post('/api/keys/key-requests', { chatId: who.chatId, senderKeyIds: ids });
 const pending = async (who) => (await who.client.get(`/api/keys/key-requests/${who.chatId}`)).body;
+
+// Пока тест держит блокировку фоновой задачи jobName, её проходы на сервере пропускаются: сервер набора запускает задачи
+// обслуживания каждые 300 мс (NYXO_TEST_MAINTENANCE_MS) и под той же advisory-блокировкой (lib/advisory-locks.js, createRunExclusive).
+// Без неё уборка просроченных запросов ключа могла удалить строку между шагами теста: проверки стали бы гонкой.
+// pg_advisory_lock ждёт, если проход уже идёт, поэтому после возврата своих проходов у задачи нет. Возвращает функцию снятия.
+async function holdJobLock(jobName) {
+    const key = advisoryLockKey(`job:${jobName}`);
+    const client = await suite.db.connect();
+    try {
+        await client.query('SELECT pg_advisory_lock($1::bigint)', [key]);
+    } catch (error) {
+        client.release();
+        throw error;
+    }
+    // Контроль самого приёма: с другого соединения блокировку взять нельзя, значит runExclusive сервера её тоже не возьмёт.
+    const probe = await suite.db.connect();
+    try {
+        const taken = (await probe.query('SELECT pg_try_advisory_lock($1::bigint) AS locked', [key])).rows[0].locked;
+        if (taken) await probe.query('SELECT pg_advisory_unlock($1::bigint)', [key]);
+        assert.strictEqual(taken, false, 'блокировка задачи ' + jobName + ' удержана тестом');
+    } finally {
+        probe.release();
+    }
+    return async () => {
+        try {
+            await client.query('SELECT pg_advisory_unlock($1::bigint)', [key]);
+        } finally {
+            client.release();
+        }
+    };
+}
 
 test('схема: таблица запросов ключа без точного времени (только час), id ключа — 16 байт', async () => {
     const cols = await suite.query(
@@ -227,17 +259,31 @@ test('запрос ключа: done стирает только свои стр�
     assert.strictEqual((await bob.client.post('/api/keys/key-requests/done', { chatId: bob.chatId, senderKeyIds: ['плохой'] })).status, 400);
     assert.strictEqual((await carol.client.post('/api/keys/key-requests/done', { chatId: bob.chatId, senderKeyIds: [shared] })).body.success, false, 'чужой чат');
 
-    // Просроченная строка (старше 7 суток) не отдаётся владельцу и убирается задачей уборки.
+    // Просроченная строка (старше 7 суток) не отдаётся владельцу и убирается задачей уборки. Фоновые проходы сервера на это
+    // время приостановлены (holdJobLock): иначе они удалили бы строку между шагами, и проверки зависели бы от тайминга.
+    const release = await holdJobLock('purgeKeyRequests');
+    try {
+        await suite.query('UPDATE e2ee_key_requests SET created_hour = created_hour - $2 WHERE room_id = $1', [r.roomId, KEY_REQUEST_TTL_HOURS + 1]);
+        assert.deepStrictEqual((await pending(r.owner)).requests, []);
+        assert.strictEqual(await requestRows(r.roomId), 1, 'просроченная строка ещё в таблице, но не отдаётся');
+        const removed = await purgeExpiredKeyRequests(suite.db);
+        assert.ok(removed >= 1, 'задача уборки удалила просроченное: ' + removed);
+        assert.strictEqual(await requestRows(r.roomId), 0);
+        // Свежая строка задачей уборки не трогается.
+        await askKeys(carol, [keyId()]);
+        await purgeExpiredKeyRequests(suite.db);
+        assert.strictEqual(await requestRows(r.roomId), 1);
+    } finally {
+        await release();
+    }
+
+    // Блокировка снята: настоящая фоновая задача сервера (проходы каждые 300 мс) сама убирает просроченную строку,
+    // свежие остаются. Так проверено и то, что приём с блокировкой не скрыл неработающую задачу.
     await suite.query('UPDATE e2ee_key_requests SET created_hour = created_hour - $2 WHERE room_id = $1', [r.roomId, KEY_REQUEST_TTL_HOURS + 1]);
-    assert.deepStrictEqual((await pending(r.owner)).requests, []);
-    assert.strictEqual(await requestRows(r.roomId), 1);
-    const removed = await purgeExpiredKeyRequests(suite.db);
-    assert.ok(removed >= 1, 'задача уборки удалила просроченное: ' + removed);
-    assert.strictEqual(await requestRows(r.roomId), 0);
-    // Свежая строка задачей уборки не трогается.
-    await askKeys(carol, [keyId()]);
-    await purgeExpiredKeyRequests(suite.db);
-    assert.strictEqual(await requestRows(r.roomId), 1);
+    await askKeys(bob, [keyId()]);
+    await waitUntil(async () => (await requestRows(r.roomId)) === 1, { timeoutMs: 15000, intervalMs: 100, what: 'фоновая уборка просроченного запроса ключа' });
+    const rest = await suite.query('SELECT requester_id FROM e2ee_key_requests WHERE room_id = $1', [r.roomId]);
+    assert.deepStrictEqual(rest.rows.map(row => row.requester_id), [bob.id], 'осталась только свежая строка Боба');
 });
 
 test('запросы ключа уходят вместе с участием: выход из комнаты, удаление аккаунта и комнаты', async () => {
