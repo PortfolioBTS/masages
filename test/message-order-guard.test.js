@@ -1,7 +1,7 @@
 'use strict';
 // Тест-запрет порядка по id (docs/security/message-ordering.md, раздел 6.1 и 15):
 // id сообщения случайный и порядка не задаёт, порядок и курсоры — только seq.
-// В server.js и public/script.js не должно быть выражений, которые молча
+// В server.js и public/js/*.js (бывший public/script.js) не должно быть выражений, которые молча
 // превращают id обратно в порядок:
 //   ORDER BY m.id    — сортировка по id;
 //   id < $           — курсор «старше id» (старый ?before=<id>);
@@ -14,9 +14,11 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const { clientScriptFiles } = require('./client-script-source');
 
 const ROOT = path.join(__dirname, '..');
-const FILES = ['server.js', 'public/script.js'];
+// Скрипт приложения разбит на public/js/*.js (T6.2): проверяется каждый файл.
+const FILES = ['server.js', ...clientScriptFiles().map(file => `public/${file}`)];
 
 // Комментарии вырезаются (в них можно описывать, что именно запрещено).
 function stripComments(source) {

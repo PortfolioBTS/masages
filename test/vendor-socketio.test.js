@@ -16,6 +16,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const { clientScriptFiles } = require('./client-script-source');
 
 const ROOT = path.join(__dirname, '..');
 const VENDOR = path.join(ROOT, 'public', 'vendor', 'socket.io.min.js');
@@ -82,7 +83,7 @@ test('index.html подключает вендор, а не /socket.io/socket.io
     assert.ok(!html.includes('/socket.io/'), 'index.html ссылается на /socket.io/');
     const vendorAt = html.indexOf('src="vendor/socket.io.min.js"');
     assert.ok(vendorAt > 0, 'нет подключения vendor/socket.io.min.js');
-    assert.ok(vendorAt < html.indexOf('src="script.js"'), 'io() нужен script.js — вендор должен идти раньше');
+    assert.ok(vendorAt < html.indexOf(`src="${clientScriptFiles()[0]}"`), 'io() нужен script.js — вендор должен идти раньше');
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');

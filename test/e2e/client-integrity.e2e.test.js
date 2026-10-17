@@ -48,7 +48,7 @@ test('/link.my — 301 на «/» без подстановки адреса х�
 
 test('CSP: script-src только self, без nonce, strict-dynamic и unsafe-inline — на / и на редиректе', async () => {
     const client = suite.client();
-    for (const url of ['/', '/link.my', '/script.js']) {
+    for (const url of ['/', '/link.my', '/js/01-state.js']) {
         const csp = (await client.get(url)).headers.get('content-security-policy');
         assert.ok(csp, `нет CSP на ${url}`);
         assert.match(csp, /(^|; )script-src 'self'(;|$)/, url);

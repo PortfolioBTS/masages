@@ -11,7 +11,8 @@ const path = require('path');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const read = (name) => fs.readFileSync(path.join(PUBLIC_DIR, name), 'utf8');
-const script = read('script.js');
+const { readClientScript, clientScriptFiles } = require('./client-script-source');
+const script = readClientScript();
 const html = read('index.html');
 const lib = read('lib/text-search.js');
 const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
@@ -114,7 +115,7 @@ test('разметка: поле поиска чатов, пустой резу�
     for (const id of ['chat-search-prev', 'chat-search-next', 'chat-search-older', 'chat-search-close']) {
         assert.strictEqual((html.match(new RegExp(`id="${id}"`, 'g')) || []).length, 1, id);
     }
-    assert.ok(html.indexOf('lib/text-search.js') > 0 && html.indexOf('lib/text-search.js') < html.indexOf('<script src="script.js">'));
+    assert.ok(html.indexOf('lib/text-search.js') > 0 && html.indexOf('lib/text-search.js') < html.indexOf(`<script src="${clientScriptFiles()[0]}">`));
     assert.match(read('icons.js'), /'chevron-up':/);
     // Прежнего «Поиск чатов и сообщений» нет: серверного поиска по сообщениям не существует.
     assert.ok(!html.includes('Поиск чатов и сообщений'));

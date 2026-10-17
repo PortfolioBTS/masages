@@ -9,6 +9,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const { readClientScript } = require('./client-script-source');
 const vm = require('vm');
 
 let passed = 0, failed = 0;
@@ -24,7 +25,7 @@ async function test(name, fn) {
     }
 }
 
-const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'script.js'), 'utf8');
+const source = readClientScript();
 const block = (() => {
     const start = source.indexOf('// >>> e2ee-room-keys');
     const end = source.indexOf('// <<< e2ee-room-keys');
