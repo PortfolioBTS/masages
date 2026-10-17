@@ -19,7 +19,8 @@ const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 // Адреса скриптов приложения (['js/01-state.js', ...]) в порядке подключения.
 function clientScriptFiles(publicDir = PUBLIC_DIR) {
     const html = fs.readFileSync(path.join(publicDir, 'index.html'), 'utf8');
-    return [...html.matchAll(/<script\s+src="(js\/[^"]+)"><\/script>/g)].map((m) => m[1]);
+    // После src может стоять integrity (SRI включён в волне 6).
+    return [...html.matchAll(/<script\s+src="(js\/[^"]+)"[^>]*><\/script>/g)].map((m) => m[1]);
 }
 
 // Тело файла без заголовка: заголовок кончается первой пустой строкой.

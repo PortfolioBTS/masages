@@ -115,7 +115,7 @@ test('разметка: значок шифрования в шапке, сос�
     const status = html.indexOf('id="composer-status"');
     const fileInput = html.indexOf('id="file-input"');
     assert.ok(sendBtn > 0 && status > sendBtn && fileInput > status, 'строка состояния стоит под полем ввода');
-    assert.ok(html.indexOf('<script src="lib/e2ee-policy.js">') > 0 && html.indexOf('lib/e2ee-policy.js') < html.indexOf(`<script src="${clientScriptFiles()[0]}">`));
+    assert.ok(html.indexOf('<script src="lib/e2ee-policy.js"') > 0 && html.indexOf('lib/e2ee-policy.js') < html.indexOf(`<script src="${clientScriptFiles()[0]}"`));
     // Значок открывает «Участники и ключи».
     assert.match(functionBody(script, 'setupE2eeListeners'), /e2eeIndicator\.addEventListener\('click', openMembersModal\)/);
 });

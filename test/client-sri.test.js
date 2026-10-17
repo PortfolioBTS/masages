@@ -1,14 +1,13 @@
 'use strict';
 // SRI для index.html (lib/client-sri.js, scripts/update-sri.js), 6.1 / roadmap R10.
 //
-// Инструмент готов, а атрибуты integrity в index.html ПОКА НЕ ВКЛЮЧЕНЫ: их
-// включат после разбиения файлов клиента (волна 6). Поэтому тест «SRI актуален»
-// работает по переключателю SRI_ENABLED:
-//   false (сейчас) — в index.html не должно быть ни одного integrity: частично
+// Атрибуты integrity в index.html ВКЛЮЧЕНЫ после разбиения файлов клиента
+// (волна 6). Тест «SRI актуален» работает по переключателю SRI_ENABLED:
+//   false          — в index.html не должно быть ни одного integrity: частично
 //                    включённый SRI опаснее выключенного (устаревший хэш
 //                    молча ломает загрузку страницы), так что включать надо
 //                    осознанно — переставив этот флаг;
-//   true           — у каждого своего <script src> и <link rel="stylesheet">
+//   true (сейчас)  — у каждого своего <script src> и <link rel="stylesheet">
 //                    есть integrity, и он совпадает с файлом в public/ (иначе
 //                    браузер откажется выполнять скрипт и клиент не запустится).
 // Логика разбора и расчёта проверяется на выдуманных страницах независимо от флага.
@@ -22,8 +21,8 @@ const { clientScriptFiles } = require('./client-script-source');
 const { spawnSync } = require('child_process');
 const { applySri, findSriTags, hasAnyIntegrity, localUrlPath } = require('../lib/client-sri');
 
-// Волна 6: поставить true, выполнить `node scripts/update-sri.js`, пересобрать манифест.
-const SRI_ENABLED = false;
+// Включено в волне 6. После любой правки JS/CSS клиента: `node scripts/update-sri.js`.
+const SRI_ENABLED = true;
 
 const ROOT = path.join(__dirname, '..');
 const PUBLIC_DIR = path.join(ROOT, 'public');

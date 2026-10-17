@@ -191,7 +191,7 @@ async function main() {
 
     await test('страница подключает модули состава до e2ee.js: ed25519-strict, membership, membership-client', () => {
         const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
-        const at = (name) => html.indexOf(`<script src="${name}"></script>`);
+        const at = (name) => html.indexOf(`<script src="${name}"`);
         const order = ['lib/ed25519-strict.js', 'lib/membership.js', 'lib/membership-client.js', 'e2ee.js', ...clientScriptFiles()].map(at);
         assert.ok(order.every(i => i >= 0), 'все скрипты подключены: ' + order.join());
         assert.deepStrictEqual(order.slice().sort((p, q) => p - q), order, 'порядок подключения');

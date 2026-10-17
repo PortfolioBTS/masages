@@ -8,18 +8,18 @@
     <link rel="icon" type="image/svg+xml" href="icons/favicon.svg">
     <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
     <link rel="manifest" href="manifest.webmanifest">
-    <script src="theme.js"></script>
-    <script src="icons.js"></script>
+    <script src="theme.js" integrity="sha384-T1UMrJ7wNeCotEPdTY8WrewF5BfXH32Af6nBpCERowFUsATGa+iVI8vq2JwkSywQ"></script>
+    <script src="icons.js" integrity="sha384-Y1YHD/B0RxyQDbpBNHVzRNYsP1ps2Tiujel4NwxbUFCWOf0c47syPEGDWKuWM6Gq"></script>
     <!-- Стили разбиты на части; порядок подключения = порядок каскада, переставлять нельзя. -->
-    <link rel="stylesheet" href="css/tokens.css">
-    <link rel="stylesheet" href="css/controls.css">
-    <link rel="stylesheet" href="css/auth.css">
-    <link rel="stylesheet" href="css/app-shell.css">
-    <link rel="stylesheet" href="css/messages.css">
-    <link rel="stylesheet" href="css/composer.css">
-    <link rel="stylesheet" href="css/modals.css">
-    <link rel="stylesheet" href="css/popups.css">
-    <link rel="stylesheet" href="css/responsive.css">
+    <link rel="stylesheet" href="css/tokens.css" integrity="sha384-8F/USs01BH7JF0575Zx88I90/A/3anzkIOUsTxPTUF8IAsq+BFThFqHG147ow2Fg">
+    <link rel="stylesheet" href="css/controls.css" integrity="sha384-kcgpYSd0nkLZXXj35DHNviipc69vD1rQTr6gFTOEw4KeRapaXhfmY6i5rugWZXxG">
+    <link rel="stylesheet" href="css/auth.css" integrity="sha384-PiMCIhU6aYgSHkoTczbWkJI1gxf35vEUgKpJ0bpmduVrdYPlNjmA/gY0DEji9ZWY">
+    <link rel="stylesheet" href="css/app-shell.css" integrity="sha384-pERlehZoKebLSb/igJzUZAnz1smG8rICO1oiqEWVhjLRJx/4DKbXznT9ZE/HgnzX">
+    <link rel="stylesheet" href="css/messages.css" integrity="sha384-kzsZl8BzJ1Rka26a+gHBY06uyEJfEtKSAg3v+peF/pSVZRakalS6o0kpO6NY3lfN">
+    <link rel="stylesheet" href="css/composer.css" integrity="sha384-/MZVVTF6nGt8HiYQDJ3lgD67qEbH+NT+b6Ji1enfaWx5BWagxOz6IG3LvQ7+eCWq">
+    <link rel="stylesheet" href="css/modals.css" integrity="sha384-+bR67Xb8RBGExM+5UPmGf7nksR3yfJYxghGzDjK7NtA0XPQU83dK5BITxJe/1JSD">
+    <link rel="stylesheet" href="css/popups.css" integrity="sha384-2uuqAvPdNddpQsYDGq2ndXEuc7O3RRPPFCDKikXUJ7uy35JNVhp8v/iBv7HF3v+p">
+    <link rel="stylesheet" href="css/responsive.css" integrity="sha384-2us9UdyDffKSwJGBliT7t+SqB9q9oOfsahLTb6yaf162h9kWIweAl8tbYZjpM+7K">
 </head>
 <body>
     <main id="auth-screen" class="auth-screen" aria-labelledby="auth-title">
@@ -585,54 +585,54 @@
     </div>
     <div id="overlay" class="overlay hidden"></div>
 
-    <script src="vendor/socket.io.min.js"></script>
-    <script src="mlkem.js"></script>
-    <script src="lib/sanitize-common.js"></script>
-    <script src="lib/sanitize-jpeg.js"></script>
-    <script src="lib/sanitize-png-gif.js"></script>
-    <script src="lib/sanitize-webp.js"></script>
-    <script src="lib/sanitize-mp4.js"></script>
-    <script src="lib/sanitize-webm.js"></script>
-    <script src="lib/sanitize-inflate.js"></script>
-    <script src="lib/sanitize-pdf.js"></script>
-    <script src="media-sanitizer.js"></script>
-    <script src="lib/mime-policy.js"></script>
-    <script src="lib/ed25519-strict.js"></script>
-    <script src="lib/kt.js"></script>
-    <script src="lib/kt-client.js"></script>
-    <script src="lib/membership.js"></script>
-    <script src="lib/membership-client.js"></script>
-    <script src="lib/e2ee-codec.js"></script>
-    <script src="lib/e2ee-crypto.js"></script>
-    <script src="lib/e2ee-formats.js"></script>
-    <script src="lib/e2ee-state.js"></script>
-    <script src="e2ee.js"></script>
-    <script src="vendor/qrcode.js"></script>
-    <script src="lib/invite.js"></script>
-    <script src="lib/lifetime.js"></script>
-    <script src="lib/message-order.js"></script>
-    <script src="lib/e2ee-lock.js"></script>
-    <script src="lib/e2ee-policy.js"></script>
-    <script src="lib/text-search.js"></script>
-    <script src="lib/sw-core.js"></script>
-    <script src="lib/sw-client.js"></script>
-    <script src="js/01-state.js"></script>
-    <script src="js/02-utils.js"></script>
-    <script src="js/03-e2ee-client.js"></script>
-    <script src="js/04-e2ee-rooms.js"></script>
-    <script src="js/05-attachments.js"></script>
-    <script src="js/06-session-socket.js"></script>
-    <script src="js/07-api-listeners.js"></script>
-    <script src="js/08-modals-profile.js"></script>
-    <script src="js/09-auth-screen.js"></script>
-    <script src="js/10-invites-join.js"></script>
-    <script src="js/11-key-log-members.js"></script>
-    <script src="js/12-chat-list.js"></script>
-    <script src="js/13-chat-messages.js"></script>
-    <script src="js/14-send.js"></script>
-    <script src="js/15-bot-suggestions.js"></script>
-    <script src="js/16-files-composer.js"></script>
-    <script src="js/17-chats-search.js"></script>
-    <script src="js/18-init.js"></script>
+    <script src="vendor/socket.io.min.js" integrity="sha384-kzavj5fiMwLKzzD1f8S7TeoVIEi7uKHvbTA3ueZkrzYq75pNQUiUi6Dy98Q3fxb0"></script>
+    <script src="mlkem.js" integrity="sha384-y29mdY0TMEV+7TCesG6OB3uasel8mrbGo/DPJN4MpeHWsuvJbkJg/OhySD3LctRy"></script>
+    <script src="lib/sanitize-common.js" integrity="sha384-41FLm0z8YlrJX0Dc71OEAvhJDdpRt+oDpizTHSJaQlzvWJCuQSqvOvXxV4JerlqB"></script>
+    <script src="lib/sanitize-jpeg.js" integrity="sha384-mkOByoFiEBX1EeZoEhBBut68sVKbYrJYhsIS+aAMMNHtLELCw7ygkpCg4rHmtZ2E"></script>
+    <script src="lib/sanitize-png-gif.js" integrity="sha384-SMfkFRYAJd2bxMCwnAAoziCG1iWIoAE80B7tqDWylnTNHPtPRRgJXpPclUR9u4qy"></script>
+    <script src="lib/sanitize-webp.js" integrity="sha384-0686dLiJk8rlBoGKLjXjIc/iZUfbRnu1PYwLwXXQnG4VDqnpsJyekGbIPbkxlfWp"></script>
+    <script src="lib/sanitize-mp4.js" integrity="sha384-703JVgvje1Isaz0SedekBioq2f5WUREcwDRSTNBeuFh0MN4OfS9YcBQ0r/8R+ftN"></script>
+    <script src="lib/sanitize-webm.js" integrity="sha384-oL1Q/s+ePnYQ216AHdtLyBI60CnZdLWLZ9aZLuvudDDvpMMGoKulQQHuMEyoaBzU"></script>
+    <script src="lib/sanitize-inflate.js" integrity="sha384-0rPwU+4UHf58EE6fGcjqy0Gp9QwrOba04bY6pnM+yEKPqKcYkt6u97MRT/0Mw015"></script>
+    <script src="lib/sanitize-pdf.js" integrity="sha384-UtrB52redxuTyYESvCx+Wr4+i5Scebg3Q0gVVkRlrnkO6Vz9vTdqCP/+RQU6pqcV"></script>
+    <script src="media-sanitizer.js" integrity="sha384-A47XvhAauCrU1gbq9uTgMWea89aOgTMttUUJPax+Yhr0hjJ7uqArO4X1OJ2mAfqn"></script>
+    <script src="lib/mime-policy.js" integrity="sha384-8TZkAsiOT7mK/kgQjqjWEPZl7Wb7v6ZQJjTk5fl2SBUrj5mUlXLtBZaIjgntbiAZ"></script>
+    <script src="lib/ed25519-strict.js" integrity="sha384-2kmcj4th901AkOi94l2tEIrqHghnIk8EcWpMovCUjbCYT23hp6XYxW28R4HHnHSt"></script>
+    <script src="lib/kt.js" integrity="sha384-PfoRX2Bt0RaWTdS939YkXl4jFVwi8Gr4ogG/wNA4FBE1Bv5oQLKcgCkDyoV656+O"></script>
+    <script src="lib/kt-client.js" integrity="sha384-pUzv3o3MzfKg+oGz4i1F34ZAz0PIkw0m2mdHfbaJPefndqXUvh2u8qaZdfVrK+l+"></script>
+    <script src="lib/membership.js" integrity="sha384-m3ddEQCczoONakNhEi35CeCiPaBtCWmSdoaVPySWZySfjoUzadPIIuNrTPSmYMLq"></script>
+    <script src="lib/membership-client.js" integrity="sha384-nD7JgodpIp7VTsOAG69tyOzKl0q+LkYMwxWucRWlz5oeHLiW9GOWwku0w9xa496E"></script>
+    <script src="lib/e2ee-codec.js" integrity="sha384-A878XAw9FiTh6ouje+4JMp7Qt0RgCB+SMZbtyXyPNVnr4lVQTBCDduc21kI6Ee31"></script>
+    <script src="lib/e2ee-crypto.js" integrity="sha384-bpR2NM2q1muL6Gq9XVLPPWjRy3dnvK7Rr8oQPYV4BjquvZH8oGediNS+QS2/CIOo"></script>
+    <script src="lib/e2ee-formats.js" integrity="sha384-tjYJiGSSuBj9griOweIctoUmHwuDTWSi5bagtRyOHhKL/WlcbHEshweY206B8HOz"></script>
+    <script src="lib/e2ee-state.js" integrity="sha384-fFeHdU8pMjZb84MT7Qtmk04p8z79a3eZ2cxQdCbOfEjxugCxuROMZgngBHQSBPUJ"></script>
+    <script src="e2ee.js" integrity="sha384-U0KuVAiNgSMsO4y0q1hkEJzFDFaJ6CxDZu57SjZSvRBkk9umfukBwcFZ0JN3inTs"></script>
+    <script src="vendor/qrcode.js" integrity="sha384-x4moaWjSk4nOh6fvDWtQRPABXF7x5nhz/QSH2oig0Y7ud+uu7jf+Bm6gKCxDlIzD"></script>
+    <script src="lib/invite.js" integrity="sha384-Y5Da7igKpPeJtf+4pbmyEikXMMpeCHkKlU1cIRINHRwTs5gKWyQa9hf66RdcV7mV"></script>
+    <script src="lib/lifetime.js" integrity="sha384-hsEKl/PFmTyLWSuxc0u6ccp/M5YzK+5aBGHklGwpPpp5ZanBDMEugDN/ZtvUykFd"></script>
+    <script src="lib/message-order.js" integrity="sha384-oS7y46gvUBhTnCuP+5c8WOB3ODZQ2f7MH4TEI+is7EFT2bntvnJ9S7+6xhDuY7qM"></script>
+    <script src="lib/e2ee-lock.js" integrity="sha384-VwxL6Hr66z4vqdfe60cB8U2Ni81vSTXYVAiwb+dHDtMVuoazCf5whmVgsNfhUUjC"></script>
+    <script src="lib/e2ee-policy.js" integrity="sha384-45CF+OwPl46sE5C7MZLV9kY6yRk9aS3n50OGqypYd592R81YdES6vsHqJLXYMhsG"></script>
+    <script src="lib/text-search.js" integrity="sha384-f/M60HBwwIXwc50+a81RRopE0oTJLJZEOVrOGRin1mSD152lrJMFiAjTeBITGW0t"></script>
+    <script src="lib/sw-core.js" integrity="sha384-Clw+QSYR6j6Vtkbs5mhNMAYfxGvn/dyR0fkRcFEG8mpPCCuac3s1uLWKpguoLhhb"></script>
+    <script src="lib/sw-client.js" integrity="sha384-OjIhjN4SkkSSYTGZqo4H+4DmqgW4+k+CjGHJruklifNgTXHQBywbHMrlqRdX2Oyx"></script>
+    <script src="js/01-state.js" integrity="sha384-AAKosLt3uZIEFRxDFv6QgiBuQsVkiaCfzcwwWhmIiMrUeacSQdjumEqCdx/kZuV2"></script>
+    <script src="js/02-utils.js" integrity="sha384-9oFlfEb38OGvOdVqrceNS3Yyaxwimy4I2duZb1SZlu75N67j0V8OX2R4K9eIBlfK"></script>
+    <script src="js/03-e2ee-client.js" integrity="sha384-cEYp9u4pGL9iTUffQG0rrJGAwzEwcqtSdGslMaeZQWD6btos7QriwYJt9+itRqLR"></script>
+    <script src="js/04-e2ee-rooms.js" integrity="sha384-1OitKFx8dlBxp9dIT7sA/fjCX1/VSDCizk5QNJ6ufHHFYOrCdGZLKdzhmEIv0J8T"></script>
+    <script src="js/05-attachments.js" integrity="sha384-n1DBN5toSrYqAoNW1pd0ddKC1mKOduaBnk/gOuU09ABq8HjsjWGILNXEVS1fltF4"></script>
+    <script src="js/06-session-socket.js" integrity="sha384-/v8UHdvWwXww+NkB8pxGe2J6hrVUtb+tmWqH9bqfhSIUyuLqyXdt+orofgypwKSG"></script>
+    <script src="js/07-api-listeners.js" integrity="sha384-iq/Bm2zkbVdHhyz9eQS0EbhLJFNxnyTa0J4ylHy1QOo3q0h01d3gWkhWJFBE3qiR"></script>
+    <script src="js/08-modals-profile.js" integrity="sha384-Y6j8dsJvim3+XmQs7EYJxWYRfgYnopCY6Ww6pxTsPV7M1u2WuYiw+u+DiYKhJAKF"></script>
+    <script src="js/09-auth-screen.js" integrity="sha384-brjViOA57cGyEvT0gwDTaXc3LHbuLh3Xx5x0iN2LnkA7/CImOVCrrHTqClKyE8Td"></script>
+    <script src="js/10-invites-join.js" integrity="sha384-4VC4YhQQacFycdEAx2AE+tiyhd0AOglIUVlkVfB5Su48OI09riCqmkXYeH3P41zX"></script>
+    <script src="js/11-key-log-members.js" integrity="sha384-LjOS5zaV86xEpCA0yX+y7+kvBnTmRyTZoDtEQaGeZ7xlU7KFgO2rrtdgVXPxShuB"></script>
+    <script src="js/12-chat-list.js" integrity="sha384-Snh9IzB6bu6CMSuOT+rh61oYfjicBS2pcVtUizX/4Jv6XaKemVFJoPsr5XFyy889"></script>
+    <script src="js/13-chat-messages.js" integrity="sha384-JOIUr/BpJ8viPNtYHSElOGjGf7bD8dBQpBT+sD/o43KJvRNQ/xb7uREOnYXK0Ib+"></script>
+    <script src="js/14-send.js" integrity="sha384-nKpL4Vh01Qh+w4qlFHh3vqa8g5T9L/jXbgfoiabsIG5+Y7WH91YUDP6XMjSBjv6P"></script>
+    <script src="js/15-bot-suggestions.js" integrity="sha384-oen/jWfjEGgSeYACOCdqBiKdaBMiDuZYPasFO0kyxxDEN0YsUTquytfhLNInbxRa"></script>
+    <script src="js/16-files-composer.js" integrity="sha384-XfVHEpRxUcUijWozEvUpoKDVpykLi7cPtc7KOpEc3tXeR4ajFIH66LOy+8gI6Mab"></script>
+    <script src="js/17-chats-search.js" integrity="sha384-ZsBostkC7eCLgHKPUXoYKNGOMkWkOVxqh0vbKkrsZZ7Ot2BTbUYFYGJpMe2l5vrn"></script>
+    <script src="js/18-init.js" integrity="sha384-/NHnQxIuoU9nPEO6EwEtfRLbjFSmkUD0AehbJdFa9Zy6ME64WVdisL8Hx6Hd8JZz"></script>
 </body>
 </html>
