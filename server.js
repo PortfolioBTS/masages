@@ -150,7 +150,7 @@ const {
     E2EE_NOT_ALLOWED,
 } = require('./lib/e2ee-envelope');
 
-// ---- T6.1, шаг 2 из 6: часть кода вынесена в src/ ----
+// ---- T6.1, шаг 3 из 6: часть кода вынесена в src/ ----
 // Контекст собирается из фабрик в порядке зависимостей (на последнем шаге этот блок станет
 // src/create-server.js); всё, что ниже в этом файле, ещё не вынесено.
 const { loadConfig } = require('./src/config');
@@ -170,10 +170,30 @@ const { createMigrations } = require('./src/db/migrate');
 const { createRateLimits } = require('./src/http/middleware/rate-limits');
 const { createSession } = require('./src/http/middleware/session');
 const { createActivity } = require('./src/services/activity');
-const { SAFE_FILENAME_RE, readFileHead, coarsenFileTimes } = require('./src/services/uploads');
+const { createChats } = require('./src/services/chats');
+const { createMessages } = require('./src/services/messages');
+const { createPow } = require('./src/services/pow');
+const { createRooms } = require('./src/services/rooms');
+const { createBot } = require('./src/services/bot');
+const { createAccounts } = require('./src/services/accounts');
+const { createUploadMiddleware } = require('./src/http/middleware/upload');
 const { MAX_SOCKETS_PER_USER, MAX_SOCKETS_PER_IP, getSocketRoomKey } = require('./src/realtime/io');
+const {
+    JOIN_REQUEST_LIVE_SQL, respondCertVerdict, inviteExpiresAtIso, roomChatPayload, JOIN_REQUEST_NOT_FOUND,
+    resetInviteAfterLeave,
+} = require('./src/services/rooms');
 const { respondIfDeadlock, withMessageIdRetry } = require('./src/db/transactions');
+const { SAFE_FILENAME_RE, readFileHead, coarsenFileTimes } = require('./src/services/uploads');
+const { POW_PURPOSES } = require('./src/services/pow');
+const { insertUserWithBotChat, signedOutResponse } = require('./src/services/accounts');
+const {
+    readMessageText, roomMessagePayload, apiMessage, e2eePolicyViolation, messageFromRow,
+    respondRoomSendError, writeMessageText,
+} = require('./src/services/messages');
+const { toPositiveInt, isNonEmptyString } = require('./src/http/params');
+const { chatScope } = require('./src/services/chats');
 const { parseRequestedExpiry } = require('./src/services/expiry');
+const { EarlyResponse } = require('./src/http/early-response');
 
 const ctx = { ...loadConfig(__dirname) };
 Object.assign(ctx, createBase());
@@ -192,147 +212,31 @@ Object.assign(ctx, createMigrations(ctx));
 Object.assign(ctx, createRateLimits(ctx));
 Object.assign(ctx, createSession(ctx));
 Object.assign(ctx, createActivity(ctx));
+Object.assign(ctx, createChats(ctx));
+Object.assign(ctx, createMessages(ctx));
+Object.assign(ctx, createPow(ctx));
+Object.assign(ctx, createRooms(ctx));
+Object.assign(ctx, createBot(ctx));
+Object.assign(ctx, createAccounts(ctx));
+Object.assign(ctx, createUploadMiddleware(ctx));
 
 const {
-    UPLOADS_DIR, app, metrics, resolveRealIp, dbGet, io, sessionMiddleware, anonActivity, userSocketCount,
-    getClientIp, ipSocketCount, dbAll, IS_PRODUCTION, HSTS_PRELOAD, isTrustedOrigin, pool, withTransaction,
-    dbRun, readiness, SESSION_RENEW_MS, csrf, apiLimiter, bundleLimiter, withTransactionRetry, pgLimits,
-    queryWithRetry, keyShareLimiter, keyRequestLimiter, memberCertLimiter, powUsedStore, registerLimiter,
-    startUserSession, endSession, GLOBAL_DEFAULT_EXPIRY_SECONDS, authorTags, disappearingMessagesManager,
-    notifyChatListChanged, applyNewMessageExpiry, UPLOAD_QUOTA_BYTES, newMessageExpirySeconds,
-    emitRoomMessageEvent, INVITE_TTL_SECONDS, subscribeUserToChat, notifyRoomMembersChanged,
-    notifyJoinRequestsChanged, joinUserLimiter, joinIpLimiter, notifyJoinRequestDecided, removeUploadedFiles,
-    unsubscribeUserFromChat, rejectUpload, rejectUploadWith, cleanupUploadedFile, getDefaultExpirySeconds,
-    setChatExpiry, DB_POOL_CONFIG, PORT, initDatabaseExclusive, server, HOST,
+    app, metrics, resolveRealIp, io, sessionMiddleware, anonActivity, userSocketCount, getClientIp,
+    ipSocketCount, dbGet, dbAll, IS_PRODUCTION, HSTS_PRELOAD, isTrustedOrigin, pool, withTransaction, dbRun,
+    readiness, SESSION_RENEW_MS, csrf, apiLimiter, bundleLimiter, withTransactionRetry, pgLimits,
+    queryWithRetry, keyShareLimiter, keyRequestLimiter, memberCertLimiter, userCanAccessFile, UPLOADS_DIR,
+    registerLimiter, checkPow, respondPowFailure, generateUniqueCodeAsync, generateAnonymousUsernameAsync,
+    startUserSession, deleteUserAccount, endSession, loadAccount, GLOBAL_DEFAULT_EXPIRY_SECONDS, getOwnChat,
+    markChatRead, newMessageExpirySeconds, insertRoomMessage, describeMessageIdUse, advanceSenderMarker,
+    emitRoomMessageEvent, unarchiveForRecipients, insertChatMessage, scheduleBotReply, INVITE_TTL_SECONDS,
+    subscribeUserToChat, notifyChatListChanged, getOwnRoom, identityKeysOf, joinUserLimiter, joinIpLimiter,
+    findRoomByInviteCode, createJoinRequest, addRoomMember, notifyJoinRequestDecided,
+    notifyJoinRequestsChanged, authorTags, removeUploadedFiles, unsubscribeUserFromChat,
+    notifyRoomMembersChanged, findOwnMessage, disappearingMessagesManager, upload, rejectUpload,
+    rejectUploadWith, cleanupUploadedFile, UPLOAD_QUOTA_BYTES, userCanAccessMessage, getDefaultExpirySeconds,
+    setChatExpiry, DB_POOL_CONFIG, purgeExpiredAnonymousUsers, purgeExpiredJoinRequests, PORT,
+    initDatabaseExclusive, server, HOST,
 } = ctx;
-
-// '.svg' явно в блок-листе как доп. защита (defense-in-depth, п.7 аудита):
-// image/svg+xml и так не входит в ALLOWED_MIME_TYPES, но SVG может нести
-// <script>, поэтому расширение блокируется отдельно на случай, если формат
-// когда-либо попадёт в разрешённый список по ошибке.
-const BLOCKED_EXTENSIONS = new Set(['.html', '.htm', '.php', '.exe', '.js', '.sh', '.py', '.rb', '.pl', '.bat', '.cmd', '.ps1', '.vbs', '.jar', '.msi', '.svg']);
-
-// Ответ, который отдаёт обработчик ошибок Express вместо ошибки: так из
-// fileFilter multer уходят 400/409 с телом { success, code, message } и даже 200
-// с уже сохранённым сообщением (повтор отправки), не принимая файл на диск.
-class EarlyResponse extends Error {
-    constructor(status, body) {
-        super(body && body.message ? body.message : 'early response');
-        this.status = status;
-        this.body = body;
-    }
-}
-
-const upload = multer({
-    storage: multer.diskStorage({
-        destination: (req, file, cb) => cb(null, UPLOADS_DIR),
-        filename: (req, file, cb) => {
-            // Расширение — только из MIME_EXTENSIONS (жёсткий маппинг по
-            // уже проверенному в fileFilter mimetype), никогда из
-            // file.originalname — см. комментарий у MIME_EXTENSIONS.
-            // Шифротекст E2EE-вложения — всегда .bin.
-            const ext = file.mimetype === ENCRYPTED_FILE_MIME ? ENCRYPTED_FILE_EXTENSION : (MIME_EXTENSIONS[file.mimetype] || '');
-            // Имя — только случайное, без Date.now(): время загрузки в имени файла
-            // (message-ordering.md, раздел 11) вернуло бы секунды, которые мы
-            // огрубили в базе. 16 случайных байт: перебрать нельзя.
-            const safeName = `${crypto.randomBytes(16).toString('hex')}${ext}`;
-            if (!SAFE_FILENAME_RE.test(safeName)) {
-                return cb(new Error('Не удалось сформировать безопасное имя файла'));
-            }
-            cb(null, safeName);
-        }
-    }),
-    limits: { fileSize: 50 * 1024 * 1024, files: 1, fields: 10 },
-    // Имя файла в multipart — UTF-8 (по умолчанию busboy декодировал его как
-    // latin1). Само имя больше нигде не хранится, но BLOCKED_EXTENSIONS
-    // ниже смотрит на его расширение.
-    defParamCharset: 'utf8',
-    fileFilter: (req, file, cb) => {
-        const ext = path.extname(file.originalname).toLowerCase();
-        if (BLOCKED_EXTENSIONS.has(ext)) {
-            return cb(new Error('Неподдерживаемый тип файла'), false);
-        }
-        // Поля формы (chatId, encrypted, envelope) клиент шлёт ДО файла,
-        // поэтому к этому моменту они уже в req.body. application/octet-stream
-        // — это шифротекст E2EE-вложения, и принимается он только с явным
-        // encrypted=true: иначе под видом "шифротекста" можно было бы залить
-        // любой файл без проверки сигнатуры и очистки метаданных. И наоборот,
-        // encrypted=true с обычным типом — тоже отказ.
-        const wantsEncrypted = Boolean(req.body) && req.body.encrypted === 'true';
-        if (file.mimetype === ENCRYPTED_FILE_MIME) {
-            return wantsEncrypted ? acceptUpload(req, file, cb) : cb(new Error('Неподдерживаемый тип файла'), false);
-        }
-        if (wantsEncrypted || !ALLOWED_MIME_TYPES.includes(file.mimetype)) {
-            return cb(new Error('Неподдерживаемый тип файла'), false);
-        }
-        acceptUpload(req, file, cb);
-    }
-});
-
-// Проверки запроса ДО приёма файла (message-ordering.md, раздел 6.3). multer
-// уже разобрал поля формы, пришедшие раньше файла (proto, chatId, encrypted,
-// clientMessageId, envelope), а тело файла ещё не читал: заведомо ненужный файл
-// на диск не пишется. Клиент обязан класть эти поля в FormData ДО поля file;
-// если proto или clientMessageId пришли позже, здесь их ещё нет и ответ — 400
-// client-outdated.
-//
-//   * нет сессии — 401;
-//   * нет proto или proto < 4 — 400 client-outdated (14.1);
-//   * чат с ботом — clientMessageId игнорируется (id выдаёт DEFAULT);
-//   * комната: нет id — 400 client-outdated, неверный формат — 400 bad-message-id;
-//   * id занят чужим сообщением или стоит в надгробии — 409 id-conflict;
-//   * тот же автор, комната и конверт (повтор после обрыва связи) — 200 с уже
-//     сохранённым сообщением, второй файл не принимается.
-// Если чата нет среди разобранных полей (chatId пришёл позже файла или чат
-// неизвестен), остальное проверит обработчик после приёма файла.
-function acceptUpload(req, file, cb) {
-    // Поля снимаются СЕЙЧАС, синхронно: fileFilter вызывается в тот момент,
-    // когда разобрано всё, что стоит до файла. Пока идёт запрос в базу, парсер
-    // может успеть разобрать и поля после небольшого файла, но «после файла»
-    // для проверки по-прежнему значит «нет».
-    const body = { ...req.body };
-    checkUploadBeforeStore(req.session, body, file).then(() => cb(null, true), (err) => cb(err, false));
-}
-
-async function checkUploadBeforeStore(session, body, file) {
-    const userId = session && session.userId;
-    if (!userId) throw new EarlyResponse(401, { success: false, message: 'Не авторизован' });
-    // Общий признак версии клиента (message-ordering.md, 14.1) — первая проверка
-    // запроса после сессии. Поле proto лежит в FormData ДО файла; пришло позже —
-    // здесь его ещё нет, и ответ — client-outdated.
-    if (isOutdatedProto(body.proto)) throw new EarlyResponse(400, CLIENT_OUTDATED);
-    const chat = toPositiveInt(body.chatId) ? await getOwnChat(body.chatId, userId) : null;
-    if (chat && !chat.room_id) {
-        // Чат с ботом: шифротекст читать некому — отказ до записи файла на диск.
-        const violation = e2eePolicyViolation(chat, body.encrypted === 'true', null);
-        if (violation) throw new EarlyResponse(400, violation);
-        return;
-    }
-    const raw = body.clientMessageId;
-    if (raw === undefined || raw === null || raw === '') {
-        // Чат назван, но такого нет: ответит обработчик («Чат не найден»).
-        if (!chat && toPositiveInt(body.chatId)) return;
-        throw new EarlyResponse(400, CLIENT_OUTDATED);
-    }
-    const id = parseClientMessageId(raw);
-    if (id === null) throw new EarlyResponse(400, BAD_MESSAGE_ID);
-    if (!chat) return;
-    // Открытое вложение в комнате и неверный конверт — тоже до записи файла.
-    const violation = e2eePolicyViolation(chat, body.encrypted === 'true', typeof body.envelope === 'string' ? body.envelope.trim() : '');
-    if (violation) throw new EarlyResponse(400, violation);
-    const expectedText = expectedFileMessageText(body, file.mimetype);
-    const use = await describeMessageIdUse({ id, roomId: chat.room_id, userId, expectedText, file: true });
-    if (use.status === 'duplicate') {
-        throw new EarlyResponse(200, { success: true, message: messageFromRow(use.row, expectedText) });
-    }
-    if (use.status === 'conflict') throw new EarlyResponse(409, ID_CONFLICT);
-}
-
-const isNonEmptyString = (value) => typeof value === 'string' && value.trim() !== '';
-const toPositiveInt = (value) => {
-    const n = Number(value);
-    return Number.isInteger(n) && n > 0 ? n : null;
-};
 
 // Самым первым: признак onion-запроса (req.isOnion) нужен лимитерам и
 // заголовкам ниже, а у onion-запроса onionMiddleware ещё и вычищает
@@ -362,25 +266,6 @@ function getLocalAddresses() {
         }
     }
     return addresses;
-}
-
-// Коды без смещения распределения — см. randomString в lib/security-utils.js.
-async function generateUniqueCodeAsync() {
-    for (let attempts = 0; attempts < 100; attempts++) {
-        const code = generateUniqueCode();
-        const row = await dbGet('SELECT id FROM users WHERE unique_code = $1', [code]);
-        if (!row) return code;
-    }
-    throw new Error('Could not generate unique code');
-}
-
-async function generateAnonymousUsernameAsync() {
-    for (let attempts = 0; attempts < 100; attempts++) {
-        const username = `Гость-${randomString('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 4)}`;
-        const row = await dbGet('SELECT id FROM users WHERE username = $1', [username]);
-        if (!row) return username;
-    }
-    throw new Error('Could not generate anonymous username');
 }
 
 // Socket.io: источник (allowRequest выше) -> сессия -> авторизация ->
@@ -678,63 +563,6 @@ app.get('/uploads/:filename', async (req, res) => {
     });
 });
 
-// ---- Текст сообщения в БД: шифрование at rest с AAD ----
-//
-// Строка КОМНАТЫ шифруется enc:v3 (lib/message-crypto.js): AAD привязывает
-// шифротекст к комнате, к id сообщения и к author_tag строки (пользователя в AAD
-// нет: в строке комнаты нет user_id, sealed-sender.md, раздел 7). Шифротекст,
-// перенесённый в другую комнату, под другой id или под другой тег, не
-// расшифруется. Строка чата с БОТОМ — enc:v2 с AAD из чата и владельца.
-// Поэтому везде, где читается или пишется messages.text, выбираются поля этой же
-// строки: room_id, id, author_tag (комната) или chat_id, user_id (бот).
-const UNREADABLE_TEXT = '[Не удалось расшифровать]';
-
-function writeMessageText(text, row) {
-    if (row.room_id) return encryptRoomText(text, messageAadV3(row));
-    return encryptText(text, messageAad(row));
-}
-
-function readMessageText(stored, row) {
-    if (stored === null || stored === undefined) return stored;
-    try {
-        return row.room_id ? decryptRoomText(stored, messageAadV3(row)) : decryptText(stored, messageAad(row));
-    } catch (err) {
-        // AAD не собирается только у строки без обязательных полей (комната без
-        // id или тега, чат без владельца, осиротевшее сообщение) — показать её
-        // всё равно некому и нечем.
-        logError('[MessageCrypto] Нет AAD для сообщения', err);
-        return UNREADABLE_TEXT;
-    }
-}
-
-// Proof-of-work (lib/pow.js): решение одноразовое и привязано к цели.
-// Цель одна — регистрация временного аккаунта; ?purpose=register — 400.
-const POW_PURPOSES = new Set(['register-anon']);
-const POW_FAILED_RESPONSE = { success: false, message: 'Не пройдена проверка proof-of-work', powRequired: true };
-
-// 'ok' | 'invalid' | 'replayed' | 'busy'. Задача сжигается в Postgres
-// (pow_used) только у решения, прошедшего проверку, — неверный nonce её не
-// тратит. Хранилище не отвечает — 'busy': регистрацию без проверки
-// одноразовости не пропускаем (лимит закрывается), а решение остаётся
-// несожжённым — клиент повторит его позже.
-async function checkPow(req, purpose) {
-    const solution = req.body && req.body.pow;
-    if (!solution || typeof solution !== 'object') return 'invalid';
-    try {
-        return await consumeSolution(solution, purpose, powUsedStore);
-    } catch (err) {
-        // Сбой хранилища уже записан в лог самим хранилищем.
-        if (!(err instanceof LimitStoreError)) logError('[PoW] Ошибка проверки решения', err);
-        return 'busy';
-    }
-}
-
-function respondPowFailure(res, verdict) {
-    metrics.powRejected(verdict);
-    if (verdict === 'busy') return respondBusy(res);
-    return res.json(POW_FAILED_RESPONSE);
-}
-
 app.get('/api/pow/challenge', (req, res) => {
     const purpose = typeof req.query.purpose === 'string' ? req.query.purpose : '';
     if (!POW_PURPOSES.has(purpose)) {
@@ -743,38 +571,6 @@ app.get('/api/pow/challenge', (req, res) => {
     const { token, difficulty } = createChallenge(purpose);
     res.json({ success: true, token, difficulty });
 });
-
-// Новый аккаунт и его чат с ботом с приветствием — внутри транзакции client.
-// lastActiveAt — корзина активности момента регистрации (lib/anon-lifetime.js).
-// Отметки о прочтении у нового аккаунта выключены явно, а не через DEFAULT
-// колонки: ответ регистрации обещает readReceipts: false. Текст приветствия
-// выбирает вызывающий. Возвращает { userId, botChatId } — id чата с ботом
-// уходит клиенту.
-async function insertUserWithBotChat(client, { uniqueCode, username, anonLifetime, lastActiveAt, welcomeText }) {
-    const userResult = await client.query(
-        `INSERT INTO users (unique_code, username, avatar, anon_lifetime, last_active_at, read_receipts)
-         VALUES ($1, $2, $3, $4, $5, FALSE)
-         RETURNING id`,
-        [uniqueCode, username, '#667EEA', anonLifetime, lastActiveAt]
-    );
-    const userId = userResult.rows[0].id;
-    // Счётчик seq чата с ботом и маркер прочитанного начинаются с одной и той
-    // же случайной базы: непрочитанным станет только приветствие, которое
-    // вставляется следом.
-    const botResult = await client.query(
-        `WITH base AS (SELECT nyxo_random_seq_base() AS seq)
-         INSERT INTO chats (user_id, name, avatar, online, is_bot, msg_seq, last_read_seq)
-         SELECT $1::int, $2::text, $3::text, $4::int, $5::int, base.seq, base.seq FROM base
-         RETURNING id`,
-        [userId, 'Бот Помощник', 'Б', 1, 1]
-    );
-    const botChatId = botResult.rows[0].id;
-    await client.query(
-        `INSERT INTO messages (chat_id, user_id, text, sent, status) VALUES ($1, $2, $3, 0, 'read')`,
-        [botChatId, userId, writeMessageText(welcomeText, { room_id: null, chat_id: botChatId, user_id: userId })]
-    );
-    return { userId, botChatId };
-}
 
 // lifetime: 'tab' | 'day' | 'week' (по умолчанию 'tab') — см.
 // lib/anon-lifetime.js. Живая сессия — 409 ещё до PoW: второй аккаунт в
@@ -853,43 +649,6 @@ async function deleteOwnAccount(req, res) {
 }
 app.post('/api/account/delete', deleteOwnAccount);
 app.post('/api/logout', deleteOwnAccount);
-
-// Поля аккаунта для ответов API — из строки users: срок и корзина последней
-// активности (её только что записал middleware после sessionMiddleware,
-// если корзина сменилась). anonExpiresAt — «когда удалится, если больше не
-// будет активности».
-async function loadAccount(userId) {
-    const row = await dbGet(
-        `SELECT username, unique_code, read_receipts, anon_lifetime,
-                EXTRACT(EPOCH FROM last_active_at) * 1000 AS last_active_ms
-         FROM users WHERE id = $1`,
-        [userId]
-    );
-    if (!row) return null;
-    return {
-        id: userId,
-        username: row.username,
-        uniqueCode: row.unique_code,
-        readReceipts: row.read_receipts,
-        ...describeAnonLifetime({
-            lifetime: row.anon_lifetime,
-            lastActiveMs: row.last_active_ms === null ? null : Number(row.last_active_ms),
-        }),
-    };
-}
-
-// «Не вошёл» (контракт этапа 1, §3): reason/expired — только если сессия
-// была, но аккаунт удалён по сроку или сессия недействительна. Клиент
-// покажет «данные удалены по сроку», а не просто экран входа.
-function signedOutResponse(req) {
-    const body = { authenticated: false };
-    if (req.authEnded) {
-        body.reason = 'expired';
-        body.expired = true;
-    }
-    body.onionUrl = onionUrlFor(req);
-    return body;
-}
 
 // Состояние входа. Сам запрос — активность и продление сессии (middleware
 // после sessionMiddleware); CSRF-куку, если её нет, выдаёт middleware CSRF.
@@ -991,51 +750,6 @@ app.post('/api/user/lifetime', async (req, res) => {
     // который видели вместе с прежней кукой, дальше не действует.
     res.json({ success: true, ...describeAnonLifetime({ lifetime, lastActiveMs }) });
 });
-
-// Личная строка chats вызывающего (chats.id — у каждого участника своя) и
-// граница видимости истории: visible_from_seq — seq последнего сообщения
-// комнаты на момент вступления, видно только то, что новее, то есть с
-// seq > visible_from_seq (для чата с ботом и создателя комнаты — 0, то есть
-// всё: seq всегда не меньше 1).
-async function getOwnChat(chatId, userId) {
-    const id = toPositiveInt(chatId);
-    if (!id) return null;
-    return dbGet(
-        `SELECT c.*, COALESCE(rp.visible_from_seq, 0) AS visible_from_seq
-         FROM chats c
-         LEFT JOIN room_participants rp ON rp.room_id = c.room_id AND rp.user_id = c.user_id
-         WHERE c.id = $1 AND c.user_id = $2`,
-        [id, userId]
-    );
-}
-
-// Сообщения чата лежат либо по room_id (групповая комната), либо по
-// chat_id (личный чат с ботом). where(alias, param) — условие WHERE для таблицы
-// messages под этим псевдонимом, param (по умолчанию $1) — номер параметра со value. У чата с ботом условие
-// содержит и room_id IS NULL: так запрос ложится на частичный уникальный
-// индекс idx_messages_chat_seq (у сообщений комнаты chat_id — личная строка
-// их автора, а не область). Сравнивать seq можно только внутри одной области.
-function chatScope(chat) {
-    const room = Boolean(chat.room_id);
-    return {
-        column: room ? 'room_id' : 'chat_id',
-        value: room ? chat.room_id : chat.id,
-        where: (alias = 'm', param = '$1') => (room ? `${alias}.room_id = ${param}` : `${alias}.chat_id = ${param} AND ${alias}.room_id IS NULL`),
-    };
-}
-
-// Сообщение в ответах и событиях API: id — всегда строка, seq — число
-// (message-ordering.md, 6.1). Остальные поля как были.
-function apiMessage(message) {
-    const out = { ...message };
-    if (out.id !== undefined && out.id !== null) out.id = String(out.id);
-    if (out.seq !== undefined && out.seq !== null) out.seq = Number(out.seq);
-    if (out.reply_to_id !== undefined && out.reply_to_id !== null) out.reply_to_id = String(out.reply_to_id);
-    if (out.reply_to && out.reply_to.id !== undefined && out.reply_to.id !== null) {
-        out.reply_to = { ...out.reply_to, id: String(out.reply_to.id) };
-    }
-    return out;
-}
 
 // Список чатов с последним сообщением и числом непрочитанных.
 //
@@ -1152,71 +866,6 @@ app.get('/api/chats', async (req, res) => {
         res.json({ success: false, message: 'Ошибка загрузки чатов' });
     }
 });
-
-// Отмечает сообщения чата прочитанными вплоть до upToSeq: двигает личный
-// маркер непрочитанного (last_read_seq только растёт), ставит статус 'read'
-// чужим сообщениям (у отправителя появляются ✓✓) и запускает
-// auto-delete-on-read.
-//
-// «Чужие» в комнате — строки, чей author_tag не входит в теги читателя
-// (sealed-sender.md, 8.4): сервер вычисляет их из сессии (комната, пользователь,
-// все недели с создания аккаунта, все ключи сообщений). В чате с ботом — по
-// user_id, как раньше.
-//
-// Если читатель выключил отметки прочтения (users.read_receipts), двигается
-// только его личный маркер: статус сообщений не меняется и messagesRead не
-// рассылается. Auto-delete-on-read срабатывает всё равно — это обещание
-// отправителя, а не отметка для него.
-//
-// Два оператора, не одна транзакция (раздел 8.2 контракта): сначала UPDATE
-// chats, затем UPDATE messages SET status — порядок блокировок chats → messages.
-async function markChatRead(chat, userId, upToSeq) {
-    const previous = Number(chat.last_read_seq) || 0;
-    if (!upToSeq || upToSeq <= previous) return;
-    const moved = await dbGet(
-        `UPDATE chats c SET last_read_seq = $1
-         FROM users u
-         WHERE c.id = $2 AND c.last_read_seq < $1 AND u.id = c.user_id
-         RETURNING u.read_receipts, u.created_at AS user_created_at`,
-        [upToSeq, chat.id]
-    );
-    if (!moved) return; // уже отмечено (например, из другой вкладки)
-    chat.last_read_seq = upToSeq;
-
-    // Только сообщения после предыдущего маркера — раньше при КАЖДОМ
-    // открытии чата UPDATE переписывал статус всех сообщений чата заново.
-    const scope = chatScope(chat);
-    const notMine = chat.room_id
-        ? { sql: 'NOT (m.author_tag = ANY($4::bytea[]))', value: authorTags.tagsForAccount(chat.room_id, userId, moved.user_created_at, Date.now()) }
-        : { sql: 'm.user_id <> $4', value: userId };
-    if (!moved.read_receipts) {
-        const autoDelete = await dbAll(
-            `SELECT m.id FROM messages m
-             JOIN message_expiry e ON e.message_id = m.id AND e.auto_delete_on_read = TRUE
-             WHERE ${scope.where('m')} AND m.seq > $2 AND m.seq <= $3
-               AND ${notMine.sql}`,
-            [scope.value, previous, upToSeq, notMine.value]
-        );
-        disappearingMessagesManager.handleMessagesRead(autoDelete.map(r => r.id));
-        return;
-    }
-    const readRows = await dbAll(
-        `UPDATE messages m SET status = 'read'
-         WHERE ${scope.where('m')} AND m.seq > $2 AND m.seq <= $3
-           AND ${notMine.sql} AND m.status <> 'read'
-         RETURNING m.id`,
-        [scope.value, previous, upToSeq, notMine.value]
-    );
-    if (readRows.length > 0) {
-        // Без reader_id: кто именно прочитал, остальным участникам знать не
-        // нужно. Сокетам самого читателя событие не шлётся — иначе его
-        // клиент принял бы его за прочтение своих же сообщений.
-        io.to(getSocketRoomKey(chat.id, chat.room_id)).except('user:' + userId).emit('messagesRead', {
-            chat_id: chat.room_id ? null : chat.id, room_id: chat.room_id, up_to_seq: upToSeq,
-        });
-        disappearingMessagesManager.handleMessagesRead(readRows.map(r => r.id));
-    }
-}
 
 const MESSAGES_PAGE_SIZE = 100;
 const MAX_MESSAGES_PAGE_SIZE = 200;
@@ -1382,290 +1031,6 @@ app.post('/api/chats/:chatId/read', async (req, res) => {
     await markChatRead(chat, userId, latest && latest.seq);
     res.json({ success: true });
 });
-
-// Новое сообщение возвращает архивный чат из архива — у получателей и
-// только если чат не "без звука" (заглушённый архивный чат так и лежит в
-// архиве). senderId = null — ответ бота владельцу чата. Не на пути ответа
-// отправителю: сбой здесь только логируется. По частичному индексу
-// idx_chats_archived запрос обычно не находит ни одной строки.
-function unarchiveForRecipients(chat, senderId) {
-    const query = chat.room_id
-        ? dbAll(
-            'UPDATE chats SET archived = FALSE WHERE room_id = $1 AND archived AND NOT muted AND user_id <> $2 RETURNING user_id',
-            [chat.room_id, senderId]
-        )
-        : dbAll('UPDATE chats SET archived = FALSE WHERE id = $1 AND archived AND NOT muted RETURNING user_id', [chat.id]);
-    query.then(
-        (rows) => { for (const row of rows) notifyChatListChanged(row.user_id); },
-        (err) => logError('[Chats] Не удалось вернуть чат из архива', err)
-    );
-}
-
-// Небольшая пауза перед ответом: он должен выглядеть ответом на сообщение, а
-// не выскакивать одновременно с ним.
-const BOT_REPLY_DELAY_MS = 600;
-
-// userText — открытый текст сообщения пользователя (чат с ботом не
-// шифруется). Что ответить, решает lib/bot-guide.js по теме запроса.
-function scheduleBotReply(chat, userText) {
-    const socketRoomKey = getSocketRoomKey(chat.id, null);
-    setTimeout(async () => {
-        // Весь колбэк в try: раньше ошибка БД в первом же запросе здесь
-        // была необработанным reject'ом и роняла процесс.
-        try {
-            const replyText = botGuide.botReply(userText).text;
-            // Порядок блокировок users → chats → messages
-            // (docs/security/message-ordering.md, §8): строку владельца
-            // берём явно и первой. Иначе INSERT сам проверял бы внешние
-            // ключи — сначала chats, потом users — и сходился во взаимной
-            // блокировке с удалением аккаунта (users FOR UPDATE, затем
-            // DELETE FROM chats), если пользователь удаляет аккаунт, пока
-            // бот готовит ответ. Аккаунта или чата уже нет — отвечать некому.
-            const botMessage = await withMessageIdRetry(() => withTransactionRetry(async (client) => {
-                const owner = await client.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE', [chat.user_id]);
-                if (owner.rows.length === 0) return null;
-                // Строку чата блокируем сразу так, как её всё равно обновит
-                // триггер seq (счётчик msg_seq), без повышения блокировки.
-                const alive = await client.query('SELECT id FROM chats WHERE id = $1 AND is_bot = 1 FOR NO KEY UPDATE', [chat.id]);
-                if (alive.rows.length === 0) return null;
-                // Сообщения бота хранятся от имени владельца чата (sent = 0).
-                // INSERT — последний оператор транзакции: окно блокировки
-                // строки области — один INSERT и COMMIT.
-                const inserted = await client.query(
-                    `INSERT INTO messages (chat_id, room_id, user_id, text, sent, status)
-                     VALUES ($1, NULL, $2, $3, 0, 'read')
-                     RETURNING id, seq, chat_id, room_id, user_id, sent, status, created_at, message_type, encrypted`,
-                    [chat.id, chat.user_id, writeMessageText(replyText, { room_id: null, chat_id: chat.id, user_id: chat.user_id })]
-                );
-                return inserted.rows[0];
-            }));
-            if (!botMessage) return;
-            // Личный таймер чата с ботом действует и на ответы бота.
-            await applyNewMessageExpiry(chat, botMessage.id);
-            // Бот "прочитал" сообщения пользователя.
-            const read = await dbAll(
-                `UPDATE messages SET status = 'read' WHERE chat_id = $1 AND room_id IS NULL AND sent = 1 AND status <> 'read' RETURNING id`,
-                [chat.id]
-            );
-            io.to(socketRoomKey).emit('newMessage', apiMessage({
-                ...botMessage, text: replyText, reactions: [], reply_to: null,
-                sender_username: 'Бот Помощник', sender_avatar: '',
-            }));
-            if (read.length > 0) {
-                io.to(socketRoomKey).emit('messagesRead', { chat_id: chat.id, room_id: null, up_to_seq: Number(botMessage.seq) });
-            }
-            unarchiveForRecipients(chat, null);
-        } catch (e) {
-            logError('Bot error', e);
-        }
-    }, BOT_REPLY_DELAY_MS);
-}
-
-// ---- Вставка сообщения: id клиента, блокировки, повторы ----
-//
-// id сообщения комнаты выбирает клиент (clientMessageId) ДО шифрования и кладёт
-// его внутрь E2EE-содержимого (mid): сервер не может выдать правку одного
-// сообщения за другое. Чат с ботом id не присылает: его выдаёт DEFAULT.
-// Конфликт id (первичный ключ или надгробие) и повтор запроса после обрыва связи
-// разбирает describeMessageIdUse (раздел 6.4 контракта порядка сообщений).
-
-// Колонки, которые разрешено вставлять через insertMessageRow: имена идут в
-// текст SQL, поэтому только из этого списка.
-const MESSAGE_INSERT_COLUMNS = new Set([
-    'id', 'chat_id', 'room_id', 'user_id', 'author_tag', 'text', 'file_url', 'file_name', 'file_type',
-    'message_type', 'sent', 'status', 'reply_to_id', 'encrypted', 'file_size', 'created_at',
-]);
-
-// INSERT сообщения; если задан срок жизни — тем же оператором и запись
-// message_expiry (раздел 8.4): сообщение не остаётся без срока при сбое между
-// операторами. Время удаления в базе округлено вверх до минуты. Возвращает
-// { id, seq, created_at }.
-async function insertMessageRow(client, fields, expirySeconds) {
-    const names = Object.keys(fields);
-    for (const name of names) {
-        if (!MESSAGE_INSERT_COLUMNS.has(name)) throw new Error(`insertMessageRow: неизвестная колонка ${name}`);
-    }
-    const values = names.map(name => fields[name]);
-    const insert = `INSERT INTO messages (${names.join(', ')}) VALUES (${names.map((_, i) => `$${i + 1}`).join(', ')})`;
-    if (!expirySeconds) {
-        const result = await client.query(`${insert} RETURNING id, seq, created_at`, values);
-        return result.rows[0];
-    }
-    values.push(expirySeconds);
-    const result = await client.query(
-        `WITH m AS (${insert} RETURNING id, seq, created_at),
-              e AS (INSERT INTO message_expiry (message_id, expires_at, auto_delete_on_read)
-                    SELECT m.id, ${DisappearingMessagesManager.expiresAtSql(`$${values.length}`)}, FALSE FROM m)
-         SELECT id, seq, created_at FROM m`,
-        values
-    );
-    return result.rows[0];
-}
-
-// Вставка сообщения ЧАТА С БОТОМ от пользователя userId. Порядок блокировок
-// users → rooms → room_participants → chats → … → upload_quota → messages
-// (message-ordering.md, раздел 8.1): строка отправителя берётся явно ПЕРВОЙ
-// (FOR KEY SHARE), и только потом INSERT, у которого триггер seq блокирует строку
-// чата, а внешние ключи — chats и снова users. Без явного шага INSERT проверял бы
-// внешние ключи в порядке их создания, и отправка сходилась бы во взаимной
-// блокировке с удалением аккаунта. Нет строки users — аккаунт удалён: null.
-// upload = { bytes } — вложение: квота резервируется в той же транзакции, строка
-// чата берётся раньше строки квоты. { error: 'quota' } — квота исчерпана.
-// INSERT — последний оператор транзакции. При 40P01 транзакция повторяется один
-// раз.
-async function insertChatMessage(userId, fields, expirySeconds, upload = null) {
-    const row = await withTransactionRetry(async (client) => {
-        const sender = await client.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE', [userId]);
-        if (sender.rows.length === 0) return null;
-        if (upload) {
-            await client.query('SELECT id FROM chats WHERE id = $1 FOR NO KEY UPDATE', [fields.chat_id]);
-            if (!(await reserveUploadQuota(client, authorTags.qkey(userId), upload.bytes, UPLOAD_QUOTA_BYTES))) {
-                return { error: 'quota' };
-            }
-        }
-        return insertMessageRow(client, fields, expirySeconds);
-    });
-    // Таймер в памяти — точный; в базе срок округлён вверх до минуты.
-    if (row && !row.error && expirySeconds) disappearingMessagesManager.scheduleNewMessage(row.id, expirySeconds);
-    return row;
-}
-
-// Транзакция отправки в КОМНАТУ (sealed-sender.md, 8.5): членство отправителя
-// проверяется внутри неё, под блокировкой строки комнаты. Выход из комнаты берёт
-// rooms FOR UPDATE и решает, писать ли user_left_rooms, по тому, есть ли у
-// пользователя сообщения; без блокировки «выход без сообщений + отправка» оставили
-// бы строку с тегом пользователя, которой удаление аккаунта не найдёт.
-//
-//   BEGIN
-//     users(я) FOR KEY SHARE                 → { error: 'no-user' }   (401)
-//     rooms    FOR NO KEY UPDATE             → { error: 'no-room' }   (404)
-//     room_participants                      → { error: 'not-member' } (403)
-//     [вложение] резервирование квоты        → { error: 'quota' }     (413)
-//     INSERT messages (последний оператор)   — триггер seq: UPDATE rooms SET msg_seq
-//   COMMIT
-//
-// created_at — минута, которую приложение передаёт в INSERT и от которой считает
-// тег (неделя): строка и тег согласованы. id выбирает клиент (clientMessageId) и
-// известен до вставки, поэтому AAD enc:v3 собирается заранее. Откат (409, ошибка)
-// откатывает и резервирование квоты. Возвращает { row: { id, seq, created_at } }
-// или { error }.
-async function insertRoomMessage({ userId, roomId, id, plainText, fields, expirySeconds, upload = null }) {
-    const outcome = await withTransactionRetry(async (client) => {
-        const sender = await client.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE', [userId]);
-        if (sender.rows.length === 0) return { error: 'no-user' };
-        const room = await client.query('SELECT id FROM rooms WHERE id = $1 FOR NO KEY UPDATE', [roomId]);
-        if (room.rows.length === 0) return { error: 'no-room' };
-        const member = await client.query('SELECT 1 FROM room_participants WHERE room_id = $1 AND user_id = $2', [roomId, userId]);
-        if (member.rows.length === 0) return { error: 'not-member' };
-        if (upload && !(await reserveUploadQuota(client, authorTags.qkey(userId), upload.bytes, UPLOAD_QUOTA_BYTES))) {
-            return { error: 'quota' };
-        }
-        const createdAt = floorToMinute(new Date());
-        const authorTag = authorTags.tagFor(roomId, userId, createdAt);
-        const text = writeMessageText(plainText, { room_id: roomId, id, author_tag: authorTag });
-        const row = await insertMessageRow(client, {
-            id, room_id: roomId, author_tag: authorTag, created_at: createdAt, text, ...fields,
-        }, expirySeconds);
-        return { row };
-    });
-    if (outcome.row && expirySeconds) disappearingMessagesManager.scheduleNewMessage(outcome.row.id, expirySeconds);
-    return outcome;
-}
-
-// Ответ на отказ транзакции отправки в комнату.
-function respondRoomSendError(res, error) {
-    if (error === 'no-user') return res.status(401).json({ success: false, message: 'Не авторизован' });
-    if (error === 'no-room') return res.status(404).json({ success: false, message: 'Комната не найдена' });
-    if (error === 'not-member') return res.status(403).json({ success: false, message: 'Вы не участник этой комнаты' });
-    return res.status(413).json({ success: false, message: 'Превышена квота хранилища вложений' });
-}
-
-// Правило R7: в комнате принимается только E2EE-конверт правильной формы, в чате с
-// ботом — только открытый текст (расшифровать конверт там некому). null — запрос
-// допустим, иначе тело ответа 400 { success:false, code, message }. Проверка
-// формы не заменяет проверки подписи на стороне получателей, но не даёт
-// «шифрованным» назвать открытый текст или произвольные данные.
-function e2eePolicyViolation(chat, encrypted, envelope) {
-    if (!chat.room_id) return encrypted ? E2EE_NOT_ALLOWED : null;
-    if (!encrypted) return E2EE_REQUIRED;
-    return isE2eeEnvelopeShape(envelope) ? null : BAD_ENVELOPE;
-}
-
-// Текст сообщения-вложения, как он хранится в messages.text: для E2EE — конверт,
-// иначе подпись или обезличенное имя по типу. null — конверта нет (так сравнить
-// с сохранённой строкой нечем).
-function expectedFileMessageText(body, mimetype) {
-    if (body.encrypted === 'true') return typeof body.envelope === 'string' ? body.envelope.trim() : null;
-    const caption = typeof body.text === 'string' ? sanitizeText(body.text.trim()) : '';
-    return caption || anonymizedFileName(mimetype);
-}
-
-// Что сейчас с id сообщения КОМНАТЫ (раздел 6.4 контракта порядка сообщений):
-//   free      — свободен;
-//   duplicate — строка уже есть, и это тот же запрос: та же комната, тот же автор
-//               (тег строки входит в теги пользователя за неделю её created_at),
-//               расшифрованный на сервере текст равен присланному, а у вложения
-//               file_url задан. Повтор после обрыва связи идемпотентен: клиент
-//               получает уже сохранённое сообщение (row);
-//   conflict  — id занят другим сообщением либо стоит в надгробии: 409, клиент
-//               выберет новый id и зашифрует содержимое заново.
-async function describeMessageIdUse({ id, roomId, userId, expectedText, file }) {
-    const row = await dbGet(
-        `SELECT id, seq, room_id, author_tag, text, file_url, file_name, file_type, message_type,
-                sent, status, edited_at, encrypted, created_at, reply_to_id
-         FROM messages WHERE id = $1`,
-        [id]
-    );
-    if (row) {
-        const same = row.room_id === roomId
-            && authorTags.ownsTag(row.author_tag, authorTags.tagsForRow(row.room_id, userId, row.created_at))
-            && Boolean(row.file_url) === Boolean(file)
-            && expectedText !== null && expectedText !== undefined
-            && readMessageText(row.text, row) === expectedText;
-        return same ? { status: 'duplicate', row } : { status: 'conflict' };
-    }
-    const retired = await dbGet('SELECT 1 AS retired FROM message_tombstones WHERE id = $1 AND expires_at > now()', [id]);
-    return retired ? { status: 'conflict' } : { status: 'free' };
-}
-
-// ---- Сообщение комнаты в ответах и событиях (sealed-sender.md, 8.1) ----
-//
-// Без user_id, chat_id (личная строка отправителя), sender_username,
-// sender_avatar и author_tag: автора знает только клиент (по E2EE-конверту).
-// Сторона пузыря не расшифрованного сообщения — подсказка mine: она есть только в
-// ответе отправителю и в копии события на user:<id> отправителя; остальным
-// участникам и в истории её нет. Клиент никогда не передаёт её в расшифровку.
-function roomMessagePayload(row, text, { replyTo = null, mine = false } = {}) {
-    const message = {
-        id: row.id, seq: row.seq, room_id: row.room_id,
-        text, file_url: row.file_url, file_name: row.file_name, file_type: row.file_type,
-        message_type: row.message_type, sent: row.sent, status: row.status, edited_at: row.edited_at,
-        encrypted: row.encrypted, created_at: row.created_at,
-        reply_to_id: replyTo ? replyTo.id : null, reply_to: replyTo, reactions: [],
-    };
-    if (mine) message.mine = true;
-    return apiMessage(message);
-}
-
-// Сообщение для ответа клиенту по уже сохранённой строке (повтор запроса): то же,
-// что вернула бы первая отправка. Повторяет её только автор, поэтому mine: true.
-function messageFromRow(row, text, replyTo = null) {
-    return roomMessagePayload(row, text, { replyTo, mine: true });
-}
-
-// Отправитель сам не считает свои сообщения непрочитанными: после COMMIT вставки
-// его личный маркер двигается к seq сообщения (sealed-sender.md, 8.3). Маркер
-// только растёт, поэтому по порядку блокировок отдельным оператором безопасно.
-// Упрощение документа: чужие сообщения со seq меньше нового тоже перестают быть
-// непрочитанными. Сбой только логируется - сообщение уже сохранено.
-async function advanceSenderMarker(chat, seq) {
-    try {
-        await dbRun('UPDATE chats SET last_read_seq = $1 WHERE id = $2 AND last_read_seq < $1', [seq, chat.id]);
-        chat.last_read_seq = Math.max(Number(chat.last_read_seq) || 0, Number(seq));
-    } catch (err) {
-        logError('[Chats] Не удалось сдвинуть маркер отправителя', err);
-    }
-}
 
 app.post('/api/messages', async (req, res) => {
     const userId = req.session.userId;
@@ -1863,200 +1228,6 @@ app.post('/api/chats', async (req, res) => {
         res.json({ success: false, message: 'Ошибка создания чата' });
     }
 });
-
-// ---- Приглашения и заявки на вступление ----
-//
-// Код приглашения (rooms.code, 26 символов) видят и меняют все участники
-// комнаты. Параметры кода (lib/invites.js): срок, лимит участников
-// (invite_max_members, NULL — без лимита), вступление только с одобрения
-// любого участника (invite_require_approval, по умолчанию включено) и
-// выключенный код (invite_disabled). Несуществующий, истёкший и
-// выключенный код снаружи неразличимы: везде INVALID_INVITE_MESSAGE.
-
-function inviteExpiresAtIso(expiresAt) {
-    return expiresAt ? new Date(expiresAt).toISOString() : null;
-}
-
-// Новый код приглашения без подписанного сертификата: код остаётся и принимает только заявки, пока кто-то не создаст
-// новую подписанную ссылку («Пригласить»). Вызывается внутри транзакции выхода или удаления аккаунта, под блокировкой
-// комнаты. Срок и лимит участников прежние.
-async function resetInviteAfterLeave(client, roomId) {
-    await client.query(
-        'UPDATE rooms SET invite_cert = NULL, invite_snap = NULL, invite_actor_id = NULL, code = $2 WHERE id = $1',
-        [roomId, generateInviteCode()]
-    );
-}
-
-const JOIN_REQUEST_LIVE_SQL = `created_at > NOW() - ${JOIN_REQUEST_TTL_SECONDS} * INTERVAL '1 second'`;
-const JOIN_REQUEST_NOT_FOUND = { success: false, message: 'Заявка не найдена' };
-
-// Строка списка чатов для только что вошедшего (как в POST /api/chats).
-function roomChatPayload(chat, room) {
-    return {
-        id: chat.id, name: chat.name, avatar: chat.avatar, online: 0, is_bot: 0,
-        room_id: room.id, invite_code: room.invite_disabled ? null : room.code,
-    };
-}
-
-// Комната вызывающего по его личному чату — с проверкой участия.
-async function getOwnRoom(chatIdParam, userId) {
-    const chat = await getOwnChat(chatIdParam, userId);
-    if (!chat) return { error: 'Чат не найден' };
-    if (!chat.room_id) return { error: 'У этого чата нет кода приглашения' };
-    const room = await dbGet(
-        `SELECT r.id, r.name, r.code, r.code_expires_at, r.invite_max_members, r.invite_require_approval, r.invite_disabled,
-                (r.invite_cert IS NOT NULL) AS invite_signed,
-                (SELECT COUNT(*)::int FROM room_participants p WHERE p.room_id = r.id) AS member_count
-         FROM rooms r
-         JOIN room_participants rp ON rp.room_id = r.id AND rp.user_id = $2
-         WHERE r.id = $1`,
-        [chat.room_id, userId]
-    );
-    if (!room) return { error: 'Чат не найден' };
-    return { chat, room };
-}
-
-// Комната по коду приглашения, если код можно использовать; иначе null —
-// одинаково для несуществующего, истёкшего и выключенного кода. Всё, что не
-// похоже на код нынешнего формата, в БД даже не ищется.
-async function findRoomByInviteCode(code) {
-    if (!isValidInviteCode(code)) return null;
-    const room = await dbGet(
-        `SELECT r.id, r.name, r.code, r.code_expires_at, r.invite_max_members, r.invite_require_approval, r.invite_disabled,
-                r.invite_cert,
-                (SELECT COUNT(*)::int FROM room_participants p WHERE p.room_id = r.id) AS member_count
-         FROM rooms r WHERE r.code = $1`,
-        [code]
-    );
-    return room && isInviteUsable(room) ? room : null;
-}
-
-// Вступление в комнату — общий путь для входа по коду без одобрения и для
-// одобрения заявки. Участник + личная строка chats — одной транзакцией под
-// блокировкой строки комнаты (FOR NO KEY UPDATE):
-//   * вступления в одну комнату идут по очереди — два одновременных
-//     запроса не превысят лимит участников;
-//   * последний участник не может одновременно выйти и снести комнату
-//     вместе с новичком (DELETE /api/chats берёт FOR UPDATE);
-//   * отправка сообщений тоже встаёт в эту очередь: триггер seq обновляет
-//     rooms.msg_seq, и NO KEY UPDATE конфликтует с NO KEY UPDATE. Поэтому
-//     граница видимости новичка точна (инвариант О2 контракта порядка
-//     сообщений): отправка либо уже зафиксирована и её seq не больше
-//     прочитанного ниже rooms.msg_seq, либо ждёт и получит seq больше него.
-//     FOR UPDATE здесь не нужен и вреден: он блокировал бы и внешние ключи
-//     (KEY SHARE) всех вставок, ссылающихся на комнату.
-// Порядок блокировок users → rooms → room_participants → chats (раздел 8):
-// строка новичка берётся первой, до комнаты.
-// check(room, client) под блокировкой перепроверяет основание для
-// вступления (код — для входа по коду, живую заявку — для одобрения) и
-// возвращает код ошибки (строку), объект-ответ { reply: { status, body } } или null.
-// afterJoin(client, room) — в той же транзакции, только для нового участника: вставка
-// сертификата допуска или входа (signed-membership.md, 7.1). Прочитанные здесь
-// значения комнаты (invite_cert, invite_snap) принадлежат моменту блокировки: поворот
-// приглашения не успевает между проверкой сертификата и вставкой.
-// Новичок видит только сообщения после вступления: visible_from_seq —
-// rooms.msg_seq на этот момент (у заявки — на момент ОДОБРЕНИЯ, а не
-// подачи); та же граница — у непрочитанного (last_read_seq).
-async function addRoomMember(roomId, userId, check, afterJoin) {
-    const result = await withTransactionRetry(async (client) => {
-        const newcomer = await client.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE', [userId]);
-        if (newcomer.rows.length === 0) return { error: 'not-found' };
-        const locked = await client.query(
-            `SELECT id, name, code, invite_max_members, invite_require_approval, invite_disabled, msg_seq,
-                    invite_cert, invite_snap,
-                    (code_expires_at IS NOT NULL AND code_expires_at > NOW()) AS code_live
-             FROM rooms WHERE id = $1 FOR NO KEY UPDATE`,
-            [roomId]
-        );
-        const room = locked.rows[0];
-        if (!room) return { error: 'gone' };
-        const checkError = check ? await check(room, client) : null;
-        if (checkError) return { error: checkError };
-
-        const existing = await client.query('SELECT id, name, avatar FROM chats WHERE room_id = $1 AND user_id = $2', [roomId, userId]);
-        if (existing.rows[0]) {
-            const dropped = await client.query('DELETE FROM join_requests WHERE room_id = $1 AND user_id = $2', [roomId, userId]);
-            return { chat: existing.rows[0], room, joined: false, requestRemoved: dropped.rowCount > 0 };
-        }
-        const members = await client.query('SELECT COUNT(*)::int AS n FROM room_participants WHERE room_id = $1', [roomId]);
-        if (isRoomFull(members.rows[0].n, room.invite_max_members)) return { error: 'full' };
-
-        // Новичок видит группу под её названием — тем же, что в предпросмотре
-        // приглашения. Раньше строка называлась «Чат с <имя первого
-        // участника>»: в группе это неверно и лишний раз показывает имя.
-        const name = room.name;
-        const avatar = name.charAt(0).toUpperCase();
-        await client.query(
-            `INSERT INTO room_participants (room_id, user_id, visible_from_seq)
-             VALUES ($1, $2, $3)
-             ON CONFLICT (room_id, user_id) DO NOTHING`,
-            [roomId, userId, room.msg_seq]
-        );
-        const chatResult = await client.query(
-            `INSERT INTO chats (user_id, room_id, name, avatar, online, is_bot, last_read_seq)
-             VALUES ($1, $2, $3, $4, 0, 0,
-                     (SELECT visible_from_seq FROM room_participants WHERE room_id = $2 AND user_id = $1))
-             RETURNING id`,
-            [userId, roomId, name, avatar]
-        );
-        const dropped = await client.query('DELETE FROM join_requests WHERE room_id = $1 AND user_id = $2', [roomId, userId]);
-        const extra = afterJoin ? await afterJoin(client, room) : null;
-        return { chat: { id: chatResult.rows[0].id, name, avatar }, room, joined: true, requestRemoved: dropped.rowCount > 0, extra };
-    });
-    if (result.error) return result;
-
-    const chat = roomChatPayload(result.chat, result.room);
-    if (result.joined) {
-        subscribeUserToChat(userId, chat.id, roomId);
-        notifyRoomMembersChanged(roomId);
-        notifyChatListChanged(userId);
-    }
-    if (result.requestRemoved) notifyJoinRequestsChanged(roomId);
-    return { chat, joined: result.joined, extra: result.extra || null };
-}
-
-// Ответ на отказ addRoomMember с подробным вердиктом проверки сертификата.
-function respondCertVerdict(res, verdict) {
-    return res.status(verdict.status).json({ success: false, code: verdict.code, message: verdict.message });
-}
-
-// Ключи участника из хранилища ключей (identity_keys) - для проверки сертификатов.
-function identityKeysOf(client, userId) {
-    const run = client ? (sql, params) => client.query(sql, params).then(r => r.rows[0] || null) : dbGet;
-    return run('SELECT identity_signing_key, identity_dh_key FROM identity_keys WHERE user_id = $1', [userId]);
-}
-
-// Заявка на вступление в комнату с одобрением. Повторный запрос возвращает
-// ту же заявку; просроченная (старше недели — фоновая чистка до неё ещё не
-// дошла) заменяется новой. Живых заявок в комнате — не больше
-// MAX_PENDING_JOIN_REQUESTS_PER_ROOM.
-async function createJoinRequest(roomId, userId) {
-    await dbRun(`DELETE FROM join_requests WHERE room_id = $1 AND user_id = $2 AND NOT (${JOIN_REQUEST_LIVE_SQL})`, [roomId, userId]);
-    const existing = await dbGet('SELECT id FROM join_requests WHERE room_id = $1 AND user_id = $2', [roomId, userId]);
-    if (existing) return { id: existing.id };
-    const pending = await dbGet(`SELECT COUNT(*)::int AS n FROM join_requests WHERE room_id = $1 AND ${JOIN_REQUEST_LIVE_SQL}`, [roomId]);
-    if (pending.n >= MAX_PENDING_JOIN_REQUESTS_PER_ROOM) {
-        return { error: 'В эту группу слишком много заявок. Попробуйте позже.' };
-    }
-    let inserted;
-    try {
-        inserted = (await queryWithRetry(
-            'INSERT INTO join_requests (room_id, user_id) VALUES ($1, $2) ON CONFLICT (room_id, user_id) DO NOTHING RETURNING id',
-            [roomId, userId]
-        )).rows[0];
-    } catch (err) {
-        // Комнату снесли между проверкой кода и заявкой (вышел последний участник): код больше не действует.
-        if (err && err.code === '23503') return { error: INVALID_INVITE_MESSAGE };
-        throw err;
-    }
-    if (!inserted) {
-        // Параллельный такой же запрос успел раньше — это та же заявка.
-        const concurrent = await dbGet('SELECT id FROM join_requests WHERE room_id = $1 AND user_id = $2', [roomId, userId]);
-        return concurrent ? { id: concurrent.id } : { error: 'Не удалось отправить заявку. Попробуйте ещё раз.' };
-    }
-    notifyJoinRequestsChanged(roomId);
-    return { id: inserted.id };
-}
 
 app.get('/api/chats/invite/:chatId', async (req, res) => {
     if (!req.session.userId) return res.json({ success: false, message: 'Не авторизован' });
@@ -2571,34 +1742,6 @@ app.delete('/api/chats/:chatId', async (req, res) => {
     }
 });
 
-// Сообщение, которое пользователь вправе менять или удалять (sealed-sender.md,
-// 8.2). В комнате автора в строке нет, поэтому: пользователь - ТЕКУЩИЙ участник
-// комнаты, сообщение для него ВИДНО (seq > visible_from_seq) и тег строки входит
-// в его теги за неделю created_at строки. Вышедший и вернувшийся участник со
-// своими старыми сообщениями под границей видимости их не меняет и не удаляет
-// (он удалит их вместе с аккаунтом). Нет строки, граница, чужой тег - один и тот же
-// ответ null: чужое, невидимое и несуществующее неразличимы. В чате с ботом -
-// по user_id, как раньше. Выбираются поля для AAD (writeMessageText).
-async function findOwnMessage(messageId, userId, { sentOnly = false } = {}) {
-    const inRoom = await dbGet(
-        `SELECT m.id, m.seq, m.room_id, m.author_tag, m.created_at, m.encrypted, m.file_url, m.sent
-         FROM messages m
-         JOIN room_participants rp ON rp.room_id = m.room_id AND rp.user_id = $2
-         WHERE m.id = $1 AND m.room_id IS NOT NULL AND m.seq > rp.visible_from_seq`,
-        [messageId, userId]
-    );
-    if (inRoom) {
-        const mine = authorTags.ownsTag(inRoom.author_tag, authorTags.tagsForRow(inRoom.room_id, userId, inRoom.created_at));
-        return mine && (!sentOnly || Number(inRoom.sent) === 1) ? inRoom : null;
-    }
-    const inBotChat = await dbGet(
-        `SELECT id, seq, chat_id, room_id, user_id, encrypted, file_url, sent
-         FROM messages WHERE id = $1 AND room_id IS NULL AND user_id = $2`,
-        [messageId, userId]
-    );
-    return inBotChat && (!sentOnly || Number(inBotChat.sent) === 1) ? inBotChat : null;
-}
-
 app.put('/api/messages/:messageId', async (req, res) => {
     const userId = req.session.userId;
     if (!userId) return res.json({ success: false, message: 'Не авторизован' });
@@ -2881,54 +2024,6 @@ app.post('/api/messages/file', upload.single('file'), async (req, res) => {
     }
 });
 
-async function userCanAccessMessage(userId, messageId) {
-    // LEFT JOIN, не INNER JOIN (см. п.3 аудита): если автор сообщения вышел
-    // из групповой комнаты, его персональная строка в chats удаляется и
-    // m.chat_id уходит в NULL (ON DELETE SET NULL). INNER JOIN на chats
-    // тогда терял строку сообщения целиком, и функция возвращала false для
-    // абсолютно любого пользователя — файл переставал открываться вообще
-    // всем, включая оставшихся участников комнаты. m.room_id при этом всегда
-    // записан прямо на сообщении в момент отправки (см. /api/messages,
-    // /api/messages/file) и не зависит от того, жива ли ещё запись chats
-    // автора, поэтому для групповых чатов JOIN для доступа не обязателен.
-    const row = await dbGet(
-        `SELECT m.seq, m.room_id, c.room_id AS chat_room_id, c.user_id AS chat_owner_id
-         FROM messages m
-         LEFT JOIN chats c ON m.chat_id = c.id
-         WHERE m.id = $1`,
-        [messageId]
-    );
-    if (!row) return false;
-    const roomId = row.room_id || row.chat_room_id;
-    if (!roomId) {
-        // Не групповой (1:1) чат — доступ только у владельца самой записи
-        // chats. Если chat_id уже NULL, значит запись chats удалена вместе
-        // со всем DM-чатом (см. DELETE /api/chats/:chatId, ветка без
-        // room_id — там messages удаляются явно перед чатом), и доступа ни
-        // у кого больше нет.
-        return row.chat_owner_id != null && row.chat_owner_id === userId;
-    }
-    // Участник, вступивший после этого сообщения, его не видит — ни файл,
-    // ни реакции (граница visible_from_seq, см. addRoomMember).
-    const participant = await dbGet(
-        'SELECT id FROM room_participants WHERE room_id = $1 AND user_id = $2 AND visible_from_seq < $3',
-        [roomId, userId, row.seq]
-    );
-    return Boolean(participant);
-}
-
-// Файлы отдаются только тому, кто реально является участником чата/комнаты,
-// к которому относится сообщение с этим файлом — а не просто "залогинен ли
-// кто-то вообще" (см. п.1 аудита). Имя файла уникально (случайное),
-// поэтому джойн messages.file_url -> chats/room_participants однозначно
-// определяет владельца. Поиск идёт по индексу idx_messages_file_url.
-async function userCanAccessFile(userId, filename) {
-    const fileUrl = `/uploads/${filename}`;
-    const message = await dbGet('SELECT id FROM messages WHERE file_url = $1 LIMIT 1', [fileUrl]);
-    if (!message) return false;
-    return userCanAccessMessage(userId, message.id);
-}
-
 // В UI предлагается фиксированный набор из 5 эмодзи для реакций. Раньше на
 // бэке проверялась только длина строки (≤10 символов), а не содержимое — это
 // пропускало вход в message.reactions, который на фронте рендерится в
@@ -3139,196 +2234,6 @@ app.use((err, req, res, next) => {
     logError('Unhandled error', err);
     res.status(500).json({ success: false, message: 'Внутренняя ошибка сервера' });
 });
-
-// Полное удаление пользователя (POST /api/account/delete и его псевдоним
-// /api/logout, чистка по сроку): его сообщения (и их файлы) во ВСЕХ комнатах,
-// где он состоит, и в тех, откуда вышел, оставив там сообщения (user_left_rooms),
-// реакции, E2EE key-shares, участие в комнатах, его заявки на вступление,
-// опустевшие комнаты со всей историей и заявками в них, окна квоты вложений,
-// chats (chat_settings — каскадом), unread, сама строка users;
-// message_expiry и реакции на его сообщения уходят каскадом. Сообщения комнат
-// находятся по тегам автора (sealed-sender.md, 12.2): для каждой комнаты - теги
-// пользователя за все недели с создания аккаунта, по всем ключам сообщений. Одной
-// транзакцией — раньше это была серия отдельных DELETE, и первая же ошибка
-// FK (например, из e2ee_key_shares, который ссылается на users без каскада)
-// оставляла пользователя в БД навсегда. После COMMIT — файлы с диска,
-// сессии на всех устройствах, сокеты, публичные E2EE-ключи (встроенное
-// хранилище) и уведомление оставшимся участникам комнат.
-//
-// Порядок блокировок users → rooms → room_participants → chats → user_left_rooms →
-// upload_quota → messages (message-ordering.md, раздел 8.1) — тот же, что у
-// отправки, вступления и выхода из комнаты. При взаимной блокировке (40P01) транзакция повторяется
-// один раз (withTransactionRetry), поэтому результаты собираются заново на
-// каждой попытке.
-async function deleteUserAccount(userId) {
-    const outcome = await withTransactionRetry(async (client) => {
-        const result = { fileUrls: [], survivingRoomIds: [], requestRoomIds: [], droppedRequests: [] };
-        // Блокировка строки пользователя: параллельная отправка сообщения
-        // (она берёт users FOR KEY SHARE первым оператором) дождётся конца
-        // удаления и получит «нет пользователя», а не оставит сообщение, которое
-        // уже никто не удалит.
-        const user = await client.query('SELECT id, created_at FROM users WHERE id = $1 FOR UPDATE', [userId]);
-        if (user.rows.length === 0) return null;
-        const rooms = await client.query('SELECT DISTINCT room_id FROM room_participants WHERE user_id = $1 ORDER BY room_id', [userId]);
-        const roomIds = rooms.rows.map(r => r.room_id);
-        // Комнаты, откуда он вышел, оставив там сообщения: их тоже надо почистить.
-        const left = await client.query('SELECT room_id FROM user_left_rooms WHERE user_id = $1', [userId]);
-        const messageRoomIds = [...new Set([...roomIds, ...left.rows.map(r => r.room_id)])].sort((a, b) => a - b);
-        // Комнаты блокируются так же, как при выходе из чата (DELETE
-        // /api/chats/:chatId): иначе одновременный выход последнего другого
-        // участника оставил бы пустую комнату навсегда. Порядок по id — без
-        // взаимных блокировок между двумя такими удалениями.
-        if (messageRoomIds.length > 0) {
-            await client.query('SELECT id FROM rooms WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE', [messageRoomIds]);
-        }
-        await client.query('DELETE FROM e2ee_key_shares WHERE sender_id = $1 OR recipient_id = $1', [userId]);
-        await client.query('DELETE FROM e2ee_key_requests WHERE requester_id = $1', [userId]);
-        await client.query('DELETE FROM room_participants WHERE user_id = $1', [userId]);
-        // Сообщения бота уходят каскадом от своей строки chats (messages.chat_id ON DELETE
-        // CASCADE), и RETURNING у явного DELETE ниже уже ничего не вернул бы: адреса
-        // файлов снимаются ДО удаления чатов. Пока users заблокирована FOR UPDATE, новые
-        // сообщения бота с файлами вставить некому.
-        const botFiles = await client.query(
-            'SELECT file_url FROM messages WHERE room_id IS NULL AND user_id = $1 AND file_url IS NOT NULL',
-            [userId]
-        );
-        result.fileUrls.push(...botFiles.rows.map(r => r.file_url));
-        await client.query('DELETE FROM chats WHERE user_id = $1', [userId]);
-        // Сертификаты состава, где он субъект или подписавший, и подписанные приглашения комнат, из которых он уходит
-        // (решение владельца, вопрос 17): код заменяется новым. Комнаты уже заблокированы выше.
-        await client.query('DELETE FROM room_member_certs WHERE subject_id = $1 OR actor_id = $1', [userId]);
-        for (const roomId of roomIds) await resetInviteAfterLeave(client, roomId);
-        await client.query('DELETE FROM user_left_rooms WHERE user_id = $1', [userId]);
-        // Окна квоты - по псевдонимам от текущего и всех прежних ключей сообщений.
-        await deleteQuotaRows(client, authorTags.qkeysFor(userId));
-        // Сообщения комнат - по (комната, теги): в строке user_id нет. Запросы по
-        // комнате, а не одним массивом пар: у старого аккаунта тегов до 600 недель
-        // на ключ, и массив из всех комнат сразу получился бы огромным.
-        const now = Date.now();
-        for (const roomId of messageRoomIds) {
-            const tags = authorTags.tagsForAccount(roomId, userId, user.rows[0].created_at, now);
-            const roomMessages = await client.query(
-                'DELETE FROM messages WHERE room_id = $1 AND author_tag = ANY($2::bytea[]) RETURNING file_url',
-                [roomId, tags]
-            );
-            result.fileUrls.push(...roomMessages.rows.map(r => r.file_url));
-        }
-        // Чат с ботом: сообщения владельца (в том числе ответы бота) каскадом уже ушли вместе
-        // с чатом; это страховка на случай строки без чата.
-        const botMessages = await client.query('DELETE FROM messages WHERE room_id IS NULL AND user_id = $1 RETURNING file_url', [userId]);
-        result.fileUrls.push(...botMessages.rows.map(r => r.file_url));
-        await client.query('DELETE FROM reactions WHERE user_id = $1', [userId]);
-        const ownRequests = await client.query('DELETE FROM join_requests WHERE user_id = $1 RETURNING room_id', [userId]);
-        result.requestRoomIds = [...new Set(ownRequests.rows.map(r => r.room_id))];
-
-        if (messageRoomIds.length > 0) {
-            const orphaned = await client.query(
-                `DELETE FROM messages m WHERE m.room_id = ANY($1::int[])
-                   AND NOT EXISTS (SELECT 1 FROM room_participants rp WHERE rp.room_id = m.room_id)
-                 RETURNING file_url`,
-                [messageRoomIds]
-            );
-            result.fileUrls.push(...orphaned.rows.map(r => r.file_url));
-            // Заявки в опустевшие комнаты ушли бы и каскадом, но заявителям
-            // надо сказать, что рассматривать их больше некому.
-            const orphanedRequests = await client.query(
-                `DELETE FROM join_requests jr WHERE jr.room_id = ANY($1::int[])
-                   AND NOT EXISTS (SELECT 1 FROM room_participants rp WHERE rp.room_id = jr.room_id)
-                 RETURNING id, user_id`,
-                [messageRoomIds]
-            );
-            result.droppedRequests = orphanedRequests.rows;
-            const removedRooms = await client.query(
-                `DELETE FROM rooms r WHERE r.id = ANY($1::int[])
-                   AND NOT EXISTS (SELECT 1 FROM room_participants rp WHERE rp.room_id = r.id)
-                 RETURNING id`,
-                [messageRoomIds]
-            );
-            const removed = new Set(removedRooms.rows.map(r => r.id));
-            result.survivingRoomIds = roomIds.filter(id => !removed.has(id));
-        }
-        await client.query('DELETE FROM users WHERE id = $1', [userId]);
-        // Домен журнала ключей — после основного, в его порядке: kt_state FOR SHARE → identity_keys →
-        // kt_pending (message-ordering.md, 8.1). Регистрация ключа и закрытие эпохи берут их так же,
-        // поэтому взаимных блокировок нет. Prekey пользователя уходят следом за identity_keys, как
-        // и в регистрации; nonce обязательства удаляется вместе со строкой identity_keys, и записи
-        // журнала перестают связываться с ключами. Запись kt_pending в эпоху уже не попадёт.
-        await client.query('SELECT 1 FROM kt_state FOR SHARE');
-        await client.query('DELETE FROM identity_keys WHERE user_id = $1', [userId]);
-        for (const table of ['pq_one_time_prekeys', 'one_time_prekeys', 'signed_pq_prekeys', 'signed_prekeys']) {
-            await client.query(`DELETE FROM ${table} WHERE user_id = $1`, [userId]);
-        }
-        await client.query('DELETE FROM kt_pending WHERE user_id = $1', [userId]);
-        return result;
-    });
-    if (!outcome) return false;
-    const { fileUrls, survivingRoomIds, requestRoomIds, droppedRequests } = outcome;
-
-    removeUploadedFiles(fileUrls);
-    anonActivity.forget(userId);
-    io.in('user:' + userId).disconnectSockets(true);
-    for (const roomId of survivingRoomIds) notifyRoomMembersChanged(roomId, { inviteRotated: true });
-    for (const roomId of requestRoomIds) notifyJoinRequestsChanged(roomId);
-    for (const request of droppedRequests) notifyJoinRequestDecided(request.user_id, { requestId: request.id, approved: false });
-    deleteKeysForUser(userId);
-    // Сессии на других устройствах. После COMMIT и отдельно: таблицы session
-    // может ещё не быть (42P01), а ошибка внутри транзакции откатила бы всё.
-    try {
-        await dbRun(`DELETE FROM session WHERE sess->>'userId' = $1`, [String(userId)]);
-    } catch (error) {
-        if (error.code !== '42P01') logError('[Account] Не удалось удалить сессии', error);
-    }
-    return true;
-}
-
-// Анонимные аккаунты, срок которых вышел (lib/anon-lifetime.js): выбранный
-// срок без активности по users.last_active_at (корзина, округлённая вверх,
-// — граница та же, что у isAnonExpired). Потолка от создания нет. Раньше
-// удаление шло только через 5 часов после создания и откладывалось, пока
-// жива строка в таблице session, — даже если вкладку давно закрыли.
-// Пользователи с открытым сокетом на этом экземпляре не трогаются: их
-// активность продлевает touch, а сокеты других экземпляров продлевают
-// last_active_at в БД сами. Время — часы сервера, как у записи корзин.
-// Ошибка выборки — наверх, в runExclusive (lib/jobs): такой проход не
-// засчитывается.
-async function purgeExpiredAnonymousUsers() {
-    const now = Date.now();
-    const deadline = (lifetime) => new Date(now - ANON_LIFETIMES[lifetime] * 1000);
-    const rows = await dbAll(`
-        SELECT id FROM users
-        WHERE ((anon_lifetime = 'tab' AND last_active_at <= $1)
-            OR (anon_lifetime = 'day' AND last_active_at <= $2)
-            OR (anon_lifetime = 'week' AND last_active_at <= $3))
-          AND NOT (id = ANY($4::int[]))
-        ORDER BY last_active_at
-        LIMIT 200
-    `, [deadline('tab'), deadline('day'), deadline('week'), userSocketCount.keys()]);
-    // В лог — только счётчики, без id анонимных аккаунтов.
-    let failed = 0;
-    for (const row of rows) {
-        try {
-            await deleteUserAccount(row.id);
-        } catch (err) {
-            failed++;
-            logError('[Anon] Не удалось удалить просроченный аккаунт', err);
-        }
-    }
-    metrics.accountsDeleted('expired', rows.length - failed);
-    if (rows.length > 0) console.log(`[Anon] Удалено просроченных анонимных аккаунтов: ${rows.length - failed}`);
-}
-
-// Заявки на вступление старше недели: заявителю — "отклонена", участникам
-// — обновить список (в выборках просроченные заявки и так не видны).
-async function purgeExpiredJoinRequests() {
-    try {
-        const rows = await dbAll(`DELETE FROM join_requests WHERE NOT (${JOIN_REQUEST_LIVE_SQL}) RETURNING id, room_id, user_id`);
-        for (const roomId of new Set(rows.map(r => r.room_id))) notifyJoinRequestsChanged(roomId);
-        for (const row of rows) notifyJoinRequestDecided(row.user_id, { requestId: row.id, approved: false });
-        if (rows.length > 0) console.log(`[Invites] Удалено просроченных заявок на вступление: ${rows.length}`);
-    } catch (error) {
-        logError('[Invites] Purge error', error);
-    }
-}
 
 // ---- Фоновые задачи (lib/jobs/index.js) ----
 //
