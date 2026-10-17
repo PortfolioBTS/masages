@@ -149,6 +149,22 @@ async function confirmJoin(page) {
     await page.click('#join-confirm-btn');
 }
 
+// Группа владельца и второй человек в ней по подписанной ссылке без одобрения:
+// общая подготовка сценариев, которым группа с двумя участниками нужна как
+// исходное состояние. Оба должны быть открыты на пустой вкладке и не иметь аккаунта.
+async function groupWithMember({ baseUrl, name, owner, ownerPage, memberPage }) {
+    await startAnonymously(ownerPage, `${baseUrl}/`);
+    await createGroup(ownerPage, name);
+    await openInvite(ownerPage);
+    await rotateToSignedInvite(ownerPage);
+    const link = await copyInviteLink(ownerPage, owner, baseUrl);
+    await closeInvite(ownerPage);
+    await openInviteAsNewcomer(memberPage, link);
+    await confirmJoin(memberPage);
+    await memberPage.waitForText('#chat-name', name, { timeoutMs: APP_TIMEOUT_MS });
+    await waitForNotice(memberPage, TEXT.membershipByInvite);
+}
+
 // Участник открывает заявки, одобряет первую и закрывает окно.
 async function approveFirstRequest(page) {
     await page.waitForSelector('#requests-bar:not(.hidden)', { timeoutMs: APP_TIMEOUT_MS });
@@ -247,6 +263,7 @@ module.exports = {
     openInviteAsNewcomer,
     openCodeAsNewcomer,
     confirmJoin,
+    groupWithMember,
     approveFirstRequest,
     readMembers,
     waitForMessage,

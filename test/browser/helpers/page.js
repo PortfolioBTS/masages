@@ -20,6 +20,8 @@ const SCREENS_DIR = process.env.NYXO_BROWSER_SCREENS_DIR
 
 const DEFAULT_TIMEOUT_MS = 15000;
 const POLL_MS = 50;
+// Транспорт socket.io (опрос, пинги) идёт сам по себе и к действиям человека не относится.
+const SOCKET_IO_RE = /\/socket\.io\//;
 
 // Ошибки вида «страница ушла на другой документ, пока шёл запрос» — при
 // ожидании это просто повод повторить.
@@ -54,6 +56,7 @@ class BrowserPage {
         this.warnings = [];       // предупреждения консоли: для диагностики, не сбой
         this.dialogs = [];        // [{ type, message, accepted }]
         this.requests = [];       // [{ url, method, type }] — все запросы вкладки по порядку
+        this.lastRequestAt = Date.now();   // последний запрос не из socket.io (для waitForNetworkQuiet)
         this.allowed = [];        // шаблоны известных безвредных сообщений
         this.dialogHandler = () => true;   // true — OK, false — отмена
         this.closed = false;
@@ -109,6 +112,7 @@ class BrowserPage {
         });
         this.on('Network.requestWillBeSent', ({ request, type }) => {
             this.requests.push({ url: request.url, method: request.method, type: type || '' });
+            if (!SOCKET_IO_RE.test(request.url)) this.lastRequestAt = Date.now();
         });
         this.on('Network.webSocketCreated', ({ url }) => {
             this.requests.push({ url, method: 'GET', type: 'WebSocket' });
@@ -350,10 +354,20 @@ class BrowserPage {
         return this.requests.length;
     }
 
-    // Запросы после метки. Транспорт socket.io (ping и опрос) идёт сам по себе и
-    // к действиям человека не относится — он отфильтрован, остальное считается.
-    requestsSince(mark, { ignore = /\/socket\.io\// } = {}) {
+    // Запросы после метки. Транспорт socket.io отфильтрован, остальное считается.
+    requestsSince(mark, { ignore = SOCKET_IO_RE } = {}) {
         return this.requests.slice(mark).filter(r => !ignore.test(r.url));
+    }
+
+    // Ждёт, пока страница перестанет что-то запрашивать (отметки о прочтении,
+    // догрузка ключей идут «по следам» действий): после этого можно ставить метку
+    // и проверять, что следующее действие сети не трогает.
+    async waitForNetworkQuiet({ quietMs = 1500, timeoutMs = 20000 } = {}) {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() - this.lastRequestAt < quietMs) {
+            if (Date.now() > deadline) throw new Error(`сеть не затихла за ${timeoutMs} мс: последние запросы ${JSON.stringify(this.requests.slice(-3).map(r => `${r.method} ${r.url}`))}`);
+            await delay(POLL_MS);
+        }
     }
 
     // ---- Итоги ----
