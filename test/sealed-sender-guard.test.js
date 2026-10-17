@@ -1,6 +1,6 @@
 'use strict';
 // Тест-запрет sealed sender (docs/security/sealed-sender.md, «Приложение: что менять в коде»):
-// в server.js не должно возвращаться то, что связывало строку комнаты с пользователем.
+// в коде сервера (server.js и src/**) не должно возвращаться то, что связывало строку комнаты с пользователем.
 //   * квота «по сумме file_size сообщений» и столбцы окна в users (upload_window): квота
 //     ведётся в upload_quota под псевдонимом;
 //   * ответы и события сообщений КОМНАТЫ с user_id, chat_id, sender_username, sender_avatar и
@@ -15,6 +15,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const { readServerSource } = require('./server-source');
 
 const ROOT = path.join(__dirname, '..');
 // Комментарии вырезаются (в них можно описывать, что именно запрещено).
@@ -25,7 +26,7 @@ function stripComments(source) {
         .map(line => line.replace(/^\s*\/\/.*$/, '').replace(/\s\/\/\s.*$/, ''))
         .join('\n');
 }
-const server = stripComments(fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8').replace(/\r\n/g, '\n'));
+const server = stripComments(readServerSource().replace(/\r\n/g, '\n'));
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -84,7 +85,7 @@ test('история и цитата комнаты: запросы без JOIN 
 test('список чатов и markChatRead: «чужие» в комнате - по тегам автора, а не по user_id', () => {
     const list = between('const CHAT_LIST_SQL = `', "app.get('/api/chats'");
     assert.doesNotMatch(list, /m\.user_id\s*<>\s*c\.user_id/);
-    const read = between('async function markChatRead(', 'const MESSAGES_PAGE_SIZE');
+    const read = between('async function markChatRead(', 'function unarchiveForRecipients(');
     assert.match(read, /NOT \(m\.author_tag = ANY\(\$4::bytea\[\]\)\)/);
     assert.match(read, /authorTags\.tagsForAccount\(/);
 });
@@ -94,7 +95,7 @@ test('события комнат уходят через emitRoomMessageEvent: 
     assert.ok(direct.length >= 2, 'остались события чата с ботом');
     for (const line of direct) assert.match(line, /getSocketRoomKey\((chat\.id|message\.chat_id), (null|message\.room_id)?\)|getSocketRoomKey\(chat\.id, null\)/, line.trim());
     assert.strictEqual(direct.filter(line => /getSocketRoomKey\(chat\.id, roomId\)/.test(line)).length, 0, 'комнатный newMessage без except автора');
-    const emit = between('function emitRoomMessageEvent(', 'async function advanceSenderMarker(');
+    const emit = between('function emitRoomMessageEvent(', 'function notifyRoomMembersChanged(');
     assert.match(emit, /\.except\('user:' \+ authorId\)/);
     assert.match(emit, /io\.to\('user:' \+ authorId\)\.emit\(event, \{ \.\.\.payload, mine: true \}\)/);
 });
@@ -104,7 +105,7 @@ test('строка комнаты пишется только транзакци
     const inserts = server.split('\n').filter(line => /INSERT INTO messages/.test(line));
     assert.ok(inserts.length >= 3, inserts.join('\n'));
     for (const line of inserts) assert.ok(/chat_id/.test(line) || line.includes('${names.join'), line.trim());
-    const room = between('async function insertRoomMessage(', 'function respondRoomSendError(');
+    const room = between('async function insertRoomMessage(', 'async function describeMessageIdUse(');
     assert.ok(room.indexOf('FOR KEY SHARE') > 0 && room.indexOf('FOR KEY SHARE') < room.indexOf('FOR NO KEY UPDATE'), 'users раньше rooms');
     assert.ok(room.indexOf('FROM room_participants') < room.indexOf('reserveUploadQuota'), 'членство - до квоты');
     assert.ok(room.indexOf('reserveUploadQuota') < room.indexOf('insertMessageRow('), 'квота - до вставки');

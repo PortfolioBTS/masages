@@ -106,7 +106,7 @@ async function main() {
     });
 
     await test('Clear-Site-Data в коде сервера только "cache": "storage" и "*" стёрли бы регистрацию SW и ключи E2EE', () => {
-        const sources = [path.join(ROOT, 'server.js'), ...fs.readdirSync(path.join(ROOT, 'lib'), { recursive: true, withFileTypes: true })
+        const sources = [...require('./server-source').serverSourceFiles().map((file) => path.join(ROOT, file)), ...fs.readdirSync(path.join(ROOT, 'lib'), { recursive: true, withFileTypes: true })
             .filter((entry) => entry.isFile() && entry.name.endsWith('.js'))
             .map((entry) => path.join(entry.parentPath, entry.name))];
         let found = 0;

@@ -119,10 +119,10 @@ async function main() {
         assert.strictEqual(skipped, 1);
     });
 
-    await test('server.js: переключатель стоит ДО express.static, иначе статика отдала бы настоящий sw.js', () => {
-        const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+    await test('код сервера: переключатель стоит ДО express.static, иначе статика отдала бы настоящий sw.js', () => {
+        const source = require('./server-source').readServerSource();
         const kill = source.indexOf('app.use(createSwKillSwitch(process.env))');
-        const statics = source.indexOf("app.use(express.static(path.join(__dirname, 'public')");
+        const statics = source.search(/app\.use\(express\.static\(path\.join\((__dirname|ROOT_DIR), 'public'\)/);
         assert.ok(kill > 0 && statics > 0);
         assert.ok(kill < statics);
     });

@@ -285,6 +285,7 @@ function listFiles() {
         }
     };
     walk('lib');
+    if (fs.existsSync(path.join(ROOT, 'src'))) walk('src');
     for (const entry of fs.readdirSync(path.join(ROOT, 'scripts'), { withFileTypes: true })) {
         if (entry.isFile() && entry.name.endsWith('.js')) files.push(`scripts/${entry.name}`);
     }

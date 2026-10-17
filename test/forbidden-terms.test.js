@@ -38,7 +38,7 @@ function isExcluded(file) {
         || file === SELF;
 }
 // Код, который работает в проде: сервер, lib/, клиент (без vendor).
-const isProdCode = (file) => file === 'server.js' || file.startsWith('lib/') || file.startsWith('public/');
+const isProdCode = (file) => file === 'server.js' || file.startsWith('src/') || file.startsWith('lib/') || file.startsWith('public/');
 // Юнит-тесты: только test/*.test.js, без вложенных папок (сквозные тесты в
 // test/e2e/ нарочно описывают старый вход, чтобы проверить его отсутствие).
 const isUnitTest = (file) => /^test\/[^/]+\.test\.js$/.test(file);
@@ -57,7 +57,7 @@ const RULES = [
         allow: [
             { file: 'lib/legacy-reset.js', reason: 'сброс старой схемы: модуль ищет колонки email/password и удаляет таблицы версии 2.0.0 — ради этого он и существует' },
             { file: 'test/legacy-reset.test.js', reason: 'юнит-тест того же модуля сброса старой схемы' },
-            { file: 'server.js', line: /Схема версии 2\.0\.0 \(аккаунты с email и паролем\)/, reason: 'комментарий у вызова сброса старой схемы в initDatabase' },
+            { file: 'src/db/schema.js', line: /Схема версии 2\.0\.0 \(аккаунты с email и паролем\)/, reason: 'комментарий у вызова сброса старой схемы в initDatabase' },
             { file: 'lib/security-utils.js', line: /url\.password|логин\/пароль/, reason: 'проверка Origin: адрес с логином и паролем (userinfo) не принимается — это разбор URL, а не вход в приложение' },
             { file: 'lib/security-txt.js', line: /url.password/, reason: 'security.txt: адрес связи с логином и паролем (userinfo) не принимается — это разбор URL, а не вход в приложение' },
             { file: 'lib/env-check.js', reason: 'пароль в DATABASE_URL, хэши утёкших паролей базы (DATABASE_PASSWORD), остатки PASSWORD_PEPPER и HIBP_CHECK в предупреждении «переменная не используется»' },
@@ -159,12 +159,12 @@ test('все слова критериев находятся: email, password, 
     }
 });
 
-test('область: этап 1 — server.js, lib/**, public/** и test/*.test.js, но не test/e2e/**; этап 2 — только прод-код', () => {
+test('область: этап 1 — server.js, src/**, lib/**, public/** и test/*.test.js, но не test/e2e/**; этап 2 — только прод-код', () => {
     const [auth, audio] = RULES;
     const inScope = (rule, file) => scanRule(rule, [fake(file, 'password record')]).violations.length > 0;
-    for (const file of ['server.js', 'lib/a/b.js', 'public/script.js', 'public/sub/dir/x.html', 'test/some.test.js']) assert.ok(inScope(auth, file), `${file}: этап 1`);
+    for (const file of ['server.js', 'src/a/b.js', 'lib/a/b.js', 'public/script.js', 'public/sub/dir/x.html', 'test/some.test.js']) assert.ok(inScope(auth, file), `${file}: этап 1`);
     for (const file of ['test/e2e/x.e2e.test.js', 'test/e2e/helpers/y.js', 'test/helper.js', 'scripts/dev.js', 'README.txt', '.github/workflows/ci.yml']) assert.ok(!inScope(auth, file), `${file}: вне этапа 1`);
-    for (const file of ['server.js', 'lib/a.js', 'public/script.js']) assert.ok(inScope(audio, file), `${file}: этап 2`);
+    for (const file of ['server.js', 'src/a.js', 'lib/a.js', 'public/script.js']) assert.ok(inScope(audio, file), `${file}: этап 2`);
     for (const file of ['test/some.test.js', 'test/e2e/x.e2e.test.js', 'scripts/dev.js']) assert.ok(!inScope(audio, file), `${file}: вне этапа 2`);
 });
 

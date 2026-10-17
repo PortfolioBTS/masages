@@ -74,7 +74,7 @@ test('лицензия MIT лежит рядом и совпадает с лиц
 });
 
 test('сервер не отдаёт клиент socket.io сам: serveClient: false', () => {
-    const server = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+    const server = require('./server-source').readServerSource(ROOT);
     assert.match(server, /new Server\(server, \{[^}]*?serveClient:\s*false/s);
 });
 

@@ -349,8 +349,8 @@ async function main() {
         assert.strictEqual(db._state.spks.has(2), true);
     });
 
-    await test('server.js: the PQ pool route has its own JSON parser (256 KB) before the general one', () => {
-        const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'server.js'), 'utf8');
+    await test('server code: the PQ pool route has its own JSON parser (256 KB) before the general one', () => {
+        const src = require('./server-source').readServerSource();
         const own = src.indexOf("app.use('/api/keys/pq-one-time-prekeys', express.json({ limit: '256kb' }))");
         const general = src.indexOf('app.use(express.json());');
         assert.ok(own > 0, 'parser for /api/keys/pq-one-time-prekeys is missing');
