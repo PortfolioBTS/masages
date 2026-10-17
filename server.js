@@ -30,9 +30,6 @@ const { ipKeyGenerator } = rateLimit;
 const { stripMetadataFromFile, cleanupStaleTempFiles } = require('./lib/metadata-stripper');
 const DisappearingMessagesManager = require('./lib/disappearing-messages');
 const { encryptText, decryptText, messageAad, encryptRoomText, decryptRoomText, messageAadV3 } = require('./lib/message-crypto');
-// Тег автора сообщения комнаты и псевдоним квоты (docs/security/sealed-sender.md):
-// ключи те же, что у message-crypto (MESSAGE_ENCRYPTION_KEY и …_PREVIOUS).
-const authorTags = require('./lib/author-tag').createAuthorTagsFromEnvironment();
 const { sanitizeText, getPrivacyHeaders, createHstsMiddleware } = require('./lib/privacy');
 const { createSwKillSwitch } = require('./lib/sw-kill-switch');
 const {
@@ -154,62 +151,51 @@ const {
     E2EE_NOT_ALLOWED,
 } = require('./lib/e2ee-envelope');
 
-const IS_PRODUCTION = process.env.NODE_ENV === 'production';
-// HSTS preload включает только владелец домена: HSTS_PRELOAD=yes (см. lib/privacy.js).
-const HSTS_PRELOAD = process.env.HSTS_PRELOAD === 'yes';
+// ---- T6.1, шаг 1 из 6: часть кода вынесена в src/ ----
+// Контекст собирается из фабрик в порядке зависимостей (на последнем шаге этот блок станет
+// src/create-server.js); всё, что ниже в этом файле, ещё не вынесено.
+const { loadConfig } = require('./src/config');
+const { createBase } = require('./src/context');
+const { createUploads } = require('./src/services/uploads');
+const { createApp } = require('./src/http/create-app');
+const { createRealIp } = require('./src/http/middleware/real-ip');
+const { createOrigin } = require('./src/http/middleware/origin');
+const { createHttpServer } = require('./src/http/server');
+const { createIo } = require('./src/realtime/io');
+const { createEvents } = require('./src/realtime/events');
+const { createPool } = require('./src/db/pool');
+const { createTransactions } = require('./src/db/transactions');
+const { SAFE_FILENAME_RE, readFileHead, coarsenFileTimes } = require('./src/services/uploads');
+const { getSocketRoomKey, MAX_SOCKETS_PER_USER, MAX_SOCKETS_PER_IP } = require('./src/realtime/io');
+const { respondIfDeadlock, withMessageIdRetry } = require('./src/db/transactions');
 
-// ALLOWED_MIME_TYPES и MIME_EXTENSIONS (жёсткий маппинг mimetype ->
-// расширение на диске, расширение никогда не берётся из имени файла) —
-// в lib/security-utils.js, рядом с обезличенными именами вложений.
+const ctx = { ...loadConfig(__dirname) };
+Object.assign(ctx, createBase());
+Object.assign(ctx, createUploads(ctx));
+Object.assign(ctx, createApp());
+Object.assign(ctx, createRealIp());
+Object.assign(ctx, createOrigin());
+Object.assign(ctx, createHttpServer(ctx));
+Object.assign(ctx, createIo(ctx));
+Object.assign(ctx, createEvents(ctx));
+Object.assign(ctx, createPool(ctx));
+Object.assign(ctx, createTransactions(ctx));
 
-// Лимит на суммарный объём вложений одного пользователя: без него один
-// аккаунт мог забить весь volume (по 50 МБ за запрос, без ограничений).
-const UPLOAD_QUOTA_BYTES = Math.floor(positiveNumberOr(process.env.UPLOAD_QUOTA_MB, 500) * 1024 * 1024);
+const {
+    UPLOADS_DIR, app, metrics, resolveRealIp, pool, removeUploadedFiles, io, dbAll, dbGet, sessionSecret,
+    IS_PRODUCTION, dbRun, userSocketCount, getClientIp, ipSocketCount, HSTS_PRELOAD, isTrustedOrigin,
+    withTransaction, readiness, SESSION_RENEW_MS, withTransactionRetry, queryWithRetry,
+    GLOBAL_DEFAULT_EXPIRY_SECONDS, authorTags, notifyChatListChanged, UPLOAD_QUOTA_BYTES,
+    emitRoomMessageEvent, INVITE_TTL_SECONDS, subscribeUserToChat, notifyRoomMembersChanged,
+    notifyJoinRequestsChanged, notifyJoinRequestDecided, unsubscribeUserFromChat, rejectUpload,
+    rejectUploadWith, cleanupUploadedFile, DB_POOL_CONFIG, PORT, server, HOST,
+} = ctx;
 
 // '.svg' явно в блок-листе как доп. защита (defense-in-depth, п.7 аудита):
 // image/svg+xml и так не входит в ALLOWED_MIME_TYPES, но SVG может нести
 // <script>, поэтому расширение блокируется отдельно на случай, если формат
 // когда-либо попадёт в разрешённый список по ошибке.
 const BLOCKED_EXTENSIONS = new Set(['.html', '.htm', '.php', '.exe', '.js', '.sh', '.py', '.rb', '.pl', '.bat', '.cmd', '.ps1', '.vbs', '.jar', '.msi', '.svg']);
-
-// Итоговое имя файла на диске должно состоять только из "безопасных" для
-// файловой системы символов — доп. страховка на случай, если MIME_EXTENSIONS
-// когда-нибудь получит некорректное значение (п.2 аудита, "валидировать
-// итоговое имя файла регуляркой").
-const SAFE_FILENAME_RE = /^[\w.-]+$/;
-
-// checkMagicBytes (сигнатура файла против заявленного типа) — в
-// lib/security-utils.js: чистая функция, её проверяют юнит-тесты.
-
-// Вложения должны лежать на постоянном диске: файловая система контейнера
-// (Railway и т.п.) очищается при каждом деплое. UPLOADS_DIR — явный путь;
-// RAILWAY_VOLUME_MOUNT_PATH Railway выставляет сам, когда к сервису
-// подключён volume.
-const UPLOADS_DIR = process.env.UPLOADS_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'uploads');
-fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-try {
-    const probe = path.join(UPLOADS_DIR, `.write-test-${process.pid}`);
-    fs.writeFileSync(probe, '');
-    fs.unlinkSync(probe);
-    console.log(`[Uploads] Папка вложений: ${UPLOADS_DIR}`);
-} catch (err) {
-    logError(`[Uploads] Нет доступа на запись в ${UPLOADS_DIR}, загрузка файлов работать не будет`, err);
-}
-
-// Удаляет файлы вложений с диска по их file_url ("/uploads/<name>").
-// Вызывается после того, как ссылающиеся на них сообщения удалены из БД.
-function removeUploadedFiles(fileUrls) {
-    for (const url of fileUrls) {
-        if (typeof url !== 'string' || !url.startsWith('/uploads/')) continue;
-        const filename = path.basename(url);
-        if (!SAFE_FILENAME_RE.test(filename)) continue;
-        fs.promises.unlink(path.join(UPLOADS_DIR, filename)).catch(err => {
-            // Имя файла в лог не идёт (по нему находят сообщение): logError убирает
-            // путь и из текста системной ошибки.
-            if (err.code !== 'ENOENT') logError('[Uploads] Не удалось удалить файл вложения', err);
-        });
-    }
-}
 
 // Ответ, который отдаёт обработчик ошибок Express вместо ошибки: так из
 // fileFilter multer уходят 400/409 с телом { success, code, message } и даже 200
@@ -327,92 +313,6 @@ async function checkUploadBeforeStore(session, body, file) {
     if (use.status === 'conflict') throw new EarlyResponse(409, ID_CONFLICT);
 }
 
-// === Верификация CF-Connecting-IP (см. https://www.cloudflare.com/ips/) ===
-// Список подтверждён на 2026-08-10. CF-Connecting-IP — это просто HTTP-заголовок,
-// который любой клиент может подставить сам. Доверять ему можно только если сам
-// запрос физически пришёл с IP-адреса Cloudflare — иначе, обращаясь напрямую на
-// публичный *.up.railway.app домен, атакующий получает "новый IP" на каждый
-// запрос и обнуляет все rate-limit'ы по IP (регистрация, вход в комнаты, API).
-// Список можно переопределить через переменную окружения CF_IP_RANGES
-// (через запятую), если Cloudflare обновит диапазоны.
-const DEFAULT_CLOUDFLARE_IP_RANGES = [
-    // IPv4
-    '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22',
-    '141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20',
-    '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
-    '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22',
-    // IPv6
-    '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32',
-    '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32',
-];
-
-const cloudflareBlockList = new net.BlockList();
-(function loadCloudflareRanges() {
-    const ranges = process.env.CF_IP_RANGES
-        ? process.env.CF_IP_RANGES.split(',').map(s => s.trim()).filter(Boolean)
-        : DEFAULT_CLOUDFLARE_IP_RANGES;
-    for (const cidr of ranges) {
-        const [addr, prefixStr] = cidr.split('/');
-        const type = net.isIP(addr);
-        if (!type || !prefixStr) {
-            console.warn('[CF] Пропущен некорректный диапазон:', cidr);
-            continue;
-        }
-        cloudflareBlockList.addSubnet(addr, Number(prefixStr), type === 6 ? 'ipv6' : 'ipv4');
-    }
-})();
-
-function isFromCloudflare(ip) {
-    if (!ip) return false;
-    const clean = ip.startsWith('::ffff:') ? ip.slice(7) : ip;
-    const type = net.isIP(clean);
-    if (!type) return false;
-    try {
-        return cloudflareBlockList.check(clean, type === 6 ? 'ipv6' : 'ipv4');
-    } catch (e) {
-        return false;
-    }
-}
-
-// connectingIp — адрес, с которого запрос физически пришёл на наш доверенный
-// прокси (Railway), а не значение из легко подделываемых заголовков.
-function resolveRealIp(headers, connectingIp) {
-    const cfIp = headers['cf-connecting-ip'];
-    if (cfIp && isFromCloudflare(connectingIp)) {
-        return cfIp.split(',')[0].trim();
-    }
-    return connectingIp;
-}
-
-// Метрики процесса: счётчики событий и HTTP по шаблону маршрута (lib/metrics.js).
-const metrics = createMetrics();
-// Готовность для GET /readyz: порт открывается только после миграций, но флаг
-// явный — проба не должна зависеть от порядка запуска.
-const readiness = { migrated: false };
-
-const app = express();
-app.set('trust proxy', 1);
-
-// Express 4 не перехватывает отклонённые промисы из async-хендлеров: любое
-// исключение вне try (например, text.trim() у числа вместо строки) давало
-// unhandledRejection, и Node завершал ВЕСЬ процесс — один кривой запрос от
-// любого залогиненного пользователя клал сервер. Оборачиваем все маршруты
-// (включая регистрируемые в lib/*), чтобы ошибка ушла в error-middleware.
-function wrapAsync(handler) {
-    if (typeof handler !== 'function' || handler.length === 4) return handler;
-    return function asyncSafeHandler(req, res, next) {
-        const result = handler(req, res, next);
-        if (result && typeof result.catch === 'function') result.catch(next);
-        return result;
-    };
-}
-for (const method of ['get', 'post', 'put', 'delete']) {
-    const original = app[method].bind(app);
-    // app.get('name') с одним аргументом — это чтение настройки, не маршрут.
-    app[method] = (routePath, ...handlers) =>
-        handlers.length === 0 ? original(routePath) : original(routePath, ...handlers.map(wrapAsync));
-}
-
 const isNonEmptyString = (value) => typeof value === 'string' && value.trim() !== '';
 const toPositiveInt = (value) => {
     const n = Number(value);
@@ -461,80 +361,6 @@ const apiLimiter = rateLimit({
     keyGenerator: (req) => (sessionUserId(req) ? `user:${sessionUserId(req)}` : rateLimitKeyGenerator(req)),
     message: { success: false, message: 'Слишком много запросов. Попробуйте позже.' }
 });
-
-// Разрешённые "чужие" источники (свои домены-зеркала). Свой хост и
-// onion-адрес разрешены и без этого списка.
-const ALLOWED_ORIGINS = parseAllowedOrigins(process.env.ALLOWED_ORIGINS);
-if (ALLOWED_ORIGINS.invalid.length > 0) {
-    console.warn('[Origin] ALLOWED_ORIGINS: пропущены некорректные записи:', ALLOWED_ORIGINS.invalid.join(', '));
-}
-
-// Запрос пришёл со страницы самого мессенджера (см. isRequestOriginAllowed).
-function isTrustedOrigin(headers) {
-    return isRequestOriginAllowed({
-        origin: headers.origin,
-        host: headers.host,
-        forwardedHost: headers['x-forwarded-host'],
-        secFetchSite: headers['sec-fetch-site'],
-        allowed: ALLOWED_ORIGINS,
-        isOnionHost,
-    });
-}
-
-let server;
-if (process.env.NODE_ENV === 'production') {
-    server = http.createServer(app);
-} else {
-    const sslOptions = {
-        key: fs.existsSync('./localhost+1-key.pem') ? fs.readFileSync('./localhost+1-key.pem') : null,
-        cert: fs.existsSync('./localhost+1.pem') ? fs.readFileSync('./localhost+1.pem') : null,
-    };
-    if (sslOptions.key && sslOptions.cert) {
-        server = https.createServer(sslOptions, app);
-    } else {
-        console.warn('SSL сертификаты не найдены. Запуск HTTP сервера.');
-        server = http.createServer(app);
-    }
-}
-
-// Cross-Site WebSocket Hijacking: сессионная кука уходит и в рукопожатии,
-// которое открыла ЧУЖАЯ страница (CORS на WebSocket не действует), — и
-// любой сайт, открытый у залогиненного пользователя, мог подключиться к
-// сокету от его имени и читать входящие сообщения в реальном времени.
-// Рукопожатие (и polling, и websocket) пускаем только со своего источника.
-const io = new Server(server, {
-    // Клиент socket.io лежит в public/vendor/ и входит в манифест клиента
-    // (lib/client-manifest.js): его хэш сверяется с релизом, как у любого
-    // другого файла. Раньше сервер сам отдавал /socket.io/socket.io.js из
-    // node_modules — мимо статики, и в манифест этот файл не попал бы.
-    serveClient: false,
-    allowRequest: (req, callback) => {
-        if (isTrustedOrigin(req.headers)) return callback(null, true);
-        callback('Origin not allowed', false);
-    },
-});
-// Лимиты одновременных сокетов: на аккаунт — всегда, на IP — только для
-// clearnet (у всех onion-клиентов один IP — контейнер tor).
-const MAX_SOCKETS_PER_USER = 10;
-const MAX_SOCKETS_PER_IP = 20;
-const userSocketCount = createCounter();
-const ipSocketCount = createCounter();
-
-function getClientIp(handshake) {
-    const headers = handshake.headers || {};
-    // Тот же принцип, что и в HTTP-мидлваре: сначала находим адрес, который
-    // реально подключился к нашему прокси (последний хоп X-Forwarded-For —
-    // соответствует "доверяем 1 прокси" из app.set('trust proxy', 1)), и только
-    // если ЭТОТ адрес принадлежит Cloudflare — доверяем CF-Connecting-IP.
-    const xff = headers['x-forwarded-for'];
-    const connectingIp = xff
-        ? xff.split(',').map(s => s.trim()).filter(Boolean).pop()
-        : handshake.address;
-    return resolveRealIp(headers, connectingIp);
-}
-
-const PORT = process.env.PORT || 3000;
-const HOST = process.env.HOST || '0.0.0.0';
 
 async function maybeDumpCa() {
     if (process.env.DUMP_CA !== 'true') return;
@@ -585,57 +411,6 @@ async function maybeDumpCa() {
     });
     process.exit(0);
 }
-
-// TLS до Postgres (см. resolveDbTlsConfig): в production без DB_CA_CERT
-// сервер стартует только в приватной сети Railway или с явным
-// DB_TLS_INSECURE=true. Исключение — DUMP_CA=true: этот режим как раз и
-// нужен, чтобы получить цепочку для DB_CA_CERT, и пулом он не пользуется.
-const dbTls = resolveDbTlsConfig({
-    nodeEnv: process.env.NODE_ENV,
-    databaseUrl: process.env.DATABASE_URL,
-    caCert: process.env.DB_CA_CERT,
-    insecure: process.env.DB_TLS_INSECURE === 'true',
-});
-if (dbTls.error && process.env.DUMP_CA !== 'true') {
-    console.error(dbTls.error);
-    process.exit(1);
-}
-if (dbTls.info) console.log(dbTls.info);
-if (dbTls.warning) console.warn(dbTls.warning);
-const sslConfig = dbTls.ssl;
-
-// Параметры подключения — общие для основного пула и служебных (пул
-// миграций и пул блокировок фоновых задач, см. lib/advisory-locks.js).
-const DB_POOL_CONFIG = {
-    connectionString: process.env.DATABASE_URL,
-    ssl: sslConfig,
-    max: Number(process.env.PG_POOL_MAX) || 10,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 10000,
-};
-const pool = new Pool(DB_POOL_CONFIG);
-metrics.attachRuntime({ pool, io });
-// Без обработчика 'error' обрыв простаивающего соединения (рестарт или
-// failover Postgres, сетевой сбой) — необработанное событие 'error',
-// которое завершает весь процесс.
-pool.on('error', (err) => {
-    logError('[DB] Ошибка простаивающего соединения', err);
-});
-
-async function dbGet(query, params = []) {
-    const result = await pool.query(query, params);
-    return result.rows[0] || null;
-}
-
-async function dbAll(query, params = []) {
-    const result = await pool.query(query, params);
-    return result.rows;
-}
-
-async function dbRun(query, params = []) {
-    const result = await pool.query(query, params);
-    return result;
-}
 // Менеджер исчезающих сообщений. Удалённые им сообщения сразу пропадают
 // и у открытых клиентов (раньше — только после перезагрузки страницы), а
 // их вложения удаляются с диска.
@@ -651,7 +426,6 @@ const disappearingMessagesManager = new DisappearingMessagesManager(pool, {
         }
     },
 });
-const GLOBAL_DEFAULT_EXPIRY_SECONDS = Math.max(0, Number(process.env.DEFAULT_MESSAGE_EXPIRY_SECONDS) || 0);
 
 // ---- Итоговая схема базы (roadmap R0) ----
 //
@@ -1036,10 +810,6 @@ async function initJoinRequests() {
     await pool.query('CREATE INDEX IF NOT EXISTS idx_join_requests_created ON join_requests(created_at)');
 }
 
-function getSocketRoomKey(chatId, roomId) {
-    return roomId ? `room:${roomId}` : `chat:${chatId}`;
-}
-
 function getLocalAddresses() {
     const nets = os.networkInterfaces();
     const addresses = [];
@@ -1071,18 +841,6 @@ async function generateAnonymousUsernameAsync() {
     }
     throw new Error('Could not generate anonymous username');
 }
-
-// Инвайт-коды (generateInviteCode) — 130 бит: проверять их на совпадение с
-// уже выданными незачем, а на невероятный случай есть UNIQUE на rooms.code.
-// Срок жизни кода — INVITE_TTL_HOURS (по умолчанию неделя), не больше 10 лет
-// (значение целиком должно помещаться в integer секунд).
-const INVITE_TTL_SECONDS = Math.min(
-    Math.round(positiveNumberOr(process.env.INVITE_TTL_HOURS, 168) * 3600),
-    10 * 365 * 24 * 3600
-);
-
-const sessionSecret = process.env.SESSION_SECRET;
-if (!sessionSecret) throw new Error('SESSION_SECRET не задан в переменных окружения');
 
 // ---- Точные лимиты в Postgres (lib/pg-limits.js, roadmap R11) ----
 //
@@ -1136,13 +894,6 @@ const joinIpLimiter = pgLimits.rateLimiter('join-ip', {
     keyGenerator: rateLimitKeyGenerator,
     message: { success: false, message: 'Слишком много попыток входа в чат. Попробуйте позже.' }
 });
-
-// Интервал продления сессии: 5 минут; в сквозных тестах —
-// NYXO_TEST_RENEW_INTERVAL_MS (только при NODE_ENV=test).
-const SESSION_RENEW_MS = sessionRenewIntervalMs(process.env);
-if (SESSION_RENEW_MS !== SESSION_RENEW_INTERVAL_MS) {
-    console.log(`[Test] NYXO_TEST_RENEW_INTERVAL_MS=${SESSION_RENEW_MS}: сессии продлеваются каждые ${SESSION_RENEW_MS} мс`);
-}
 
 // NyxoPgStore (lib/session-store.js) — стор connect-pg-simple, который пишет
 // время в таблицу session огрублённым до 5 минут и без createdAt.
@@ -1284,14 +1035,6 @@ io.on('connection', async (socket) => {
         logError('Socket auto-join error', err);
     }
 });
-
-// Подписать/отписать все сокеты пользователя (все вкладки) на чат.
-function subscribeUserToChat(userId, chatId, roomId) {
-    io.in('user:' + userId).socketsJoin(getSocketRoomKey(chatId, roomId));
-}
-function unsubscribeUserFromChat(userId, chatId, roomId) {
-    io.in('user:' + userId).socketsLeave(getSocketRoomKey(chatId, roomId));
-}
 
 // Заголовки — первыми, чтобы их получил любой ответ, включая отказы
 // проверок источника и CSRF ниже.
@@ -1601,60 +1344,6 @@ async function insertUserWithBotChat(client, { uniqueCode, username, anonLifetim
         [botChatId, userId, writeMessageText(welcomeText, { room_id: null, chat_id: botChatId, user_id: userId })]
     );
     return { userId, botChatId };
-}
-
-async function withTransaction(work) {
-    const client = await pool.connect();
-    try {
-        await client.query('BEGIN');
-        const result = await work(client);
-        await client.query('COMMIT');
-        return result;
-    } catch (txErr) {
-        // Исходная ошибка важнее: сбой самого ROLLBACK её не затирает.
-        await client.query('ROLLBACK').catch(() => {});
-        throw txErr;
-    } finally {
-        client.release();
-    }
-}
-
-// Транзакция с одним повтором при взаимной блокировке (40P01, раздел 8.3
-// контракта порядка сообщений; lib/tx-retry.js). Первая попытка откатилась
-// целиком, поэтому повтор безопасен: work() обязана не иметь побочных эффектов
-// вне БД и читать всё заново (вставка сообщения идемпотентна по clientMessageId).
-// Если вторая попытка тоже упала с 40P01, ошибка уходит вызывающему, а он
-// отвечает 503 busy (respondIfDeadlock). В лог — только код ошибки, без id.
-// Строка предупреждения нужна сквозным тестам блокировок: они считают повторы.
-const withTransactionRetry = createTransactionRetry({ withTransaction, warn: (message) => console.warn(message) });
-
-// Один оператор с повтором при 40P01: для записей, которые не вошли в порядок
-// блокировок целиком (реакции, заявки, key-share — раздел 8.2), но ссылаются на
-// users и rooms внешними ключами и потому могут сойтись с удалением аккаунта.
-function queryWithRetry(sql, params) {
-    return withTransactionRetry((client) => client.query(sql, params));
-}
-
-// Ответ на взаимную блокировку, которая повторилась и после повтора
-// (withTransactionRetry): 503 { code:'busy' } с Retry-After. В лог — только
-// код ошибки, без id. true — ошибка обработана, ответ отправлен.
-function respondIfDeadlock(res, err) {
-    if (!isDeadlock(err)) return false;
-    logError('[DB] Взаимная блокировка повторилась, клиенту 503', err);
-    respondBusy(res);
-    return true;
-}
-
-// Вставки, где id выдаёт DEFAULT (чат с ботом, приветствие): два одинаковых
-// случайных id в одну минуту или попадание в надгробие — один повтор на 23505
-// по id сообщения (message-ids.js: isMessageIdConflict).
-async function withMessageIdRetry(work) {
-    try {
-        return await work();
-    } catch (err) {
-        if (!isMessageIdConflict(err)) throw err;
-        return work();
-    }
 }
 
 // lifetime: 'tab' | 'day' | 'week' (по умолчанию 'tab') — см.
@@ -2297,11 +1986,6 @@ async function applyNewMessageExpiry(chat, messageId, requestedSeconds = null) {
     if (expiry) await disappearingMessagesManager.setMessageExpiry(messageId, expiry, false);
 }
 
-// Синхронизация списка чатов между вкладками/устройствами пользователя.
-function notifyChatListChanged(userId) {
-    io.to('user:' + userId).emit('chatListChanged', {});
-}
-
 // Новое сообщение возвращает архивный чат из архива — у получателей и
 // только если чат не "без звука" (заглушённый архивный чат так и лежит в
 // архиве). senderId = null — ответ бота владельцу чата. Не на пути ответа
@@ -2585,17 +2269,6 @@ function messageFromRow(row, text, replyTo = null) {
     return roomMessagePayload(row, text, { replyTo, mine: true });
 }
 
-// Рассылка события сообщения комнаты. Сокеты отправителя состоят и в room:<id>, и
-// в user:<id>: без except комнатное событие пришло бы его вкладке дважды (с mine и
-// без). Поэтому комнате — except автора (и тех, для кого сообщение под границей
-// видимости), а автору — одна копия на user:<id> с mine: true.
-function emitRoomMessageEvent(event, roomId, authorId, payload, { hiddenUserIds = [], toAuthor = true } = {}) {
-    let target = io.to(getSocketRoomKey(null, roomId)).except('user:' + authorId);
-    for (const id of hiddenUserIds) target = target.except('user:' + id);
-    target.emit(event, payload);
-    if (toAuthor) io.to('user:' + authorId).emit(event, { ...payload, mine: true });
-}
-
 // Отправитель сам не считает свои сообщения непрочитанными: после COMMIT вставки
 // его личный маркер двигается к seq сообщения (sealed-sender.md, 8.3). Маркер
 // только растёт, поэтому по порядку блокировок отдельным оператором безопасно.
@@ -2820,14 +2493,6 @@ function inviteExpiresAtIso(expiresAt) {
     return expiresAt ? new Date(expiresAt).toISOString() : null;
 }
 
-// Состав комнаты изменился: клиенты участников перечитывают список
-// участников (E2EE: новичку — Sender Key, после ухода — ротация ключа).
-// inviteRotated: true - из-за выхода участника сервер обнулил подписанное приглашение и выдал новый код
-// (решение владельца, signed-membership.md, вопрос 17): клиенты показывают «Ссылка-приглашение обновлена».
-function notifyRoomMembersChanged(roomId, extra) {
-    io.to(`room:${roomId}`).emit('roomMembersChanged', { roomId, ...extra });
-}
-
 // Новый код приглашения без подписанного сертификата: код остаётся и принимает только заявки, пока кто-то не создаст
 // новую подписанную ссылку («Пригласить»). Вызывается внутри транзакции выхода или удаления аккаунта, под блокировкой
 // комнаты. Срок и лимит участников прежние.
@@ -2836,16 +2501,6 @@ async function resetInviteAfterLeave(client, roomId) {
         'UPDATE rooms SET invite_cert = NULL, invite_snap = NULL, invite_actor_id = NULL, code = $2 WHERE id = $1',
         [roomId, generateInviteCode()]
     );
-}
-
-// Список заявок комнаты изменился — только участникам (заявитель в
-// room:<id> не подписан и чужих заявок не видит).
-function notifyJoinRequestsChanged(roomId) {
-    io.to(`room:${roomId}`).emit('joinRequestsChanged', { roomId });
-}
-
-function notifyJoinRequestDecided(userId, payload) {
-    io.to('user:' + userId).emit('joinRequestDecided', payload);
 }
 
 const JOIN_REQUEST_LIVE_SQL = `created_at > NOW() - ${JOIN_REQUEST_TTL_SECONDS} * INTERVAL '1 second'`;
@@ -3651,49 +3306,6 @@ app.delete('/api/messages/:messageId', async (req, res) => {
         res.json({ success: false, message: 'Ошибка удаления' });
     }
 });
-
-// multer(upload.single('file')) уже записал файл на диск ДО этого хендлера —
-// значит, ранние return (401/400/404) должны сами убирать за собой, иначе
-// каждая неудачная/подделанная попытка загрузки будет накапливать файлы-сироты.
-function cleanupUploadedFile(file) {
-    if (!file) return;
-    fs.promises.unlink(path.join(UPLOADS_DIR, file.filename)).catch(() => {});
-}
-
-async function readFileHead(filePath, length) {
-    const handle = await fs.promises.open(filePath, 'r');
-    try {
-        const buffer = Buffer.alloc(length);
-        const { bytesRead } = await handle.read(buffer, 0, length, 0);
-        return buffer.subarray(0, bytesRead);
-    } finally {
-        await handle.close();
-    }
-}
-
-function rejectUpload(res, file, status, message) {
-    cleanupUploadedFile(file);
-    return res.status(status).json({ success: false, message });
-}
-
-// То же с готовым телом ответа (коды ошибок контракта порядка сообщений).
-function rejectUploadWith(res, file, status, body) {
-    cleanupUploadedFile(file);
-    return res.status(status).json(body);
-}
-
-// mtime и atime файла вложения — с точностью до часа, вниз: по времени
-// изменения файла иначе восстанавливалось бы время сообщения до секунды
-// (раздел 11 контракта). Уборщик файлов-сирот учитывает округление: его порог
-// возраста не меньше двух часов (lib/coarse-time.js). Сбой не фатален.
-async function coarsenFileTimes(filePath) {
-    try {
-        const hour = floorToHour();
-        await fs.promises.utimes(filePath, hour, hour);
-    } catch (err) {
-        logError('[Uploads] Не удалось округлить время файла', err);
-    }
-}
 
 // Квота вложений (sealed-sender.md, раздел 13): объём ЗАГРУЗОК ЗА ОКНО В 30 ДНЕЙ,
 // а не сумма размеров сообщений (у строки комнаты нет user_id). Строка квоты лежит

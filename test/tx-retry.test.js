@@ -95,8 +95,9 @@ async function main() {
             if (/\bwithTransaction\(/.test(line) && !/^\s*(\/\/|\*)/.test(line)) direct.push(`${i + 1}: ${line.trim()}`);
         });
         assert.strictEqual(direct.length, 2, 'ожидались определение withTransaction и регистрация:\n' + direct.join('\n'));
-        assert.match(direct[0], /async function withTransaction\(work\)/);
-        assert.match(direct[1], /insertUserWithBotChat/);
+        // Порядок строк зависит от того, в каких файлах лежат определение и регистрация, поэтому — по одному на каждую.
+        assert.strictEqual(direct.filter(line => /async function withTransaction\(work\)/.test(line)).length, 1, direct.join('\n'));
+        assert.strictEqual(direct.filter(line => /insertUserWithBotChat/.test(line)).length, 1, direct.join('\n'));
     });
 
     console.log(`\n${passed} passed, ${failed} failed`);
