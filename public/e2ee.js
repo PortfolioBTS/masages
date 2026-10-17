@@ -359,6 +359,7 @@
     const Codec = resolveCoreModule(typeof NyxoE2eeCodec !== 'undefined' ? NyxoE2eeCodec : null, './lib/e2ee-codec.js', 'lib/e2ee-codec.js');
     const CryptoOps = resolveCoreModule(typeof NyxoE2eeCrypto !== 'undefined' ? NyxoE2eeCrypto : null, './lib/e2ee-crypto.js', 'lib/e2ee-crypto.js');
     const Formats = resolveCoreModule(typeof NyxoE2eeFormats !== 'undefined' ? NyxoE2eeFormats : null, './lib/e2ee-formats.js', 'lib/e2ee-formats.js');
+    const KeyState = resolveCoreModule(typeof NyxoE2eeState !== 'undefined' ? NyxoE2eeState : null, './lib/e2ee-state.js', 'lib/e2ee-state.js');
     const {
         MSG_PAD_MIN, FILE_PAD_MIN, b64encode, b64decode, decodeFixed, canonicalPubKey,
         utf8encode, utf8decode, concatBytes, bytesEqual, toBytes, isKeyId,
@@ -375,6 +376,10 @@
         skdmAadV2, parseShareEnvelope, MAX_EXT_CHARS, parseKtGossip, parseSkdmExt, parseSkdm,
         buildSkdm, encodeContent, decodeContent, isValidMessageId, canonicalSigningKey,
     } = Formats;
+    const {
+        archiveEntryId, archiveHas, missingKeyReason, normalizePolicy, normalizeIds, normalizeParticipants,
+        logExcluded, identityStatus,
+    } = KeyState;
 
     // Строгая проверка Ed25519 (public/lib/ed25519-strict.js, signed-membership.md 6.1): ключ малого
     // порядка или некорректная кодировка принимаются платформенным verify для ЛЮБОГО сообщения
@@ -662,66 +667,9 @@
     }
     const membershipModules = resolveMembershipModules();
 
-    // ---- Записи ключей: индекс архива, часы вывода ----
+    // ---- Часы вывода ключей (индекс архива и нормализаторы записей - в lib/e2ee-state.js) ----
 
     const hourOf = (t) => Math.floor(t / HOUR_MS);
-    const archiveEntryId = (entry) => (typeof entry === 'string' ? entry : entry && entry.id);
-    const archiveHas = (state, keyId) => (state.archive || []).some(entry => archiveEntryId(entry) === keyId);
-
-    // Почему нет ключа сообщения, которое ниже позиции цепочки (раздел 5 и 6
-    // плана криптографии): удалено режимом «не хранить историю», удалено по
-    // сроку или бюджету, либо ключа не было вовсе (цепочка началась позже).
-    function missingKeyReason(rec, iteration) {
-        if (iteration < (rec.forgottenBelow || 0)) return 'history-not-kept';
-        if (iteration < (rec.expiredBelow || 0)) return 'key-expired';
-        return 'no-message-key';
-    }
-
-    // Политика комнаты на устройстве (roomPolicy:<комната>): режим истории и
-    // срок исчезающих сообщений. Любой мусор в записи сводится к значениям по умолчанию.
-    function normalizePolicy(raw) {
-        const p = raw && typeof raw === 'object' ? raw : {};
-        return {
-            historyMode: p.historyMode === 'none' ? 'none' : 'keep',
-            expirySeconds: Number.isSafeInteger(p.expirySeconds) && p.expirySeconds > 0 ? p.expirySeconds : null,
-            updatedAt: Number.isFinite(p.updatedAt) ? p.updatedAt : 0,
-        };
-    }
-
-    function normalizeIds(list) {
-        const out = [];
-        for (const v of Array.isArray(list) ? list : []) {
-            const id = Number(v);
-            if (Number.isSafeInteger(id) && id > 0 && !out.includes(id)) out.push(id);
-        }
-        return out;
-    }
-
-    function normalizeParticipants(list) {
-        const out = [];
-        const seen = new Set();
-        for (const p of Array.isArray(list) ? list : []) {
-            const id = Number(p && p.id);
-            if (!Number.isSafeInteger(id) || id <= 0 || seen.has(id)) continue;
-            seen.add(id);
-            out.push({ id, username: p && typeof p.username === 'string' ? p.username : '' });
-        }
-        return out;
-    }
-
-    // Ключа собеседника нет в журнале (mismatch) — отдельный статус, пока код безопасности не сверен
-    // (markPeerVerified) и пользователь не продолжил явно (overrideLogMismatch). pending журнала статус
-    // не меняет: это «ключ ждёт подтверждения», а не нарушение.
-    function logExcluded(pin) {
-        return Boolean(pin && pin.kt && pin.kt.status === 'mismatch' && !pin.verified && !pin.kt.override);
-    }
-
-    function identityStatus(pin) {
-        if (!pin) return 'unknown';
-        if (pin.pending) return 'changed';
-        if (logExcluded(pin)) return 'log-mismatch';
-        return pin.verified ? 'verified' : 'unverified';
-    }
 
     // ===================== Клиент =====================
 
