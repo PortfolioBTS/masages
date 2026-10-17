@@ -14,7 +14,7 @@ const APP_TIMEOUT_MS = 30000;
 const TEXT = {
     membershipByInvite: /Состав группы подтверждён по подписи приглашения/,
     deletedElsewhere: /Аккаунт удалён в другой вкладке/,
-    deleted: /Аккаунт удалён/,
+    deleted: /^Аккаунт удалён\./,
 };
 
 // ---- Вход ----
