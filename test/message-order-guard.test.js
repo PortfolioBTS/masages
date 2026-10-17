@@ -16,7 +16,8 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-const FILES = ['server.js', 'public/script.js'];
+const { serverSourceFiles, readServerSource } = require('./server-source');
+const FILES = [...serverSourceFiles(), 'public/script.js'];
 
 // Комментарии вырезаются (в них можно описывать, что именно запрещено).
 function stripComments(source) {
@@ -63,8 +64,8 @@ for (const file of FILES) {
     });
 }
 
-test('upToId допустим в server.js только как признак старого клиента (400 client-outdated)', () => {
-    const source = stripComments(fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8'));
+test('upToId допустим в коде сервера только как признак старого клиента (400 client-outdated)', () => {
+    const source = stripComments(readServerSource());
     const lines = source.split('\n').filter(line => /\bupToId\b/.test(line));
     assert.strictEqual(lines.length, 1, lines.join('\n'));
     assert.match(lines[0], /CLIENT_OUTDATED/);

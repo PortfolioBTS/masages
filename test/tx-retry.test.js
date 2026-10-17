@@ -88,8 +88,8 @@ async function main() {
 
     // Сторожок порядка блокировок: все транзакции раздела 8.2 идут через withTransactionRetry.
     // Прямой withTransaction остаётся только у регистрации (новой строки users ещё никто не ждёт).
-    await test('server.js: прямой withTransaction( — только в самой обёртке и при регистрации', () => {
-        const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+    await test('код сервера: прямой withTransaction( — только в самой обёртке и при регистрации', () => {
+        const source = require('./server-source').readServerSource();
         const direct = [];
         source.split('\n').forEach((line, i) => {
             if (/\bwithTransaction\(/.test(line) && !/^\s*(\/\/|\*)/.test(line)) direct.push(`${i + 1}: ${line.trim()}`);
