@@ -44,30 +44,49 @@
 // диспетчер HANDLERS, normalizeMimeType, isSupported, sanitize и экспорт (в том числе _internal для тестов и сервера).
 // Вынесено:
 //   sanitize-common.js - MediaSanitizeError, fail/refuse, потолок итераций, чтение и запись байтов с проверкой границ, CRC-32;
+//   sanitize-jpeg.js - JPEG;
+//   sanitize-png-gif.js - PNG и GIF;
+//   sanitize-webp.js - WebP;
 // В браузере части - глобальные Nyxo* (index.html подключает их ДО этого файла), в Node - соседние файлы через
 // require. Без любой из частей санитайзер не загружается: молча пропустить формат нельзя (fail closed).
 
 (function (root, factory) {
     if (typeof module !== 'undefined' && module.exports) {
-        module.exports = factory(require('./lib/sanitize-common.js'));
+        module.exports = factory(
+            require('./lib/sanitize-common.js'),
+            require('./lib/sanitize-jpeg.js'),
+            require('./lib/sanitize-png-gif.js'),
+            require('./lib/sanitize-webp.js'),
+        );
     } else {
-        root.MediaSanitizer = factory(root.NyxoSanitizeCommon);
+        root.MediaSanitizer = factory(
+            root.NyxoSanitizeCommon,
+            root.NyxoSanitizeJpeg,
+            root.NyxoSanitizePngGif,
+            root.NyxoSanitizeWebp,
+        );
     }
-})(typeof self !== 'undefined' ? self : this, function (Common) {
+})(typeof self !== 'undefined' ? self : this, function (Common, Jpeg, PngGif, Webp) {
     'use strict';
 
     // Части санитайзера обязательны: формат, чей разборщик не загрузился, нельзя "пропускать как есть".
     const PARTS = [
         [Common, 'lib/sanitize-common.js'],
+        [Jpeg, 'lib/sanitize-jpeg.js'],
+        [PngGif, 'lib/sanitize-png-gif.js'],
+        [Webp, 'lib/sanitize-webp.js'],
     ];
     for (const [part, label] of PARTS) {
         if (!part) throw new Error('MediaSanitizer: модуль ' + label + ' не загружен');
     }
 
     const {
-        MediaSanitizeError, fail, refuse, makeGuard, need, u8, u16be, u24be, u32be, u32le, u64be, s32be, fourcc,
-        asciiAt, writeAscii, concatBytes, latin1, toUint8Array, crc32, PDF_WS,
+        MediaSanitizeError, fail, refuse, makeGuard, need, u8, u16be, u24be, u32be, u64be, s32be, fourcc, asciiAt,
+        writeAscii, latin1, toUint8Array, crc32, PDF_WS,
     } = Common;
+    const { sanitizeJpeg } = Jpeg;
+    const { sanitizePng, sanitizeGif } = PngGif;
+    const { sanitizeWebp } = Webp;
 
     const SUPPORTED_TYPES = Object.freeze([
         'image/jpeg', 'image/png', 'image/gif', 'image/webp',
@@ -81,319 +100,6 @@
         'image/jpg': 'image/jpeg',
         'image/pjpeg': 'image/jpeg',
     };
-
-    // ===================== JPEG =====================
-    //
-    // Сегменты до первого SOS разбираются по одному; энтропийно-кодированные
-    // данные сканов копируются как есть, но маркеры МЕЖДУ сканами
-    // (прогрессивный JPEG) проходят через тот же фильтр. Всё после EOI
-    // отбрасывается: туда телефоны дописывают видео Motion Photo (со своим
-    // GPS), дополнительные кадры MPF (со своим EXIF) и трейлеры Samsung.
-
-    const JPEG_EOI = Uint8Array.of(0xFF, 0xD9);
-
-    function isJpegSof(m) {
-        return m >= 0xC0 && m <= 0xCF && m !== 0xC4 && m !== 0xC8 && m !== 0xCC;
-    }
-
-    // Ориентация из EXIF (тег 0x0112 в IFD0), с учётом порядка байт II/MM.
-    // 0 — тега нет или он некорректен.
-    function readExifOrientation(b, tiff, end) {
-        if (end - tiff < 8) return 0;
-        const le = b[tiff] === 0x49 && b[tiff + 1] === 0x49;
-        const be = b[tiff] === 0x4D && b[tiff + 1] === 0x4D;
-        if (!le && !be) return 0;
-        const r16 = (o) => (le ? b[o] | (b[o + 1] << 8) : (b[o] << 8) | b[o + 1]);
-        const r32 = (o) => (le
-            ? b[o + 3] * 0x1000000 + ((b[o + 2] << 16) | (b[o + 1] << 8) | b[o])
-            : b[o] * 0x1000000 + ((b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]));
-        if (r16(tiff + 2) !== 42) return 0;
-        const ifd = tiff + r32(tiff + 4);
-        if (ifd < tiff + 8 || ifd + 2 > end) return 0;
-        const count = r16(ifd);
-        for (let i = 0; i < count; i++) {
-            const e = ifd + 2 + i * 12;
-            if (e + 12 > end) return 0;
-            if (r16(e) !== 0x0112) continue;
-            if (r16(e + 2) !== 3) return 0; // тип SHORT
-            const v = r16(e + 8);
-            return v >= 1 && v <= 8 ? v : 0;
-        }
-        return 0;
-    }
-
-    // Минимальный EXIF: только IFD0 с одним тегом Orientation. Без него
-    // вертикальные фото с телефона легли бы на бок — пиксели здесь не
-    // поворачиваются, в отличие от серверного пути через sharp.
-    function jpegOrientationSegment(v) {
-        return Uint8Array.of(
-            0xFF, 0xE1, 0x00, 0x22,
-            0x45, 0x78, 0x69, 0x66, 0x00, 0x00, // "Exif\0\0"
-            0x4D, 0x4D, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08, // TIFF MM, IFD0 по смещению 8
-            0x00, 0x01, // одна запись
-            0x01, 0x12, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, v, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00 // следующего IFD нет
-        );
-    }
-
-    // APP0 JFIF может содержать несжатую миниатюру — а миниатюра хранит
-    // исходный (необрезанный) кадр. Оставляем только сам заголовок JFIF.
-    function jpegCleanJfif(seg) {
-        if (seg.length < 18 || !asciiAt(seg, 4, 'JFIF\0')) return null;
-        const out = new Uint8Array(18);
-        out.set(seg.subarray(0, 16));
-        out[2] = 0;
-        out[3] = 16;
-        return out;
-    }
-
-    function sanitizeJpeg(src) {
-        const n = src.length;
-        if (n < 4 || src[0] !== 0xFF || src[1] !== 0xD8) fail('нет маркера начала изображения (SOI)');
-        const guard = makeGuard();
-        const leading = []; // APP0 JFIF, идущие сразу за SOI
-        const rest = [];
-        let orientation = 0;
-        let sawFrame = false;
-        let sawScan = false;
-        let pos = 2;
-        while (pos < n) {
-            guard();
-            if (src[pos] !== 0xFF) fail('ожидался маркер сегмента');
-            while (pos + 1 < n && src[pos + 1] === 0xFF) pos++; // байты-заполнители
-            if (pos + 1 >= n) fail('обрезан маркер сегмента');
-            const marker = src[pos + 1];
-            if (marker === 0xD9) break; // EOI
-            if (marker === 0xD8 || marker === 0x00) fail('неожиданный маркер');
-            if ((marker >= 0xD0 && marker <= 0xD7) || marker === 0x01) {
-                rest.push(src.subarray(pos, pos + 2));
-                pos += 2;
-                continue;
-            }
-            const len = u16be(src, pos + 2);
-            if (len < 2) fail('некорректная длина сегмента');
-            const segEnd = pos + 2 + len;
-            if (segEnd > n) fail('сегмент выходит за конец файла');
-            const seg = src.subarray(pos, segEnd);
-
-            if (marker === 0xDA) { // SOS: заголовок скана + энтропийные данные
-                if (!sawFrame) fail('скан без заголовка кадра');
-                sawScan = true;
-                let p = segEnd;
-                for (;;) {
-                    guard();
-                    const ff = src.indexOf(0xFF, p);
-                    if (ff === -1 || ff + 1 >= n) { p = n; break; }
-                    const next = src[ff + 1];
-                    // 0xFF00 — байт-стаффинг, RSTn — маркеры рестарта, 0xFFFF —
-                    // заполнитель: всё это часть энтропийных данных.
-                    if (next === 0x00 || (next >= 0xD0 && next <= 0xD7) || next === 0xFF) {
-                        p = next === 0xFF ? ff + 1 : ff + 2;
-                        continue;
-                    }
-                    p = ff;
-                    break;
-                }
-                rest.push(src.subarray(pos, p));
-                pos = p;
-                continue;
-            }
-
-            if (marker === 0xE0) {
-                const jfif = jpegCleanJfif(seg);
-                if (jfif) (rest.length === 0 ? leading : rest).push(jfif);
-            } else if (marker === 0xE1) {
-                // EXIF и XMP удаляются всегда; ориентацию запоминаем до удаления.
-                if (!orientation && asciiAt(seg, 4, 'Exif\0\0')) orientation = readExifOrientation(seg, 10, seg.length);
-            } else if (marker === 0xE2) {
-                // Из APP2 нужен только ICC-профиль (цвет); MPF и FlashPix — нет.
-                if (asciiAt(seg, 4, 'ICC_PROFILE\0')) rest.push(seg);
-            } else if (marker === 0xEE) {
-                // APP14 Adobe задаёт цветовую трансформацию (YCCK/CMYK) — без
-                // него цвета части JPEG съедут.
-                if (asciiAt(seg, 4, 'Adobe')) rest.push(seg);
-            } else if ((marker >= 0xE3 && marker <= 0xEF) || marker === 0xFE) {
-                // APP3–APP13 (в т.ч. IPTC/Photoshop), APP15 и COM — удаляются.
-            } else {
-                if (isJpegSof(marker)) sawFrame = true;
-                rest.push(seg);
-            }
-            pos = segEnd;
-        }
-        if (!sawScan) fail('нет данных изображения');
-        // EOI пишется заново всегда: и после обычного конца, и у файла,
-        // обрезанного посреди скана (декодеры показывают такой частично).
-        const parts = [src.subarray(0, 2)].concat(leading);
-        if (orientation > 1) parts.push(jpegOrientationSegment(orientation));
-        for (const seg of rest) parts.push(seg);
-        parts.push(JPEG_EOI);
-        return concatBytes(parts);
-    }
-
-    // ===================== PNG =====================
-
-    const PNG_SIGNATURE = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
-    // Всё, что влияет на отображение, плюс APNG. tEXt/zTXt/iTXt/eXIf/tIME,
-    // C2PA (caBX) и приватные чанки в список не входят.
-    const PNG_KEEP = new Set([
-        'IHDR', 'PLTE', 'IDAT', 'IEND', 'tRNS', 'cHRM', 'gAMA', 'iCCP', 'sBIT', 'sRGB',
-        'bKGD', 'hIST', 'pHYs', 'sPLT', 'cICP', 'mDCv', 'cLLi', 'acTL', 'fcTL', 'fdAT',
-    ]);
-
-    function isAsciiLetter(c) {
-        return (c >= 0x41 && c <= 0x5A) || (c >= 0x61 && c <= 0x7A);
-    }
-
-    function sanitizePng(src) {
-        const n = src.length;
-        for (let i = 0; i < 8; i++) if (src[i] !== PNG_SIGNATURE[i]) fail('неверная сигнатура');
-        const guard = makeGuard();
-        const parts = [src.subarray(0, 8)];
-        let pos = 8;
-        let first = true;
-        let sawData = false;
-        let ended = false;
-        while (pos < n) {
-            guard();
-            if (n - pos < 12) fail('обрезан чанк');
-            const len = u32be(src, pos);
-            if (len > 0x7FFFFFFF) fail('некорректная длина чанка');
-            const end = pos + 12 + len;
-            if (end > n) fail('чанк выходит за конец файла');
-            for (let i = 4; i < 8; i++) if (!isAsciiLetter(src[pos + i])) fail('некорректный тип чанка');
-            const type = fourcc(src, pos + 4);
-            if (crc32(src, pos + 4, pos + 8 + len) !== u32be(src, pos + 8 + len)) {
-                fail('неверная контрольная сумма чанка ' + type);
-            }
-            if (first && type !== 'IHDR') fail('первый чанк не IHDR');
-            first = false;
-            if (type === 'IDAT') sawData = true;
-            if (PNG_KEEP.has(type)) parts.push(src.subarray(pos, end));
-            pos = end;
-            if (type === 'IEND') { ended = true; break; } // всё после IEND отбрасывается
-        }
-        if (!sawData) fail('нет данных изображения (IDAT)');
-        if (!ended) fail('нет завершающего чанка IEND');
-        return concatBytes(parts);
-    }
-
-    // ===================== GIF =====================
-
-    function skipGifSubBlocks(b, q) {
-        const n = b.length;
-        for (;;) {
-            if (q >= n) fail('обрезаны подблоки данных');
-            const size = b[q];
-            q += 1 + size;
-            if (size === 0) return q;
-        }
-    }
-
-    function sanitizeGif(src) {
-        const n = src.length;
-        if (n < 13 || !(asciiAt(src, 0, 'GIF87a') || asciiAt(src, 0, 'GIF89a'))) fail('неверная сигнатура');
-        const guard = makeGuard();
-        let pos = 13;
-        const lsd = src[10];
-        if (lsd & 0x80) pos += 3 * (1 << ((lsd & 7) + 1)); // глобальная палитра
-        if (pos > n) fail('обрезана глобальная палитра');
-        const parts = [src.subarray(0, pos)];
-        let images = 0;
-        while (pos < n) {
-            guard();
-            const intro = src[pos];
-            if (intro === 0x3B) break; // трейлер; всё после него отбрасывается
-            if (intro === 0x2C) { // кадр
-                if (n - pos < 11) fail('обрезан дескриптор кадра');
-                const packed = src[pos + 9];
-                let q = pos + 10;
-                if (packed & 0x80) q += 3 * (1 << ((packed & 7) + 1)); // локальная палитра
-                q += 1; // минимальный размер LZW-кода
-                if (q > n) fail('обрезан кадр');
-                q = skipGifSubBlocks(src, q);
-                parts.push(src.subarray(pos, q));
-                images++;
-                pos = q;
-                continue;
-            }
-            if (intro === 0x21) { // расширение
-                if (n - pos < 3) fail('обрезано расширение');
-                const label = src[pos + 1];
-                const end = skipGifSubBlocks(src, pos + 2);
-                let keep = label === 0xF9; // Graphic Control: задержки и прозрачность кадров
-                if (label === 0xFF) {
-                    // Из Application Extension нужны только расширения
-                    // зацикливания анимации; XMP (XMP DataXMP), ICC и прочие — нет.
-                    keep = src[pos + 2] === 11
-                        && (asciiAt(src, pos + 3, 'NETSCAPE2.0') || asciiAt(src, pos + 3, 'ANIMEXTS1.0'));
-                }
-                // Comment (0xFE) и Plain Text (0x01) удаляются: второй браузеры
-                // не рисуют, то есть это такой же скрытый текст, как комментарий.
-                if (keep) parts.push(src.subarray(pos, end));
-                pos = end;
-                continue;
-            }
-            fail('неизвестный блок');
-        }
-        if (!images) fail('нет ни одного кадра');
-        parts.push(Uint8Array.of(0x3B));
-        return concatBytes(parts);
-    }
-
-    // ===================== WebP =====================
-
-    const WEBP_KEEP = new Set(['VP8 ', 'VP8L', 'VP8X', 'ALPH', 'ANIM', 'ANMF', 'ICCP']);
-
-    function sanitizeWebp(src) {
-        const n = src.length;
-        if (n < 20 || !asciiAt(src, 0, 'RIFF') || !asciiAt(src, 8, 'WEBP')) fail('неверная сигнатура');
-        const riffEnd = 8 + u32le(src, 4);
-        if (riffEnd > n) fail('размер RIFF больше файла');
-        const guard = makeGuard();
-        const chunks = [];
-        let pos = 12;
-        let first = true;
-        let hasImage = false;
-        while (pos < riffEnd) {
-            guard();
-            if (riffEnd - pos < 8) fail('обрезан чанк');
-            const id = fourcc(src, pos);
-            const size = u32le(src, pos + 4);
-            const dataEnd = pos + 8 + size;
-            if (dataEnd > riffEnd) fail('чанк выходит за конец файла');
-            if (first) {
-                if (id !== 'VP8 ' && id !== 'VP8L' && id !== 'VP8X') fail('первый чанк не VP8/VP8L/VP8X');
-                if (id === 'VP8X' && size < 10) fail('некорректный чанк VP8X');
-                first = false;
-            }
-            if (id === 'VP8 ' || id === 'VP8L' || id === 'ANMF') hasImage = true;
-            // Всё, кроме белого списка (EXIF, "XMP " и неизвестные чанки), удаляется.
-            if (WEBP_KEEP.has(id)) chunks.push({ id, data: src.subarray(pos + 8, dataEnd) });
-            // Байт выравнивания у последнего чанка иногда не записан — терпимо.
-            pos = Math.min(dataEnd + (size & 1), riffEnd);
-        }
-        if (!hasImage) fail('нет данных изображения');
-        let total = 12;
-        for (const c of chunks) total += 8 + c.data.length + (c.data.length & 1);
-        const out = new Uint8Array(total);
-        writeAscii(out, 0, 'RIFF');
-        const riffSize = total - 8;
-        out[4] = riffSize & 0xFF; out[5] = (riffSize >>> 8) & 0xFF;
-        out[6] = (riffSize >>> 16) & 0xFF; out[7] = (riffSize >>> 24) & 0xFF;
-        writeAscii(out, 8, 'WEBP');
-        let o = 12;
-        for (const c of chunks) {
-            const len = c.data.length;
-            writeAscii(out, o, c.id);
-            out[o + 4] = len & 0xFF; out[o + 5] = (len >>> 8) & 0xFF;
-            out[o + 6] = (len >>> 16) & 0xFF; out[o + 7] = (len >>> 24) & 0xFF;
-            out.set(c.data, o + 8);
-            // Флаги VP8X "есть EXIF" (0x08) и "есть XMP" (0x04) — самих чанков больше нет.
-            if (c.id === 'VP8X') out[o + 8] &= ~0x0C;
-            o += 8 + len + (len & 1); // байт выравнивания уже нулевой
-        }
-        return out;
-    }
 
     // ===================== MP4 / MOV (ISO BMFF) =====================
     //
