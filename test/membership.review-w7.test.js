@@ -7,6 +7,7 @@
 // Запуск: node test/membership.review-w7.test.js
 
 const { assert, E2EE, mlkem, makeWorld, test, finish, ROOM, DAY, chatOf } = require('./membership-world');
+const Policy = require('../public/lib/e2ee-policy.js');
 
 const at = (user, room) => ({ ...user, room, chatId: chatOf(user.id, room) });
 const memberOf = (result, id) => result.members.find(m => m.id === id);
@@ -157,6 +158,66 @@ const sharesTo = (w, room, recipientId, senderId) =>
         await w.ensure(alice2);
         assert.strictEqual(await w.stored(alice2, 'suspended:' + R2), null, 'ушёл из комнаты - отложенная запись забыта');
         w.noViolations();
+    });
+
+    // ===================== F4: отправка, когда ключ комнаты некому передать =====================
+
+    await test('F4: в комнате все остальные неподтверждены (ключ никому не ушёл) - отправка блокируется, после подтверждения снимается', async () => {
+        const w = makeWorld();
+        const alice = await w.addUser(1);
+        const bob = await w.addUser(2);
+        await w.createRoom(alice);
+        w.server.evil.addGhost(ROOM, bob.id, bob.chatId);       // Боб в комнате без сертификата
+        const session = await w.ensure(alice);
+        assert.strictEqual(session.ok, true, 'рассылка не падала: адресатов просто нет');
+        assert.strictEqual(session.peers, 1);
+        assert.strictEqual(session.keyHolders, 0);
+        assert.strictEqual(session.withheldPeers, 1, 'сессия сообщает, сколько участников остались без ключа из-за статуса');
+        const block = Policy.sessionBlock(session);
+        assert.ok(block, 'отправка должна быть заблокирована');
+        assert.strictEqual(block.code, 'keys-withheld');
+        assert.match(block.text, /не подтверждены/);
+        // Подтвердили Боба вручную - ключ ушёл, блокировки нет.
+        await alice.client.checkPeerIdentities([bob.id]);
+        assert.deepStrictEqual(await alice.client.trustMember(ROOM, bob.id), { ok: true, cancelledIntent: false });
+        const after = await w.ensure(alice);
+        assert.strictEqual(after.keyHolders, 1);
+        assert.strictEqual(Policy.sessionBlock(after), null);
+        w.noViolations();
+    });
+
+    await test('F4: часть участников получила ключ - отправка идёт (неподтверждённый остаётся предупреждением)', async () => {
+        const w = makeWorld();
+        const alice = await w.addUser(1);
+        const bob = await w.addUser(2);
+        const ghost = await w.addUser(3);
+        await w.createRoom(alice);
+        await w.approve(alice, bob);
+        w.server.evil.addGhost(ROOM, ghost.id, ghost.chatId);
+        const session = await w.ensure(alice);
+        assert.strictEqual(session.keyHolders, 1);
+        assert.strictEqual(session.withheldPeers, 1);
+        assert.strictEqual(Policy.sessionBlock(session), null);
+    });
+
+    await test('F4: участник без настроенного шифрования по-прежнему не блокирует отправку (решение e2ee-policy)', async () => {
+        const w = makeWorld();
+        const alice = await w.addUser(1);
+        await w.addUser(3, { init: false });                    // у Кэрол нет ключей на сервере
+        await w.createRoom(alice);
+        w.server.addParticipant(ROOM, 3, chatOf(3));
+        const notReady = await w.ensure(alice);
+        assert.strictEqual(notReady.withheldPeers, 0, 'нет ключей на сервере - это не отказ из-за подтверждения');
+        assert.strictEqual(Policy.sessionBlock(notReady), null);
+    });
+
+    await test('policy.sessionBlock: ключ получил кто-то - не блокирует; никто, но есть удержанные - блок; старые результаты без счётчика - как раньше', () => {
+        assert.strictEqual(Policy.sessionBlock({ ok: true, peers: 2, keyHolders: 0, withheldPeers: 2 }).code, 'keys-withheld');
+        assert.strictEqual(Policy.sessionBlock({ ok: true, peers: 2, keyHolders: 1, withheldPeers: 1 }), null);
+        assert.strictEqual(Policy.sessionBlock({ ok: true, peers: 2, keyHolders: 0, withheldPeers: 0 }), null, 'остальные без шифрования');
+        assert.strictEqual(Policy.sessionBlock({ ok: true, peers: 0, keyHolders: 0, withheldPeers: 0 }), null);
+        assert.strictEqual(Policy.sessionBlock({ ok: false, peers: 2, keyHolders: 0, withheldPeers: 2 }).code, 'keys-not-delivered', 'сбой рассылки - прежний код');
+        assert.strictEqual(Policy.sessionBlock({ ok: true, peers: 2, keyHolders: 0 }), null, 'без withheldPeers - как раньше');
     });
 
     finish();

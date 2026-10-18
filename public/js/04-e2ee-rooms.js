@@ -376,6 +376,8 @@ async function runRoomSession(chatId, roomId, { answerKeyRequests = false } = {}
         console.warn('E2EE: не со всеми участниками установлен защищённый канал:', result.warnings);
     }
     handleRoomSessionResult(roomId, result);
+    // Причина отказа в отправке снимается, как только ключ комнаты получил хоть кто-то (например, после подтверждения участника).
+    if (result && !NyxoE2eePolicy.sessionBlock(result)) clearRoomBlock(chatId);
     await refreshIdentityChanges(client, roomId, part.participants, result && result.identityChanges);
     refreshTransparencyBanner();
     return result;
@@ -426,7 +428,8 @@ function scheduleRoomMembersRefresh(roomId) {
 // Отправка прервана, и причина понятна пользователю. code:
 //   'unavailable'        — ключи устройства не готовы (причина в e2eeInitError);
 //   'session-failed',
-//   'keys-not-delivered' — см. NyxoE2eePolicy.sessionBlock;
+//   'keys-not-delivered',
+//   'keys-withheld'      — см. NyxoE2eePolicy.sessionBlock;
 //   'not-bot'            — чат не комната и не запомненный чат с ботом.
 class E2eeBlockedError extends Error {
     constructor(code, message) {
@@ -437,7 +440,7 @@ class E2eeBlockedError extends Error {
 
     // Причина относится к ключу комнаты: её показывают под полем ввода с «Повторить».
     get showsRetry() {
-        return this.code === 'session-failed' || this.code === 'keys-not-delivered';
+        return this.code === 'session-failed' || this.code === 'keys-not-delivered' || this.code === 'keys-withheld';
     }
 }
 

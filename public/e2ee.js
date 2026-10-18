@@ -2765,7 +2765,7 @@
             const me = Number(userId);
             const current = normalizeParticipants(participants);
             const empty = {
-                newMembers: [], removedMembers: [], rotated: false, rotationReason: null, identityChanges: [], peers: 0, keyHolders: 0,
+                newMembers: [], removedMembers: [], rotated: false, rotationReason: null, identityChanges: [], peers: 0, keyHolders: 0, withheldPeers: 0,
                 members: [], unconfirmed: [], duplicateKeys: [], viewMismatch: false, viewIdsDiverged: false,
             };
             if (!current.some(p => p.id === me)) {
@@ -2882,7 +2882,11 @@
             const identityChanges = [];
             const shares = [];
             const marks = [];
+            // Участники, у которых ключи на сервере есть, но ключ комнаты им не отправляется из-за их статуса (смена ключа,
+            // несовпадение с журналом, не подтверждён). Если ключ не получил никто, а таких есть, отправка блокируется (9.4).
+            let withheldPeers = 0;
             const noteChanged = (peer) => {
+                withheldPeers++;
                 identityChanges.push({ userId: peer.id, username: peer.username });
                 warnings.push({ userId: peer.id, reason: REASON_IDENTITY_CHANGED });
             };
@@ -2892,6 +2896,7 @@
             for (const peer of others) {
                 if (changedIds.has(peer.id)) { noteChanged(peer); continue; }
                 if (logMismatchIds.has(peer.id)) {
+                    withheldPeers++;
                     logMismatches.push({ userId: peer.id, username: peer.username });
                     warnings.push({ userId: peer.id, reason: REASON_LOG_MISMATCH });
                     continue;
@@ -2907,6 +2912,7 @@
                 // Ключ комнаты получают только подтверждённые участники (П1): остальные остаются в unconfirmed, без
                 // запроса bundle и без отметки рассылки.
                 if (!recipientIds.has(peer.id)) {
+                    withheldPeers++;
                     warnings.push({ userId: peer.id, reason: 'unconfirmed-member' });
                     continue;
                 }
@@ -2968,6 +2974,7 @@
                 logMismatches,
                 peers: others.length,
                 keyHolders,
+                withheldPeers,
                 members: verdict.members,
                 unconfirmed: verdict.unconfirmed,
                 duplicateKeys: verdict.duplicateKeys,
