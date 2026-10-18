@@ -319,7 +319,7 @@ async function overrideLogMismatch(row, peer, ctx, btn) {
 }
 
 async function acceptIdentityChange(row, peer, ctx, btn) {
-    if (!confirm(`Принять новый ключ участника ${peer.username}? Делайте это, только если код безопасности совпал с кодом на его устройстве.`)) return;
+    if (!confirm(`Принять новый ключ участника ${peer.username}? Делайте это, только если код безопасности совпал с кодом на его устройстве. Участник останется подтверждённым в группах, где вы его уже подтверждали; в группах, где он был не подтверждён, он таким и останется.`)) return;
     btn.disabled = true;
     try {
         await ctx.client.acceptPeerIdentityChange(peer.id);
