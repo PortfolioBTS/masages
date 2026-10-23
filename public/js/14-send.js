@@ -195,6 +195,7 @@ async function sendMessage() {
     // переключиться — конверт комнаты A не должен уйти в чат B.
     const chatId = currentChatId;
     const roomId = currentRoomId;
+    const replyAtStart = replyToMessageId;
 
     setSending(true); // двойной Enter/клик не отправляет сообщение дважды
     try {
@@ -229,7 +230,7 @@ async function sendMessage() {
             if (chatId === currentChatId) applyMessageEdit(messageId, encryptEdit ? text : (data.text || text));
             if (String(editingMessageId) === String(messageId)) finishEditing();
         } else {
-            const sent = await sendText(text, { chatId, roomId, replyToId: replyToMessageId });
+            const sent = await sendText(text, { chatId, roomId, replyToId: replyAtStart });
             if (!sent) return;
         }
     } finally {
@@ -237,9 +238,12 @@ async function sendMessage() {
     }
 
     // Если пользователь успел уйти в другой чат, там в поле может быть уже
-    // новый черновик — его не трогаем.
+    // новый черновик — его не трогаем. В том же чате поле очищается, только если там
+    // всё ещё отправленный текст: за время отправки (до 60 с при плохой связи) человек
+    // мог набирать следующее сообщение, и стирать его нельзя. То же с ответом: если он
+    // успел выбрать другое сообщение для ответа, выбор остаётся.
     if (chatId === currentChatId) {
-        elements.messageInput.value = '';
-        clearReply();
+        if (elements.messageInput.value.trim() === text) elements.messageInput.value = '';
+        if (replyToMessageId === replyAtStart) clearReply();
     }
 }
