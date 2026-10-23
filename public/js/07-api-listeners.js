@@ -297,6 +297,11 @@ function setupComposerListeners() {
             clearReply();
         }
     });
+    // Поле очищено вручную — правка отменяется (плашка пропадает): иначе
+    // следующий набранный текст тихо ушёл бы как правка старого сообщения.
+    elements.messageInput.addEventListener('input', () => {
+        if (editingMessageId && !elements.messageInput.value.trim()) cancelEditing();
+    });
 
     elements.attachBtn.addEventListener('click', () => {
         if (uploadQueue) {
@@ -314,6 +319,10 @@ function setupComposerListeners() {
     elements.uploadCancelBtn.addEventListener('click', () => cancelUploadQueue(true));
     setupDragAndDrop();
     elements.cancelReplyBtn.addEventListener('click', clearReply);
+    elements.cancelEditBtn.addEventListener('click', () => {
+        cancelEditing();
+        elements.messageInput.focus();
+    });
     elements.botSuggestions.addEventListener('click', onBotSuggestionClick);
 }
 
@@ -324,11 +333,7 @@ function setupMessageMenuListeners() {
     elements.replyMessageBtn.addEventListener('click', () => {
         const message = menuMessage;
         hideMessageMenu();
-        if (!message) return;
-        replyToMessageId = message.id;
-        elements.replyPreviewText.textContent = messageSummary(message).substring(0, 100);
-        elements.replyPreview.classList.remove('hidden');
-        elements.messageInput.focus();
+        if (message) startReply(message);
     });
 
     elements.copyMessageBtn.addEventListener('click', () => {
@@ -340,10 +345,7 @@ function setupMessageMenuListeners() {
     elements.editMessageBtn.addEventListener('click', () => {
         const message = menuMessage;
         hideMessageMenu();
-        if (!message) return;
-        editingMessageId = message.id;
-        elements.messageInput.value = message.text || '';
-        elements.messageInput.focus();
+        if (message) startEditing(message);
     });
 
     elements.deleteMessageBtn.addEventListener('click', async () => {

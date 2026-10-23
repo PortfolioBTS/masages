@@ -433,7 +433,7 @@ function resetChatView() {
     elements.chatMessages.replaceChildren();
     elements.sidebar.classList.remove('hidden-mobile');
     clearReply();
-    editingMessageId = null;
+    finishEditing();
     setActiveChatItem(null, null);
 }
 

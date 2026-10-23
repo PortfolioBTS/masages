@@ -189,9 +189,7 @@ async function sendMessage() {
             showToast('Сообщение изменено', 'success');
             // в бабле — то, что реально набрано, открытым текстом
             if (chatId === currentChatId) applyMessageEdit(messageId, encryptEdit ? text : (data.text || text));
-            if (String(editingMessageId) === String(messageId)) {
-                editingMessageId = null;
-            }
+            if (String(editingMessageId) === String(messageId)) finishEditing();
         } else {
             const sent = await sendText(text, { chatId, roomId, replyToId: replyToMessageId });
             if (!sent) return;

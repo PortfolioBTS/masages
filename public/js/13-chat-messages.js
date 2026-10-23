@@ -590,7 +590,41 @@ function clearReply() {
     elements.replyPreviewText.textContent = '';
 }
 
+// Ответ и правка — два взаимоисключающих режима поля ввода: запрос правки
+// (PUT) не несёт replyToId, поэтому «правка + ответ» молча стала бы просто
+// правкой. Каждый режим показывает свою плашку над полем и отменяется
+// крестиком, Esc или очисткой поля.
+function startReply(message) {
+    if (editingMessageId) cancelEditing();
+    replyToMessageId = message.id;
+    elements.replyPreviewText.textContent = messageSummary(message).substring(0, 100);
+    elements.replyPreview.classList.remove('hidden');
+    elements.messageInput.focus();
+}
+
+function startEditing(message) {
+    clearReply();
+    editingMessageId = message.id;
+    elements.editPreviewText.textContent = `Редактирование: ${messageSummary(message).substring(0, 100)}`;
+    elements.editPreview.classList.remove('hidden');
+    elements.messageInput.setAttribute('aria-describedby', 'edit-preview-text');
+    elements.messageInput.value = message.text || '';
+    elements.messageInput.focus();
+    const end = elements.messageInput.value.length;
+    elements.messageInput.setSelectionRange(end, end);
+}
+
+// Правка закончена (сохранена или отменена): плашка скрыта, режим сброшен.
+// Поле ввода не трогает — его очищает вызывающий.
+function finishEditing() {
+    editingMessageId = null;
+    elements.editPreview.classList.add('hidden');
+    elements.editPreviewText.textContent = '';
+    elements.messageInput.removeAttribute('aria-describedby');
+}
+
+// Отмена правки: в поле лежал текст редактируемого сообщения, его убираем.
 function cancelEditing() {
     if (editingMessageId) elements.messageInput.value = '';
-    editingMessageId = null;
+    finishEditing();
 }
