@@ -1198,7 +1198,9 @@
                 const pin = await storage.get(name);
                 if (pin && pin.kt && pin.kt.status) peers.push({ userId: Number(name.slice('peer:'.length)), status: pin.kt.status });
             }
-            const selfAlerts = alerts.filter(a => a.kind === 'self-foreign-entry' || a.kind === 'self-missing' || a.kind === 'self-unreachable');
+            // log-fork с источником self - сервер не отдал обязательное поколение на самопроверке (F3): self тоже не 'unknown'.
+            const selfAlerts = alerts.filter(a => a.kind === 'self-foreign-entry' || a.kind === 'self-missing' || a.kind === 'self-unreachable'
+                || (a.kind === 'log-fork' && a.detail && a.detail.source === 'self'));
             let self = 'unknown';
             if (selfAlerts.length > 0) self = 'alert';
             else if (state.scanned) self = 'ok';

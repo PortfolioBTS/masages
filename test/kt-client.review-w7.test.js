@@ -179,7 +179,7 @@ async function main() {
         assert.ok(!state || !state.scanned, 'прогресс скана не двигается');
         const t = await alice.client.checkTransparency();
         assert.strictEqual(t.status, 'inconsistent');
-        assert.notStrictEqual(t.self, 'ok');
+        assert.strictEqual(t.self, 'alert', 'самопроверка не выполнена: self не unknown и не ok');
     });
 
     await test('F3: 404 на предыдущее поколение в пределах льготного срока - тревога; после срока - тихий пропуск (как раньше)', async () => {
