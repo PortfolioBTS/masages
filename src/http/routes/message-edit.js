@@ -15,7 +15,7 @@ const { e2eePolicyViolation, writeMessageText } = require('../../services/messag
 const { getSocketRoomKey } = require('../../realtime/io');
 
 function register(app, ctx) {
-    const { io, emitRoomMessageEvent, dbAll, dbRun, disappearingMessagesManager, findOwnMessage } = ctx;
+    const { io, emitVisibleRoomMessage, dbRun, disappearingMessagesManager, findOwnMessage } = ctx;
 
     app.put('/api/messages/:messageId', async (req, res) => {
         const userId = req.session.userId;
@@ -64,14 +64,10 @@ function register(app, ctx) {
             if (message.room_id) {
                 // Тем, кто вступил в комнату после этого сообщения, новый текст не
                 // уходит: для них этого сообщения нет (visible_from_seq >= seq).
-                const hidden = await dbAll(
-                    'SELECT user_id FROM room_participants WHERE room_id = $1 AND visible_from_seq >= $2',
-                    [message.room_id, message.seq]
-                );
-                emitRoomMessageEvent('messageEdited', message.room_id, userId, {
+                await emitVisibleRoomMessage('messageEdited', message.room_id, userId, message.seq, {
                     id: String(messageId), seq: Number(message.seq), text: newText, edited_at: editedAt,
                     room_id: message.room_id, encrypted: message.encrypted,
-                }, { hiddenUserIds: hidden.map(row => row.user_id) });
+                });
             } else {
                 io.to(getSocketRoomKey(message.chat_id, null)).emit('messageEdited', {
                     id: String(messageId), seq: Number(message.seq), text: newText, edited_at: editedAt,

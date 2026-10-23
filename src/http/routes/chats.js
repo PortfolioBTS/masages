@@ -119,7 +119,7 @@ const MAX_MESSAGES_PAGE_SIZE = 200;
 function register(app, ctx) {
     const {
         GLOBAL_DEFAULT_EXPIRY_SECONDS, INVITE_TTL_SECONDS, io, subscribeUserToChat, notifyChatListChanged,
-        emitRoomMessageEvent, dbGet, dbAll, withTransactionRetry, newMessageExpirySeconds, getOwnChat,
+        emitVisibleRoomMessage, dbGet, dbAll, withTransactionRetry, newMessageExpirySeconds, getOwnChat,
         markChatRead, unarchiveForRecipients, insertChatMessage, insertRoomMessage, describeMessageIdUse,
         advanceSenderMarker, scheduleBotReply,
     } = ctx;
@@ -429,7 +429,8 @@ function register(app, ctx) {
                     message_type: 'text', sent: 1, status: 'sent', edited_at: null, encrypted, created_at: outcome.row.created_at,
                 };
                 await advanceSenderMarker(chat, row.seq);
-                emitRoomMessageEvent('newMessage', roomId, userId, roomMessagePayload(row, safeText, { replyTo }));
+                // Новичкам, вступившим уже после этого сообщения, событие не уходит.
+                await emitVisibleRoomMessage('newMessage', roomId, userId, row.seq, roomMessagePayload(row, safeText, { replyTo }));
                 res.json({ success: true, message: roomMessagePayload(row, safeText, { replyTo, mine: true }) });
                 unarchiveForRecipients(chat, userId);
                 return;

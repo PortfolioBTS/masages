@@ -27,7 +27,7 @@ const { getSocketRoomKey } = require('../../realtime/io');
 function register(app, ctx) {
     const {
         UPLOAD_QUOTA_BYTES, UPLOADS_DIR, cleanupUploadedFile, rejectUpload, rejectUploadWith, io,
-        emitRoomMessageEvent, newMessageExpirySeconds, getOwnChat, unarchiveForRecipients, insertChatMessage,
+        emitVisibleRoomMessage, newMessageExpirySeconds, getOwnChat, unarchiveForRecipients, insertChatMessage,
         insertRoomMessage, describeMessageIdUse, advanceSenderMarker, upload, uploadQuotaLeft,
     } = ctx;
 
@@ -199,7 +199,8 @@ function register(app, ctx) {
                     created_at: outcome.row.created_at,
                 };
                 await advanceSenderMarker(chat, row.seq);
-                emitRoomMessageEvent('newMessage', roomId, userId, roomMessagePayload(row, messageText));
+                // Новичкам, вступившим уже после этого сообщения, событие не уходит.
+                await emitVisibleRoomMessage('newMessage', roomId, userId, row.seq, roomMessagePayload(row, messageText));
                 res.json({ success: true, message: roomMessagePayload(row, messageText, { mine: true }) });
                 unarchiveForRecipients(chat, userId);
                 return;
