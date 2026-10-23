@@ -54,9 +54,8 @@ async function botSession(t, { lifetime = 'tab' } = {}) {
     const bot = await client.botChat();
     const sock = await client.socket();
     t.after(() => sock.close());
-    // Явная подписка на чат: на уже существующие чаты сервер подписывает
-    // сокет асинхронно, а ответ бота приходит через ~0.6 с — подписка готова.
-    sock.emit('joinChat', `chat:${bot.id}`);
+    // На уже существующие чаты сервер подписывает сокет сам и асинхронно (запрос к
+    // базе после подключения), а ответ бота приходит через ~0.6 с — подписка готова.
     return { client, bot, sock };
 }
 
