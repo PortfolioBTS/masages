@@ -31,7 +31,9 @@
     const MAX_CERTS_PER_SUBJECT = 6;           // 4 допуска + join + запас; лишнее от сервера игнорируется
     const CERT_FETCH_CHUNK = 200;
     const MAX_FETCH_IDS = 1000;
-    const HOWS = Object.freeze(['creator', 'approved', 'invite', 'vouched', 'revouched', 'manual']);
+    // 'unknown' - способ входа неизвестен: у меня нет записи V, а создавать комнату или входить по намерению я не начинал
+    // (сервер добавил учётную запись сам, либо данные устройства потеряны). Это не 'creator': «Вы создали группу» было бы ложью.
+    const HOWS = Object.freeze(['creator', 'approved', 'invite', 'vouched', 'revouched', 'manual', 'unknown']);
     // Подтверждения, которые держатся на подписи участника: при его уходе нужен повторный допуск.
     const REF_HOWS = Object.freeze(['approved', 'invite', 'vouched', 'revouched']);
 
@@ -284,9 +286,10 @@
             const prevSelf = V.get(me.id);
             V.set(me.id, {
                 id: me.id, username: me.username, memkey: meMemkey, status: 'self',
-                // Нет записи V: создатель (noteRoomCreated пишет её сразу) либо вошедший, чьё намерение входа ещё не прошло
-                // якорную проверку, - тогда способ входа неизвестен, а не «создал группу».
-                how: prevSelf ? prevSelf.how : (intent ? 'manual' : 'creator'), by: prevSelf ? prevSelf.by : null,
+                // Нет записи V: создатель пишет её сразу (noteRoomCreated), поэтому здесь это вошедший, чьё намерение входа ещё
+                // не прошло якорную проверку, либо учётная запись, которую сервер добавил без намерения входа, - способ входа
+                // неизвестен, а не «создал группу» (ревью R4 W7, З2).
+                how: prevSelf ? prevSelf.how : 'unknown', by: prevSelf ? prevSelf.by : null,
                 certHash: prevSelf ? prevSelf.certHash : null, since: prevSelf ? prevSelf.since : minute,
             });
 
@@ -916,7 +919,7 @@
                 // Предусловие: «я» в V (после потери данных записи может не быть - создаём).
                 const me = await meLocked();
                 if (!list.some(e => e.id === me.id)) {
-                    list.push({ id: me.id, username: '', memkey: M.toHex(await M.memkey(me.id, me.signPub, me.dhPub)), status: 'self', how: 'creator', by: null, certHash: null, since: minute });
+                    list.push({ id: me.id, username: '', memkey: M.toHex(await M.memkey(me.id, me.signPub, me.dhPub)), status: 'self', how: 'unknown', by: null, certHash: null, since: minute });
                 }
                 list.push({
                     id, username: member && typeof member.username === 'string' ? member.username : '',

@@ -180,7 +180,8 @@ function membershipHowLine(roomId, entry) {
     if (entry.status === 'self') {
         if (entry.how === 'approved') return `Вас одобрил(а) ${by}`;
         if (entry.how === 'invite') return `Вы вошли по приглашению ${by}`;
-        return entry.how === 'creator' ? 'Вы создали группу' : '';
+        if (entry.how === 'creator') return 'Вы создали группу';
+        return entry.how === 'unknown' ? 'Способ входа в группу неизвестен' : '';
     }
     if (entry.status === 'unconfirmed') {
         return entry.duplicateKeys

@@ -283,5 +283,27 @@ const sharesTo = (w, room, recipientId, senderId) =>
         w.noViolations();
     });
 
+    // ===================== З2: способ входа неизвестен, а не «Вы создали группу» =====================
+
+    await test('З2: учётная запись, добавленная сервером без намерения входа, не считает себя создателем (how = unknown); настоящий создатель - creator', async () => {
+        const w = makeWorld();
+        const alice = await w.addUser(1);
+        const dan = await w.addUser(4);
+        await w.createRoom(alice);
+        assert.strictEqual(memberOf(await w.ensure(alice), alice.id).how, 'creator');
+        w.server.evil.addGhost(ROOM, dan.id, dan.chatId);   // Дэн никуда не входил (нет joinIntent) и комнату не создавал
+        const self = memberOf(await w.ensure(dan), dan.id);
+        assert.strictEqual(self.status, 'self');
+        assert.strictEqual(self.how, 'unknown');
+        assert.strictEqual((await w.stored(dan, 'trusted:' + ROOM)).list.find(e => e.id === dan.id).how, 'unknown', 'сохраняется как есть');
+        // Ручное подтверждение без записи V (данные потеряны) тоже не выдаёт «я» за создателя.
+        const eve = await w.addUser(5);
+        w.server.evil.addGhost(ROOM, eve.id, eve.chatId);
+        await eve.client.checkPeerIdentities([alice.id]);
+        await eve.client.trustMember(ROOM, alice.id);
+        assert.strictEqual((await w.stored(eve, 'trusted:' + ROOM)).list.find(e => e.id === eve.id).how, 'unknown');
+        w.noViolations();
+    });
+
     finish();
 })().catch((err) => { console.error(err); process.exitCode = 1; });
