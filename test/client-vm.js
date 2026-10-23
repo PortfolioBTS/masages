@@ -24,7 +24,9 @@ function extractFunction(source, name) {
     return source.slice(match.index, end + 2);
 }
 
-// Элемент-заглушка: ровно то, что нужно логике композера и меню.
+// Элемент-заглушка: ровно то, что нужно логике композера и меню. Дерево детей и классы
+// настоящие (className ↔ classList, querySelector по .классу и тегу, contains), стили и
+// раскладка — нет: offsetParent === null, если сам элемент или предок скрыт классом hidden.
 class FakeEl {
     constructor(tag = 'div') {
         this.tagName = tag.toUpperCase();
@@ -32,11 +34,13 @@ class FakeEl {
         this.attrs = new Map();
         this.listeners = new Map();
         this.children = [];
+        this.parent = null;
         this.dataset = {};
         this.style = {};
         this.value = '';
         this.textContent = '';
         this.disabled = false;
+        this.isConnected = true;
         this.selection = null;
         const el = this;
         this.classList = {
@@ -50,20 +54,45 @@ class FakeEl {
             },
         };
     }
+    get className() { return [...this.classes].join(' '); }
+    set className(value) { this.classes = new Set(String(value).split(/\s+/).filter(Boolean)); }
     get hidden() { return this.classes.has('hidden'); }
+    get offsetParent() {
+        for (let el = this; el; el = el.parent) if (el.classes.has('hidden')) return null;
+        return this.parent || {};
+    }
     setAttribute(name, value) { this.attrs.set(name, String(value)); }
     getAttribute(name) { return this.attrs.has(name) ? this.attrs.get(name) : null; }
     removeAttribute(name) { this.attrs.delete(name); }
     hasAttribute(name) { return this.attrs.has(name); }
+    set tabIndex(value) { this.attrs.set('tabindex', String(value)); }
+    get tabIndex() { return this.attrs.has('tabindex') ? Number(this.attrs.get('tabindex')) : -1; }
     addEventListener(type, fn) {
         if (!this.listeners.has(type)) this.listeners.set(type, []);
         this.listeners.get(type).push(fn);
     }
     focus() { FakeEl.active = this; }
     setSelectionRange(a, b) { this.selection = [a, b]; }
-    append(...nodes) { this.children.push(...nodes); }
-    appendChild(node) { this.children.push(node); return node; }
-    replaceChildren(...nodes) { this.children = nodes; }
+    appendChild(node) { if (node instanceof FakeEl) node.parent = this; this.children.push(node); return node; }
+    append(...nodes) { nodes.forEach((n) => this.appendChild(n)); }
+    replaceChildren(...nodes) { this.children = []; nodes.forEach((n) => this.appendChild(n)); }
+    contains(node) {
+        for (let el = node; el; el = el.parent) if (el === this) return true;
+        return false;
+    }
+    descendants() { return this.children.filter((c) => c instanceof FakeEl).flatMap((c) => [c, ...c.descendants()]); }
+    // Селекторы: «.класс», «тег», «тег.класс», через запятую.
+    querySelectorAll(selector) {
+        const parts = selector.split(',').map((p) => p.trim());
+        return this.descendants().filter((el) => parts.some((part) => {
+            const m = /^([a-z0-9]*)((?:\.[\w-]+)*)$/i.exec(part);
+            if (!m) return false;
+            if (m[1] && el.tagName !== m[1].toUpperCase()) return false;
+            return m[2].split('.').filter(Boolean).every((c) => el.classes.has(c));
+        }));
+    }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+    getBoundingClientRect() { return { left: 10, top: 10, right: 210, bottom: 60, width: 200, height: 50 }; }
     // Вызвать подписчиков события; возвращает объект события (e.defaultPrevented видно тесту).
     fire(type, init = {}) {
         const event = { type, target: this, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, stopPropagation() {}, ...init };

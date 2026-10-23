@@ -371,6 +371,33 @@ function setActiveChatItem(chatId, roomId) {
     }
 }
 
+// ---- Клавиатура во всплывающих меню (сообщения и строки чата) ----
+
+function popupMenuItems(menu) {
+    return Array.from(menu.querySelectorAll('button')).filter((btn) => !btn.disabled && btn.offsetParent !== null);
+}
+
+// Стрелки двигают фокус по кругу, Home/End — в начало и конец; Esc и Tab закрывают
+// меню (hide сам возвращает фокус туда, откуда меню открыли).
+function onPopupMenuKeydown(e, menu, hide) {
+    if (e.key === 'Escape' || e.key === 'Tab') {
+        e.preventDefault();
+        hide();
+        return;
+    }
+    const items = popupMenuItems(menu);
+    if (items.length === 0) return;
+    const index = items.indexOf(document.activeElement);
+    let target = null;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowRight') target = items[(index + 1) % items.length];
+    else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') target = index < 0 ? items[items.length - 1] : items[(index - 1 + items.length) % items.length];
+    else if (e.key === 'Home') target = items[0];
+    else if (e.key === 'End') target = items[items.length - 1];
+    if (!target) return;
+    e.preventDefault();
+    target.focus({ preventScroll: true });
+}
+
 // ---- Контекстное меню строки чата и меню чата ----
 
 let chatItemMenuChat = null;

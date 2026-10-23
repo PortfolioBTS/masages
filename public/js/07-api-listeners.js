@@ -329,6 +329,7 @@ function setupComposerListeners() {
 // Меню сообщения: панель реакций, ответ, копирование, правка, удаление.
 function setupMessageMenuListeners() {
     buildReactionPicker();
+    elements.messageMenu.addEventListener('keydown', (e) => onPopupMenuKeydown(e, elements.messageMenu, hideMessageMenu));
 
     elements.replyMessageBtn.addEventListener('click', () => {
         const message = menuMessage;

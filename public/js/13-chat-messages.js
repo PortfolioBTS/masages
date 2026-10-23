@@ -463,9 +463,22 @@ function createMessageElement(message, animate) {
     div.appendChild(metaDiv);
     if (isMine) renderMessageStatus(div);
 
+    // Меню доступно и с клавиатуры: сообщение берёт фокус (Tab), клавиша ContextMenu
+    // или Shift+F10 открывает меню и переводит фокус на его первый пункт.
+    div.tabIndex = 0;
+    div.setAttribute('role', 'article');
+    div.addEventListener('keydown', (e) => {
+        if (e.key !== 'ContextMenu' && !(e.key === 'F10' && e.shiftKey)) return;
+        e.preventDefault();
+        keyboardMenuAt = Date.now();
+        const rect = div.querySelector('.message-content').getBoundingClientRect();
+        showMessageMenu(rect.left + 24, rect.top + 24, message, { keyboard: true });
+    });
     div.addEventListener('contextmenu', (e) => {
         e.preventDefault();
         e.stopPropagation();
+        // Клавиша ContextMenu в части систем присылает ещё и событие contextmenu — меню уже открыто с фокусом.
+        if (Date.now() - keyboardMenuAt < 600) return;
         showMessageMenu(e.clientX, e.clientY, message);
     });
     attachLongPress(div, (x, y) => showMessageMenu(x, y, message));
@@ -473,8 +486,12 @@ function createMessageElement(message, animate) {
     return div;
 }
 
-function showMessageMenu(x, y, message) {
+let keyboardMenuAt = 0;
+let messageMenuReturnFocus = null;   // куда вернуть фокус при закрытии меню, открытого с клавиатуры
+
+function showMessageMenu(x, y, message, { keyboard = false } = {}) {
     hideChatItemMenu();
+    messageMenuReturnFocus = keyboard ? document.activeElement : null;
     menuMessage = message;
     const isMine = isOwnMessage(message);
     // Файлы не редактируются; нерасшифрованное — тоже (в поле ввода попал
@@ -488,10 +505,22 @@ function showMessageMenu(x, y, message) {
     const rect = menu.getBoundingClientRect();
     menu.style.left = Math.max(8, Math.min(x, window.innerWidth - rect.width - 8)) + 'px';
     menu.style.top = Math.max(8, Math.min(y, window.innerHeight - rect.height - 8)) + 'px';
+    if (keyboard) {
+        const [first] = popupMenuItems(menu);
+        if (first) first.focus({ preventScroll: true });
+    }
 }
 
+// Закрывая меню, возвращает фокус на сообщение — но только если фокус был в самом меню:
+// клик в другое место уже поставил фокус туда, и отбирать его нельзя.
 function hideMessageMenu() {
-    elements.messageMenu.classList.add('hidden');
+    const menu = elements.messageMenu;
+    if (menu.classList.contains('hidden')) return;
+    const hadFocus = menu.contains(document.activeElement);
+    menu.classList.add('hidden');
+    const target = messageMenuReturnFocus;
+    messageMenuReturnFocus = null;
+    if (hadFocus && target && target.isConnected) target.focus({ preventScroll: true });
 }
 
 // ---- Реакции ----
