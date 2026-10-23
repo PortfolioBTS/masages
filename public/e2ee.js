@@ -1809,7 +1809,9 @@
                 for (const item of res.data.identities) {
                     const id = Number(item && item.user_id);
                     if (!chunk.includes(id)) continue;
-                    const signPub = canonicalPubKey(item.identity_signing_key);
+                    // Ключ подписи закрепляется только после строгой проверки Ed25519 (малый порядок, неканоническая точка), как и
+                    // в bundle и SKDM: иначе слабый ключ от сервера закрепился бы при первом контакте (З6).
+                    const signPub = canonicalSigningKey(item.identity_signing_key);
                     const dhPub = canonicalPubKey(item.identity_dh_key);
                     if (signPub && dhPub) out.set(id, { signPub, dhPub, kt: item.kt });
                 }
