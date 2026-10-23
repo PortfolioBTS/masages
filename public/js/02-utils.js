@@ -46,6 +46,26 @@ function iconText(tag, className, iconName, text, options = {}) {
     return el;
 }
 
+// Кнопка, запускающая запрос на сервер: пока task идёт, она disabled + aria-busy, поэтому
+// двойной клик (и Enter в соседнем поле) не отправит запрос дважды — раньше так
+// создавались две одинаковые группы. busyLabel — подпись со значком загрузки на время
+// запроса; прежнее содержимое кнопки возвращается в любом случае. Если кнопка уже занята,
+// возвращает undefined и task не запускает.
+async function withBusyButton(btn, task, busyLabel = '') {
+    if (!btn || btn.disabled || btn.getAttribute('aria-busy') === 'true') return undefined;
+    const original = Array.from(btn.childNodes);
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    if (busyLabel) setIconLabel(btn, 'loader', busyLabel, { className: 'spin' });
+    try {
+        return await task();
+    } finally {
+        btn.disabled = false;
+        btn.removeAttribute('aria-busy');
+        if (busyLabel) btn.replaceChildren(...original);
+    }
+}
+
 // ==================== Мелкие утилиты ====================
 
 // Не отменяет сам promise — только перестаёт его ждать. Нужна там, где

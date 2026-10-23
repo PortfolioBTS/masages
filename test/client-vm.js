@@ -64,6 +64,7 @@ class FakeEl {
     get className() { return [...this.classes].join(' '); }
     set className(value) { this.classes = new Set(String(value).split(/\s+/).filter(Boolean)); }
     get hidden() { return this.classes.has('hidden'); }
+    get childNodes() { return this.children; }
     get offsetParent() {
         for (let el = this; el; el = el.parent) if (el.classes.has('hidden')) return null;
         return this.parent || {};

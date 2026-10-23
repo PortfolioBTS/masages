@@ -175,6 +175,10 @@ async function rotateInviteCode() {
     }
     const hadCode = Boolean(inviteState && inviteState.code && !inviteState.disabled);
     if (hadCode && !confirm('Создать новый код? Старый код сразу перестанет действовать.')) return;
+    await withBusyButton(elements.rotateInviteBtn, () => doRotateInviteCode(max, hadCode));
+}
+
+async function doRotateInviteCode(max, hadCode) {
     const chatId = currentChatId;
     const roomId = currentRoomId;
     const body = {
@@ -183,13 +187,11 @@ async function rotateInviteCode() {
         requireApproval: elements.inviteApproval.checked,
         proto: PROTO_VERSION,
     };
-    elements.rotateInviteBtn.disabled = true;
     // Вход без одобрения - только по подписанному приглашению: сертификат и снимок подписывает клиент, секрет ссылки остаётся на устройстве.
     let signed = null;
     if (!body.requireApproval) {
         const client = await getReadyE2eeClient();
         if (!client) {
-            elements.rotateInviteBtn.disabled = false;
             showToast('Шифрование недоступно: подписанную ссылку без одобрения создать нельзя', 'error');
             return;
         }
@@ -197,7 +199,6 @@ async function rotateInviteCode() {
             signed = await client.signInvite(roomId, { ttlSeconds: body.ttlSeconds });
         } catch (err) {
             console.error('E2EE: signInvite failed:', err);
-            elements.rotateInviteBtn.disabled = false;
             showToast('Не удалось подписать приглашение', 'error');
             return;
         }
@@ -205,7 +206,6 @@ async function rotateInviteCode() {
         body.inviteSnap = signed.snap;
     }
     const data = await api(`/api/chats/${chatId}/invite/rotate`, { method: 'POST', body: JSON.stringify(body) });
-    elements.rotateInviteBtn.disabled = false;
     if (!data.success) {
         showToast(data.message || 'Не удалось создать новый код', 'error');
         return;
@@ -235,9 +235,10 @@ async function disableInviteCode() {
     if (!currentChatId || elements.disableInviteBtn.disabled) return;
     if (!confirm('Отключить приглашение? Текущий код сразу перестанет действовать. Новый код можно создать в любой момент.')) return;
     const chatId = currentChatId;
-    elements.disableInviteBtn.disabled = true;
-    const data = await api(`/api/chats/${chatId}/invite/disable`, { method: 'POST', body: JSON.stringify({ proto: PROTO_VERSION }) });
-    elements.disableInviteBtn.disabled = false;
+    // Занята только сама кнопка на время запроса. renderInvite после успеха сам выключает
+    // эту же кнопку (приглашения больше нет), поэтому рисуется уже после снятия «занято».
+    const data = await withBusyButton(elements.disableInviteBtn, () => api(`/api/chats/${chatId}/invite/disable`, { method: 'POST', body: JSON.stringify({ proto: PROTO_VERSION }) }));
+    if (!data) return;
     if (!data.success) {
         showToast(data.message || 'Не удалось отключить приглашение', 'error');
         return;

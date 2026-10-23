@@ -8,26 +8,30 @@
 async function createChat() {
     const name = document.getElementById('new-chat-name').value.trim();
     if (!name) return showToast('Введите название', 'error');
-    const data = await api('/api/chats', {
-        method: 'POST',
-        body: JSON.stringify({ name }),
-    });
-    if (data.success) {
-        document.getElementById('new-chat-name').value = '';
-        // Создатель: V = {я}, how = creator, bootstrapDone записываются сразу (signed-membership.md, 5.1).
-        if (data.chat.room_id) {
-            const client = await getReadyE2eeClient();
-            if (client) {
-                try { await client.noteRoomCreated(data.chat.room_id, currentUser.username); } catch (err) { console.warn('E2EE: состав новой группы не записан:', err); }
+    // Кнопка занята на всё время запроса: двойной клик или Enter во время ответа сервера
+    // создавал бы вторую такую же группу.
+    await withBusyButton(elements.createChatBtn, async () => {
+        const data = await api('/api/chats', {
+            method: 'POST',
+            body: JSON.stringify({ name }),
+        });
+        if (data.success) {
+            document.getElementById('new-chat-name').value = '';
+            // Создатель: V = {я}, how = creator, bootstrapDone записываются сразу (signed-membership.md, 5.1).
+            if (data.chat.room_id) {
+                const client = await getReadyE2eeClient();
+                if (client) {
+                    try { await client.noteRoomCreated(data.chat.room_id, currentUser.username); } catch (err) { console.warn('E2EE: состав новой группы не записан:', err); }
+                }
             }
+            showToast('Чат создан', 'success');
+            closeModal(elements.newChatModal);
+            loadChats();
+            openChat(data.chat.id, data.chat.room_id, data.chat.name, data.chat.avatar, 0, 0);
+        } else {
+            showToast(data.message, 'error');
         }
-        showToast('Чат создан', 'success');
-        closeModal(elements.newChatModal);
-        loadChats();
-        openChat(data.chat.id, data.chat.room_id, data.chat.name, data.chat.avatar, 0, 0);
-    } else {
-        showToast(data.message, 'error');
-    }
+    }, 'Создаём…');
 }
 
 async function deleteChat() {
