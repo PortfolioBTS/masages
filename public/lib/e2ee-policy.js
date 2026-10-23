@@ -12,6 +12,8 @@
 //                                   — можно ли отправить в чат открытый текст;
 //   sessionBlock(session)           — результат ensureRoomSession: нужно ли
 //                                     прервать отправку (ключ не дошёл никому);
+//   replyQuoteTrusted(serverReplyTo, result)
+//                                   — совпала ли цитата сервера с подписанным id ответа;
 //   initErrorReason(err)            — причина недоступности шифрования по err.code;
 //   initErrorRetryable(err)         — есть ли смысл в «Повторить»;
 //   composerView(state)             — что показать под полем ввода и в шапке.
@@ -68,6 +70,7 @@
     const BLOCK_TEXTS = Object.freeze({
         'session-failed': 'Не удалось подготовить ключи группы — сообщение не отправлено. Проверьте соединение и повторите.',
         'keys-not-delivered': 'Ключ шифрования не удалось передать ни одному участнику — сообщение не отправлено, иначе его никто не смог бы прочитать. Повторите попытку.',
+        'keys-withheld': 'Ключ шифрования некому передать: участники группы не подтверждены или у них изменился ключ. Сообщение не отправлено, иначе его никто не смог бы прочитать. Подтвердите участников в окне «Участники и ключи» и повторите.',
     });
 
     // Результат ensureRoomSession → null (отправлять можно) или { code, text }.
@@ -75,6 +78,10 @@
     //   * ключ не дошёл ни до одного участника при ok === false и других участниках
     //     в комнате — блокируем; если не дошёл лишь до части, отправляем (о части
     //     предупреждает handleRoomSessionResult);
+    //   * ключ не получил никто, а часть участников с ключами на сервере осталась без него
+    //     из-за статуса (не подтверждены, сменили ключ, расхождение с журналом) — блокируем
+    //     независимо от ok: рассылка не падала, адресатов просто нет, и сообщение не прочитает
+    //     никто, в том числе подтверждённый позже (signed-membership.md, 9.4);
     //   * ok === true, но ключа ни у кого нет, потому что у остальных не настроено
     //     шифрование, — не блокируем: рассылка не упала, отправка не зависит от
     //     готовности остальных, а предупреждение показывает handleRoomSessionResult.
@@ -83,7 +90,19 @@
         if (session.ok === false && Number(session.peers) > 0 && Number(session.keyHolders) === 0) {
             return { code: 'keys-not-delivered', text: BLOCK_TEXTS['keys-not-delivered'] };
         }
+        if (Number(session.withheldPeers) > 0 && Number(session.keyHolders) === 0) {
+            return { code: 'keys-withheld', text: BLOCK_TEXTS['keys-withheld'] };
+        }
         return null;
+    }
+
+    // Цитата в комнате (З3): сервер хранит reply_to_id открыто, поэтому может приписать сообщению участника любую цитату.
+    // Цитата принимается, только если её id совпал с id, который отправитель подписал внутри шифротекста (result.replyTo).
+    // Нет цитаты - нечего проверять; сообщение не расшифровано - проверить нечем, цитата не показывается.
+    function replyQuoteTrusted(serverReplyTo, result) {
+        if (!serverReplyTo) return true;
+        if (!result || result.ok !== true || typeof result.replyTo !== 'string') return false;
+        return result.replyTo === String(serverReplyTo.id);
     }
 
     const PLACEHOLDERS = Object.freeze({
@@ -163,6 +182,7 @@
         parseBotChatId,
         plaintextAllowed,
         sessionBlock,
+        replyQuoteTrusted,
         initErrorReason,
         initErrorRetryable,
         composerView,

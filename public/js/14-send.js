@@ -100,7 +100,9 @@ async function sendText(text, { chatId, roomId, replyToId } = {}) {
             let outgoingText = text;
             if (client) {
                 try {
-                    outgoingText = await encryptForRoom(client, chatId, roomId, text, { messageId: clientMessageId });
+                    // Ответ уходит и внутри шифротекста (replyTo): сервер хранит reply_to_id открыто, и получатели
+                    // принимают цитату, только если её id совпал с подписанным (З3).
+                    outgoingText = await encryptForRoom(client, chatId, roomId, text, { messageId: clientMessageId, replyTo: replyToId || null });
                 } catch (err) {
                     console.error('E2EE: encryptOutgoing failed:', err);
                     encryptFailed = true;
@@ -129,6 +131,8 @@ async function sendText(text, { chatId, roomId, replyToId } = {}) {
     // прийти (и пришёл ли вообще) newMessage по сокету.
     if (chatId === currentChatId && data.message) {
         const message = { ...data.message, text };
+        // Цитата в ответе сервера должна быть той, на которую отвечали мы (З3).
+        if (roomId && message.reply_to && String(message.reply_to.id) !== String(replyToId || '')) message.reply_to = null;
         const reply = message.reply_to;
         if (reply && reply.encrypted && !reply.deleted) {
             const replyRes = await decryptEnvelope(roomId, null, reply.text, reply.id);
@@ -175,7 +179,11 @@ async function sendMessage() {
                 if (!client) { showToast('Не удалось зашифровать правку: сквозное шифрование недоступно', 'error'); return; }
                 // mid правки — id редактируемого сообщения (строка), edit:true поднимает ts
                 // выше известной версии: правка при отстающих часах не выглядит старой.
-                try { outgoingText = await encryptForRoom(client, chatId, roomId, text, { messageId: String(messageId), edit: true }); }
+                // Правка несёт тот же ответ, что и исходное сообщение (replyTo): после перезагрузки истории показывается
+                // именно текст правки, и без replyTo цитата не прошла бы сверку (З3).
+                const original = findMessageEl(messageId);
+                const originalReply = original && original._message && original._message.reply_to ? String(original._message.reply_to.id) : null;
+                try { outgoingText = await encryptForRoom(client, chatId, roomId, text, { messageId: String(messageId), edit: true, replyTo: originalReply }); }
                 catch { showToast('Не удалось зашифровать правку', 'error'); return; }
             }
             const data = await api(`/api/messages/${messageId}`, {

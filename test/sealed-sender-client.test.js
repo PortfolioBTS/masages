@@ -135,12 +135,14 @@ async function main() {
             roomMemberNames: new Map(),
             e2eeFailureText: (reason) => `отказ:${reason}`,
             safeDisplayName: (name) => name,
+            NyxoE2eePolicy: require('../public/lib/e2ee-policy.js'),
             decryptEnvelope: async (roomId, senderId, text, id) => {
                 calls.push([roomId, senderId, id]);
                 return results.get(String(id));
             },
         });
-        results.set('100', { ok: true, text: 'привет', senderId: 2, ts: 1 });
+        // replyTo - id ответа, подписанный отправителем внутри шифротекста: цитата сервера принимается, только если он совпал (З3).
+        results.set('100', { ok: true, text: 'привет', senderId: 2, ts: 1, replyTo: '90' });
         results.set('90', { ok: true, text: 'исходное', senderId: 1, ts: 1 });
         const message = { id: '100', encrypted: true, text: 'конверт', reply_to: { id: '90', encrypted: true, text: 'конверт-цитаты' } };
         await ctx.decryptMessageInPlace(message, 5);
@@ -156,8 +158,19 @@ async function main() {
         await ctx.decryptMessageInPlace(failed, 5);
         assert.strictEqual(failed._senderId, undefined, 'автор неизвестен');
         assert.strictEqual(failed._e2eeFailed, true);
-        assert.strictEqual(failed.reply_to.text, 'Сообщение недоступно');
-        assert.strictEqual(failed.reply_to._author, '');
+        // Сообщение не расшифровано: подписанного id ответа нет, цитата сервера непроверяема и не показывается (З3).
+        assert.strictEqual(failed.reply_to, null);
+
+        // Расшифровано, но сервер приписал другую цитату (id не совпал с подписанным) или отправитель ни на что не отвечал.
+        results.set('102', { ok: true, text: 'без ответа', senderId: 2, ts: 1, replyTo: null });
+        results.set('103', { ok: true, text: 'ответ на 90', senderId: 2, ts: 1, replyTo: '90' });
+        const forged = { id: '102', encrypted: true, text: 'конверт', reply_to: { id: '90', encrypted: true, text: 'конверт-цитаты' } };
+        await ctx.decryptMessageInPlace(forged, 5);
+        assert.strictEqual(forged.text, 'без ответа');
+        assert.strictEqual(forged.reply_to, null, 'цитата, которой отправитель не подписывал, убрана');
+        const swapped = { id: '103', encrypted: true, text: 'конверт', reply_to: { id: '91', encrypted: true, text: 'конверт-цитаты' } };
+        await ctx.decryptMessageInPlace(swapped, 5);
+        assert.strictEqual(swapped.reply_to, null, 'другая цитата убрана');
     });
 
     console.log(`\n${passed} passed, ${failed} failed`);

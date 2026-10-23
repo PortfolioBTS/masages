@@ -31,13 +31,17 @@
     const MAX_CERTS_PER_SUBJECT = 6;           // 4 допуска + join + запас; лишнее от сервера игнорируется
     const CERT_FETCH_CHUNK = 200;
     const MAX_FETCH_IDS = 1000;
-    const HOWS = Object.freeze(['creator', 'approved', 'invite', 'vouched', 'revouched', 'manual']);
+    // 'unknown' - способ входа неизвестен: у меня нет записи V, а создавать комнату или входить по намерению я не начинал
+    // (сервер добавил учётную запись сам, либо данные устройства потеряны). Это не 'creator': «Вы создали группу» было бы ложью.
+    const HOWS = Object.freeze(['creator', 'approved', 'invite', 'vouched', 'revouched', 'manual', 'unknown']);
     // Подтверждения, которые держатся на подписи участника: при его уходе нужен повторный допуск.
     const REF_HOWS = Object.freeze(['approved', 'invite', 'vouched', 'revouched']);
 
     const names = Object.freeze({
         trusted: (room) => 'trusted:' + room,
         removed: (room) => 'removed:' + room,
+        // Записи V, отложенные из-за смены ключа участника (9.7): в V их нет, но «был подтверждён» помнится.
+        suspended: (room) => 'suspended:' + room,
         intent: (room) => 'joinIntent:' + room,
         revouch: (room) => 'revouch:' + room,
         delivered: (room, keyId) => 'delivered:' + room + ':' + keyId,
@@ -83,6 +87,17 @@
         for (const item of Array.isArray(raw.list) ? raw.list : []) {
             const entry = normalizeEntry(item);
             if (entry && !seen.has(entry.id)) { seen.add(entry.id); out.list.push(entry); }
+        }
+        return out;
+    }
+
+    // Отложенные записи V: тот же вид, что у trusted.list, без дублей по id.
+    function normalizeSuspended(raw) {
+        const out = [];
+        const seen = new Set();
+        for (const item of Array.isArray(raw) ? raw : []) {
+            const entry = normalizeEntry(item);
+            if (entry && entry.status === 'confirmed' && !seen.has(entry.id)) { seen.add(entry.id); out.push(entry); }
         }
         return out;
     }
@@ -192,6 +207,7 @@
         }
 
         async function readTrusted(roomId) { return normalizeTrusted(await storage.get(names.trusted(roomId))); }
+        async function readSuspended(roomId) { return normalizeSuspended(await storage.get(names.suspended(roomId))); }
 
         async function readIntentLocked(roomId, minute) {
             const raw = await storage.get(names.intent(roomId));
@@ -253,18 +269,27 @@
             const removedStored = await storage.get(names.removed(roomId));
             const removed = normalizeRemoved(removedStored, minute);
             const removedBefore = JSON.stringify(removed);
+            const suspendedStored = await readSuspended(roomId);
             let intent = await readIntentLocked(roomId, minute);
             // Намерение входа при уже записанном V бесполезно (якорь невозможен) и не должно блокировать запись V.
             if (intent && trusted.bootstrapDone) { await storage.delete(names.intent(roomId)); intent = null; }
 
             const V = new Map(trusted.list.map(e => [e.id, e]));
+            // Отложенные из-за смены ключа записи (9.7) участвуют в проходе как члены V: шаг 3 решает, вернуть ли их (ключи
+            // снова те, на которых подтверждали) или оставить отложенными. Кратковременная подмена ключа сервером не должна
+            // навсегда выбивать подтверждённых вручную и с допуском старше 30 суток - заново подтвердить их нечем (З1).
+            const fromSuspended = new Set();
+            for (const entry of suspendedStored) {
+                if (!V.has(entry.id)) { V.set(entry.id, entry); fromSuspended.add(entry.id); }
+            }
             const meMemkey = M.toHex(await M.memkey(me.id, me.signPub, me.dhPub));
             const prevSelf = V.get(me.id);
             V.set(me.id, {
                 id: me.id, username: me.username, memkey: meMemkey, status: 'self',
-                // Нет записи V: создатель (noteRoomCreated пишет её сразу) либо вошедший, чьё намерение входа ещё не прошло
-                // якорную проверку, - тогда способ входа неизвестен, а не «создал группу».
-                how: prevSelf ? prevSelf.how : (intent ? 'manual' : 'creator'), by: prevSelf ? prevSelf.by : null,
+                // Нет записи V: создатель пишет её сразу (noteRoomCreated), поэтому здесь это вошедший, чьё намерение входа ещё
+                // не прошло якорную проверку, либо учётная запись, которую сервер добавил без намерения входа, - способ входа
+                // неизвестен, а не «создал группу» (ревью R4 W7, З2).
+                how: prevSelf ? prevSelf.how : 'unknown', by: prevSelf ? prevSelf.by : null,
                 certHash: prevSelf ? prevSelf.certHash : null, since: prevSelf ? prevSelf.since : minute,
             });
 
@@ -281,12 +306,24 @@
 
             // 3. Отзыв: ключ изменился и не принят (pending), либо закреплённые ключи уже не те, на которых участник
             // попал в V. Это единственная причина выпадения из V при X в S.
+            // Выпавшего из-за смены ключа запись V запоминается в suspended (9.7): только по ней потом решается, в какой комнате
+            // человек подтверждал участника до смены ключа, а в какой участник так и остался «призраком».
             const revoked = [];
+            const suspendedNow = [];
             for (const [id, entry] of [...V]) {
                 if (id === me.id) continue;
                 const pin = pins.get(id);
-                if (!pin) continue;
-                if (pin.pending || entry.memkey !== await memkeyOf(id, pin.signPub, pin.dhPub)) { V.delete(id); revoked.push(id); }
+                if (!pin) {
+                    // Без закреплённых ключей отложенную запись не проверить - остаётся отложенной.
+                    if (fromSuspended.has(id)) { V.delete(id); suspendedNow.push(entry); }
+                    continue;
+                }
+                if (pin.pending || entry.memkey !== await memkeyOf(id, pin.signPub, pin.dhPub)) {
+                    V.delete(id);
+                    suspendedNow.push(entry);
+                    // Об отзыве (и ротации) сообщается один раз: когда запись выпала, а не на каждом проходе отложенности.
+                    if (!fromSuspended.has(id)) revoked.push(id);
+                }
             }
 
             // 3а. Дубликаты ключей (6.2): кто уже в V по id, там и остаётся; остальные члены группы не подтверждаются.
@@ -418,6 +455,13 @@
                 const before = { bootstrapDone: trusted.bootstrapDone, list: trusted.list.slice().sort((a, b) => a.id - b.id) };
                 if (!sameJson(before, next)) await storage.set(names.trusted(roomId), next);
                 if (anchorDone) await storage.delete(names.intent(roomId));
+                // Отложенные записи: пока участник в комнате и не вернулся в V другим путём; ушедший забывается.
+                const suspendedNext = [...new Map([...suspendedStored, ...suspendedNow].map(e => [e.id, e])).values()]
+                    .filter(e => S.has(e.id) && !V.has(e.id)).sort((a, b) => a.id - b.id);
+                if (!sameJson(suspendedStored.slice().sort((a, b) => a.id - b.id), suspendedNext)) {
+                    if (suspendedNext.length === 0) await storage.delete(names.suspended(roomId));
+                    else await storage.set(names.suspended(roomId), suspendedNext);
+                }
             }
             if (JSON.stringify(removed) !== removedBefore || (removedStored !== null && removedStored !== undefined && !sameJson(removedStored, removed))) {
                 if (Object.keys(removed).length === 0) await storage.delete(names.removed(roomId));
@@ -875,7 +919,7 @@
                 // Предусловие: «я» в V (после потери данных записи может не быть - создаём).
                 const me = await meLocked();
                 if (!list.some(e => e.id === me.id)) {
-                    list.push({ id: me.id, username: '', memkey: M.toHex(await M.memkey(me.id, me.signPub, me.dhPub)), status: 'self', how: 'creator', by: null, certHash: null, since: minute });
+                    list.push({ id: me.id, username: '', memkey: M.toHex(await M.memkey(me.id, me.signPub, me.dhPub)), status: 'self', how: 'unknown', by: null, certHash: null, since: minute });
                 }
                 list.push({
                     id, username: member && typeof member.username === 'string' ? member.username : '',
@@ -1017,8 +1061,11 @@
             return out;
         }
 
-        // Подтверждение вручную после принятия нового ключа (9.7): во всех комнатах, где участник есть в списке и
-        // нет живого намерения входа. Вызывается из acceptPeerIdentityChange внутри его блокировки.
+        // Подтверждение вручную после принятия нового ключа (9.7): только в тех комнатах, где участник уже был в V до
+        // смены ключа (запись ещё в trusted либо отложена в suspended), есть в списке сервера и нет живого намерения входа.
+        // Там, где его никто не подписывал («призрак»), одно решение о ключе подтверждением не становится: иначе сервер
+        // одним «Принять» получил бы ключи всех комнат, куда успел добавить подменённого участника (П1).
+        // Вызывается из acceptPeerIdentityChange внутри его блокировки.
         async function trustAfterAcceptLocked(peerId, usernameOf) {
             const rooms = [];
             for (const name of await storage.keys('members:')) {
@@ -1028,6 +1075,8 @@
                 if ((await storage.get(names.intent(roomId))) !== null) continue;
                 const trusted = await readTrusted(roomId);
                 if (!trusted.bootstrapDone) continue;
+                const suspended = await readSuspended(roomId);
+                if (!trusted.list.some(e => e.id === peerId) && !suspended.some(e => e.id === peerId)) continue;
                 const pin = (await loadPins([peerId])).get(peerId);
                 if (!pin || pin.pending) continue;
                 const list = trusted.list.filter(e => e.id !== peerId);
@@ -1036,6 +1085,11 @@
                     status: 'confirmed', how: 'manual', by: null, certHash: null, since: nowMin(),
                 });
                 await storage.set(names.trusted(roomId), { bootstrapDone: true, list: list.sort((a, b) => a.id - b.id) });
+                const rest = suspended.filter(e => e.id !== peerId);
+                if (rest.length !== suspended.length) {
+                    if (rest.length === 0) await storage.delete(names.suspended(roomId));
+                    else await storage.set(names.suspended(roomId), rest);
+                }
                 rooms.push(roomId);
             }
             return rooms;
@@ -1069,7 +1123,7 @@
         async function forgetRoomLocked(roomId) {
             let removed = 0;
             for (const name of [
-                names.trusted(roomId), names.removed(roomId), names.revouch(roomId), names.intent(roomId),
+                names.trusted(roomId), names.suspended(roomId), names.removed(roomId), names.revouch(roomId), names.intent(roomId),
                 names.viewPending(roomId), names.inviteSecret(roomId),
             ]) {
                 if ((await storage.get(name)) !== null) { await storage.delete(name); removed++; }
@@ -1097,5 +1151,5 @@
         };
     }
 
-    return Object.freeze({ createMembershipClient, parseViewField, parseCertItems, normalizeRevouch, MAX_REVOUCH_TASKS, normalizeTrusted, normalizeRemoved, normalizeIntent, names, REF_HOWS, HOWS });
+    return Object.freeze({ createMembershipClient, parseViewField, parseCertItems, normalizeRevouch, MAX_REVOUCH_TASKS, normalizeTrusted, normalizeSuspended, normalizeRemoved, normalizeIntent, names, REF_HOWS, HOWS });
 });

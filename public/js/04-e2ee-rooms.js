@@ -180,7 +180,8 @@ function membershipHowLine(roomId, entry) {
     if (entry.status === 'self') {
         if (entry.how === 'approved') return `Вас одобрил(а) ${by}`;
         if (entry.how === 'invite') return `Вы вошли по приглашению ${by}`;
-        return entry.how === 'creator' ? 'Вы создали группу' : '';
+        if (entry.how === 'creator') return 'Вы создали группу';
+        return entry.how === 'unknown' ? 'Способ входа в группу неизвестен' : '';
     }
     if (entry.status === 'unconfirmed') {
         return entry.duplicateKeys
@@ -376,6 +377,8 @@ async function runRoomSession(chatId, roomId, { answerKeyRequests = false } = {}
         console.warn('E2EE: не со всеми участниками установлен защищённый канал:', result.warnings);
     }
     handleRoomSessionResult(roomId, result);
+    // Причина отказа в отправке снимается, как только ключ комнаты получил хоть кто-то (например, после подтверждения участника).
+    if (result && !NyxoE2eePolicy.sessionBlock(result)) clearRoomBlock(chatId);
     await refreshIdentityChanges(client, roomId, part.participants, result && result.identityChanges);
     refreshTransparencyBanner();
     return result;
@@ -426,7 +429,8 @@ function scheduleRoomMembersRefresh(roomId) {
 // Отправка прервана, и причина понятна пользователю. code:
 //   'unavailable'        — ключи устройства не готовы (причина в e2eeInitError);
 //   'session-failed',
-//   'keys-not-delivered' — см. NyxoE2eePolicy.sessionBlock;
+//   'keys-not-delivered',
+//   'keys-withheld'      — см. NyxoE2eePolicy.sessionBlock;
 //   'not-bot'            — чат не комната и не запомненный чат с ботом.
 class E2eeBlockedError extends Error {
     constructor(code, message) {
@@ -437,7 +441,7 @@ class E2eeBlockedError extends Error {
 
     // Причина относится к ключу комнаты: её показывают под полем ввода с «Повторить».
     get showsRetry() {
-        return this.code === 'session-failed' || this.code === 'keys-not-delivered';
+        return this.code === 'session-failed' || this.code === 'keys-not-delivered' || this.code === 'keys-withheld';
     }
 }
 
@@ -565,6 +569,7 @@ async function decryptEnvelope(roomId, senderId, text, messageId) {
 }
 
 async function decryptMessageInPlace(message, roomId) {
+    let decryptedForReply = null;   // результат расшифровки самого сообщения: из него берётся подписанный id ответа
     if (roomId && !message.encrypted) {
         // Без метки «без шифрования» (её больше нет) подложенное сервером открытое
         // сообщение выглядело бы как настоящее сообщение участника.
@@ -577,6 +582,7 @@ async function decryptMessageInPlace(message, roomId) {
             // Подсказки сервера об авторе нет и быть не может: senderId = null, автора
             // находит клиент по индексу отправителей (sealed-sender.md, 9.3).
             const res = await decryptEnvelope(roomId, null, message.text, message.id);
+            decryptedForReply = res;
             if (res.ok) {
                 message.text = res.text || '';
                 if (res.file) message._file = res.file;
@@ -594,6 +600,11 @@ async function decryptMessageInPlace(message, roomId) {
             message.text = 'Зашифрованное сообщение';
             message._e2eeFailed = true;
         }
+    }
+    // Цитата в комнате показывается, только если её id совпал с id ответа внутри подписанного шифротекста (З3):
+    // reply_to_id сервер хранит открыто и мог бы приписать сообщению любую цитату.
+    if (roomId && message.reply_to && !NyxoE2eePolicy.replyQuoteTrusted(message.reply_to, decryptedForReply)) {
+        message.reply_to = null;
     }
     if (message.reply_to && !message.reply_to.deleted) {
         if (roomId && !message.reply_to.encrypted) {
