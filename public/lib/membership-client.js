@@ -273,6 +273,13 @@
             if (intent && trusted.bootstrapDone) { await storage.delete(names.intent(roomId)); intent = null; }
 
             const V = new Map(trusted.list.map(e => [e.id, e]));
+            // Отложенные из-за смены ключа записи (9.7) участвуют в проходе как члены V: шаг 3 решает, вернуть ли их (ключи
+            // снова те, на которых подтверждали) или оставить отложенными. Кратковременная подмена ключа сервером не должна
+            // навсегда выбивать подтверждённых вручную и с допуском старше 30 суток - заново подтвердить их нечем (З1).
+            const fromSuspended = new Set();
+            for (const entry of suspendedStored) {
+                if (!V.has(entry.id)) { V.set(entry.id, entry); fromSuspended.add(entry.id); }
+            }
             const meMemkey = M.toHex(await M.memkey(me.id, me.signPub, me.dhPub));
             const prevSelf = V.get(me.id);
             V.set(me.id, {
@@ -303,9 +310,16 @@
             for (const [id, entry] of [...V]) {
                 if (id === me.id) continue;
                 const pin = pins.get(id);
-                if (!pin) continue;
+                if (!pin) {
+                    // Без закреплённых ключей отложенную запись не проверить - остаётся отложенной.
+                    if (fromSuspended.has(id)) { V.delete(id); suspendedNow.push(entry); }
+                    continue;
+                }
                 if (pin.pending || entry.memkey !== await memkeyOf(id, pin.signPub, pin.dhPub)) {
-                    V.delete(id); revoked.push(id); suspendedNow.push(entry);
+                    V.delete(id);
+                    suspendedNow.push(entry);
+                    // Об отзыве (и ротации) сообщается один раз: когда запись выпала, а не на каждом проходе отложенности.
+                    if (!fromSuspended.has(id)) revoked.push(id);
                 }
             }
 
@@ -439,7 +453,7 @@
                 if (!sameJson(before, next)) await storage.set(names.trusted(roomId), next);
                 if (anchorDone) await storage.delete(names.intent(roomId));
                 // Отложенные записи: пока участник в комнате и не вернулся в V другим путём; ушедший забывается.
-                const suspendedNext = [...suspendedStored, ...suspendedNow]
+                const suspendedNext = [...new Map([...suspendedStored, ...suspendedNow].map(e => [e.id, e])).values()]
                     .filter(e => S.has(e.id) && !V.has(e.id)).sort((a, b) => a.id - b.id);
                 if (!sameJson(suspendedStored.slice().sort((a, b) => a.id - b.id), suspendedNext)) {
                     if (suspendedNext.length === 0) await storage.delete(names.suspended(roomId));

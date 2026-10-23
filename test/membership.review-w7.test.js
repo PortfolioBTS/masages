@@ -220,5 +220,68 @@ const sharesTo = (w, room, recipientId, senderId) =>
         assert.strictEqual(Policy.sessionBlock({ ok: true, peers: 2, keyHolders: 0 }), null, 'без withheldPeers - как раньше');
     });
 
+    // ===================== З1: кратковременная подмена ключа =====================
+
+    await test('З1: сервер на один проход подменил ключи подтверждённых, затем вернул настоящие - подтверждение возвращается само (допуск старше 30 суток, ручное)', async () => {
+        const w = makeWorld();
+        const alice = await w.addUser(1);
+        const bob = await w.addUser(2);
+        const carol = await w.addUser(3);
+        const mallory = await w.addUser(9);
+        await w.createRoom(alice);
+        await w.approve(alice, bob);                         // Боб - по подписи Алисы
+        w.server.evil.addGhost(ROOM, carol.id, carol.chatId); // Кэрол - Алиса подтвердит вручную
+        await w.ensure(alice);
+        await alice.client.checkPeerIdentities([carol.id]);
+        await alice.client.trustMember(ROOM, carol.id);
+        const first = await w.ensure(alice);
+        const before = { bob: memberOf(first, bob.id), carol: memberOf(first, carol.id) };
+        assert.deepStrictEqual([before.bob.status, before.carol.status, before.carol.how], ['confirmed', 'confirmed', 'manual']);
+        w.clock.advance(31 * DAY);                           // допуск Боба старше FRESH: заново он по сертификату не подтвердится
+        assert.strictEqual(memberOf(await w.ensure(alice), bob.id).status, 'confirmed');
+
+        w.server.evil.impersonate(bob.id, mallory.id);
+        w.server.evil.impersonate(carol.id, mallory.id);
+        const during = await w.ensure(alice);
+        assert.strictEqual(memberOf(during, bob.id).status, 'unconfirmed');
+        assert.strictEqual(memberOf(during, carol.id).status, 'unconfirmed');
+        assert.strictEqual(during.rotated, true, 'на время подмены ключ комнаты ротируется (получатель выпал)');
+        assert.strictEqual(sharesTo(w, ROOM, bob.id, alice.id) + sharesTo(w, ROOM, carol.id, alice.id) > 0, true);
+        const sharesBefore = w.server._keyShares.length;
+        await w.ensure(alice);
+        assert.strictEqual(w.server._keyShares.length, sharesBefore, 'пока подмена идёт, ключей подменённым не уходит');
+
+        w.server.evil.stopImpersonating(bob.id);
+        w.server.evil.stopImpersonating(carol.id);
+        const back = await w.ensure(alice);
+        assert.deepStrictEqual([memberOf(back, bob.id).status, memberOf(back, bob.id).how], ['confirmed', before.bob.how], 'Боб вернулся в V');
+        assert.deepStrictEqual([memberOf(back, carol.id).status, memberOf(back, carol.id).how], ['confirmed', 'manual'], 'Кэрол вернулась в V');
+        assert.strictEqual(await w.stored(alice, 'suspended:' + ROOM), null, 'отложенных записей не осталось');
+        assert.ok(sharesTo(w, ROOM, bob.id, alice.id) >= 1);
+        assert.strictEqual(back.keyHolders, 2, 'обоим ушёл текущий ключ комнаты');
+        w.noViolations();
+    });
+
+    await test('З1: подмена не снята (ключ действительно другой) и пользователь не принял - участник остаётся неподтверждённым; ушёл из комнаты - запись забыта', async () => {
+        const w = makeWorld();
+        const alice = await w.addUser(1);
+        const bob = await w.addUser(2);
+        const mallory = await w.addUser(9);
+        await w.createRoom(alice);
+        await w.approve(alice, bob);
+        await w.ensure(alice);
+        w.server.evil.impersonate(bob.id, mallory.id);
+        for (let i = 0; i < 3; i++) assert.strictEqual(memberOf(await w.ensure(alice), bob.id).status, 'unconfirmed');
+        assert.deepStrictEqual((await w.stored(alice, 'suspended:' + ROOM)).map(e => e.id), [bob.id]);
+        // Боб вышел, подмена прекращена, Боб вернулся: прежнее подтверждение не воскресает.
+        w.server.removeParticipant(ROOM, bob.id);
+        await w.ensure(alice);
+        assert.strictEqual(await w.stored(alice, 'suspended:' + ROOM), null);
+        w.server.evil.stopImpersonating(bob.id);
+        w.server.admit(ROOM, bob.id, bob.chatId, null);
+        assert.strictEqual(memberOf(await w.ensure(alice), bob.id).status, 'unconfirmed', 'вернулся без новой подписи');
+        w.noViolations();
+    });
+
     finish();
 })().catch((err) => { console.error(err); process.exitCode = 1; });
