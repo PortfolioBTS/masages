@@ -491,22 +491,23 @@ function renderChatMenu() {
 // Включение «Не хранить историю» необратимо для уже прочитанного, поэтому требует
 // подтверждения; выключение — без него. Что именно меняется и чего это не делает,
 // сказано в окне (раздел 6 плана криптографии).
-const NO_HISTORY_CONFIRM = 'Включить «Не хранить историю на этом устройстве»?\n\n'
-    + 'Ключи к прочитанным сообщениям этой группы будут стираться из браузера, когда вы закроете чат или вкладку. '
+const NO_HISTORY_CONFIRM = 'Ключи к прочитанным сообщениям этой группы будут стираться из браузера, когда вы закроете чат или вкладку. '
     + 'Более ранние сообщения здесь больше не откроются, вернуть их нельзя.\n\n'
     + 'Это касается только этого устройства: у других участников и на сервере сообщения остаются, '
     + 'а чтобы они исчезли у всех, включите исчезающие сообщения. Другие участники об этой настройке не узнают.\n\n'
     + 'Браузер не гарантирует, что данные сразу будут затёрты на диске.';
+const NO_HISTORY_CONFIRM_TITLE = 'Включить «Не хранить историю на этом устройстве»?';
 
 async function onNoHistoryToggle() {
     const roomId = currentRoomId;
     const toggle = elements.noHistoryToggle;
     if (!roomId) return;
     const wantNone = toggle.checked;
-    if (wantNone && !confirm(NO_HISTORY_CONFIRM)) {
+    if (wantNone && !(await confirmAction(NO_HISTORY_CONFIRM, { title: NO_HISTORY_CONFIRM_TITLE, confirmLabel: 'Включить', danger: true }))) {
         toggle.checked = false;
         return;
     }
+    if (roomId !== currentRoomId) return;   // пока отвечали, открыли другой чат
     toggle.disabled = true;
     try {
         await applyRoomHistoryMode(roomId, wantNone ? 'none' : 'keep');

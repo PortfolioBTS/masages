@@ -269,6 +269,11 @@ const elements = {
     // ---- «Удалить и выйти» ----
     deleteAccountBtn: document.getElementById('delete-account-btn'),
     deleteAccountModal: document.getElementById('delete-account-modal'),
+    confirmModal: document.getElementById('confirm-modal'),
+    confirmTitle: document.getElementById('confirm-title'),
+    confirmBody: document.getElementById('confirm-body'),
+    confirmActions: document.getElementById('confirm-actions'),
+    confirmCloseBtn: document.getElementById('confirm-close-btn'),
     deleteAccountAlt: document.getElementById('delete-account-alt'),
     deleteAccountError: document.getElementById('delete-account-error'),
     confirmDeleteAccountBtn: document.getElementById('confirm-delete-account-btn'),

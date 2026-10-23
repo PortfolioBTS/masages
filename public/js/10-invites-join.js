@@ -174,7 +174,9 @@ async function rotateInviteCode() {
         return;
     }
     const hadCode = Boolean(inviteState && inviteState.code && !inviteState.disabled);
-    if (hadCode && !confirm('Создать новый код? Старый код сразу перестанет действовать.')) return;
+    const chatId = currentChatId;
+    if (hadCode && !(await confirmAction('Старый код сразу перестанет действовать.', { title: 'Создать новый код?', confirmLabel: 'Создать новый код' }))) return;
+    if (chatId !== currentChatId) return;   // пока отвечали, открыли другой чат
     await withBusyButton(elements.rotateInviteBtn, () => doRotateInviteCode(max, hadCode));
 }
 
@@ -233,8 +235,9 @@ async function doRotateInviteCode(max, hadCode) {
 
 async function disableInviteCode() {
     if (!currentChatId || elements.disableInviteBtn.disabled) return;
-    if (!confirm('Отключить приглашение? Текущий код сразу перестанет действовать. Новый код можно создать в любой момент.')) return;
     const chatId = currentChatId;
+    if (!(await confirmAction('Текущий код сразу перестанет действовать. Новый код можно создать в любой момент.', { title: 'Отключить приглашение?', confirmLabel: 'Отключить', danger: true }))) return;
+    if (chatId !== currentChatId) return;   // пока отвечали, открыли другой чат
     // Занята только сама кнопка на время запроса. renderInvite после успеха сам выключает
     // эту же кнопку (приглашения больше нет), поэтому рисуется уже после снятия «занято».
     const data = await withBusyButton(elements.disableInviteBtn, () => api(`/api/chats/${chatId}/invite/disable`, { method: 'POST', body: JSON.stringify({ proto: PROTO_VERSION }) }));

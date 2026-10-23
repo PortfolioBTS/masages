@@ -32,6 +32,7 @@ function openModal(modal) {
 
 function closeModal(modal) {
     modal.classList.add('hidden');
+    if (modal === elements.confirmModal) onConfirmClosed();
     if (!document.querySelector('.modal:not(.hidden)')) {
         elements.overlay.classList.add('hidden');
         const target = modalReturnFocus;
@@ -51,7 +52,9 @@ function onModalKeydown(e) {
     const modal = open[open.length - 1];
     if (e.key === 'Escape') {
         e.preventDefault();
-        closeAllModals();
+        // Подтверждение поверх другого окна закрывается одно: нижнее окно остаётся.
+        if (modal === elements.confirmModal) closeModal(modal);
+        else closeAllModals();
         return;
     }
     if (e.key !== 'Tab') return;
@@ -70,6 +73,77 @@ function onModalKeydown(e) {
         e.preventDefault();
         first.focus();
     }
+}
+
+// ==================== Окно подтверждения ====================
+// Своё окно вместо window.confirm: у родного диалога нельзя подписать кнопки («Выйти и
+// удалить сообщения»), его нельзя оформить под тему, а когда браузер отключает диалоги
+// страницы, confirm() молча возвращает false — действие не выполнялось и без объяснений.
+//
+// confirmDialog({ title, paragraphs, actions: [{ id, label, style }], cancelLabel }) →
+// Promise<id нажатой кнопки | null>. null — закрыто крестиком, Escape, «Отмена» или
+// закрытием всех окон (выход из аккаунта): висящих обещаний не остаётся. Фокус сначала на
+// «Отмене»; после закрытия возвращается туда, где был (в нижнем окне — на кнопку-источник).
+let confirmResolve = null;
+let confirmChoice = null;
+let confirmReturnFocus = null;
+
+function confirmDialog({ title, paragraphs = [], actions = [], cancelLabel = 'Отмена' }) {
+    if (confirmResolve) closeModal(elements.confirmModal);   // прежний вопрос ещё висел: считаем отменённым
+    elements.confirmTitle.textContent = title;
+    elements.confirmBody.replaceChildren(...paragraphs.map((text) => {
+        const p = document.createElement('p');
+        p.textContent = text;
+        return p;
+    }));
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn btn-ghost';
+    cancel.dataset.autofocus = '';
+    cancel.dataset.cancel = '';
+    cancel.textContent = cancelLabel;
+    cancel.addEventListener('click', () => closeModal(elements.confirmModal));
+    const buttons = actions.map((action) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = `btn ${action.style === 'danger' ? 'btn-danger' : action.style === 'secondary' ? 'btn-secondary' : 'btn-primary'}`;
+        btn.dataset.action = action.id;
+        btn.textContent = action.label;
+        btn.addEventListener('click', () => {
+            confirmChoice = action.id;
+            closeModal(elements.confirmModal);
+        });
+        return btn;
+    });
+    elements.confirmActions.replaceChildren(cancel, ...buttons);
+    confirmChoice = null;
+    confirmReturnFocus = document.activeElement;
+    return new Promise((resolve) => {
+        confirmResolve = resolve;
+        openModal(elements.confirmModal);
+    });
+}
+
+// Окно закрыли (любым путём): отдать выбор ждущему и вернуть фокус.
+function onConfirmClosed() {
+    const resolve = confirmResolve;
+    const choice = confirmChoice;
+    const target = confirmReturnFocus;
+    confirmResolve = null;
+    confirmChoice = null;
+    confirmReturnFocus = null;
+    if (target && target.isConnected && typeof target.focus === 'function') target.focus({ preventScroll: true });
+    if (resolve) resolve(choice);
+}
+
+// Вопрос с одним «да»: true — подтверждено. text — абзацы через пустую строку.
+async function confirmAction(text, { title = 'Подтвердите действие', confirmLabel = 'Продолжить', danger = false } = {}) {
+    const choice = await confirmDialog({
+        title,
+        paragraphs: String(text).split(/\n\s*\n/),
+        actions: [{ id: 'ok', label: confirmLabel, style: danger ? 'danger' : 'primary' }],
+    });
+    return choice === 'ok';
 }
 
 // ==================== Профиль, срок хранения, удаление аккаунта ====================

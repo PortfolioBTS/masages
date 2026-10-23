@@ -152,7 +152,7 @@ async function openTransparencyModal() {
                 btn.className = 'btn btn-secondary btn-sm';
                 btn.textContent = action.text;
                 btn.addEventListener('click', async () => {
-                    if (action.confirm && !confirm(action.confirm)) return;
+                    if (action.confirm && !(await confirmAction(action.confirm, { title: 'Подтвердите действие' }))) return;
                     btn.disabled = true;
                     try {
                         await action.run();

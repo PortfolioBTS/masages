@@ -93,6 +93,9 @@ class FakeEl {
     querySelectorAll(selector) {
         const parts = selector.split(',').map((p) => p.trim());
         return this.descendants().filter((el) => parts.some((part) => {
+            // «[data-имя]» — наличие data-атрибута (dataset.имя).
+            const attr = /^\[data-([\w-]+)\]$/.exec(part);
+            if (attr) return Object.prototype.hasOwnProperty.call(el.dataset, attr[1]);
             const m = /^([a-z0-9]*)((?:\.[\w-]+)*)$/i.exec(part);
             if (!m) return false;
             if (m[1] && el.tagName !== m[1].toUpperCase()) return false;

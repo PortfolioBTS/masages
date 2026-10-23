@@ -438,6 +438,7 @@ function setupModalListeners() {
     document.querySelectorAll('.close-modal, [data-close-modal]').forEach(btn => {
         btn.addEventListener('click', closeAllModals);
     });
+    elements.confirmCloseBtn.addEventListener('click', () => closeModal(elements.confirmModal));
 
     elements.overlay.addEventListener('click', () => {
         closeAllModals();

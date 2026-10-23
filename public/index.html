@@ -588,6 +588,16 @@
             </div>
         </div>
     </div>
+    <div id="confirm-modal" class="modal hidden" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-body">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h3 id="confirm-title"></h3>
+                <button id="confirm-close-btn" class="icon-btn" type="button" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+            </div>
+            <div id="confirm-body" class="modal-body"></div>
+            <div id="confirm-actions" class="modal-footer"></div>
+        </div>
+    </div>
     <div id="overlay" class="overlay hidden"></div>
 
     <script src="vendor/socket.io.min.js" integrity="sha384-kzavj5fiMwLKzzD1f8S7TeoVIEi7uKHvbTA3ueZkrzYq75pNQUiUi6Dy98Q3fxb0"></script>
@@ -621,23 +631,23 @@
     <script src="lib/text-search.js" integrity="sha384-f/M60HBwwIXwc50+a81RRopE0oTJLJZEOVrOGRin1mSD152lrJMFiAjTeBITGW0t"></script>
     <script src="lib/sw-core.js" integrity="sha384-Clw+QSYR6j6Vtkbs5mhNMAYfxGvn/dyR0fkRcFEG8mpPCCuac3s1uLWKpguoLhhb"></script>
     <script src="lib/sw-client.js" integrity="sha384-OjIhjN4SkkSSYTGZqo4H+4DmqgW4+k+CjGHJruklifNgTXHQBywbHMrlqRdX2Oyx"></script>
-    <script src="js/01-state.js" integrity="sha384-D3JKuFxC5NjJ47OQqZwQC79vM1z2L2WPPU+vA2OI0j9/0UqKtw2McpeD5XDo5R4S"></script>
+    <script src="js/01-state.js" integrity="sha384-JK1vEAtdNKMyZOePH04yUV3VJuVZAEmNbkcWXjxlq8jCSca0Jqj0NR+LKFwfAyGC"></script>
     <script src="js/02-utils.js" integrity="sha384-mc1+cW4EXoUv0cPr4kdaJWY/D31UOhd1BsV2RMI8dJbrrR1jwm96nbWbhXXRWsaA"></script>
     <script src="js/03-e2ee-client.js" integrity="sha384-cEYp9u4pGL9iTUffQG0rrJGAwzEwcqtSdGslMaeZQWD6btos7QriwYJt9+itRqLR"></script>
     <script src="js/04-e2ee-rooms.js" integrity="sha384-1OitKFx8dlBxp9dIT7sA/fjCX1/VSDCizk5QNJ6ufHHFYOrCdGZLKdzhmEIv0J8T"></script>
     <script src="js/05-attachments.js" integrity="sha384-n1DBN5toSrYqAoNW1pd0ddKC1mKOduaBnk/gOuU09ABq8HjsjWGILNXEVS1fltF4"></script>
     <script src="js/06-session-socket.js" integrity="sha384-PnwytZdOvmdJOLQX/mzM8WE8lMXThuOwrqopVNOLzxG+rHaWXNY87IUHd65M6Hb+"></script>
-    <script src="js/07-api-listeners.js" integrity="sha384-+KkOA9k0cdA8pFdE1+woVIC+LHASRpq5+DdkTDq/8YRzmRBOHjiY5zTVupauNRDp"></script>
-    <script src="js/08-modals-profile.js" integrity="sha384-Y6j8dsJvim3+XmQs7EYJxWYRfgYnopCY6Ww6pxTsPV7M1u2WuYiw+u+DiYKhJAKF"></script>
+    <script src="js/07-api-listeners.js" integrity="sha384-FwMT7fyiuinOo+yZEQe4AoxPftTibgGn9rIQCUgxSKh68q3FkJ//kO6VTRzbvzYb"></script>
+    <script src="js/08-modals-profile.js" integrity="sha384-rUStZmNnkQbqhPkpb5Ql4RNDzEJyCQjjgBij3vk6RyHxjndmypH7srZwYD3xhYJ+"></script>
     <script src="js/09-auth-screen.js" integrity="sha384-brjViOA57cGyEvT0gwDTaXc3LHbuLh3Xx5x0iN2LnkA7/CImOVCrrHTqClKyE8Td"></script>
-    <script src="js/10-invites-join.js" integrity="sha384-j/i0vl2hs4i/N+MAfgjOv2VLf2pgfnXGE7iXbvgxowxkV9pJWhbCeNh9SXWr5Rzr"></script>
-    <script src="js/11-key-log-members.js" integrity="sha384-LjOS5zaV86xEpCA0yX+y7+kvBnTmRyTZoDtEQaGeZ7xlU7KFgO2rrtdgVXPxShuB"></script>
-    <script src="js/12-chat-list.js" integrity="sha384-5De5iaXQmQRq9IYwkEoRr72zEmskkQudWG5EL51V++QJsuIAIrtUUuPmtpzqy2gA"></script>
+    <script src="js/10-invites-join.js" integrity="sha384-qE8ROoqMi8Hb/nCZ/rxgiWhSsP30k7fPdrMvOUXwbqFjUHaV6K+HK9oIWQ5k5eDm"></script>
+    <script src="js/11-key-log-members.js" integrity="sha384-j2QqePiKiwq5hqEFDtr0YyQhlaFK4BUmyNEEw3dOZUrl/6HMR3dg9agdNgpABCdz"></script>
+    <script src="js/12-chat-list.js" integrity="sha384-K+TsuHuNhPwyT3w/uBydB4Ie/XBBDsByjk/Jvl3dQlz7u4foMfCms4Uf1c9pS5Lc"></script>
     <script src="js/13-chat-messages.js" integrity="sha384-pvK1XlTuXdXnrrufVJ4jYjiSyKVF1m2b7Vw9UNJ7KexHySkR8WJmXuzV+a1tkpcw"></script>
     <script src="js/14-send.js" integrity="sha384-U5khPX4gQIxeG5OzabvcuEjYe94YdmV1mL7C5eroVOPwc1Lfa+VCYaKSg9KlLZmX"></script>
     <script src="js/15-bot-suggestions.js" integrity="sha384-wweydTeInr4aMN2Z2+t1C82grT31h0yAY6/YeV/yqmh9Js9MI3PNqoQPctIAWQKp"></script>
     <script src="js/16-files-composer.js" integrity="sha384-XfVHEpRxUcUijWozEvUpoKDVpykLi7cPtc7KOpEc3tXeR4ajFIH66LOy+8gI6Mab"></script>
-    <script src="js/17-chats-search.js" integrity="sha384-T4641Pl61I+65isrzScUTZslnqYRipOc9AXpkqdrCnKTjL8iaiV8XcyganTwSh0L"></script>
+    <script src="js/17-chats-search.js" integrity="sha384-hklycVM8gT6ow7IP5ES3KB915dHzw9eWPzY9BL0FffRm+UymMGio3OTlNnorDXpX"></script>
     <script src="js/18-init.js" integrity="sha384-/NHnQxIuoU9nPEO6EwEtfRLbjFSmkUD0AehbJdFa9Zy6ME64WVdisL8Hx6Hd8JZz"></script>
 </body>
 </html>
