@@ -361,7 +361,7 @@
     const Formats = resolveCoreModule(typeof NyxoE2eeFormats !== 'undefined' ? NyxoE2eeFormats : null, './lib/e2ee-formats.js', 'lib/e2ee-formats.js');
     const KeyState = resolveCoreModule(typeof NyxoE2eeState !== 'undefined' ? NyxoE2eeState : null, './lib/e2ee-state.js', 'lib/e2ee-state.js');
     const {
-        MSG_PAD_MIN, FILE_PAD_MIN, b64encode, b64decode, decodeFixed, canonicalPubKey,
+        MSG_PAD_MIN, FILE_PAD_MIN, b64encode, b64decode, b64decodeCanonical, decodeFixed, canonicalPubKey,
         utf8encode, utf8decode, concatBytes, bytesEqual, toBytes, isKeyId,
         isU32, isCanonicalKeyId, padmeLength, padMessage, unpadMessage, filePaddedLength,
     } = Codec;
@@ -1809,7 +1809,9 @@
                 for (const item of res.data.identities) {
                     const id = Number(item && item.user_id);
                     if (!chunk.includes(id)) continue;
-                    const signPub = canonicalPubKey(item.identity_signing_key);
+                    // Ключ подписи закрепляется только после строгой проверки Ed25519 (малый порядок, неканоническая точка), как и
+                    // в bundle и SKDM: иначе слабый ключ от сервера закрепился бы при первом контакте (З6).
+                    const signPub = canonicalSigningKey(item.identity_signing_key);
                     const dhPub = canonicalPubKey(item.identity_dh_key);
                     if (signPub && dhPub) out.set(id, { signPub, dhPub, kt: item.kt });
                 }
@@ -2541,7 +2543,7 @@
                 if (keyId === null) return 'unbound';
                 if (onInstalled) onInstalled(keyId);
                 // Голова журнала отправителя (7.5): сверка — вне блокировки, в блокировке только задача.
-                if (ktOn() && opened.skdm.ext && opened.skdm.ext.kt) await ktLog.noteGossipLocked(opened.skdm.ext.kt);
+                if (ktOn() && opened.skdm.ext && opened.skdm.ext.kt) await ktLog.noteGossipLocked(opened.skdm.ext.kt, senderId);
                 // Хэш взгляда (9.6): в блокировке - только задача, сверка идёт вне блокировки (runViewChecks).
                 if (opened.skdm.ext && opened.skdm.ext.view) await membership.noteViewLocked(roomId, senderId, opened.skdm.ext.view);
                 return 'applied';
@@ -2765,7 +2767,7 @@
             const me = Number(userId);
             const current = normalizeParticipants(participants);
             const empty = {
-                newMembers: [], removedMembers: [], rotated: false, rotationReason: null, identityChanges: [], peers: 0, keyHolders: 0,
+                newMembers: [], removedMembers: [], rotated: false, rotationReason: null, identityChanges: [], peers: 0, keyHolders: 0, withheldPeers: 0,
                 members: [], unconfirmed: [], duplicateKeys: [], viewMismatch: false, viewIdsDiverged: false,
             };
             if (!current.some(p => p.id === me)) {
@@ -2882,7 +2884,11 @@
             const identityChanges = [];
             const shares = [];
             const marks = [];
+            // Участники, у которых ключи на сервере есть, но ключ комнаты им не отправляется из-за их статуса (смена ключа,
+            // несовпадение с журналом, не подтверждён). Если ключ не получил никто, а таких есть, отправка блокируется (9.4).
+            let withheldPeers = 0;
             const noteChanged = (peer) => {
+                withheldPeers++;
                 identityChanges.push({ userId: peer.id, username: peer.username });
                 warnings.push({ userId: peer.id, reason: REASON_IDENTITY_CHANGED });
             };
@@ -2892,6 +2898,7 @@
             for (const peer of others) {
                 if (changedIds.has(peer.id)) { noteChanged(peer); continue; }
                 if (logMismatchIds.has(peer.id)) {
+                    withheldPeers++;
                     logMismatches.push({ userId: peer.id, username: peer.username });
                     warnings.push({ userId: peer.id, reason: REASON_LOG_MISMATCH });
                     continue;
@@ -2907,6 +2914,7 @@
                 // Ключ комнаты получают только подтверждённые участники (П1): остальные остаются в unconfirmed, без
                 // запроса bundle и без отметки рассылки.
                 if (!recipientIds.has(peer.id)) {
+                    withheldPeers++;
                     warnings.push({ userId: peer.id, reason: 'unconfirmed-member' });
                     continue;
                 }
@@ -2968,6 +2976,7 @@
                 logMismatches,
                 peers: others.length,
                 keyHolders,
+                withheldPeers,
                 members: verdict.members,
                 unconfirmed: verdict.unconfirmed,
                 duplicateKeys: verdict.duplicateKeys,
@@ -3162,7 +3171,8 @@
         // Бросает E2eeError('needs-room-session'), если ключ комнаты исчерпал жёсткий
         // порог ротации: script.js ждёт ensureRoomSession и повторяет один раз.
         //
-        // options: { messageId, edit? }. messageId обязателен (строка по формату
+        // options: { messageId, edit?, replyTo? }. replyTo - id сообщения, на которое это ответ (строка по формату 6.1),
+        // уходит внутри шифротекста. messageId обязателен (строка по формату
         // 6.1: id сообщения, который клиент выбрал ДО шифрования и отправит на
         // сервер как clientMessageId), иначе E2eeError('protocol'): содержимое
         // без mid получатель всё равно отвергнет ('no-mid'). ts = now() для нового
@@ -3174,13 +3184,18 @@
                 throw new E2eeError('protocol', 'E2EE: не указан идентификатор сообщения (messageId)');
             }
             const edit = Boolean(options.edit);
+            // Ответ на сообщение (З3): id цитируемого сообщения кладётся внутрь шифротекста; правка тоже его несёт.
+            const replyTo = options.replyTo === undefined || options.replyTo === null ? null : String(options.replyTo);
+            if (replyTo !== null && !isValidMessageId(replyTo)) {
+                throw new E2eeError('protocol', 'E2EE: некорректный идентификатор сообщения, на которое отвечают (replyTo)');
+            }
             await ensureLocal();
             let ts = Math.max(0, Math.trunc(now()));
             if (edit) {
                 const known = await withLock(() => storage.get(editName(roomId, messageId)));
                 if (known && Number.isSafeInteger(known.ts)) ts = Math.max(ts, known.ts + 1);
             }
-            const padded = padMessage(utf8encode(JSON.stringify(encodeContent(content, { mid: messageId, ts, edit }))));
+            const padded = padMessage(utf8encode(JSON.stringify(encodeContent(content, { mid: messageId, ts, edit, replyTo }))));
             const { state, iteration, messageKey } = await withLock(async () => {
                 const st = await loadOwnSenderKeyLocked(roomId);
                 if (!st) throw new Error('E2EE: для этой комнаты ещё не создан Sender Key — вызовите ensureRoomSession()');
@@ -3258,7 +3273,7 @@
             if (!isCanonicalKeyId(envelope.senderKeyId)) return bad;
             const iv = decodeFixed(envelope.iv, 12);
             const sig = decodeFixed(envelope.sig, 64);
-            const ct = typeof envelope.ct === 'string' ? b64decode(envelope.ct) : null;
+            const ct = typeof envelope.ct === 'string' ? b64decodeCanonical(envelope.ct) : null;
             if (!iv || !sig || !ct || ct.length < 16) return bad;
             const iteration = envelope.iteration;
             const keyId = envelope.senderKeyId;
@@ -3373,6 +3388,8 @@
                 result.senderId = senderId;
                 result.ts = content.ts;
                 result.edit = content.edit;
+                // На какое сообщение отвечает отправитель (подписано им): цитату сервера клиент сверяет с этим id (З3).
+                result.replyTo = content.replyTo || null;
                 // Отправитель вне V: SKDM принят, но сообщения помечаются. Флаг вычисляется при каждой расшифровке по
                 // текущему V, а не хранится: после подтверждения пометка исчезает без перешифровки (9.4).
                 if (!(await membership.isTrustedMember(roomId, senderId))) result.unverifiedSender = true;

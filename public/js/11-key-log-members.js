@@ -13,12 +13,13 @@
 const KT_BANNER_TEXT = {
     'self-foreign-entry': 'Сервер опубликовал для вашего аккаунта ключ, которого нет на этом устройстве.',
     'self-missing': 'Сервер не выполнил обещание включить ваш ключ в журнал ключей.',
+    'self-unreachable': 'Не удаётся проверить, нет ли в журнале ключей чужих записей под вашим аккаунтом: сервер давно не отдаёт данные самопроверки.',
     'key-split': 'Подпись журнала у вас и у собеседника не сходится. Возможна подмена журнала — сверьте коды безопасности лично.',
     'log-disabled': 'Журнал ключей на сервере перестал отвечать или отключён, хотя раньше работал. Новые и изменившиеся ключи собеседников не считаются проверенными — сверяйте коды безопасности.',
     inconsistent: 'Журнал ключей на сервере не прошёл проверку. Шифрование может быть небезопасным — сверяйте коды безопасности.',
 };
 // Какая тревога главная для баннера: сначала про мой аккаунт, потом про журнал.
-const KT_BANNER_ORDER = ['self-foreign-entry', 'self-missing', 'key-split', 'log-disabled'];
+const KT_BANNER_ORDER = ['self-foreign-entry', 'self-missing', 'self-unreachable', 'key-split', 'log-disabled'];
 const KT_INCONSISTENT_KINDS = ['log-fork', 'equivocation', 'bad-signature', 'key-changed'];
 
 let ktAlertsSeq = 0;
@@ -115,6 +116,10 @@ function ktAlertView(alert, pendingKey, client) {
                 },
             });
         }
+    }
+    // Тревоги по сплетне (key-split, equivocation) вызывает подпись, которую прислал конкретный участник группы.
+    if ((alert.kind === 'key-split' || alert.kind === 'equivocation') && Number.isInteger(alert.sender) && alert.sender > 0) {
+        lines.push(`Подпись журнала прислал участник #${alert.sender}. Сверьте с ним код безопасности лично.`);
     }
     return { title, lines, actions };
 }
@@ -319,7 +324,7 @@ async function overrideLogMismatch(row, peer, ctx, btn) {
 }
 
 async function acceptIdentityChange(row, peer, ctx, btn) {
-    if (!confirm(`Принять новый ключ участника ${peer.username}? Делайте это, только если код безопасности совпал с кодом на его устройстве.`)) return;
+    if (!confirm(`Принять новый ключ участника ${peer.username}? Делайте это, только если код безопасности совпал с кодом на его устройстве. Участник останется подтверждённым в группах, где вы его уже подтверждали; в группах, где он был не подтверждён, он таким и останется.`)) return;
     btn.disabled = true;
     try {
         await ctx.client.acceptPeerIdentityChange(peer.id);

@@ -35,6 +35,8 @@
     const SYNC_FRESH_MS = 30 * 1000;
     // Самомониторинг: не чаще раза в 20 минут (7.4).
     const SELF_MIN_INTERVAL_MS = 20 * 60 * 1000;
+    // Самомониторинг не удаётся довести до конца дольше этого срока - отдельная тревога self-unreachable (7.4).
+    const SELF_UNREACHABLE_MS = 6 * HOUR_MS;
     // Паузы повтора при сетевой ошибке, секунды (7.3, п. 2).
     const RETRY_STEPS_S = [1, 2, 4, 8, 16, 32, 64, 128, 256, 300];
     const MAX_QUEUE = 200;
@@ -331,6 +333,12 @@
                 return logSeen ? { ok: false, reason: 'network' } : { ok: false, reason: 'unavailable' };
             }
             if (transient(res)) return { ok: false, reason: 'network' };
+            // Прочие 4xx (кроме 401 - сессия закончилась, это не ответ журнала) сервер на /api/kt/head не отдаёт: для клиента,
+            // видевшего журнал, это не сбой сети, а тревога (7.3, п. 2). Сервер не должен получать «тихий» повтор за ответ 4xx.
+            if (logSeen && res.status >= 400 && res.status < 500 && res.status !== 401) {
+                await addAlert('log-disabled', { status: res.status, reason: 'unexpected-status' });
+                return { ok: false, reason: 'disabled' };
+            }
             if (res.status !== 200 || data.success !== true) {
                 warn('Журнал ключей: неожиданный ответ /api/kt/head:', res.status);
                 return { ok: false, reason: 'network' };
@@ -697,6 +705,25 @@
 
         const ktFor = (pin) => pin.signPub + ':' + pin.dhPub;
 
+        // Задача 'peer' не завершилась из-за сети, 5xx или kt-not-ready: статус при этом не меняется (7.3, п. 2), но и «ждать
+        // доказательства» бесконечно нельзя - сервер, отвечающий отказами, держал бы подменённый ключ в pending, а ключ комнаты
+        // тем временем уходил бы на него. Через PENDING_MS по локальным часам от since.at (момент, когда ключ стал pending)
+        // pending становится mismatch 'kt-unreachable' (7.3, п. 6б); задача остаётся в очереди, и когда журнал ответит, статус
+        // пересчитается (ok, если ключ в журнале). true - статус изменён.
+        async function expireUnreachablePeer(task) {
+            return withLock(async () => {
+                const name = 'peer:' + task.u;
+                const pin = await storage.get(name);
+                if (!pin || pin.pending || pin.signPub !== task.signPub || pin.dhPub !== task.dhPub) return false;
+                const kt = pin.kt;
+                if (!kt || kt.for !== ktFor(pin) || kt.status !== 'pending' || !kt.since || !Number.isSafeInteger(kt.since.at)) return false;
+                if (now() - kt.since.at < PENDING_MS) return false;
+                pin.kt = { ...kt, status: 'mismatch', reason: 'kt-unreachable' };
+                await storage.set(name, pin);
+                return true;
+            });
+        }
+
         // ---------- Очередь задач (7.6) ----------
 
         async function readQueue() {
@@ -732,14 +759,17 @@
             await storage.set('kt:queue', queue);
         }
 
-        // В withLock: головa журнала из SKDM — отложенная сверка.
-        async function noteGossipLocked(raw) {
+        // В withLock: головa журнала из SKDM — отложенная сверка. senderId - кто прислал SKDM: тревога по сплетне (key-split,
+        // equivocation) говорит о подписи, которую прислал именно он, и без него доказательство нельзя ни проверить, ни
+        // отнести к человеку (любой участник мог положить в ext.kt поле правильной формы с неверной подписью).
+        async function noteGossipLocked(raw, senderId = null) {
             if (!supported()) return;
             const gossip = parseGossip(raw);
             if (!gossip) return;
-            const id = gossip.g + ':' + gossip.e + ':' + hex(gossip.h);
+            const from = isUint(Number(senderId)) && Number(senderId) > 0 ? Number(senderId) : null;
+            const id = gossip.g + ':' + gossip.e + ':' + hex(gossip.h) + ':' + (from === null ? '' : from);
             const queue = await readQueue();
-            enqueueLocked(queue, { kind: 'gossip', id, g: gossip.g, e: gossip.e, h: Kt.b64encode(gossip.h), s: Kt.b64encode(gossip.s) });
+            enqueueLocked(queue, { kind: 'gossip', id, from, g: gossip.g, e: gossip.e, h: Kt.b64encode(gossip.h), s: Kt.b64encode(gossip.s) });
             await storage.set('kt:queue', queue);
         }
 
@@ -785,9 +815,12 @@
                 signer = keyFor(pins, task.g, task.e);
                 valid = signer ? await Kt.verifyEd25519(signer, Kt.sthMessage(task.g, task.e, h), s) : false;
                 if (!valid) {
+                    // Одна тревога на отправителя: иначе один участник заполнил бы список тревог (MAX_ALERTS) и вытеснил
+                    // настоящие. Доказательство - первая присланная им подпись; sender - кто её прислал.
                     await addAlert('key-split', {
+                        sender: task.from === undefined ? null : task.from,
                         sent: { g: task.g, e: task.e, h: task.h, s: task.s }, pinned: pins.map(p => ({ pub: p.pub, from: p.from })),
-                    }, task.g + ':' + task.e);
+                    }, 'sender:' + (task.from === undefined || task.from === null ? '' : task.from));
                     return { done: true };
                 }
             }
@@ -803,7 +836,7 @@
                 held = await readGen(task.g);
                 covered = Boolean(held) && task.e >= held.rec.genStart && task.e <= held.rec.headEpoch;
                 if (!covered) {
-                    await addAlert('equivocation', { reason: 'behind', theirs: { g: task.g, e: task.e, h: task.h, s: task.s } }, task.g + ':' + task.e);
+                    await addAlert('equivocation', { reason: 'behind', sender: task.from === undefined ? null : task.from, theirs: { g: task.g, e: task.e, h: task.h, s: task.s } }, task.g + ':' + task.e);
                     return { done: true };
                 }
             }
@@ -813,7 +846,7 @@
                 // Верная подпись под иной головой той же эпохи — двуличие. Сохраняем пару: чужая подписанная
                 // голова и наша цепочка с подписью последней головы.
                 await addAlert('equivocation', {
-                    reason: 'gossip', theirs: { g: task.g, e: task.e, h: task.h, s: task.s },
+                    reason: 'gossip', sender: task.from === undefined ? null : task.from, theirs: { g: task.g, e: task.e, h: task.h, s: task.s },
                     mine: { g: task.g, e: held.rec.headEpoch, h: held.rec.head, s: held.rec.sig, chainFrom: held.rec.genStart, roots: held.rec.roots.length },
                 }, task.g + ':' + task.e);
             }
@@ -822,7 +855,7 @@
 
         // ---------- Самомониторинг (7.4) ----------
 
-        const emptySelf = () => ({ commits: [], scanned: null, acked: [], alert: null, inbox: null, currentNonce: null, lastScanAt: 0 });
+        const emptySelf = () => ({ commits: [], scanned: null, acked: [], alert: null, inbox: null, currentNonce: null, lastScanAt: 0, failSince: 0 });
 
         async function readSelf() {
             const state = await storage.get('kt:self');
@@ -894,6 +927,7 @@
             const missing = [];
             let progress = state.scanned;
             let network = false;
+            let violation = false;
             for (const gen of await storedGens()) {
                 if (progress && gen < progress.gen) continue;
                 const held = await readGen(gen);
@@ -902,7 +936,19 @@
                 while (from <= held.rec.headEpoch) {
                     const { res, error } = await call('ktSelf', gen, from, SELF_BATCH);
                     if (error) { network = true; break; }
-                    if (res.status === 404) break; // поколение уже не отдаётся (срок вышел)
+                    if (res.status === 404) {
+                        // Поколение не отдаётся. Текущее сервер обязан отдавать всегда, предыдущее - до genStart(g+1) + льготный срок
+                        // (7.2, раздел 12 строка 11); только после срока это не нарушение. Иначе 404 прятал бы чужое обязательство
+                        // под моей меткой без всякой тревоги, а скан выглядел бы успешным.
+                        const newest = await latestHead();
+                        const mustServe = Boolean(newest) && (gen === newest.gen
+                            || (gen === newest.gen - 1 && newest.epoch <= newest.genStart + graceEpochs));
+                        if (mustServe) {
+                            await logFork('grace-violated', { gen, epoch: from, source: 'self' });
+                            violation = true;
+                        }
+                        break;
+                    }
                     const data = body(res);
                     if (transient(res) || res.status !== 200 || data.success !== true || !Array.isArray(data.proofs)) { network = true; break; }
                     if (data.proofs.length === 0) break;
@@ -943,7 +989,7 @@
                     });
                     if (data.next === null || data.next === undefined) break;
                 }
-                if (network) break;
+                if (network || violation) break;
             }
 
             if (foreign.length > 0) {
@@ -958,14 +1004,31 @@
             for (const m of missing) {
                 await addAlert('self-missing', { ...m }, m.c + ':' + m.gen + ':' + m.epoch + ':' + m.reason);
             }
-            if (!network) {
+            if (!network && !violation) {
                 await withLock(async () => {
                     const s = await readSelf();
                     s.lastScanAt = now();
                     await storage.set('kt:self', s);
                 });
             }
-            return { network };
+            return { network, violation };
+        }
+
+        // Затяжной сбой самомониторинга (7.4): сервер, не отдающий данные /api/kt/self, не должен молча лишать владельца
+        // проверки. Отсчёт идёт по локальным часам от первой неудачи; успешный скан сбрасывает отсчёт и снимает тревогу.
+        async function noteSelfHealth(ok) {
+            let since = 0;
+            await withLock(async () => {
+                const state = await readSelf();
+                if (ok) {
+                    if (state.failSince) { state.failSince = 0; await storage.set('kt:self', state); }
+                    return;
+                }
+                if (!state.failSince) { state.failSince = now(); await storage.set('kt:self', state); return; }
+                if (now() - state.failSince >= SELF_UNREACHABLE_MS) since = state.failSince;
+            });
+            if (ok) await clearAlerts(['self-unreachable']);
+            else if (since) await addAlert('self-unreachable', { since }, 'self-unreachable');
         }
 
         // Пользователь подтвердил, что часть обязательств — его прежние ключи («Это были мои прежние ключи»).
@@ -1051,7 +1114,11 @@
                 if (task.kind === 'self') continue;
                 try {
                     const result = task.kind === 'peer' ? await evaluatePeer(task, sync) : await evaluateGossip(task, sync);
-                    if (result.retry) { retry = true; continue; }
+                    if (result.retry) {
+                        retry = true;
+                        if (task.kind === 'peer') await expireUnreachablePeer(task);
+                        continue;
+                    }
                     if (task.kind === 'peer') await applyPeerResult(task, result);
                     await removeTask(task);
                 } catch (error) {
@@ -1067,15 +1134,25 @@
                         const state = await readSelf();
                         const due = state.lastScanAt === 0 || now() - state.lastScanAt >= SELF_MIN_INTERVAL_MS;
                         const done = await scanSelf(sync, { scan: due });
-                        if (done.network) retry = true;
-                        await removeTask({ kind: 'self' });
+                        if (due) await noteSelfHealth(!done.network && !done.violation);
+                        if (done.network) {
+                            // Сетевой сбой: задача остаётся, повтор с нарастающей паузой дойдёт до скана (7.3, п. 2).
+                            retry = true;
+                            selfRequested = true;
+                        } else {
+                            await removeTask({ kind: 'self' });
+                        }
                     } catch (error) {
                         warn('Журнал ключей: самомониторинг не удался:', error);
                         retry = true;
+                        selfRequested = true;
                     }
                 } else if (sync.reason !== 'network') {
                     selfRequested = false;
                     await removeTask({ kind: 'self' });
+                } else {
+                    // Голова журнала не получена: самомониторинг не выполнен, это тоже сбой в счёт срока.
+                    await noteSelfHealth(false);
                 }
             }
             if (retry) scheduleRetry();
@@ -1121,7 +1198,9 @@
                 const pin = await storage.get(name);
                 if (pin && pin.kt && pin.kt.status) peers.push({ userId: Number(name.slice('peer:'.length)), status: pin.kt.status });
             }
-            const selfAlerts = alerts.filter(a => a.kind === 'self-foreign-entry' || a.kind === 'self-missing');
+            // log-fork с источником self - сервер не отдал обязательное поколение на самопроверке (F3): self тоже не 'unknown'.
+            const selfAlerts = alerts.filter(a => a.kind === 'self-foreign-entry' || a.kind === 'self-missing' || a.kind === 'self-unreachable'
+                || (a.kind === 'log-fork' && a.detail && a.detail.source === 'self'));
             let self = 'unknown';
             if (selfAlerts.length > 0) self = 'alert';
             else if (state.scanned) self = 'ok';
