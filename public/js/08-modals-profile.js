@@ -45,6 +45,33 @@ function closeAllModals() {
     document.querySelectorAll('.modal:not(.hidden)').forEach(m => closeModal(m));
 }
 
+// Затемнение вокруг окна — сам видимый .modal; клик по его содержимому сюда не относится
+// (target — элемент внутри .modal-content).
+function backdropModalOf(target) {
+    const hit = target && target.classList && target.classList.contains('modal') && !target.classList.contains('hidden');
+    return hit ? target : null;
+}
+
+// Окно, на затемнении которого нажали мышью/пальцем. Закрываем только если и нажатие, и
+// отпускание пришлись на затемнение: протянутое из текста окна выделение, закончившееся
+// снаружи, даёт click на общем предке — .modal, и окно закрывать не должно.
+let backdropPress = null;
+
+function rememberBackdropPress(e) {
+    backdropPress = backdropModalOf(e.target);
+}
+
+// alertdialog (подтверждение, удаление аккаунта, предупреждение о коде) мимокликом не
+// закрывается: на такой вопрос надо ответить явно.
+function closeOnBackdropClick(e) {
+    const modal = backdropModalOf(e.target);
+    const pressed = backdropPress;
+    backdropPress = null;
+    if (!modal || modal !== pressed) return;
+    if (modal.getAttribute('role') === 'alertdialog') return;
+    closeAllModals();
+}
+
 // Escape закрывает окно, Tab не уводит фокус из открытого окна за оверлей.
 function onModalKeydown(e) {
     const open = document.querySelectorAll('.modal:not(.hidden)');

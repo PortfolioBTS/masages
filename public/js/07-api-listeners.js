@@ -432,19 +432,19 @@ function setupSearchListeners() {
     setupChatSearchListeners();
 }
 
-// Модальные окна: закрытие по крестику и кнопкам «Отмена», по оверлею и
-// Escape (а также удержание фокуса внутри окна — onModalKeydown).
+// Модальные окна: закрытие по крестику и кнопкам «Отмена», по клику на затемнение вокруг
+// окна и Escape (а также удержание фокуса внутри окна — onModalKeydown).
 function setupModalListeners() {
     document.querySelectorAll('.close-modal, [data-close-modal]').forEach(btn => {
         btn.addEventListener('click', closeAllModals);
     });
     elements.confirmCloseBtn.addEventListener('click', () => closeModal(elements.confirmModal));
 
-    elements.overlay.addEventListener('click', () => {
-        closeAllModals();
-        hideMessageMenu();
-        hideChatItemMenu();
-    });
+    // Затемнением служит сам .modal (он на весь экран), а .overlay лежит под ним и кликов не
+    // получает — поэтому слушаем документ, а не .overlay (прежний обработчик на нём не
+    // срабатывал никогда).
+    document.addEventListener('pointerdown', rememberBackdropPress);
+    document.addEventListener('click', closeOnBackdropClick);
 
     document.addEventListener('keydown', onModalKeydown);
     document.addEventListener('keydown', (e) => {
