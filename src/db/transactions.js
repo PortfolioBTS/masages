@@ -6,6 +6,7 @@ const { createTransactionRetry } = require('../../lib/tx-retry');
 // Точные лимиты и одноразовость PoW в Postgres (UNLOGGED-таблицы, ключи — HMAC).
 const { respondBusy } = require('../../lib/pg-limits');
 const { logError } = require('../../lib/log-error');
+const { guardClient } = require('../../lib/pg-client-guard');
 // Id и курсоры сообщений, тела ошибок 400/409 (docs/security/message-ordering.md).
 const { isDeadlock, isMessageIdConflict } = require('../../lib/message-ids');
 
@@ -36,17 +37,22 @@ function createTransactions(ctx) {
 
     async function withTransaction(work) {
         const client = await pool.connect();
+        // Обрыв соединения посреди транзакции — ошибка запроса, а не падение
+        // процесса (lib/pg-client-guard.js).
+        const release = guardClient(client, '[DB] Обрыв соединения во время транзакции');
+        let broken;
         try {
             await client.query('BEGIN');
             const result = await work(client);
             await client.query('COMMIT');
             return result;
         } catch (txErr) {
-            // Исходная ошибка важнее: сбой самого ROLLBACK её не затирает.
-            await client.query('ROLLBACK').catch(() => {});
+            // Исходная ошибка важнее: сбой самого ROLLBACK её не затирает. Не
+            // откатившееся соединение в пул не возвращается — оно закрывается.
+            await client.query('ROLLBACK').catch((rollbackErr) => { broken = rollbackErr; });
             throw txErr;
         } finally {
-            client.release();
+            release(broken);
         }
     }
 
