@@ -80,7 +80,18 @@ function createSession(ctx) {
         });
     }
 
-    return { csrf, sessionMiddleware, startUserSession, endSession };
+    // Сессия нужна только API и выдаче вложений. Остальным путям (опечатки, сканеры, 404)
+    // она не нужна: раньше любой запрос с кукой connect.sid ходил в Postgres за сессией,
+    // и поток таких запросов (700 в секунду на неизвестные пути) занимал пул (W7 R1 п.4).
+    // Сокеты вызывают sessionMiddleware напрямую (socket-handlers.js). Имя функции -
+    // 'session': по нему слой узнаёт test/server-structure.test.js.
+    const SESSION_PATH_RE = /^\/(?:api|uploads)(?:\/|$)/;
+    const httpSessionMiddleware = function session(req, res, next) {
+        if (!SESSION_PATH_RE.test(req.path)) return next();
+        sessionMiddleware(req, res, next);
+    };
+
+    return { csrf, sessionMiddleware, httpSessionMiddleware, startUserSession, endSession };
 }
 
 module.exports = { createSession };

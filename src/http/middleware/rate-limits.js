@@ -40,6 +40,29 @@ function createRateLimits(ctx) {
         message: { success: false, message: 'Слишком много запросов. Попробуйте позже.' }
     });
 
+    // Выдача вложений (/uploads) раньше шла мимо лимитов: каждый запрос - сессия и ещё два запроса
+    // в БД, и поток в сотни запросов в секунду забивал пул (W7 R1 п.4). Лимитеров два:
+    //   * по IP, ДО загрузки сессии: отсекает флуд с кукой, не тратя ни одного запроса в БД; чат с
+    //     сотней картинок открывается всплеском, поэтому потолок щедрый. Для onion пропускается:
+    //     там один IP на всех, а от флуда защищает сам onion-сервис (как у apiLimiter);
+    //   * по аккаунту, после сессии: за одним NAT аккаунтов много, а каждый просматривает своё.
+    const uploadsIpLimiter = rateLimit({
+        ...RATE_LIMIT_DEFAULTS,
+        windowMs: 60 * 1000,
+        max: ACCOUNT_LIMITS.uploadsIpPerMin,
+        skip: (req) => req.isOnion,
+        keyGenerator: rateLimitKeyGenerator,
+        message: { success: false, message: 'Слишком много запросов. Попробуйте позже.' }
+    });
+    const uploadsUserLimiter = rateLimit({
+        ...RATE_LIMIT_DEFAULTS,
+        windowMs: 15 * 60 * 1000,
+        max: ACCOUNT_LIMITS.uploadsUserPer15Min,
+        skip: (req) => !sessionUserId(req),
+        keyGenerator: (req) => `user:${sessionUserId(req)}`,
+        message: { success: false, message: 'Слишком много запросов. Попробуйте позже.' }
+    });
+
     // ---- Точные лимиты в Postgres (lib/pg-limits.js, roadmap R11) ----
     //
     // Регистрация, вход по коду, выдача bundle ключей и одноразовость решений PoW
@@ -124,7 +147,7 @@ function createRateLimits(ctx) {
     });
 
     return {
-        apiLimiter, pgLimits, powUsedStore, bundleLimiter, keyShareLimiter, keyRequestLimiter,
+        apiLimiter, uploadsIpLimiter, uploadsUserLimiter, pgLimits, powUsedStore, bundleLimiter, keyShareLimiter, keyRequestLimiter,
         memberCertLimiter, registerLimiter, joinUserLimiter, joinIpLimiter, registerGlobalGate, textQuota,
     };
 }

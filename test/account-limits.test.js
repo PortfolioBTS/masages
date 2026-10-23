@@ -46,7 +46,7 @@ async function main() {
     await test('умолчания лимитов', () => {
         assert.deepStrictEqual({ ...resolveAccountLimits({}) }, {
             registerGlobalPerMin: 120, registerPacePerMin: 20, textQuotaBytesPerDay: 20 * 1024 * 1024,
-            roomsPerUserMax: 50, uploadMinFreeBytes: 256 * 1024 * 1024,
+            roomsPerUserMax: 50, uploadMinFreeBytes: 256 * 1024 * 1024, uploadsIpPerMin: 600, uploadsUserPer15Min: 3000,
         });
         assert.strictEqual(DEFAULTS.ROOMS_PER_USER_MAX, 50);
     });
@@ -54,11 +54,11 @@ async function main() {
     await test('значения из окружения; мусор, ноль, отрицательные и экспонента дают умолчание', () => {
         const limits = resolveAccountLimits({
             REGISTER_GLOBAL_PER_MIN: '7', REGISTER_PACE_PER_MIN: '3', TEXT_QUOTA_MB_PER_DAY: '0.5',
-            ROOMS_PER_USER_MAX: '4', UPLOAD_MIN_FREE_MB: '1024',
+            ROOMS_PER_USER_MAX: '4', UPLOAD_MIN_FREE_MB: '1024', UPLOADS_IP_PER_MIN: '5', UPLOADS_USER_PER_15MIN: '6',
         });
         assert.deepStrictEqual({ ...limits }, {
             registerGlobalPerMin: 7, registerPacePerMin: 3, textQuotaBytesPerDay: 524288,
-            roomsPerUserMax: 4, uploadMinFreeBytes: 1024 * 1024 * 1024,
+            roomsPerUserMax: 4, uploadMinFreeBytes: 1024 * 1024 * 1024, uploadsIpPerMin: 5, uploadsUserPer15Min: 6,
         });
         for (const bad of ['', 'abc', '0', '-5', '1e3', '0x10', ' ', '1.5']) {
             const l = resolveAccountLimits({ REGISTER_GLOBAL_PER_MIN: bad, ROOMS_PER_USER_MAX: bad });

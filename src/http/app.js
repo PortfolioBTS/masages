@@ -42,7 +42,7 @@ function setRevalidateCacheHeaders(res, isPrivate) {
 function configureApp(ctx) {
     const {
         ROOT_DIR, IS_PRODUCTION, HSTS_PRELOAD, SESSION_RENEW_MS, metrics, app, resolveRealIp, isTrustedOrigin,
-        apiLimiter, csrf, sessionMiddleware, anonActivity, serverContext,
+        apiLimiter, uploadsIpLimiter, uploadsUserLimiter, csrf, httpSessionMiddleware, anonActivity, serverContext,
     } = ctx;
 
     // Самым первым: признак onion-запроса (req.isOnion) нужен лимитерам и
@@ -127,7 +127,12 @@ function configureApp(ctx) {
     // сессия не нужна; ниже, после лимитера /api/, — обычные маршруты API.
     registerPreSessionRoutes(app, serverContext);
 
-    app.use(sessionMiddleware);
+    // Выдача вложений: лимит по IP стоит ДО сессии (поток запросов с кукой не должен ходить в БД),
+    // лимит по аккаунту - после неё и проверки сессии (ниже).
+    app.use('/uploads', uploadsIpLimiter);
+
+    // Сессия грузится только для /api и /uploads (httpSessionMiddleware): остальным путям она не нужна.
+    app.use(httpSessionMiddleware);
 
     // Сессия проверяется на КАЖДОМ запросе (validateSession). Недействительная
     // (без isAnonymous — от прежней версии с постоянными аккаунтами) или истёкшая
@@ -162,6 +167,8 @@ function configureApp(ctx) {
     // запроса без входа, например регистрации, — кука nyxo_pre) и до разбора тела.
     // Источник небезопасного запроса проверен ещё раньше (isTrustedOrigin).
     app.use(csrf.middleware);
+
+    app.use('/uploads', uploadsUserLimiter);
 
     // Разбор тела запроса: парсеры и их порядок — в middleware/body-parsers.js.
     installBodyParsers(app);
