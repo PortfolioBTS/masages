@@ -35,6 +35,8 @@
     const SYNC_FRESH_MS = 30 * 1000;
     // Самомониторинг: не чаще раза в 20 минут (7.4).
     const SELF_MIN_INTERVAL_MS = 20 * 60 * 1000;
+    // Самомониторинг не удаётся довести до конца дольше этого срока - отдельная тревога self-unreachable (7.4).
+    const SELF_UNREACHABLE_MS = 6 * HOUR_MS;
     // Паузы повтора при сетевой ошибке, секунды (7.3, п. 2).
     const RETRY_STEPS_S = [1, 2, 4, 8, 16, 32, 64, 128, 256, 300];
     const MAX_QUEUE = 200;
@@ -847,7 +849,7 @@
 
         // ---------- Самомониторинг (7.4) ----------
 
-        const emptySelf = () => ({ commits: [], scanned: null, acked: [], alert: null, inbox: null, currentNonce: null, lastScanAt: 0 });
+        const emptySelf = () => ({ commits: [], scanned: null, acked: [], alert: null, inbox: null, currentNonce: null, lastScanAt: 0, failSince: 0 });
 
         async function readSelf() {
             const state = await storage.get('kt:self');
@@ -919,6 +921,7 @@
             const missing = [];
             let progress = state.scanned;
             let network = false;
+            let violation = false;
             for (const gen of await storedGens()) {
                 if (progress && gen < progress.gen) continue;
                 const held = await readGen(gen);
@@ -927,7 +930,19 @@
                 while (from <= held.rec.headEpoch) {
                     const { res, error } = await call('ktSelf', gen, from, SELF_BATCH);
                     if (error) { network = true; break; }
-                    if (res.status === 404) break; // поколение уже не отдаётся (срок вышел)
+                    if (res.status === 404) {
+                        // Поколение не отдаётся. Текущее сервер обязан отдавать всегда, предыдущее - до genStart(g+1) + льготный срок
+                        // (7.2, раздел 12 строка 11); только после срока это не нарушение. Иначе 404 прятал бы чужое обязательство
+                        // под моей меткой без всякой тревоги, а скан выглядел бы успешным.
+                        const newest = await latestHead();
+                        const mustServe = Boolean(newest) && (gen === newest.gen
+                            || (gen === newest.gen - 1 && newest.epoch <= newest.genStart + graceEpochs));
+                        if (mustServe) {
+                            await logFork('grace-violated', { gen, epoch: from, source: 'self' });
+                            violation = true;
+                        }
+                        break;
+                    }
                     const data = body(res);
                     if (transient(res) || res.status !== 200 || data.success !== true || !Array.isArray(data.proofs)) { network = true; break; }
                     if (data.proofs.length === 0) break;
@@ -968,7 +983,7 @@
                     });
                     if (data.next === null || data.next === undefined) break;
                 }
-                if (network) break;
+                if (network || violation) break;
             }
 
             if (foreign.length > 0) {
@@ -983,14 +998,31 @@
             for (const m of missing) {
                 await addAlert('self-missing', { ...m }, m.c + ':' + m.gen + ':' + m.epoch + ':' + m.reason);
             }
-            if (!network) {
+            if (!network && !violation) {
                 await withLock(async () => {
                     const s = await readSelf();
                     s.lastScanAt = now();
                     await storage.set('kt:self', s);
                 });
             }
-            return { network };
+            return { network, violation };
+        }
+
+        // Затяжной сбой самомониторинга (7.4): сервер, не отдающий данные /api/kt/self, не должен молча лишать владельца
+        // проверки. Отсчёт идёт по локальным часам от первой неудачи; успешный скан сбрасывает отсчёт и снимает тревогу.
+        async function noteSelfHealth(ok) {
+            let since = 0;
+            await withLock(async () => {
+                const state = await readSelf();
+                if (ok) {
+                    if (state.failSince) { state.failSince = 0; await storage.set('kt:self', state); }
+                    return;
+                }
+                if (!state.failSince) { state.failSince = now(); await storage.set('kt:self', state); return; }
+                if (now() - state.failSince >= SELF_UNREACHABLE_MS) since = state.failSince;
+            });
+            if (ok) await clearAlerts(['self-unreachable']);
+            else if (since) await addAlert('self-unreachable', { since }, 'self-unreachable');
         }
 
         // Пользователь подтвердил, что часть обязательств — его прежние ключи («Это были мои прежние ключи»).
@@ -1096,15 +1128,25 @@
                         const state = await readSelf();
                         const due = state.lastScanAt === 0 || now() - state.lastScanAt >= SELF_MIN_INTERVAL_MS;
                         const done = await scanSelf(sync, { scan: due });
-                        if (done.network) retry = true;
-                        await removeTask({ kind: 'self' });
+                        if (due) await noteSelfHealth(!done.network && !done.violation);
+                        if (done.network) {
+                            // Сетевой сбой: задача остаётся, повтор с нарастающей паузой дойдёт до скана (7.3, п. 2).
+                            retry = true;
+                            selfRequested = true;
+                        } else {
+                            await removeTask({ kind: 'self' });
+                        }
                     } catch (error) {
                         warn('Журнал ключей: самомониторинг не удался:', error);
                         retry = true;
+                        selfRequested = true;
                     }
                 } else if (sync.reason !== 'network') {
                     selfRequested = false;
                     await removeTask({ kind: 'self' });
+                } else {
+                    // Голова журнала не получена: самомониторинг не выполнен, это тоже сбой в счёт срока.
+                    await noteSelfHealth(false);
                 }
             }
             if (retry) scheduleRetry();
@@ -1150,7 +1192,7 @@
                 const pin = await storage.get(name);
                 if (pin && pin.kt && pin.kt.status) peers.push({ userId: Number(name.slice('peer:'.length)), status: pin.kt.status });
             }
-            const selfAlerts = alerts.filter(a => a.kind === 'self-foreign-entry' || a.kind === 'self-missing');
+            const selfAlerts = alerts.filter(a => a.kind === 'self-foreign-entry' || a.kind === 'self-missing' || a.kind === 'self-unreachable');
             let self = 'unknown';
             if (selfAlerts.length > 0) self = 'alert';
             else if (state.scanned) self = 'ok';

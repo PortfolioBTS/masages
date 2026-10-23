@@ -121,6 +121,128 @@ async function main() {
         }
     });
 
+    // ===================== F3: самомониторинг и ответы /api/kt/self =====================
+
+    // Транспорт Алисы: всё как у сервера, кроме /api/kt/self - им управляет тест через ctl.self(gen).
+    function selfWorld() {
+        const world = makeWorld();
+        const base = world.server.transportFor(1);
+        const ctl = { self: null };
+        const transport = new Proxy(base, {
+            get(target, name) {
+                if (name === 'ktSelf') {
+                    return async (gen, from, limit) => {
+                        const forced = ctl.self ? ctl.self(gen) : null;
+                        return forced || target.ktSelf(gen, from, limit);
+                    };
+                }
+                return target[name];
+            },
+        });
+        return { world, ctl, transport };
+    }
+
+    // stale - информационное предупреждение (голова журнала давно не двигалась), в хранилище не пишется.
+    const alertKinds = (user) => user.alerts.map(a => a.kind).filter(kind => kind !== 'stale');
+    const selfState = (user) => user.storage.get('kt:self');
+    const notFound = { status: 404, data: { success: false, code: 'kt-not-found' } };
+
+    await test('F3: честный сервер - чужое обязательство под моей меткой даёт self-foreign-entry (контроль сценария)', async () => {
+        const { world, transport } = selfWorld();
+        const alice = await world.addUser(1, { transport });
+        await world.addUser(2);
+        world.kt.injectEntry(1);
+        await world.kt.closeEpoch();
+        await alice.check();
+        assert.ok(alertKinds(alice).includes('self-foreign-entry'));
+        assert.strictEqual((await alice.client.checkTransparency()).self, 'alert');
+    });
+
+    await test('F3: 404 на /api/kt/self для ТЕКУЩЕГО поколения - тревога log-fork grace-violated, скан не считается успешным', async () => {
+        const { world, ctl, transport } = selfWorld();
+        const alice = await world.addUser(1, { transport });
+        await world.addUser(2);
+        world.kt.injectEntry(1);                    // чужое обязательство, которое 404 и прячет
+        await world.kt.closeEpoch();
+        ctl.self = () => notFound;
+        for (let i = 0; i < 3; i++) {
+            await alice.check();
+            for (const item of alice.scheduled.splice(0)) await item.fn();
+        }
+        const fork = alice.alerts.find(a => a.kind === 'log-fork');
+        assert.ok(fork, 'тревога: ' + alertKinds(alice).join());
+        assert.strictEqual(fork.reason, 'grace-violated');
+        assert.strictEqual(fork.gen, 1);
+        const state = await selfState(alice);
+        assert.ok(!state || !state.lastScanAt, 'lastScanAt не обновляется, как после успеха');
+        assert.ok(!state || !state.scanned, 'прогресс скана не двигается');
+        const t = await alice.client.checkTransparency();
+        assert.strictEqual(t.status, 'inconsistent');
+        assert.notStrictEqual(t.self, 'ok');
+    });
+
+    await test('F3: 404 на предыдущее поколение в пределах льготного срока - тревога; после срока - тихий пропуск (как раньше)', async () => {
+        for (const [closed, expectAlert] of [[5, true], [10, false]]) {
+            const { world, ctl, transport } = selfWorld();
+            const alice = await world.addUser(1, { transport });
+            await world.addUser(2);
+            await world.kt.closeEpochs(3);
+            await alice.check();                    // Алиса просканировала начало поколения 1
+            ctl.self = (gen) => (gen === 1 ? notFound : null);
+            await world.kt.closeEpochs(closed);      // поколение 1 закончилось на эпохе 5; поколение 2 идёт
+            world.advance(60 * 60 * 1000);
+            alice.client.startTransparency();         // плановая проверка раз в час запрашивает самомониторинг
+            await alice.scheduled.find(item => item.ms === HOUR).fn();
+            const forks = alice.alerts.filter(a => a.kind === 'log-fork');
+            assert.strictEqual(forks.length > 0, expectAlert, 'закрыто ' + closed + ': ' + alertKinds(alice).join());
+            if (expectAlert) assert.strictEqual(forks[0].reason, 'grace-violated');
+        }
+    });
+
+    await test('F3: затяжной сбой /api/kt/self (5xx) дольше 6 часов - тревога self-unreachable, self = alert; после восстановления тревога снимается', async () => {
+        const { world, ctl, transport } = selfWorld();
+        const alice = await world.addUser(1, { transport });
+        await world.addUser(2);
+        world.kt.injectEntry(1);
+        await world.kt.closeEpoch();
+        ctl.self = () => ({ status: 503, data: { success: false } });
+        for (let h = 0; h < 5; h++) {
+            await alice.check();
+            for (const item of alice.scheduled.splice(0)) await item.fn();
+            world.advance(HOUR);
+        }
+        assert.ok(!alertKinds(alice).includes('self-unreachable'), 'до 6 часов тревоги нет: ' + alertKinds(alice).join());
+        assert.strictEqual((await selfState(alice)).lastScanAt, 0);
+        for (let h = 0; h < 3; h++) {
+            await alice.check();
+            for (const item of alice.scheduled.splice(0)) await item.fn();
+            world.advance(HOUR);
+        }
+        assert.ok(alertKinds(alice).includes('self-unreachable'), alertKinds(alice).join());
+        assert.strictEqual((await alice.client.checkTransparency()).self, 'alert', 'self не unknown молча');
+        // Сервер ответил: скан прошёл, чужая запись найдена, тревога о недоступности снята.
+        ctl.self = null;
+        await alice.check();
+        assert.ok(alertKinds(alice).includes('self-foreign-entry'));
+        assert.ok(!(await alice.client.getTransparencyAlerts()).some(a => a.kind === 'self-unreachable'));
+        assert.ok((await selfState(alice)).lastScanAt > 0);
+    });
+
+    await test('F3: короткий сбой /api/kt/self (меньше 6 часов) тревоги не даёт', async () => {
+        const { world, ctl, transport } = selfWorld();
+        const alice = await world.addUser(1, { transport });
+        await world.kt.closeEpoch();
+        ctl.self = () => ({ status: 503, data: { success: false } });
+        await alice.check();
+        world.advance(2 * HOUR);
+        await alice.check();
+        ctl.self = null;
+        world.advance(HOUR);
+        await alice.check();
+        assert.deepStrictEqual(alertKinds(alice), []);
+        assert.ok((await selfState(alice)).lastScanAt > 0);
+    });
+
     console.log('\n' + passed + ' passed, ' + failed + ' failed');
     if (failed > 0) process.exitCode = 1;
 }
