@@ -215,18 +215,26 @@
     }
 
     // Формат содержимого (message-ordering.md, раздел 9.1):
-    //   { t:'text', b, mid, ts, e?:1 }
+    //   { t:'text', b, mid, ts, e?:1, re?:'<id>' }
     //   { t:'file', mime, name, size, key, iv, caption, mid, ts }
     // mid — String(id сообщения), ts — время отправителя в мс, e:1 — правка
-    // (правятся только текстовые сообщения).
-    function encodeContent(content, { mid, ts, edit = false }) {
+    // (правятся только текстовые сообщения), re — id сообщения, на которое это
+    // ответ (только у текста; сервер хранит reply_to_id открыто, и без re он мог бы
+    // приписать сообщению любую цитату — клиент сверяет цитату сервера с re).
+    function encodeContent(content, { mid, ts, edit = false, replyTo = null }) {
+        if (replyTo !== null && replyTo !== undefined && !isValidMessageId(replyTo)) {
+            throw new Error('E2EE: некорректный идентификатор сообщения, на которое отвечают');
+        }
+        const hasReply = replyTo !== null && replyTo !== undefined;
         if (typeof content === 'string') {
             const text = { t: 'text', b: content, mid, ts };
             if (edit) text.e = 1;
+            if (hasReply) text.re = replyTo;
             return text;
         }
         if (content && typeof content === 'object' && content.type === 'file') {
             if (edit) throw new Error('E2EE: правятся только текстовые сообщения');
+            if (hasReply) throw new Error('E2EE: ответ на сообщение поддержан только у текста');
             const file = normalizeFileDescriptor(content);
             if (!file) throw new Error('E2EE: некорректное описание файла');
             const caption = content.caption === undefined || content.caption === null ? '' : content.caption;
@@ -244,11 +252,13 @@
         if (!obj || typeof obj !== 'object') return null;
         let content;
         if (obj.t === 'text' && typeof obj.b === 'string') {
-            content = { text: obj.b, edit: obj.e === 1 };
+            // re: строго строка формата id; всё остальное - испорченное содержимое, а не "ответа нет".
+            if (obj.re !== undefined && !isValidMessageId(obj.re)) return null;
+            content = { text: obj.b, edit: obj.e === 1, replyTo: obj.re === undefined ? null : obj.re };
         } else if (obj.t === 'file') {
             const file = normalizeFileDescriptor(obj);
-            if (!file || typeof obj.caption !== 'string' || obj.e !== undefined) return null;
-            content = { text: obj.caption, file, edit: false };
+            if (!file || typeof obj.caption !== 'string' || obj.e !== undefined || obj.re !== undefined) return null;
+            content = { text: obj.caption, file, edit: false, replyTo: null };
         } else {
             return null;
         }

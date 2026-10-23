@@ -3169,7 +3169,8 @@
         // Бросает E2eeError('needs-room-session'), если ключ комнаты исчерпал жёсткий
         // порог ротации: script.js ждёт ensureRoomSession и повторяет один раз.
         //
-        // options: { messageId, edit? }. messageId обязателен (строка по формату
+        // options: { messageId, edit?, replyTo? }. replyTo - id сообщения, на которое это ответ (строка по формату 6.1),
+        // уходит внутри шифротекста. messageId обязателен (строка по формату
         // 6.1: id сообщения, который клиент выбрал ДО шифрования и отправит на
         // сервер как clientMessageId), иначе E2eeError('protocol'): содержимое
         // без mid получатель всё равно отвергнет ('no-mid'). ts = now() для нового
@@ -3181,13 +3182,18 @@
                 throw new E2eeError('protocol', 'E2EE: не указан идентификатор сообщения (messageId)');
             }
             const edit = Boolean(options.edit);
+            // Ответ на сообщение (З3): id цитируемого сообщения кладётся внутрь шифротекста; правка тоже его несёт.
+            const replyTo = options.replyTo === undefined || options.replyTo === null ? null : String(options.replyTo);
+            if (replyTo !== null && !isValidMessageId(replyTo)) {
+                throw new E2eeError('protocol', 'E2EE: некорректный идентификатор сообщения, на которое отвечают (replyTo)');
+            }
             await ensureLocal();
             let ts = Math.max(0, Math.trunc(now()));
             if (edit) {
                 const known = await withLock(() => storage.get(editName(roomId, messageId)));
                 if (known && Number.isSafeInteger(known.ts)) ts = Math.max(ts, known.ts + 1);
             }
-            const padded = padMessage(utf8encode(JSON.stringify(encodeContent(content, { mid: messageId, ts, edit }))));
+            const padded = padMessage(utf8encode(JSON.stringify(encodeContent(content, { mid: messageId, ts, edit, replyTo }))));
             const { state, iteration, messageKey } = await withLock(async () => {
                 const st = await loadOwnSenderKeyLocked(roomId);
                 if (!st) throw new Error('E2EE: для этой комнаты ещё не создан Sender Key — вызовите ensureRoomSession()');
@@ -3380,6 +3386,8 @@
                 result.senderId = senderId;
                 result.ts = content.ts;
                 result.edit = content.edit;
+                // На какое сообщение отвечает отправитель (подписано им): цитату сервера клиент сверяет с этим id (З3).
+                result.replyTo = content.replyTo || null;
                 // Отправитель вне V: SKDM принят, но сообщения помечаются. Флаг вычисляется при каждой расшифровке по
                 // текущему V, а не хранится: после подтверждения пометка исчезает без перешифровки (9.4).
                 if (!(await membership.isTrustedMember(roomId, senderId))) result.unverifiedSender = true;

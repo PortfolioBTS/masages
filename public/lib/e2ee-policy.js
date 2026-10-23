@@ -12,6 +12,8 @@
 //                                   — можно ли отправить в чат открытый текст;
 //   sessionBlock(session)           — результат ensureRoomSession: нужно ли
 //                                     прервать отправку (ключ не дошёл никому);
+//   replyQuoteTrusted(serverReplyTo, result)
+//                                   — совпала ли цитата сервера с подписанным id ответа;
 //   initErrorReason(err)            — причина недоступности шифрования по err.code;
 //   initErrorRetryable(err)         — есть ли смысл в «Повторить»;
 //   composerView(state)             — что показать под полем ввода и в шапке.
@@ -94,6 +96,15 @@
         return null;
     }
 
+    // Цитата в комнате (З3): сервер хранит reply_to_id открыто, поэтому может приписать сообщению участника любую цитату.
+    // Цитата принимается, только если её id совпал с id, который отправитель подписал внутри шифротекста (result.replyTo).
+    // Нет цитаты - нечего проверять; сообщение не расшифровано - проверить нечем, цитата не показывается.
+    function replyQuoteTrusted(serverReplyTo, result) {
+        if (!serverReplyTo) return true;
+        if (!result || result.ok !== true || typeof result.replyTo !== 'string') return false;
+        return result.replyTo === String(serverReplyTo.id);
+    }
+
     const PLACEHOLDERS = Object.freeze({
         room: 'Зашифрованное сообщение...',
         bot: 'Спросите бота или выберите тему',
@@ -171,6 +182,7 @@
         parseBotChatId,
         plaintextAllowed,
         sessionBlock,
+        replyQuoteTrusted,
         initErrorReason,
         initErrorRetryable,
         composerView,

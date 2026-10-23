@@ -569,6 +569,7 @@ async function decryptEnvelope(roomId, senderId, text, messageId) {
 }
 
 async function decryptMessageInPlace(message, roomId) {
+    let decryptedForReply = null;   // результат расшифровки самого сообщения: из него берётся подписанный id ответа
     if (roomId && !message.encrypted) {
         // Без метки «без шифрования» (её больше нет) подложенное сервером открытое
         // сообщение выглядело бы как настоящее сообщение участника.
@@ -581,6 +582,7 @@ async function decryptMessageInPlace(message, roomId) {
             // Подсказки сервера об авторе нет и быть не может: senderId = null, автора
             // находит клиент по индексу отправителей (sealed-sender.md, 9.3).
             const res = await decryptEnvelope(roomId, null, message.text, message.id);
+            decryptedForReply = res;
             if (res.ok) {
                 message.text = res.text || '';
                 if (res.file) message._file = res.file;
@@ -598,6 +600,11 @@ async function decryptMessageInPlace(message, roomId) {
             message.text = 'Зашифрованное сообщение';
             message._e2eeFailed = true;
         }
+    }
+    // Цитата в комнате показывается, только если её id совпал с id ответа внутри подписанного шифротекста (З3):
+    // reply_to_id сервер хранит открыто и мог бы приписать сообщению любую цитату.
+    if (roomId && message.reply_to && !NyxoE2eePolicy.replyQuoteTrusted(message.reply_to, decryptedForReply)) {
+        message.reply_to = null;
     }
     if (message.reply_to && !message.reply_to.deleted) {
         if (roomId && !message.reply_to.encrypted) {
