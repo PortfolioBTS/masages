@@ -304,7 +304,7 @@ async function markVerified(row, peer, ctx, btn) {
 
 // Пользователь явно продолжает общение с участником, чьего ключа нет в журнале: он снова адресат рассылки.
 async function overrideLogMismatch(row, peer, ctx, btn) {
-    if (!confirm(`Продолжить обмен ключами с ${peer.username} без проверки по журналу? Делайте это, только если уверены, что его ключ настоящий (код безопасности сверен лично).`)) return;
+    if (!(await confirmAction(`Обмен ключами с ${peer.username} продолжится без проверки по журналу. Делайте это, только если уверены, что его ключ настоящий (код безопасности сверен лично).`, { title: 'Продолжить без проверки по журналу?', confirmLabel: 'Продолжить', danger: true }))) return;
     btn.disabled = true;
     try {
         await ctx.client.overrideLogMismatch(peer.id);
@@ -324,7 +324,7 @@ async function overrideLogMismatch(row, peer, ctx, btn) {
 }
 
 async function acceptIdentityChange(row, peer, ctx, btn) {
-    if (!confirm(`Принять новый ключ участника ${peer.username}? Делайте это, только если код безопасности совпал с кодом на его устройстве. Участник останется подтверждённым в группах, где вы его уже подтверждали; в группах, где он был не подтверждён, он таким и останется.`)) return;
+    if (!(await confirmAction(`Делайте это, только если код безопасности совпал с кодом на устройстве участника ${peer.username}.\n\nУчастник останется подтверждённым в группах, где вы его уже подтверждали; в группах, где он был не подтверждён, он таким и останется.`, { title: 'Принять новый ключ?', confirmLabel: 'Принять ключ', danger: true }))) return;
     btn.disabled = true;
     try {
         await ctx.client.acceptPeerIdentityChange(peer.id);
@@ -349,7 +349,7 @@ async function acceptIdentityChange(row, peer, ctx, btn) {
 async function trustUnconfirmedMember(peer, ctx, btn, duplicate) {
     const warning = `Сервер добавил ${peer.username} в группу, но никто из участников это не подписал. Доверяйте, только если знаете, кто это.`
         + (duplicate ? ' У этого участника такие же ключи шифрования, как у другого: возможно, это подделка.' : '');
-    if (!confirm(warning)) return;
+    if (!(await confirmAction(warning, { title: 'Подтвердить участника?', confirmLabel: 'Подтвердить', danger: true }))) return;
     btn.disabled = true;
     let res;
     try {
@@ -375,7 +375,7 @@ async function trustUnconfirmedMember(peer, ctx, btn, duplicate) {
 
 // Явное поручительство (9.5): подписать допуск за участника, подтверждённого вручную. Остальные начнут отправлять ему ключи.
 async function vouchForMember(peer, ctx, btn) {
-    if (!confirm(`Вы подпишете, что знаете ${peer.username}. Остальные участники начнут отправлять ему ключи.`)) return;
+    if (!(await confirmAction(`Вы подпишете, что знаете ${peer.username}. Остальные участники начнут отправлять ему ключи.`, { title: 'Поручиться за участника?', confirmLabel: 'Поручиться' }))) return;
     btn.disabled = true;
     let res;
     try {

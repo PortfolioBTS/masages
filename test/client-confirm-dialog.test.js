@@ -30,7 +30,7 @@ test('в разметке есть alertdialog подтверждения: по�
     assert.doesNotMatch(html.slice(html.indexOf('id="confirm-modal"'), html.indexOf('id="overlay"')), /close-modal/);
 });
 
-test('window.confirm в клиенте не вызывается (кроме окон журнала ключей, ждущих слияния T7.1)', () => {
+test('window.confirm в клиенте не вызывается нигде', () => {
     const { clientScriptFiles } = require('./client-script-source');
     const found = [];
     for (const file of clientScriptFiles()) {
@@ -40,11 +40,19 @@ test('window.confirm в клиенте не вызывается (кроме о�
             if (/(^|[^\w.])confirm\(/.test(line)) found.push(`${file}:${i + 1}`);
         });
     }
-    // Допустимое исключение: вопросы участников в js/11-key-log-members.js. Файл правит T7.1 (тексты
-    // подтверждения ключа), поэтому они переводятся на confirmAction после его слияния.
-    const outside = found.filter((place) => !place.startsWith('js/11-key-log-members.js:'));
-    assert.deepStrictEqual(outside, [], 'родной confirm() остался вне разрешённого списка');
-    assert.ok(found.length <= 4, `родных confirm() осталось ${found.length}: ждём не больше четырёх (журнал ключей)`);
+    assert.deepStrictEqual(found, [], 'родной confirm() при отключённых диалогах молча даёт false: нужен confirmAction/confirmDialog');
+});
+
+test('вопросы про ключи участников идут через окно и сохраняют смысл: «принять ключ» — подтверждённым остаётся только прежде подтверждённый', () => {
+    const members = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', '11-key-log-members.js'), 'utf8');
+    const accept = members.slice(members.indexOf('async function acceptIdentityChange'), members.indexOf('// Подтверждение участника вручную'));
+    assert.match(accept, /await confirmAction\(/);
+    assert.match(accept, /Участник останется подтверждённым в группах, где вы его уже подтверждали; в группах, где он был не подтверждён, он таким и останется\./);
+    assert.match(accept, /Принять новый ключ\?/);
+    for (const name of ['overrideLogMismatch', 'trustUnconfirmedMember', 'vouchForMember']) {
+        const body = members.slice(members.indexOf(`async function ${name}`), members.indexOf(`async function ${name}`) + 600);
+        assert.match(body, /await confirmAction\(/, name);
+    }
 });
 
 // ---- окно подтверждения в vm ----
