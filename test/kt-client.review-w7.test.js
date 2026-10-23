@@ -8,6 +8,7 @@
 
 const assert = require('assert');
 const { makeWorld, statusOf, HOUR } = require('./kt-harness');
+const { FakeKt } = require('./fake-kt');
 
 let passed = 0, failed = 0;
 async function test(name, fn) {
@@ -241,6 +242,72 @@ async function main() {
         await alice.check();
         assert.deepStrictEqual(alertKinds(alice), []);
         assert.ok((await selfState(alice)).lastScanAt > 0);
+    });
+
+    // ===================== З4: отправитель сплетни записывается в доказательство =====================
+
+    async function gossipWorld() {
+        const base = new FakeKt();
+        const views = new Map();
+        const forked = base.clone();
+        const world = makeWorld({ kt: base, ktOf: (id) => views.get(id) || base, ktAll: [base, forked] });
+        const alice = await world.addUser(1);
+        const bob = await world.addUser(2);
+        await base.closeEpochs(2);
+        await forked.closeEpochs(2);
+        return { world, base, views, alice, bob };
+    }
+
+    await test('З4: key-split и equivocation по сплетне несут отправителя ext.kt', async () => {
+        const split = await gossipWorld();
+        const other = new FakeKt({ genEpochs: 6, graceEpochs: 4 });      // мир Боба подписан другим ключом журнала
+        for (const [id, u] of split.base.users) other.users.set(id, { ...u });
+        split.views.set(2, other);
+        await other.closeEpochs(3);
+        await split.bob.check();
+        await split.base.closeEpoch();
+        await split.alice.check();
+        await split.world.session(split.alice);
+        await split.world.sync(split.bob);
+        await split.bob.check();
+        const keySplit = split.bob.alerts.find(a => a.kind === 'key-split');
+        assert.ok(keySplit, split.bob.alerts.map(a => a.kind).join());
+        assert.strictEqual(keySplit.sender, 1, 'кто прислал подпись, которую мы не можем проверить');
+
+        const fork = await gossipWorld();
+        const clone = fork.base.clone();
+        fork.views.set(2, clone);
+        await clone.closeEpoch();
+        await fork.base.closeEpoch();
+        await fork.alice.check();
+        await fork.bob.check();
+        await fork.world.session(fork.alice);
+        await fork.world.sync(fork.bob);
+        await fork.bob.check();
+        const equivocation = fork.bob.alerts.find(a => a.kind === 'equivocation');
+        assert.ok(equivocation);
+        assert.strictEqual(equivocation.sender, 1);
+    });
+
+    await test('З4: один участник не заводит много тревог key-split подряд (по одной на отправителя), чужие тревоги не вытесняются', async () => {
+        const { world, base, views, alice, bob } = await gossipWorld();
+        const other = new FakeKt({ genEpochs: 6, graceEpochs: 4 });
+        for (const [id, u] of base.users) other.users.set(id, { ...u });
+        views.set(2, other);
+        await other.closeEpochs(3);
+        await bob.check();
+        for (let i = 0; i < 4; i++) {
+            await base.closeEpoch();
+            await alice.check();
+            await alice.client.rotateRoomKey(100);   // каждая ротация кладёт в SKDM свежую голову Алисы (другая эпоха)
+            await world.session(alice);
+            await world.sync(bob);
+            world.advance(60 * 1000);
+            await bob.check();
+        }
+        const splits = bob.alerts.filter(a => a.kind === 'key-split');
+        assert.strictEqual(splits.length, 1, 'тревог key-split: ' + splits.length);
+        assert.strictEqual(splits[0].sender, 1);
     });
 
     console.log('\n' + passed + ' passed, ' + failed + ' failed');

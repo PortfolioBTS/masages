@@ -2541,7 +2541,7 @@
                 if (keyId === null) return 'unbound';
                 if (onInstalled) onInstalled(keyId);
                 // Голова журнала отправителя (7.5): сверка — вне блокировки, в блокировке только задача.
-                if (ktOn() && opened.skdm.ext && opened.skdm.ext.kt) await ktLog.noteGossipLocked(opened.skdm.ext.kt);
+                if (ktOn() && opened.skdm.ext && opened.skdm.ext.kt) await ktLog.noteGossipLocked(opened.skdm.ext.kt, senderId);
                 // Хэш взгляда (9.6): в блокировке - только задача, сверка идёт вне блокировки (runViewChecks).
                 if (opened.skdm.ext && opened.skdm.ext.view) await membership.noteViewLocked(roomId, senderId, opened.skdm.ext.view);
                 return 'applied';

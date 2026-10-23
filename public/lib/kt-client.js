@@ -759,14 +759,17 @@
             await storage.set('kt:queue', queue);
         }
 
-        // В withLock: головa журнала из SKDM — отложенная сверка.
-        async function noteGossipLocked(raw) {
+        // В withLock: головa журнала из SKDM — отложенная сверка. senderId - кто прислал SKDM: тревога по сплетне (key-split,
+        // equivocation) говорит о подписи, которую прислал именно он, и без него доказательство нельзя ни проверить, ни
+        // отнести к человеку (любой участник мог положить в ext.kt поле правильной формы с неверной подписью).
+        async function noteGossipLocked(raw, senderId = null) {
             if (!supported()) return;
             const gossip = parseGossip(raw);
             if (!gossip) return;
-            const id = gossip.g + ':' + gossip.e + ':' + hex(gossip.h);
+            const from = isUint(Number(senderId)) && Number(senderId) > 0 ? Number(senderId) : null;
+            const id = gossip.g + ':' + gossip.e + ':' + hex(gossip.h) + ':' + (from === null ? '' : from);
             const queue = await readQueue();
-            enqueueLocked(queue, { kind: 'gossip', id, g: gossip.g, e: gossip.e, h: Kt.b64encode(gossip.h), s: Kt.b64encode(gossip.s) });
+            enqueueLocked(queue, { kind: 'gossip', id, from, g: gossip.g, e: gossip.e, h: Kt.b64encode(gossip.h), s: Kt.b64encode(gossip.s) });
             await storage.set('kt:queue', queue);
         }
 
@@ -812,9 +815,12 @@
                 signer = keyFor(pins, task.g, task.e);
                 valid = signer ? await Kt.verifyEd25519(signer, Kt.sthMessage(task.g, task.e, h), s) : false;
                 if (!valid) {
+                    // Одна тревога на отправителя: иначе один участник заполнил бы список тревог (MAX_ALERTS) и вытеснил
+                    // настоящие. Доказательство - первая присланная им подпись; sender - кто её прислал.
                     await addAlert('key-split', {
+                        sender: task.from === undefined ? null : task.from,
                         sent: { g: task.g, e: task.e, h: task.h, s: task.s }, pinned: pins.map(p => ({ pub: p.pub, from: p.from })),
-                    }, task.g + ':' + task.e);
+                    }, 'sender:' + (task.from === undefined || task.from === null ? '' : task.from));
                     return { done: true };
                 }
             }
@@ -830,7 +836,7 @@
                 held = await readGen(task.g);
                 covered = Boolean(held) && task.e >= held.rec.genStart && task.e <= held.rec.headEpoch;
                 if (!covered) {
-                    await addAlert('equivocation', { reason: 'behind', theirs: { g: task.g, e: task.e, h: task.h, s: task.s } }, task.g + ':' + task.e);
+                    await addAlert('equivocation', { reason: 'behind', sender: task.from === undefined ? null : task.from, theirs: { g: task.g, e: task.e, h: task.h, s: task.s } }, task.g + ':' + task.e);
                     return { done: true };
                 }
             }
@@ -840,7 +846,7 @@
                 // Верная подпись под иной головой той же эпохи — двуличие. Сохраняем пару: чужая подписанная
                 // голова и наша цепочка с подписью последней головы.
                 await addAlert('equivocation', {
-                    reason: 'gossip', theirs: { g: task.g, e: task.e, h: task.h, s: task.s },
+                    reason: 'gossip', sender: task.from === undefined ? null : task.from, theirs: { g: task.g, e: task.e, h: task.h, s: task.s },
                     mine: { g: task.g, e: held.rec.headEpoch, h: held.rec.head, s: held.rec.sig, chainFrom: held.rec.genStart, roots: held.rec.roots.length },
                 }, task.g + ':' + task.e);
             }

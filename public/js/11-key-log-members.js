@@ -117,6 +117,10 @@ function ktAlertView(alert, pendingKey, client) {
             });
         }
     }
+    // Тревоги по сплетне (key-split, equivocation) вызывает подпись, которую прислал конкретный участник группы.
+    if ((alert.kind === 'key-split' || alert.kind === 'equivocation') && Number.isInteger(alert.sender) && alert.sender > 0) {
+        lines.push(`Подпись журнала прислал участник #${alert.sender}. Сверьте с ним код безопасности лично.`);
+    }
     return { title, lines, actions };
 }
 
