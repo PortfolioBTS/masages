@@ -486,6 +486,7 @@ function leaveApp(message) {
     clearTimeout(loadChatsTimer);
     cancelUploadQueue();
     roomParticipants.clear();
+    unknownSend = null;
     chatListData = [];
     chatsById.clear();
     resetChatView();

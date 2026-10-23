@@ -23,6 +23,12 @@ let loadingHistory = false;
 let lastSeenSeq = 0;          // до какого seq пользователь уже видел открытый чат (seq сравнивается только внутри чата)
 let membersChangedTimer = null; // debounce событий roomMembersChanged
 
+// Сколько ждать ответа сервера (api) и сколько допускается «тишина» при загрузке файла;
+// отправка сообщения ждёт меньше и повторяется (14-send.js).
+const API_TIMEOUT_MS = 60 * 1000;
+const UPLOAD_STALL_MS = 60 * 1000;
+const TIMED_OUT_MESSAGE = 'Сервер не отвечает';
+
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const MAX_FILES_PER_BATCH = 10;
 const POW_TIMEOUT_MS = 60 * 1000;

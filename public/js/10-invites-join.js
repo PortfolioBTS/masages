@@ -315,6 +315,7 @@ function setJoinStatus(text) {
 // коротко, подробность — на клиенте.
 function joinFailureText(data, fallback) {
     if (data && data.networkError) return 'Нет связи с сервером. Попробуйте ещё раз.';
+    if (data && data.timedOut) return 'Сервер не отвечает. Попробуйте ещё раз.';
     const message = data && typeof data.message === 'string' ? data.message : '';
     if (/^Код недействителен/.test(message)) return JOIN_INVALID_TEXT;
     return message || fallback;

@@ -24,6 +24,13 @@ function extractFunction(source, name) {
     return source.slice(match.index, end + 2);
 }
 
+// Объявление верхнего уровня const/let в одну строку (константы с тайм-аутами и т. п.).
+function extractConst(source, name) {
+    const match = new RegExp(`^(?:const|let) ${name} = [^\\n]*;$`, 'm').exec(source);
+    if (!match) throw new Error(`константа ${name} не найдена (или занимает несколько строк)`);
+    return match[0];
+}
+
 // Элемент-заглушка: ровно то, что нужно логике композера и меню. Дерево детей и классы
 // настоящие (className ↔ classList, querySelector по .классу и тегу, contains), стили и
 // раскладка — нет: offsetParent === null, если сам элемент или предок скрыт классом hidden.
@@ -118,7 +125,7 @@ function fakeElements(preset = {}) {
 // createClient({ functions: ['startReply', ...], prelude: 'let x = null;', sandbox: { ... } })
 //   → { context, run(code), el(name) }
 // prelude выполняется до функций (объявления состояния), sandbox — глобальные заглушки.
-function createClient({ functions = [], prelude = '', sandbox = {}, source = readClientScript() } = {}) {
+function createClient({ functions = [], consts = [], prelude = '', sandbox = {}, source = readClientScript() } = {}) {
     const elements = sandbox.elements || fakeElements();
     const context = vm.createContext({
         console,
@@ -138,7 +145,7 @@ function createClient({ functions = [], prelude = '', sandbox = {}, source = rea
         ...sandbox,
         elements,
     });
-    const code = [prelude, ...functions.map((name) => extractFunction(source, name))].join('\n');
+    const code = [prelude, ...consts.map((name) => extractConst(source, name)), ...functions.map((name) => extractFunction(source, name))].join('\n');
     vm.runInContext(code, context, { filename: 'client-under-test.js' });
     return {
         context,
@@ -173,4 +180,4 @@ function createHarness() {
     return { test, done };
 }
 
-module.exports = { extractFunction, FakeEl, fakeElements, createClient, createHarness };
+module.exports = { extractFunction, extractConst, FakeEl, fakeElements, createClient, createHarness };

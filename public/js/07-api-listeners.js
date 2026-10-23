@@ -43,12 +43,21 @@ function onUnauthorizedResponse(data) {
 // обработчике клика, и кнопка просто "ничего не делала". networkError —
 // запрос не дошёл до сервера (важно для «Удалить и выйти»: тогда аккаунт
 // точно не удалён). skipAuthCheck — вызывающий сам разбирает «Не авторизован».
+//
+// Запрос без ответа дольше timeoutMs (по умолчанию API_TIMEOUT_MS) обрывается:
+// { success: false, timedOut: true } — исход НЕИЗВЕСТЕН (сервер мог успеть выполнить
+// запрос), поэтому это не networkError. Раньше зависший запрос держал кнопку и флаг
+// «идёт отправка» навсегда. Тот, кто повторяет запрос (отправка сообщения), делает
+// это идемпотентно — с тем же clientMessageId.
 async function api(url, options = {}, retried = false) {
-    const { skipAuthCheck = false, ...init } = options;
+    const { skipAuthCheck = false, timeoutMs = API_TIMEOUT_MS, ...init } = options;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     let res;
     try {
         res = await fetch(url, {
             ...init,
+            signal: controller.signal,
             headers: {
                 'Content-Type': 'application/json',
                 'X-CSRF-Token': getCsrfToken(),
@@ -56,13 +65,19 @@ async function api(url, options = {}, retried = false) {
             },
         });
     } catch {
+        clearTimeout(timer);
+        if (controller.signal.aborted) return { success: false, timedOut: true, message: TIMED_OUT_MESSAGE };
         return { success: false, networkError: true, message: 'Нет соединения с сервером' };
     }
+    // Таймер держится и пока читается тело ответа: оборванный на середине ответ тоже зависание.
     let data;
     try {
         data = await res.json();
     } catch {
+        if (controller.signal.aborted) return { success: false, timedOut: true, message: TIMED_OUT_MESSAGE };
         return { success: false, httpStatus: res.status, message: `Ошибка сервера (HTTP ${res.status})` };
+    } finally {
+        clearTimeout(timer);
     }
     if (!data || typeof data !== 'object') return { success: false, httpStatus: res.status, message: `Ошибка сервера (HTTP ${res.status})` };
     // Статус нужен тем, кто различает исходы (повтор отправки после 5xx и 409,
@@ -113,12 +128,36 @@ function postFormDataWithProgress(url, formData, options = {}, retried = false) 
         xhr.responseType = 'text';
         xhr.setRequestHeader('X-CSRF-Token', getCsrfToken());
         if (typeof options.onXhr === 'function') options.onXhr(xhr);
+        // Загрузка большого файла может идти долго, поэтому часы тут не общие, а на «тишину»:
+        // нет ни байта прогресса (а после отправки — ни байта ответа) дольше stallMs — обрыв
+        // с { timedOut: true }. Отмена пользователем остаётся { aborted: true }.
+        const stallMs = options.stallMs || UPLOAD_STALL_MS;
+        let stalled = false;
+        let stallTimer = null;
+        const armStall = () => {
+            clearTimeout(stallTimer);
+            stallTimer = setTimeout(() => {
+                stalled = true;
+                try { xhr.abort(); } catch { /* запрос уже завершён */ }
+            }, stallMs);
+        };
         xhr.upload.onprogress = (e) => {
+            armStall();
             if (e.lengthComputable && typeof options.onProgress === 'function') options.onProgress(e.loaded / e.total);
         };
-        xhr.onabort = () => resolve({ success: false, aborted: true, message: 'Загрузка отменена' });
-        xhr.onerror = () => resolve({ success: false, networkError: true, message: 'Нет соединения с сервером' });
+        xhr.upload.onload = armStall; // всё отправлено — ждём ответ сервера
+        xhr.onabort = () => {
+            clearTimeout(stallTimer);
+            resolve(stalled
+                ? { success: false, timedOut: true, message: TIMED_OUT_MESSAGE }
+                : { success: false, aborted: true, message: 'Загрузка отменена' });
+        };
+        xhr.onerror = () => {
+            clearTimeout(stallTimer);
+            resolve({ success: false, networkError: true, message: 'Нет соединения с сервером' });
+        };
         xhr.onload = async () => {
+            clearTimeout(stallTimer);
             let data;
             try {
                 data = JSON.parse(xhr.responseText);
@@ -134,6 +173,7 @@ function postFormDataWithProgress(url, formData, options = {}, retried = false) 
             onUnauthorizedResponse(data);
             resolve(data || { success: false });
         };
+        armStall();
         xhr.send(formData);
     });
 }
