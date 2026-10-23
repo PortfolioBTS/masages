@@ -495,26 +495,69 @@ function hideMessageMenu() {
 }
 
 // ---- Реакции ----
-// Сервер хранит эмодзи и отдаёт по сообщению список различных реакций
-// (без счётчиков и без «чья»). Свои реакции этой сессии помним локально,
-// чтобы повторный выбор в пикере снимал реакцию.
-const myReactions = new Map();   // messageId -> Set(emoji)
+// Сервер отдаёт по сообщению список {emoji, count, mine}: сколько человек поставили
+// эмодзи и стоит ли оно у меня («моя» нужна, чтобы после перезагрузки реакцию можно
+// было снять). Изменения других участников приходят событием reactionChanged
+// (абсолютное число, не «+1»), свои — ответом на POST/DELETE; порядок прихода
+// ответа и события поэтому не важен. Кто именно поставил, не сообщается.
+
+// Элемент списка реакций приводится к виду {emoji, count, mine}: событие newMessage
+// и старые клиентские объекты могут нести просто строку-эмодзи.
+function normalizeReaction(item) {
+    if (item && typeof item === 'object') {
+        return { emoji: item.emoji, count: Math.max(0, Number(item.count) || 0), mine: item.mine === true };
+    }
+    return { emoji: item, count: 1, mine: false };
+}
+
+function messageReactions(message) {
+    return (Array.isArray(message.reactions) ? message.reactions : []).map(normalizeReaction);
+}
+
+function myReaction(message, emoji) {
+    return messageReactions(message).some((entry) => entry.emoji === emoji && entry.mine);
+}
+
+// Записывает в сообщение итог по одному эмодзи. mine === undefined — «не знаем,
+// моя ли» (событие от другого участника): отметка остаётся прежней.
+function setReactionState(message, emoji, count, mine) {
+    const list = messageReactions(message);
+    const index = list.findIndex((entry) => entry.emoji === emoji);
+    const previous = index >= 0 ? list[index] : null;
+    const next = {
+        emoji,
+        count: Math.max(0, Number(count) || 0),
+        mine: typeof mine === 'boolean' ? mine : Boolean(previous && previous.mine),
+    };
+    if (index >= 0) list.splice(index, 1);
+    if (next.count > 0) list.push(next);
+    message.reactions = list;
+}
+
+// Применяет новый итог по эмодзи к сообщению в ленте и перерисовывает его реакции.
+function applyReactionChange(messageId, emoji, count, mine) {
+    const bubble = findMessageEl(messageId);
+    const message = bubble && bubble._message;
+    if (!message) return;
+    setReactionState(message, emoji, count, mine);
+    const container = bubble.querySelector('.reactions');
+    if (container) renderReactions(container, message);
+    if (menuMessage && String(menuMessage.id) === String(messageId)) updateReactionPicker(menuMessage);
+}
 
 function renderReactions(container, message) {
-    const list = Array.isArray(message.reactions) ? message.reactions : [];
-    const mine = myReactions.get(String(message.id)) || new Set();
+    const list = messageReactions(message);
     const items = [];
     REACTIONS.forEach((r) => {
-        const entry = list.find(x => (x && typeof x === 'object' ? x.emoji : x) === r.emoji);
+        const entry = list.find((x) => x.emoji === r.emoji);
         if (!entry) return;
-        const count = entry && typeof entry === 'object' ? Number(entry.count) || 0 : 0;
         const el = document.createElement('span');
-        el.className = 'reaction' + (mine.has(r.emoji) ? ' is-active' : '');
-        el.title = r.label;
+        el.className = 'reaction' + (entry.mine ? ' is-active' : '');
+        el.title = entry.mine ? `${r.label} (вы)` : r.label;
         el.appendChild(icon(r.icon, { size: 'sm', className: 'icon-fill', label: r.label }));
-        if (count > 1) {
+        if (entry.count > 1) {
             const n = document.createElement('span');
-            n.textContent = String(count);
+            n.textContent = String(entry.count);
             el.appendChild(n);
         }
         items.push(el);
@@ -543,19 +586,16 @@ function buildReactionPicker() {
 }
 
 function updateReactionPicker(message) {
-    const mine = myReactions.get(String(message.id)) || new Set();
     elements.reactionPicker.querySelectorAll('.reaction-option').forEach((btn) => {
         const r = REACTIONS[Number(btn.dataset.index)];
-        const on = Boolean(r) && mine.has(r.emoji);
+        const on = Boolean(r) && myReaction(message, r.emoji);
         btn.setAttribute('aria-pressed', on ? 'true' : 'false');
         btn.classList.toggle('is-active', on);
     });
 }
 
 async function toggleReaction(message, emoji) {
-    const key = String(message.id);
-    const mine = myReactions.get(key) || new Set();
-    const removing = mine.has(emoji);
+    const removing = myReaction(message, emoji);
     const data = removing
         ? await api(`/api/reactions/${encodeURIComponent(message.id)}/${encodeURIComponent(emoji)}`, { method: 'DELETE' })
         : await api('/api/reactions', { method: 'POST', body: JSON.stringify({ messageId: message.id, emoji }) });
@@ -563,25 +603,12 @@ async function toggleReaction(message, emoji) {
         showToast(data.message || 'Не удалось сохранить реакцию', 'error');
         return;
     }
-    const list = Array.isArray(message.reactions) ? message.reactions.slice() : [];
-    const has = list.some(x => (x && typeof x === 'object' ? x.emoji : x) === emoji);
-    if (removing) {
-        mine.delete(emoji);
-        // Реакция, которой не было в ответе сервера, — только наша: убираем.
-        // Пришедшую с сервером могли поставить и другие — оставляем до
-        // следующей загрузки истории.
-        if (!message._serverReactions || !message._serverReactions.has(emoji)) {
-            message.reactions = list.filter(x => (x && typeof x === 'object' ? x.emoji : x) !== emoji);
-        }
-    } else {
-        mine.add(emoji);
-        if (!message._serverReactions) message._serverReactions = new Set(list.map(x => (x && typeof x === 'object' ? x.emoji : x)));
-        if (!has) message.reactions = [...list, emoji];
-    }
-    myReactions.set(key, mine);
-    const bubble = elements.chatMessages.querySelector(`[data-message-id="${CSS.escape(key)}"]`);
-    const container = bubble && bubble.querySelector('.reactions');
-    if (container) renderReactions(container, bubble._message || message);
+    // Число — из ответа сервера (с учётом реакций, поставленных другими за это время).
+    // Ответа без числа быть не должно; на случай старого сервера считаем сами.
+    const known = messageReactions(message).find((entry) => entry.emoji === emoji);
+    const before = known ? known.count : 0;
+    const count = typeof data.count === 'number' ? data.count : Math.max(0, before + (removing ? -1 : 1));
+    applyReactionChange(message.id, emoji, count, !removing);
 }
 
 function clearReply() {

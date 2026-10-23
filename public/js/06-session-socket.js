@@ -488,7 +488,6 @@ function leaveApp(message) {
     roomParticipants.clear();
     chatListData = [];
     chatsById.clear();
-    myReactions.clear();
     resetChatView();
     closeAllModals();
     hideChatItemMenu();

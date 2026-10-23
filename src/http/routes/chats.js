@@ -237,13 +237,19 @@ function register(app, ctx) {
             if (hasMore) rows.length = limit;
             rows.reverse();
 
+            // Реакции: [{ emoji, count, mine }] — сколько человек поставили эмодзи и стоит ли оно
+            // у читающего (по нему клиент после перезагрузки умеет снять реакцию). Кто именно
+            // поставил, не отдаётся.
             const reactionsMap = {};
             if (rows.length > 0) {
                 const reactions = await dbAll(
-                    'SELECT message_id, ARRAY_AGG(DISTINCT emoji) AS emojis FROM reactions WHERE message_id = ANY($1::int[]) GROUP BY message_id',
-                    [rows.map(m => m.id)]
+                    `SELECT message_id, emoji, COUNT(*)::int AS count, BOOL_OR(user_id = $2) AS mine
+                     FROM reactions WHERE message_id = ANY($1::int[]) GROUP BY message_id, emoji ORDER BY message_id, emoji`,
+                    [rows.map(m => m.id), userId]
                 );
-                reactions.forEach(r => { reactionsMap[r.message_id] = r.emojis; });
+                reactions.forEach(r => {
+                    (reactionsMap[r.message_id] ||= []).push({ emoji: r.emoji, count: r.count, mine: r.mine });
+                });
             }
 
             const messages = chat.room_id
