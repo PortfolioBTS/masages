@@ -9,7 +9,7 @@ const {
 } = require('../../lib/message-crypto');
 const { sanitizeText } = require('../../lib/privacy');
 const { anonymizedFileName } = require('../../lib/security-utils');
-const { reserveUploadQuota } = require('../../lib/upload-quota');
+const { reserveUploadQuota, remainingUploadQuota } = require('../../lib/upload-quota');
 const { logError } = require('../../lib/log-error');
 // Огрубление времени сообщений и файлов (раздел 11 контракта).
 const { floorToMinute } = require('../../lib/coarse-time');
@@ -347,9 +347,14 @@ function createMessages(ctx) {
         return userCanAccessMessage(userId, message.id);
     }
 
+    // Остаток квоты вложений пользователя (подсказка до обработки файла, R1 п.1).
+    function uploadQuotaLeft(userId) {
+        return remainingUploadQuota({ dbGet }, authorTags.qkey(userId), UPLOAD_QUOTA_BYTES);
+    }
+
     return {
         insertChatMessage, insertRoomMessage, describeMessageIdUse, advanceSenderMarker, findOwnMessage,
-        userCanAccessMessage, userCanAccessFile,
+        userCanAccessMessage, userCanAccessFile, uploadQuotaLeft,
     };
 }
 

@@ -28,7 +28,7 @@ function register(app, ctx) {
     const {
         UPLOAD_QUOTA_BYTES, UPLOADS_DIR, cleanupUploadedFile, rejectUpload, rejectUploadWith, io,
         emitRoomMessageEvent, newMessageExpirySeconds, getOwnChat, unarchiveForRecipients, insertChatMessage,
-        insertRoomMessage, describeMessageIdUse, advanceSenderMarker, upload,
+        insertRoomMessage, describeMessageIdUse, advanceSenderMarker, upload, uploadQuotaLeft,
     } = ctx;
 
     // Квота вложений (sealed-sender.md, раздел 13): объём ЗАГРУЗОК ЗА ОКНО В 30 ДНЕЙ,
@@ -110,6 +110,12 @@ function register(app, ctx) {
             if (file.size > UPLOAD_QUOTA_BYTES) {
                 return rejectUpload(res, file, 413, 'Превышена квота хранилища вложений');
             }
+            // Остаток квоты — ДО санитайзера (R1 п.1): резерв делается только в
+            // транзакции вставки, а обработка файла дорогая; аккаунт с исчерпанной
+            // квотой иначе гонял бы её впустую. Окончательно решает резерв в транзакции.
+            if (file.size > await uploadQuotaLeft(userId)) {
+                return rejectUpload(res, file, 413, 'Превышена квота хранилища вложений');
+            }
         } catch (err) {
             cleanupUploadedFile(file);
             throw err;
@@ -128,6 +134,12 @@ function register(app, ctx) {
                 await stripMetadataFromFile(uploadedFilePath, file.mimetype);
                 fileSize = (await fs.promises.stat(uploadedFilePath)).size;
             } catch (magicErr) {
+                // Очередь обработки переполнена (lib/work-limiter.js): не ошибка файла,
+                // повтор через несколько секунд пройдёт. В лог не пишем — это штатный отказ.
+                if (magicErr && magicErr.busy) {
+                    res.set('Retry-After', '5');
+                    return rejectUpload(res, file, 503, magicErr.message);
+                }
                 // Раньше при исключении здесь проверка молча пропускалась и файл
                 // проходил дальше — теоретическая лазейка мимо проверки типа файла.
                 // Теперь любая ошибка проверки = отказ (fail closed), а не fail open.
