@@ -331,6 +331,12 @@
                 return logSeen ? { ok: false, reason: 'network' } : { ok: false, reason: 'unavailable' };
             }
             if (transient(res)) return { ok: false, reason: 'network' };
+            // Прочие 4xx (кроме 401 - сессия закончилась, это не ответ журнала) сервер на /api/kt/head не отдаёт: для клиента,
+            // видевшего журнал, это не сбой сети, а тревога (7.3, п. 2). Сервер не должен получать «тихий» повтор за ответ 4xx.
+            if (logSeen && res.status >= 400 && res.status < 500 && res.status !== 401) {
+                await addAlert('log-disabled', { status: res.status, reason: 'unexpected-status' });
+                return { ok: false, reason: 'disabled' };
+            }
             if (res.status !== 200 || data.success !== true) {
                 warn('Журнал ключей: неожиданный ответ /api/kt/head:', res.status);
                 return { ok: false, reason: 'network' };
@@ -697,6 +703,25 @@
 
         const ktFor = (pin) => pin.signPub + ':' + pin.dhPub;
 
+        // Задача 'peer' не завершилась из-за сети, 5xx или kt-not-ready: статус при этом не меняется (7.3, п. 2), но и «ждать
+        // доказательства» бесконечно нельзя - сервер, отвечающий отказами, держал бы подменённый ключ в pending, а ключ комнаты
+        // тем временем уходил бы на него. Через PENDING_MS по локальным часам от since.at (момент, когда ключ стал pending)
+        // pending становится mismatch 'kt-unreachable' (7.3, п. 6б); задача остаётся в очереди, и когда журнал ответит, статус
+        // пересчитается (ok, если ключ в журнале). true - статус изменён.
+        async function expireUnreachablePeer(task) {
+            return withLock(async () => {
+                const name = 'peer:' + task.u;
+                const pin = await storage.get(name);
+                if (!pin || pin.pending || pin.signPub !== task.signPub || pin.dhPub !== task.dhPub) return false;
+                const kt = pin.kt;
+                if (!kt || kt.for !== ktFor(pin) || kt.status !== 'pending' || !kt.since || !Number.isSafeInteger(kt.since.at)) return false;
+                if (now() - kt.since.at < PENDING_MS) return false;
+                pin.kt = { ...kt, status: 'mismatch', reason: 'kt-unreachable' };
+                await storage.set(name, pin);
+                return true;
+            });
+        }
+
         // ---------- Очередь задач (7.6) ----------
 
         async function readQueue() {
@@ -1051,7 +1076,11 @@
                 if (task.kind === 'self') continue;
                 try {
                     const result = task.kind === 'peer' ? await evaluatePeer(task, sync) : await evaluateGossip(task, sync);
-                    if (result.retry) { retry = true; continue; }
+                    if (result.retry) {
+                        retry = true;
+                        if (task.kind === 'peer') await expireUnreachablePeer(task);
+                        continue;
+                    }
                     if (task.kind === 'peer') await applyPeerResult(task, result);
                     await removeTask(task);
                 } catch (error) {
