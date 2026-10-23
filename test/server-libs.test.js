@@ -149,12 +149,13 @@ async function main() {
         assert.strictEqual(decryptText(stored, messageAad({ room_id: null, chat_id: 11, user_id: 7 })), 'только для чата 11');
     });
 
-    await test('message-crypto: legacy v1 records and unprefixed strings still read', async () => {
+    await test('message-crypto: unprefixed strings still read; legacy v1 (no AAD) is no longer accepted (R0, ревью R4 W7 З5)', async () => {
         const { decryptText, messageAad } = loadMessageCrypto(b64(KEY_A));
         const v1 = encryptV1(KEY_A, 'старое сообщение');
-        assert.strictEqual(decryptText(v1), 'старое сообщение');
-        // AAD для v1 не используется, но и не мешает — сервер передаёт его всегда.
-        assert.strictEqual(decryptText(v1, messageAad({ chat_id: 1, user_id: 1 })), 'старое сообщение');
+        // Запись без AAD не привязана ни к чату, ни к пользователю: её нельзя ни читать, ни выдавать за текст.
+        let v1Result;
+        await withQuietConsole(() => { v1Result = [decryptText(v1), decryptText(v1, messageAad({ chat_id: 1, user_id: 1 }))]; });
+        assert.deepStrictEqual(v1Result, [FAILED, FAILED]);
         assert.strictEqual(decryptText('[Сообщение удалено]', 'nyxo:msg:v2:chat=1:user=1'), '[Сообщение удалено]');
         assert.strictEqual(decryptText('plain text before encryption'), 'plain text before encryption');
         let result;
@@ -171,7 +172,9 @@ async function main() {
         // Новый ключ B, старые A и C — в PREVIOUS (через запятую, с пробелами).
         const rotated = loadMessageCrypto(b64(KEY_B), ` ${b64(KEY_C)} , ${b64(KEY_A)} `);
         assert.strictEqual(rotated.decryptText(storedUnderA, aad), 'до ротации');
-        assert.strictEqual(rotated.decryptText(v1UnderA), 'совсем старое');
+        let v1Rotated;
+        await withQuietConsole(() => { v1Rotated = rotated.decryptText(v1UnderA); });
+        assert.strictEqual(v1Rotated, FAILED, 'enc:v1 не читается и после ротации');
         const storedUnderB = rotated.encryptText('после ротации', aad);
         assert.strictEqual(storedUnderB.split(':')[2], kidOf(KEY_B), 'new records use the current key');
         assert.strictEqual(rotated.decryptText(storedUnderB, aad), 'после ротации');
