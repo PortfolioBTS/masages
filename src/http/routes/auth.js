@@ -21,7 +21,7 @@ function register(app, ctx) {
     const {
         SESSION_RENEW_MS, metrics, withTransaction, registerLimiter, startUserSession, endSession,
         anonActivity, checkPow, respondPowFailure, generateUniqueCodeAsync, generateAnonymousUsernameAsync,
-        loadAccount, deleteUserAccount,
+        loadAccount, deleteUserAccount, registerGlobalGate, noteRegistration,
     } = ctx;
 
     // lifetime: 'tab' | 'day' | 'week' (по умолчанию 'tab') — см.
@@ -41,6 +41,8 @@ function register(app, ctx) {
         }
         const powVerdict = await checkPow(req, 'register-anon');
         if (powVerdict !== 'ok') return respondPowFailure(res, powVerdict);
+        // Глобальный потолок регистраций в минуту - после PoW, чтобы его не тратили запросы без решения.
+        if (!(await registerGlobalGate(res))) return;
         try {
             const uniqueCode = await generateUniqueCodeAsync();
             const username = await generateAnonymousUsernameAsync();
@@ -66,6 +68,7 @@ function register(app, ctx) {
             // создания — id — имя" в логах хостинга как раз и деанонимизирует.
 
             metrics.registered();
+            noteRegistration();
             res.json({
                 success: true,
                 user: {

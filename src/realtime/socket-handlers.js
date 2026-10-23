@@ -12,7 +12,7 @@ const { MAX_SOCKETS_PER_USER, MAX_SOCKETS_PER_IP, getSocketRoomKey } = require('
 // на чаты делается сервером, так что любой поток событий - не работа, а нагрузка. SOCKET_EVENT_RATE
 // - событий в секунду в среднем, SOCKET_EVENT_BURST - всплеск. Превышение - disconnect.
 function envInt(value, fallback) {
-    const n = Number(value);
+    const n = typeof value === 'string' && /^\d{1,9}$/.test(value.trim()) ? Number(value) : NaN;
     return Number.isInteger(n) && n >= 1 ? n : fallback;
 }
 

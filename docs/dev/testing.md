@@ -76,7 +76,11 @@ worktree, на одном контейнере) друг другу не меш�
   (`PATH`, `SystemRoot`, `TEMP`…), `NODE_ENV=test`, `HOST=127.0.0.1`, `PORT`,
   `DATABASE_URL`, случайные `SESSION_SECRET` и `MESSAGE_ENCRYPTION_KEY` на набор
   (общие для его реплик), `POW_DIFFICULTY=8`, `UPLOADS_DIR=<tmp>/uploads`,
-  `PG_POOL_MAX=3`, `CLEANUP_INTERVAL_MS=500`, `NYXO_TEST_MAINTENANCE_MS=300`.
+  `PG_POOL_MAX=3`, `CLEANUP_INTERVAL_MS=500`, `NYXO_TEST_MAINTENANCE_MS=300`,
+  а также ослабленные лимиты против массовых аккаунтов: `REGISTER_GLOBAL_PER_MIN=100000`,
+  `REGISTER_PACE_PER_MIN=100000` (иначе набор, заводящий сотни аккаунтов за минуту, упрётся в потолок
+  регистраций и рост сложности PoW) и `UPLOAD_MIN_FREE_MB=1` (результат не зависит от свободного места
+  диска). Свои лимиты проверяют `registration-limits`, `account-quotas`, `upload-disk-guard`.
   Свои переменные набора — `createSuite(name, { env })`, значение `null` убирает
   переменную.
 - **Тестовые ручки** — переменные `NYXO_TEST_*`, действуют **только** при

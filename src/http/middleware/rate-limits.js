@@ -5,7 +5,9 @@
 const rateLimit = require('express-rate-limit');
 const { setSecret: setPowSecret } = require('../../../lib/pow');
 // Точные лимиты и одноразовость PoW в Postgres (UNLOGGED-таблицы, ключи — HMAC).
-const { createPgLimits } = require('../../../lib/pg-limits');
+const { createPgLimits, LimitStoreError, respondBusy } = require('../../../lib/pg-limits');
+// Суточный объём текста на аккаунт (W7 R1 п.3).
+const { createTextQuota } = require('../../../lib/text-quota');
 
 const { ipKeyGenerator } = rateLimit;
 
@@ -14,7 +16,7 @@ const sessionUserId = (req) => (req.session && req.session.userId) || null;
 const RATE_LIMIT_DEFAULTS = { standardHeaders: true, legacyHeaders: false };
 
 function createRateLimits(ctx) {
-    const { sessionSecret, metrics, pool } = ctx;
+    const { sessionSecret, metrics, pool, ACCOUNT_LIMITS } = ctx;
 
     // Точные лимиты (регистрация, вход по коду, выдача ключей) и одноразовость PoW
     // живут в Postgres и создаются ниже, из того же пула и SESSION_SECRET
@@ -70,6 +72,40 @@ function createRateLimits(ctx) {
         message: { success: false, message: 'Слишком много регистраций. Попробуйте позже.' }
     });
 
+    // Глобальный потолок регистраций в минуту (W7 R1 п.3), в том числе onion: IP-лимит
+    // выше там не действует, а PoW (~0,14 с на аккаунт) сам по себе массовость не останавливает.
+    // Проверяется ПОСЛЕ успешного PoW (registerGlobalGate): запросы без решённой задачи
+    // потолок не расходуют, иначе любой забил бы его мусором. Рядом растёт сложность PoW
+    // (src/services/pow.js): потолок - последняя линия, а не основной рубеж.
+    const registerGlobalLimiter = pgLimits.rateLimiter('register-all', {
+        windowMs: 60 * 1000,
+        max: ACCOUNT_LIMITS.registerGlobalPerMin,
+        keyGenerator: () => 'all',
+    });
+    // true - регистрировать можно; false - ответ (429 или 503 busy) уже отправлен.
+    async function registerGlobalGate(res) {
+        try {
+            const { totalHits, resetTime } = await registerGlobalLimiter.store.increment('all');
+            if (totalHits <= ACCOUNT_LIMITS.registerGlobalPerMin) return true;
+            metrics.rateLimited('register-all');
+            const waitSeconds = Math.max(1, Math.ceil((new Date(resetTime).getTime() - Date.now()) / 1000));
+            res.set('Retry-After', String(waitSeconds));
+            res.status(429).json({
+                success: false, code: 'registration-busy',
+                message: 'Сейчас регистрируется слишком много аккаунтов. Повторите через минуту.',
+            });
+            return false;
+        } catch (err) {
+            if (!(err instanceof LimitStoreError)) throw err;
+            metrics.limitStoreError('register-all');
+            respondBusy(res);
+            return false;
+        }
+    }
+
+    // Суточный объём текста сообщений на аккаунт (lib/text-quota.js).
+    const textQuota = createTextQuota({ pool, secret: sessionSecret, limitBytes: ACCOUNT_LIMITS.textQuotaBytesPerDay });
+
     // Вход в комнату по коду: даже 130-битный код не должен перебираться
     // с бесконечной скоростью, и утёкший список кодов — массово проверяться.
     const joinUserLimiter = pgLimits.rateLimiter('join-user', {
@@ -89,7 +125,7 @@ function createRateLimits(ctx) {
 
     return {
         apiLimiter, pgLimits, powUsedStore, bundleLimiter, keyShareLimiter, keyRequestLimiter,
-        memberCertLimiter, registerLimiter, joinUserLimiter, joinIpLimiter,
+        memberCertLimiter, registerLimiter, joinUserLimiter, joinIpLimiter, registerGlobalGate, textQuota,
     };
 }
 

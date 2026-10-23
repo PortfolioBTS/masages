@@ -17,6 +17,7 @@ const { SAFE_FILENAME_RE } = require('../../services/uploads');
 const { EarlyResponse } = require('../early-response');
 const { toPositiveInt } = require('../params');
 const { e2eePolicyViolation, expectedFileMessageText, messageFromRow } = require('../../services/messages');
+const { STORAGE_FULL_MESSAGE } = require('../../../lib/account-limits');
 
 // ALLOWED_MIME_TYPES и MIME_EXTENSIONS (жёсткий маппинг mimetype ->
 // расширение на диске, расширение никогда не берётся из имени файла) —
@@ -29,7 +30,7 @@ const { e2eePolicyViolation, expectedFileMessageText, messageFromRow } = require
 const BLOCKED_EXTENSIONS = new Set(['.html', '.htm', '.php', '.exe', '.js', '.sh', '.py', '.rb', '.pl', '.bat', '.cmd', '.ps1', '.vbs', '.jar', '.msi', '.svg']);
 
 function createUploadMiddleware(ctx) {
-    const { UPLOADS_DIR, getOwnChat, describeMessageIdUse } = ctx;
+    const { UPLOADS_DIR, getOwnChat, describeMessageIdUse, diskGuard } = ctx;
 
     const upload = multer({
         storage: multer.diskStorage({
@@ -105,6 +106,10 @@ function createUploadMiddleware(ctx) {
     async function checkUploadBeforeStore(session, body, file) {
         const userId = session && session.userId;
         if (!userId) throw new EarlyResponse(401, { success: false, message: 'Не авторизован' });
+        // Места на томе вложений почти нет (UPLOAD_MIN_FREE_MB): файл не принимается совсем (R1 п.3).
+        if (!(await diskGuard.hasRoom())) {
+            throw new EarlyResponse(507, { success: false, code: 'storage-full', message: STORAGE_FULL_MESSAGE });
+        }
         // Общий признак версии клиента (message-ordering.md, 14.1) — первая проверка
         // запроса после сессии. Поле proto лежит в FormData ДО файла; пришло позже —
         // здесь его ещё нет, и ответ — client-outdated.

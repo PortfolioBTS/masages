@@ -50,7 +50,9 @@ test('допустимые значения принимаются, гранич
             const r = checkEnv(goodEnv({ [knob.name]: String(ok) }));
             assert.strictEqual(r.warnings.filter(w => w.name === knob.name).length, 0, `${knob.name}=${ok}`);
         }
-        for (const bad of ['abc', '1.5', String(knob.max + 1), String(knob.min - 1), '-1']) {
+        // Дробное допустимо только у настроек в мегабайтах; экспонента и шестнадцатеричная запись - никогда.
+        const bads = ['abc', '1e1', '0x10', String(knob.max + 1), String(knob.min - 1), '-1'].concat(knob.float ? [] : ['1.5']);
+        for (const bad of bads) {
             const r = checkEnv(goodEnv({ [knob.name]: bad }));
             const warnings = r.warnings.filter(w => w.name === knob.name);
             assert.strictEqual(warnings.length, 1, `${knob.name}=${bad}`);

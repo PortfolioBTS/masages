@@ -2,6 +2,7 @@
 // Заявки на вступление: список для участников, свои заявки, одобрение, отказ, отзыв. Вынесено из server.js.
 
 const { ROOM_FULL_MESSAGE } = require('../../../lib/invites');
+const { roomsLimitMessage } = require('../../../lib/account-limits');
 const { isClientOutdated: isOutdatedProto } = require('../../../lib/proto');
 // Подписанный состав группы (signed-membership.md): проверки сертификатов на сервере и общий с клиентом разбор.
 const MembershipCerts = require('../../../lib/membership-certs');
@@ -15,7 +16,7 @@ const { respondIfDeadlock } = require('../../db/transactions');
 
 function register(app, ctx) {
     const {
-        notifyJoinRequestsChanged, notifyJoinRequestDecided, dbGet, dbAll, getOwnChat, addRoomMember,
+        notifyJoinRequestsChanged, notifyJoinRequestDecided, dbGet, dbAll, getOwnChat, addRoomMember, ACCOUNT_LIMITS,
         identityKeysOf, kt,
     } = ctx;
 
@@ -142,6 +143,10 @@ function register(app, ctx) {
                 return null;
             });
             if (result.error === 'full') return res.json({ success: false, message: ROOM_FULL_MESSAGE });
+            // У заявителя уже предельное число групп: заявка остаётся, одобряющему сказано почему.
+            if (result.error === 'rooms-limit') {
+                return res.status(409).json({ success: false, code: 'rooms-limit', message: 'У заявителя уже предельное число групп на аккаунте. Одобрить заявку сейчас нельзя.' });
+            }
             if (result.error === 'not-participant') {
                 return res.status(404).json({ success: false, code: 'not-participant', message: 'Вы больше не состоите в этой группе' });
             }
