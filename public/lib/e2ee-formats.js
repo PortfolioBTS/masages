@@ -20,7 +20,7 @@
     'use strict';
 
     const {
-        b64decode, decodeFixed, canonicalPubKey, utf8encode, utf8decode, concatBytes,
+        b64decode, b64decodeCanonical, decodeFixed, canonicalPubKey, utf8encode, utf8decode, concatBytes,
         u32be, u64be, isKeyId, isCanonicalKeyId,
     } = Codec;
 
@@ -85,7 +85,7 @@
         if (!env || typeof env !== 'object' || env.v !== 2 || env.type !== 'skdm') return null;
         if (!Number.isSafeInteger(env.n) || env.n < 0) return null;
         const iv = decodeFixed(env.iv, 12);
-        const ct = typeof env.ct === 'string' ? b64decode(env.ct) : null;
+        const ct = typeof env.ct === 'string' ? b64decodeCanonical(env.ct) : null;
         if (!iv || !ct || ct.length < 16) return null;
         const h = env.init;
         if (!h || typeof h !== 'object') return null;

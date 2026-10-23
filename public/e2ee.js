@@ -361,7 +361,7 @@
     const Formats = resolveCoreModule(typeof NyxoE2eeFormats !== 'undefined' ? NyxoE2eeFormats : null, './lib/e2ee-formats.js', 'lib/e2ee-formats.js');
     const KeyState = resolveCoreModule(typeof NyxoE2eeState !== 'undefined' ? NyxoE2eeState : null, './lib/e2ee-state.js', 'lib/e2ee-state.js');
     const {
-        MSG_PAD_MIN, FILE_PAD_MIN, b64encode, b64decode, decodeFixed, canonicalPubKey,
+        MSG_PAD_MIN, FILE_PAD_MIN, b64encode, b64decode, b64decodeCanonical, decodeFixed, canonicalPubKey,
         utf8encode, utf8decode, concatBytes, bytesEqual, toBytes, isKeyId,
         isU32, isCanonicalKeyId, padmeLength, padMessage, unpadMessage, filePaddedLength,
     } = Codec;
@@ -3273,7 +3273,7 @@
             if (!isCanonicalKeyId(envelope.senderKeyId)) return bad;
             const iv = decodeFixed(envelope.iv, 12);
             const sig = decodeFixed(envelope.sig, 64);
-            const ct = typeof envelope.ct === 'string' ? b64decode(envelope.ct) : null;
+            const ct = typeof envelope.ct === 'string' ? b64decodeCanonical(envelope.ct) : null;
             if (!iv || !sig || !ct || ct.length < 16) return bad;
             const iteration = envelope.iteration;
             const keyId = envelope.senderKeyId;

@@ -71,11 +71,18 @@
         return out.slice(0, pos);
     }
 
-    // Строгое декодирование поля фиксированной длины из недоверенного JSON.
-    function decodeFixed(str, len) {
+    // Каноническое base64 из недоверенного ввода: алфавит, выравнивание "=" и нулевые лишние биты. b64decode вычищает
+    // посторонние символы и принимает неканоническое написание тех же байт; здесь любое отклонение - null (ревью R4 W7, З7).
+    function b64decodeCanonical(str) {
         if (typeof str !== 'string') return null;
         const bytes = b64decode(str);
-        return bytes.length === len ? bytes : null;
+        return b64encode(bytes) === str ? bytes : null;
+    }
+
+    // Строгое декодирование поля фиксированной длины из недоверенного JSON.
+    function decodeFixed(str, len) {
+        const bytes = b64decodeCanonical(str);
+        return bytes && bytes.length === len ? bytes : null;
     }
 
     // Публичный ключ X25519/Ed25519 в каноническом base64. Сравниваем ключи
@@ -176,10 +183,14 @@
         return out;
     }
 
+    // Строго: длина буфера - ровно класс Padmé для объявленной длины (как у padMessage), а дополнение - только нули.
+    // Иначе отправитель мог бы класть в дополнение произвольные данные (скрытый канал), а размер - выбирать любой.
     function unpadMessage(buf) {
         if (buf.length < 4) return null;
         const len = ((buf[0] << 24) >>> 0) + (buf[1] << 16) + (buf[2] << 8) + buf[3];
         if (len > buf.length - 4) return null;
+        if (buf.length !== Math.max(MSG_PAD_MIN, padmeLength(4 + len))) return null;
+        for (let i = 4 + len; i < buf.length; i++) if (buf[i] !== 0) return null;
         return buf.subarray(4, 4 + len);
     }
 
@@ -188,7 +199,7 @@
     }
 
     return Object.freeze({
-        MSG_PAD_MIN, FILE_PAD_MIN, b64encode, b64decode, decodeFixed, canonicalPubKey,
+        MSG_PAD_MIN, FILE_PAD_MIN, b64encode, b64decode, b64decodeCanonical, decodeFixed, canonicalPubKey,
         utf8encode, utf8decode, concatBytes, bytesEqual, u32be, u64be,
         toBytes, isKeyId, isU32, isAllZero, isCanonicalKeyId, padmeLength,
         padMessage, unpadMessage, filePaddedLength,
