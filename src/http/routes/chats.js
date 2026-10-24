@@ -274,9 +274,16 @@ function register(app, ctx) {
                     } : (reply_target_id ? { id: reply_target_id, deleted: true } : null)
                 }));
 
-            // Первая (самая свежая) страница = пользователь видит конец чата.
+            // Первая (самая свежая) страница = пользователь видит конец чата. Отметка
+            // прочитанного — побочное действие загрузки: её сбой (взаимная блокировка с
+            // отправкой, таймаут блокировки; ревью W7 R2.9) не должен ломать саму историю —
+            // клиент отметит прочитанное позже через POST /api/chats/:chatId/read.
             if (!beforeSeq && messages.length > 0) {
-                await markChatRead(chat, userId, messages[messages.length - 1].seq);
+                try {
+                    await markChatRead(chat, userId, messages[messages.length - 1].seq);
+                } catch (err) {
+                    logError('[Chats] Не удалось отметить прочитанное при загрузке истории', err);
+                }
             }
 
             res.json({
