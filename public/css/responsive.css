@@ -347,3 +347,58 @@
         min-height: 44px;
     }
 }
+
+
+/* --------------------------------------------------------------------------
+   18. Телефон 320 px: экран входа (T7.3, п.18 ревью W7 R3).
+   На 320×640 главная кнопка «Начать анонимно» уходила ниже первого экрана на ~75 px. Здесь
+   отступы и размеры сжаты ровно настолько, чтобы она помещалась целиком: поля карточки и
+   отступы между блоками, знак, заголовок. Варианты срока остаются столбиком (WCAG 1.4.10,
+   controls.css) и по 44 px — это цель нажатия. Блок после «Узких телефонов», иначе они его перебьют.
+   -------------------------------------------------------------------------- */
+
+@media (max-width: 359px) {
+    .auth-screen {
+        padding-top: max(12px, env(safe-area-inset-top));
+        padding-bottom: max(12px, env(safe-area-inset-bottom));
+    }
+
+    .auth-container {
+        padding: 16px;
+    }
+
+    .auth-hero {
+        gap: 4px;
+        margin-bottom: 16px;
+    }
+
+    .logo-icon {
+        width: 36px;
+        height: 36px;
+        margin-bottom: 4px;
+    }
+
+    .auth-hero .logo-icon svg.icon {
+        width: 36px;
+        height: 36px;
+    }
+
+    .auth-hero h1 {
+        font-size: 22px;
+        line-height: 28px;
+    }
+
+    .segmented-option {
+        min-height: 44px;
+    }
+
+    .lifetime-picker,
+    .auth-warning {
+        margin-bottom: 12px;
+    }
+
+    .auth-points {
+        margin-top: 20px;
+        padding-top: 16px;
+    }
+}
