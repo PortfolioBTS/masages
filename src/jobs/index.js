@@ -18,6 +18,8 @@ const { logError } = require('../../lib/log-error');
 const { createJobScheduler, registerJobModules } = require('../../lib/jobs');
 // Огрубление времени сообщений и файлов (раздел 11 контракта).
 const { orphanAgeThresholdMs } = require('../../lib/coarse-time');
+// Уборщик файлов-сирот: вложения без строки messages (ревью W7 R2.5).
+const { createOrphanSweeper } = require('../../lib/orphan-uploads');
 
 // Тестовые ручки сквозных тестов (NYXO_TEST_*, docs/dev/testing.md):
 // действуют ТОЛЬКО при NODE_ENV=test, в production env-check считает их
@@ -30,7 +32,7 @@ function testKnobMs(name) {
 
 function createJobs(ctx) {
     const {
-        UPLOADS_DIR, metrics, userSocketCount, DB_POOL_CONFIG, dbRun, anonActivity, purgeExpiredJoinRequests,
+        UPLOADS_DIR, metrics, userSocketCount, DB_POOL_CONFIG, dbAll, dbRun, anonActivity, purgeExpiredJoinRequests,
         purgeExpiredAnonymousUsers, serverContext,
     } = ctx;
 
@@ -79,6 +81,12 @@ function createJobs(ctx) {
     jobs.register({
         name: 'cleanupStaleTempFiles', run: () => cleanupStaleTempFiles(UPLOADS_DIR, orphanAgeThresholdMs(60 * 60 * 1000)),
         intervalMs: 60 * 60 * 1000, exclusive: false,
+    });
+    // Файлы-сироты (lib/orphan-uploads.js): раз в сутки, в папке этого процесса — у каждого
+    // экземпляра свой volume, поэтому без блокировки. Ссылки проверяются в общей базе.
+    jobs.register({
+        name: 'sweepOrphanUploads', run: createOrphanSweeper({ uploadsDir: UPLOADS_DIR, query: dbAll }),
+        firstDelayMs: 10 * 60 * 1000, intervalMs: 24 * 60 * 60 * 1000, exclusive: false, maintenance: true,
     });
     // Задачи lib-модулей (JOB_MODULES в lib/jobs/index.js).
     registerJobModules(jobs, serverContext);
