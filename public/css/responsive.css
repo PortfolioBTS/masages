@@ -307,3 +307,43 @@
         border-color: CanvasText;
     }
 }
+
+
+/* --------------------------------------------------------------------------
+   17. Сенсорный экран: цели нажатия не меньше 44×44 px (T7.3, п.11 ревью W7 R3).
+   Блок стоит после узких экранов (там кнопки шапки сужены до 36 px) и перебивает их.
+   Индикатор режима в шапке — мелкий по замыслу (20 px), ему достаточно 32 px.
+   -------------------------------------------------------------------------- */
+
+@media (pointer: coarse) {
+    .icon-btn,
+    .icon-btn-sm,
+    .close-modal,
+    .chat-header .icon-btn,
+    .reaction-option,
+    .jump-down {
+        width: 44px;
+        height: 44px;
+    }
+
+    .btn,
+    .btn-sm,
+    .auth-btn,
+    .banner-btn,
+    .member-code-btn,
+    .footer-btn,
+    .menu-item,
+    .suggestion {
+        height: 44px;
+    }
+
+    button.indicator {
+        justify-content: center;
+        min-width: 32px;
+        min-height: 32px;
+    }
+
+    .input-wrapper textarea {
+        min-height: 44px;
+    }
+}
