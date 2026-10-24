@@ -10,6 +10,13 @@ const { deleteQuotaRows } = require('../../lib/upload-quota');
 // Onion-сервис (контейнер tor-service/)
 const { onionUrlFor } = require('../../lib/tor-support');
 const { logError } = require('../../lib/log-error');
+// Пачки до исчерпания с бюджетом времени прохода (ревью W7 R2.11).
+const { drainBatches } = require('../../lib/drain-batches');
+
+// Чистка просроченных анонимов: пачка и бюджет одного прохода. Бюджет меньше интервала
+// задачи (5 минут, src/jobs/index.js): следующий проход не ждёт, пока кончится этот.
+const PURGE_BATCH_SIZE = 200;
+const PURGE_BUDGET_MS = 4 * 60 * 1000;
 const { resetInviteAfterLeave } = require('./rooms');
 const { writeMessageText } = require('./messages');
 
@@ -258,31 +265,31 @@ function createAccounts(ctx) {
     // активность продлевает touch, а сокеты других экземпляров продлевают
     // last_active_at в БД сами. Время — часы сервера, как у записи корзин.
     // Ошибка выборки — наверх, в runExclusive (lib/jobs): такой проход не
-    // засчитывается.
-    async function purgeExpiredAnonymousUsers() {
+    // засчитывается. Проход берёт пачки, пока они полные (раньше — одна пачка в 200
+    // строк раз в 5 минут, и при наплыве аккаунты жили дольше срока), но не дольше
+    // PURGE_BUDGET_MS; остаток — следующему проходу. Аккаунт, который не удалился, в
+    // этом проходе больше не выбирается.
+    async function purgeExpiredAnonymousUsers({ batchSize = PURGE_BATCH_SIZE, budgetMs = PURGE_BUDGET_MS } = {}) {
         const now = Date.now();
         const deadline = (lifetime) => new Date(now - ANON_LIFETIMES[lifetime] * 1000);
-        const rows = await dbAll(`
+        const result = await drainBatches({
+            batchSize, budgetMs, skipIds: userSocketCount.keys(),
+            fetchBatch: (skipIds, limit) => dbAll(`
         SELECT id FROM users
         WHERE ((anon_lifetime = 'tab' AND last_active_at <= $1)
             OR (anon_lifetime = 'day' AND last_active_at <= $2)
             OR (anon_lifetime = 'week' AND last_active_at <= $3))
           AND NOT (id = ANY($4::int[]))
         ORDER BY last_active_at
-        LIMIT 200
-    `, [deadline('tab'), deadline('day'), deadline('week'), userSocketCount.keys()]);
+        LIMIT $5
+    `, [deadline('tab'), deadline('day'), deadline('week'), skipIds, limit]),
+            handle: (row) => deleteUserAccount(row.id),
+            onError: (err) => logError('[Anon] Не удалось удалить просроченный аккаунт', err),
+        });
         // В лог — только счётчики, без id анонимных аккаунтов.
-        let failed = 0;
-        for (const row of rows) {
-            try {
-                await deleteUserAccount(row.id);
-            } catch (err) {
-                failed++;
-                logError('[Anon] Не удалось удалить просроченный аккаунт', err);
-            }
-        }
-        metrics.accountsDeleted('expired', rows.length - failed);
-        if (rows.length > 0) console.log(`[Anon] Удалено просроченных анонимных аккаунтов: ${rows.length - failed}`);
+        metrics.accountsDeleted('expired', result.processed);
+        if (result.processed > 0) console.log(`[Anon] Удалено просроченных анонимных аккаунтов: ${result.processed}`);
+        if (!result.exhausted) console.log('[Anon] Проход чистки упёрся в предел времени — остаток удалит следующий');
     }
 
     return {
