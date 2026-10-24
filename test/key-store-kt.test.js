@@ -133,7 +133,7 @@ async function main() {
         assert.deepStrictEqual(tx.events.slice(-2), ['BEGIN', 'ROLLBACK']);
     });
 
-    await test('ошибка базы внутри транзакции откатывает её и поднимается наверх (маршрут ответит 502)', async () => {
+    await test('ошибка базы внутри транзакции откатывает её и поднимается наверх (маршрут ответит 503 busy или 500)', async () => {
         const { store, db, tx } = setup();
         db.failNextQuery(new Error('обрыв соединения'));
         await assert.rejects(() => put(store, 7, keysBody()), /обрыв соединения/);
