@@ -18,7 +18,9 @@ const {
     apiMessage,
 } = require('../../services/messages');
 const { readFileHead, coarsenFileTimes } = require('../../services/uploads');
-const { withMessageIdRetry, respondIfDeadlock } = require('../../db/transactions');
+const { withMessageIdRetry } = require('../../db/transactions');
+// База недоступна или занята — 503 busy с Retry-After (lib/db-errors.js).
+const { respondIfDbBusy } = require('../../../lib/db-errors');
 const { getSocketRoomKey } = require('../../realtime/io');
 
 // checkMagicBytes (сигнатура файла против заявленного типа) — в
@@ -228,7 +230,7 @@ function register(app, ctx) {
             res.json({ success: true, message: fileMessage });
         } catch (error) {
             cleanupUploadedFile(file);
-            if (respondIfDeadlock(res, error)) return;
+            if (respondIfDbBusy(res, error)) return;
             logError('Upload file error', error);
             res.status(500).json({ success: false, message: 'Ошибка отправки файла' });
         }

@@ -1,24 +1,12 @@
 'use strict';
 // Транзакции: withTransaction, повтор при взаимной блокировке (withTransactionRetry), запрос с
-// повтором, ответ 503 при deadlock и повтор вставки с занятым id сообщения. Вынесено из server.js.
+// повтором и повтор вставки с занятым id сообщения. Ответ 503 при deadlock и других сбоях
+// доступности базы — lib/db-errors.js (respondIfDbBusy). Вынесено из server.js.
 
 const { createTransactionRetry } = require('../../lib/tx-retry');
-// Точные лимиты и одноразовость PoW в Postgres (UNLOGGED-таблицы, ключи — HMAC).
-const { respondBusy } = require('../../lib/pg-limits');
-const { logError } = require('../../lib/log-error');
 const { guardClient } = require('../../lib/pg-client-guard');
 // Id и курсоры сообщений, тела ошибок 400/409 (docs/security/message-ordering.md).
-const { isDeadlock, isMessageIdConflict } = require('../../lib/message-ids');
-
-// Ответ на взаимную блокировку, которая повторилась и после повтора
-// (withTransactionRetry): 503 { code:'busy' } с Retry-After. В лог — только
-// код ошибки, без id. true — ошибка обработана, ответ отправлен.
-function respondIfDeadlock(res, err) {
-    if (!isDeadlock(err)) return false;
-    logError('[DB] Взаимная блокировка повторилась, клиенту 503', err);
-    respondBusy(res);
-    return true;
-}
+const { isMessageIdConflict } = require('../../lib/message-ids');
 
 // Вставки, где id выдаёт DEFAULT (чат с ботом, приветствие): два одинаковых
 // случайных id в одну минуту или попадание в надгробие — один повтор на 23505
@@ -61,7 +49,7 @@ function createTransactions(ctx) {
     // целиком, поэтому повтор безопасен: work() обязана не иметь побочных эффектов
     // вне БД и читать всё заново (вставка сообщения идемпотентна по clientMessageId).
     // Если вторая попытка тоже упала с 40P01, ошибка уходит вызывающему, а он
-    // отвечает 503 busy (respondIfDeadlock). В лог — только код ошибки, без id.
+    // отвечает 503 busy (respondIfDbBusy, lib/db-errors.js). В лог — только код ошибки, без id.
     // Строка предупреждения нужна сквозным тестам блокировок: они считают повторы.
     const withTransactionRetry = createTransactionRetry({ withTransaction, warn: (message) => console.warn(message) });
 
@@ -75,4 +63,4 @@ function createTransactions(ctx) {
     return { withTransaction, withTransactionRetry, queryWithRetry };
 }
 
-module.exports = { createTransactions, withMessageIdRetry, respondIfDeadlock };
+module.exports = { createTransactions, withMessageIdRetry };

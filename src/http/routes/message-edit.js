@@ -4,6 +4,8 @@
 const { sanitizeText } = require('../../../lib/privacy');
 const { isClientOutdated: isOutdatedProto } = require('../../../lib/proto');
 const { logError } = require('../../../lib/log-error');
+// База недоступна или занята — 503 busy с Retry-After (lib/db-errors.js).
+const { respondIfDbBusy } = require('../../../lib/db-errors');
 // Огрубление времени сообщений и файлов (раздел 11 контракта).
 const { floorToMinute } = require('../../../lib/coarse-time');
 // Id и курсоры сообщений, тела ошибок 400/409 (docs/security/message-ordering.md).
@@ -77,6 +79,7 @@ function register(app, ctx) {
 
             res.json({ success: true, edited_at: editedAt, text: newText });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('Edit message error', error);
             res.json({ success: false, message: 'Ошибка редактирования' });
         }
@@ -100,6 +103,7 @@ function register(app, ctx) {
             if (deleted.length === 0) return res.json({ success: false, message: 'Ошибка удаления' });
             res.json({ success: true });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('Delete message error', error);
             res.json({ success: false, message: 'Ошибка удаления' });
         }

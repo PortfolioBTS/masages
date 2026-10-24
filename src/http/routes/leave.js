@@ -5,7 +5,8 @@
 const { logError } = require('../../../lib/log-error');
 const { resetInviteAfterLeave } = require('../../services/rooms');
 const { getSocketRoomKey } = require('../../realtime/io');
-const { respondIfDeadlock } = require('../../db/transactions');
+// База недоступна или занята — 503 busy с Retry-After (lib/db-errors.js).
+const { respondIfDbBusy } = require('../../../lib/db-errors');
 
 function register(app, ctx) {
     const {
@@ -122,7 +123,7 @@ function register(app, ctx) {
             notifyChatListChanged(userId);
             res.json({ success: true });
         } catch (error) {
-            if (respondIfDeadlock(res, error)) return;
+            if (respondIfDbBusy(res, error)) return;
             logError('Delete chat error', error);
             res.json({ success: false, message: 'Ошибка удаления чата' });
         }

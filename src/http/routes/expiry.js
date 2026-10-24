@@ -7,6 +7,8 @@ const {
     effectiveMessageExpiry, parseChatExpirySeconds, parseChatPrefs,
 } = require('../../../lib/chat-settings');
 const { logError } = require('../../../lib/log-error');
+// База недоступна или занята — 503 busy с Retry-After (lib/db-errors.js).
+const { respondIfDbBusy } = require('../../../lib/db-errors');
 const { toPositiveInt } = require('../params');
 
 function register(app, ctx) {
@@ -46,6 +48,7 @@ function register(app, ctx) {
 
             res.json({ success: true, message: 'Таймер самоуничтожения установлен' });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('Set expiry error', error);
             res.json({ success: false, message: 'Ошибка установки таймера' });
         }
@@ -65,6 +68,7 @@ function register(app, ctx) {
             if (!chat) return res.json({ success: false, message: 'Чат не найден' });
             res.json({ success: true, seconds: await setChatExpiry(chat, seconds) });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('Set chat expiry error', error);
             res.json({ success: false, message: 'Ошибка настройки автоудаления' });
         }
@@ -95,6 +99,7 @@ function register(app, ctx) {
                 message: seconds > 0 ? 'Автоудаление сообщений настроено для чата' : 'Автоудаление сообщений выключено',
             });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('Set chat default expiry error', error);
             res.json({ success: false, message: 'Ошибка настройки автоудаления' });
         }
@@ -112,6 +117,7 @@ function register(app, ctx) {
             const expiry = await getDefaultExpirySeconds(chat);
             res.json({ success: true, settings: expiry ? { default_message_expiry: expiry } : {} });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('Get chat settings error', error);
             res.json({ success: false, message: 'Ошибка получения настроек' });
         }
@@ -142,6 +148,7 @@ function register(app, ctx) {
             notifyChatListChanged(userId);
             res.json({ success: true, pinned: row.pinned, muted: row.muted, archived: row.archived });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('Set chat prefs error', error);
             res.json({ success: false, message: 'Ошибка сохранения настроек чата' });
         }

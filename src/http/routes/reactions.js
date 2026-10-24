@@ -3,7 +3,8 @@
 
 const { logError } = require('../../../lib/log-error');
 const { toPositiveInt } = require('../params');
-const { respondIfDeadlock } = require('../../db/transactions');
+// База недоступна или занята — 503 busy с Retry-After (lib/db-errors.js).
+const { respondIfDbBusy } = require('../../../lib/db-errors');
 
 // В UI предлагается фиксированный набор из 5 эмодзи для реакций. Раньше на
 // бэке проверялась только длина строки (≤10 символов), а не содержимое — это
@@ -29,7 +30,7 @@ function register(app, ctx) {
             await queryWithRetry('INSERT INTO reactions (message_id, user_id, emoji) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [messageId, req.session.userId, emoji]);
             res.json({ success: true });
         } catch (error) {
-            if (respondIfDeadlock(res, error)) return;
+            if (respondIfDbBusy(res, error)) return;
             logError('Add reaction error', error);
             res.json({ success: false, message: 'Ошибка добавления реакции' });
         }
@@ -55,6 +56,7 @@ function register(app, ctx) {
             );
             res.json({ success: true });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('Remove reaction error', error);
             res.json({ success: false, message: 'Ошибка удаления реакции' });
         }

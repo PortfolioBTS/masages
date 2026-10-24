@@ -23,7 +23,9 @@ const {
 const { toPositiveInt, isNonEmptyString } = require('../params');
 const { chatScope } = require('../../services/chats');
 const { parseRequestedExpiry } = require('../../services/expiry');
-const { withMessageIdRetry, respondIfDeadlock } = require('../../db/transactions');
+const { withMessageIdRetry } = require('../../db/transactions');
+// База недоступна или занята — 503 busy с Retry-After (lib/db-errors.js).
+const { respondIfDbBusy } = require('../../../lib/db-errors');
 const { getSocketRoomKey } = require('../../realtime/io');
 
 // Список чатов с последним сообщением и числом непрочитанных.
@@ -148,6 +150,7 @@ function register(app, ctx) {
                 })),
             });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('Get chats error', error);
             res.json({ success: false, message: 'Ошибка загрузки чатов' });
         }
@@ -288,6 +291,7 @@ function register(app, ctx) {
                 },
             });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('Get messages error', error);
             res.json({ success: false, message: 'Ошибка загрузки сообщений' });
         }
@@ -463,7 +467,7 @@ function register(app, ctx) {
             // Чат с ботом ходит открытым текстом: конверт сюда не принимается (выше).
             if (chat.is_bot) scheduleBotReply(chat, safeText);
         } catch (error) {
-            if (respondIfDeadlock(res, error)) return;
+            if (respondIfDbBusy(res, error)) return;
             logError('Send message error', error);
             res.json({ success: false, message: 'Ошибка отправки' });
         }
@@ -507,7 +511,7 @@ function register(app, ctx) {
             notifyChatListChanged(userId);
             res.json({ success: true, chat: { id: chatId, name, avatar, online: 0, is_bot: 0, room_id: roomId, invite_code: roomCode } });
         } catch (error) {
-            if (respondIfDeadlock(res, error)) return;
+            if (respondIfDbBusy(res, error)) return;
             logError('Create chat error', error);
             res.json({ success: false, message: 'Ошибка создания чата' });
         }

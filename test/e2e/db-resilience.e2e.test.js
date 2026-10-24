@@ -56,7 +56,9 @@ test('обрыв соединения Postgres посреди транзакци
         return pending;
     });
     assert.strictEqual(typeof response.status, 'number', 'запрос получил HTTP-ответ, а не обрыв соединения');
-    assert.ok(!(response.body && response.body.success), 'оборванная отправка не считается успешной');
+    // Обрыв — сбой доступности базы: 503 busy с Retry-After (R2.10), клиент повторит.
+    assert.strictEqual(response.status, 503, JSON.stringify(response.body));
+    assert.strictEqual(response.body.code, 'busy');
     await suite.server.logs.waitFor(/\[DB\] Обрыв соединения во время транзакции/, { from: mark });
     assert.ok(suite.server.alive, 'процесс сервера жив');
     assert.ok(!/Необработанное исключение/.test(suite.server.logs.text()), 'обрыв не стал необработанным исключением');
@@ -94,7 +96,12 @@ test('зависшая блокировка комнаты: отправки о�
     // Раньше: 10 с ожидания соединения и 500.
     assert.strictEqual(auth.status, 200, `GET /api/auth постороннего: ${auth.status}`);
     assert.ok(authMs < 4000, `GET /api/auth постороннего ждал ${authMs} мс`);
-    for (const res of results) assert.ok(!(res.body && res.body.success), 'отправка под зависшим замком не прошла');
+    // Не дождавшиеся блокировки — 503 busy с Retry-After (R2.10), а не «Ошибка отправки».
+    for (const res of results) {
+        assert.strictEqual(res.status, 503, `отправка под зависшим замком: ${res.status} ${JSON.stringify(res.body)}`);
+        assert.strictEqual(res.body.code, 'busy');
+        assert.strictEqual(res.headers.get('retry-after'), '5');
+    }
     assert.ok(server.alive);
     // Замок снят — отправка проходит.
     assert.ok((await owner.send(ownerChat.id, 'после замка')).id);

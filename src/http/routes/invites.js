@@ -13,7 +13,8 @@ const { logError } = require('../../../lib/log-error');
 // Id и курсоры сообщений, тела ошибок 400/409 (docs/security/message-ordering.md).
 const { CLIENT_OUTDATED } = require('../../../lib/message-ids');
 const { respondCertVerdict, inviteExpiresAtIso, roomChatPayload } = require('../../services/rooms');
-const { respondIfDeadlock } = require('../../db/transactions');
+// База недоступна или занята — 503 busy с Retry-After (lib/db-errors.js).
+const { respondIfDbBusy } = require('../../../lib/db-errors');
 
 function register(app, ctx) {
     const {
@@ -28,6 +29,7 @@ function register(app, ctx) {
             if (own.error) return res.json({ success: false, message: own.error });
             res.json({ success: true, ...describeInvite(own.room, own.room.member_count) });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('Get invite error', error);
             res.json({ success: false, message: 'Ошибка получения кода' });
         }
@@ -102,7 +104,7 @@ function register(app, ctx) {
                 requireApproval: room.invite_require_approval,
             });
         } catch (error) {
-            if (respondIfDeadlock(res, error)) return;
+            if (respondIfDbBusy(res, error)) return;
             logError('Rotate invite error', error);
             res.json({ success: false, message: 'Ошибка обновления кода' });
         }
@@ -129,6 +131,7 @@ function register(app, ctx) {
             if (!room) return res.json({ success: false, message: 'Чат не найден' });
             res.json({ success: true });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('Disable invite error', error);
             res.json({ success: false, message: 'Ошибка отключения кода' });
         }
@@ -156,6 +159,7 @@ function register(app, ctx) {
                 inviteCert: room.invite_cert ? Membership.toB64(new Uint8Array(room.invite_cert)) : null,
             });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('Join preview error', error);
             res.json({ success: false, message: 'Ошибка проверки кода' });
         }
@@ -238,7 +242,7 @@ function register(app, ctx) {
             if (result.extra && result.extra.inviteSnap) reply.inviteSnap = result.extra.inviteSnap;
             res.json(reply);
         } catch (error) {
-            if (respondIfDeadlock(res, error)) return;
+            if (respondIfDbBusy(res, error)) return;
             logError('Join chat error', error);
             res.json({ success: false, message: 'Ошибка входа в чат' });
         }

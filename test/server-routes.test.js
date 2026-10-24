@@ -438,7 +438,7 @@ async function main() {
         assert.deepStrictEqual(left.body, { count: 0, pq_count: 0 });
     });
 
-    await test('bundle: a user without keys -> 404 from the store; a DB error in the store -> 502', async () => {
+    await test('bundle: a user without keys -> 404 from the store; DB unavailable -> 503 busy, other store error -> 500', async () => {
         const { app, keyDb } = makeKeysFixture();
         const get = (target) => call(app, 'get', '/api/keys/bundle/:targetUserId', { session: { userId: 1 }, params: { targetUserId: String(target) } });
         const missing = await get(2);
@@ -446,12 +446,20 @@ async function main() {
         assert.strictEqual(missing.body.success, false);
 
         await registerKeys(app, 3, { opks: 1 });
-        keyDb.failNextQuery(new Error('ECONNREFUSED'));
+        // Хранилище ключей — эта же база (W7 R2.10): недоступна — 503 busy с Retry-After, а не
+        // 502 «E2EE key server недоступен» (отдельного key server давно нет).
+        keyDb.failNextQuery(Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:5432'), { code: 'ECONNREFUSED' }));
         let res;
         const logged = await withQuietConsole(async () => { res = await get(3); });
-        assert.strictEqual(res.statusCode, 502);
-        assert.deepStrictEqual(res.body, { success: false, message: 'E2EE key server недоступен' });
+        assert.strictEqual(res.statusCode, 503);
+        assert.strictEqual(res.headers['retry-after'], '5');
+        assert.strictEqual(res.body.code, 'busy');
         assert.ok(logged.some(l => l.includes('ECONNREFUSED')));
+        // Иная ошибка хранилища — 500 без упоминания key server.
+        keyDb.failNextQuery(Object.assign(new Error('relation does not exist'), { code: '42P01' }));
+        await withQuietConsole(async () => { res = await get(3); });
+        assert.strictEqual(res.statusCode, 500);
+        assert.deepStrictEqual(res.body, { success: false, message: 'Ошибка хранилища ключей' });
         // Сбой не потратил одноразовый prekey: следующий запрос получает его.
         const retry = await get(3);
         assert.strictEqual(retry.statusCode, 200);
@@ -569,7 +577,7 @@ async function main() {
         assert.strictEqual(ok.body.success, true);
     });
 
-    await test('identities: a DB error in the key store -> 502', async () => {
+    await test('identities: a DB error in the key store -> 500 (W7 R2.10: no «key server» 502)', async () => {
         const { app, keyDb } = makeKeysFixture();
         await registerKeys(app, 2);
         keyDb.failNextQuery(new Error('db down'));
@@ -577,8 +585,8 @@ async function main() {
         const logged = await withQuietConsole(async () => {
             res = await call(app, 'get', '/api/keys/identities', { session: { userId: 1 }, query: { ids: '2' } });
         });
-        assert.strictEqual(res.statusCode, 502);
-        assert.deepStrictEqual(res.body, { success: false, message: 'E2EE key server недоступен' });
+        assert.strictEqual(res.statusCode, 500);
+        assert.deepStrictEqual(res.body, { success: false, message: 'Ошибка хранилища ключей' });
         assert.ok(logged.some(l => /db down/.test(l)));
     });
 
