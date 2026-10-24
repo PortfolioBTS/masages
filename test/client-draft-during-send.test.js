@@ -17,10 +17,11 @@ function makeClient({ sendResult = true } = {}) {
     gate.promise = new Promise((resolve) => { gate.release = resolve; });
     const elements = fakeElements();
     const client = createClient({
-        functions: ['sendMessage', 'clearReply'],
+        functions: ['sendMessage', 'clearReply', 'setMessageInputValue'],
         prelude: 'let sending = false; let currentChatId = 1; let currentRoomId = 10; let replyToMessageId = null; let editingMessageId = null;',
         sandbox: {
             elements,
+            autoResizeMessageInput() {},
             showToast: (text) => log.toasts.push(text),
             setSending: (value) => { client.run(`sending = ${value}`); },
             sendText: async (text, opts) => {

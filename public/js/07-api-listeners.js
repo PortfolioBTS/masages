@@ -330,7 +330,8 @@ function setupProfileListeners() {
 function setupComposerListeners() {
     elements.sendBtn.addEventListener('click', sendMessage);
     elements.messageInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.isComposing) {
+        // Enter отправляет, Shift+Enter переносит строку (поле многострочное).
+        if (e.key === 'Enter' && !e.isComposing && !e.shiftKey) {
             e.preventDefault();
             sendMessage();
         } else if (e.key === 'Escape' && (editingMessageId || replyToMessageId)) {
@@ -342,7 +343,9 @@ function setupComposerListeners() {
     // следующий набранный текст тихо ушёл бы как правка старого сообщения.
     elements.messageInput.addEventListener('input', () => {
         if (editingMessageId && !elements.messageInput.value.trim()) cancelEditing();
+        autoResizeMessageInput();
     });
+    window.addEventListener('resize', autoResizeMessageInput);
 
     elements.attachBtn.addEventListener('click', () => {
         if (uploadQueue) {

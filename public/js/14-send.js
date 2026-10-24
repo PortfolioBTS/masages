@@ -185,6 +185,28 @@ async function sendText(text, { chatId, roomId, replyToId } = {}) {
     return true;
 }
 
+// Поле сообщения — textarea: растёт по тексту до max-height из CSS (шесть строк), дальше
+// прокручивается. Высоту надо пересчитывать при любом изменении значения, в том числе из
+// кода (setMessageInputValue), и при смене ширины окна (меняются переносы строк).
+function autoResizeMessageInput() {
+    const input = elements.messageInput;
+    input.style.height = 'auto';
+    if (input.offsetParent === null) {          // поле скрыто (чат не открыт): высоту посчитать нельзя
+        input.style.height = '';
+        return;
+    }
+    const max = parseFloat(getComputedStyle(input).maxHeight);
+    const wanted = input.scrollHeight + (input.offsetHeight - input.clientHeight);
+    const limit = Number.isFinite(max) ? max : wanted;
+    input.style.height = `${Math.min(wanted, limit)}px`;
+    input.style.overflowY = wanted > limit ? 'auto' : 'hidden';
+}
+
+function setMessageInputValue(text) {
+    elements.messageInput.value = text;
+    autoResizeMessageInput();
+}
+
 // Отправка из поля ввода: новое сообщение (через sendText) или сохранение
 // правки. Поле и ответ очищаются только после успеха — и только если
 // пользователь остался в том же чате.
@@ -251,7 +273,7 @@ async function sendMessage() {
     // мог набирать следующее сообщение, и стирать его нельзя. То же с ответом: если он
     // успел выбрать другое сообщение для ответа, выбор остаётся.
     if (chatId === currentChatId) {
-        if (elements.messageInput.value.trim() === text) elements.messageInput.value = '';
+        if (elements.messageInput.value.trim() === text) setMessageInputValue('');
         if (replyToMessageId === replyAtStart) clearReply();
     }
 }

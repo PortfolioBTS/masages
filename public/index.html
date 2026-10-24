@@ -16,7 +16,7 @@
     <link rel="stylesheet" href="css/auth.css" integrity="sha384-PiMCIhU6aYgSHkoTczbWkJI1gxf35vEUgKpJ0bpmduVrdYPlNjmA/gY0DEji9ZWY">
     <link rel="stylesheet" href="css/app-shell.css" integrity="sha384-pERlehZoKebLSb/igJzUZAnz1smG8rICO1oiqEWVhjLRJx/4DKbXznT9ZE/HgnzX">
     <link rel="stylesheet" href="css/messages.css" integrity="sha384-kzsZl8BzJ1Rka26a+gHBY06uyEJfEtKSAg3v+peF/pSVZRakalS6o0kpO6NY3lfN">
-    <link rel="stylesheet" href="css/composer.css" integrity="sha384-/MZVVTF6nGt8HiYQDJ3lgD67qEbH+NT+b6Ji1enfaWx5BWagxOz6IG3LvQ7+eCWq">
+    <link rel="stylesheet" href="css/composer.css" integrity="sha384-HmBXm4iuvIQaw6vXNiLeq9CMPbwG/g2vL+jTXwFnApIDVg1WwLpGYKU+tBTyNG+5">
     <link rel="stylesheet" href="css/modals.css" integrity="sha384-+bR67Xb8RBGExM+5UPmGf7nksR3yfJYxghGzDjK7NtA0XPQU83dK5BITxJe/1JSD">
     <link rel="stylesheet" href="css/popups.css" integrity="sha384-2uuqAvPdNddpQsYDGq2ndXEuc7O3RRPPFCDKikXUJ7uy35JNVhp8v/iBv7HF3v+p">
     <link rel="stylesheet" href="css/responsive.css" integrity="sha384-2us9UdyDffKSwJGBliT7t+SqB9q9oOfsahLTb6yaf162h9kWIweAl8tbYZjpM+7K">
@@ -187,7 +187,7 @@
                 </div>
                 <div class="input-wrapper">
                     <button id="attach-btn" class="icon-btn" title="Прикрепить файлы" aria-label="Прикрепить файлы"><svg class="icon" aria-hidden="true"><use href="#i-paperclip"></use></svg></button>
-                    <input type="text" id="message-input" placeholder="Введите сообщение..." maxlength="4000" aria-label="Текст сообщения">
+                    <textarea id="message-input" rows="1" placeholder="Введите сообщение..." maxlength="4000" aria-label="Текст сообщения" enterkeyhint="send" autocomplete="off"></textarea>
                     <button id="send-btn" class="icon-btn" title="Отправить" aria-label="Отправить"><svg class="icon" aria-hidden="true"><use href="#i-send"></use></svg></button>
                 </div>
                 <div id="composer-status" class="composer-status" role="status">
@@ -637,14 +637,14 @@
     <script src="js/04-e2ee-rooms.js" integrity="sha384-+wiEKtAz9uJoChqWOBBQ35SIprBTjlsgPigx3o27ZX71t6J/CtK6V+dQxmpUp9O1"></script>
     <script src="js/05-attachments.js" integrity="sha384-n1DBN5toSrYqAoNW1pd0ddKC1mKOduaBnk/gOuU09ABq8HjsjWGILNXEVS1fltF4"></script>
     <script src="js/06-session-socket.js" integrity="sha384-PnwytZdOvmdJOLQX/mzM8WE8lMXThuOwrqopVNOLzxG+rHaWXNY87IUHd65M6Hb+"></script>
-    <script src="js/07-api-listeners.js" integrity="sha384-Ghi/cxVUlrdbXNM/dl/OjY0hIFjJcGh5gNWH2poxmkUl+nbiQ/8fK1xSC8rwW7s3"></script>
+    <script src="js/07-api-listeners.js" integrity="sha384-SodwfkKA+B8ZNelgpaqkOK7qn9BzWPPNJEstMGP5vQfYzZDJWJqf7jPn6ixEQdEf"></script>
     <script src="js/08-modals-profile.js" integrity="sha384-B/XEsUiJu2TFrcVKPtP7w7LjU6leuKccFYc4JY75lqXA1v4Ay4a+p/NAHDAZWX5p"></script>
     <script src="js/09-auth-screen.js" integrity="sha384-brjViOA57cGyEvT0gwDTaXc3LHbuLh3Xx5x0iN2LnkA7/CImOVCrrHTqClKyE8Td"></script>
     <script src="js/10-invites-join.js" integrity="sha384-qE8ROoqMi8Hb/nCZ/rxgiWhSsP30k7fPdrMvOUXwbqFjUHaV6K+HK9oIWQ5k5eDm"></script>
     <script src="js/11-key-log-members.js" integrity="sha384-s3qWcYCQ5DVZwS/TxbZEKmuT93wQghoYiRUscDf/JWhNMXeaftA08kcAFBEY77jb"></script>
     <script src="js/12-chat-list.js" integrity="sha384-5+GUEYk8O9a241TwyMXzcY98VluINjaZz/IG5/IeYOiA5JzRq2W9NAeMgBtoV/Dj"></script>
-    <script src="js/13-chat-messages.js" integrity="sha384-pvK1XlTuXdXnrrufVJ4jYjiSyKVF1m2b7Vw9UNJ7KexHySkR8WJmXuzV+a1tkpcw"></script>
-    <script src="js/14-send.js" integrity="sha384-Cj/IGqldc6cFzAnCR+W/CsEFm/FOI5kKoCCqqDog/7mM/orVMuyyDkFucOrPd5q5"></script>
+    <script src="js/13-chat-messages.js" integrity="sha384-wsZP7Uv+qAdIOXytH3MUhHOTaBFqAFHy0YlvwpH+CGC8dmGFr+RT1ZMum/oU+k3C"></script>
+    <script src="js/14-send.js" integrity="sha384-WHmBLzrUGEZ1t9GrQ3nQwoCDFbpf7WP6L8Y5bbz1HCfd0j5HyZy6bGnLSzQGyE07"></script>
     <script src="js/15-bot-suggestions.js" integrity="sha384-wweydTeInr4aMN2Z2+t1C82grT31h0yAY6/YeV/yqmh9Js9MI3PNqoQPctIAWQKp"></script>
     <script src="js/16-files-composer.js" integrity="sha384-XfVHEpRxUcUijWozEvUpoKDVpykLi7cPtc7KOpEc3tXeR4ajFIH66LOy+8gI6Mab"></script>
     <script src="js/17-chats-search.js" integrity="sha384-hklycVM8gT6ow7IP5ES3KB915dHzw9eWPzY9BL0FffRm+UymMGio3OTlNnorDXpX"></script>

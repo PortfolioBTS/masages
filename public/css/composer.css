@@ -130,11 +130,15 @@
     font-size: 15px;
 }
 
+/* Поле сообщения растёт по тексту (autoResizeMessageInput в 14-send.js) до шести строк
+   (6 × line-height 20 px + отступы 18 px + рамка 2 px), дальше прокручивается. */
 .input-wrapper textarea {
     height: var(--control-h);
-    max-height: 160px;
+    max-height: 140px;
     padding-top: 9px;
     padding-bottom: 9px;
+    line-height: 20px;
+    overflow-y: hidden;
     resize: none;
 }
 

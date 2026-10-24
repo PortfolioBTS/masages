@@ -664,7 +664,7 @@ function startEditing(message) {
     elements.editPreviewText.textContent = `Редактирование: ${messageSummary(message).substring(0, 100)}`;
     elements.editPreview.classList.remove('hidden');
     elements.messageInput.setAttribute('aria-describedby', 'edit-preview-text');
-    elements.messageInput.value = message.text || '';
+    setMessageInputValue(message.text || '');
     elements.messageInput.focus();
     const end = elements.messageInput.value.length;
     elements.messageInput.setSelectionRange(end, end);
@@ -681,6 +681,6 @@ function finishEditing() {
 
 // Отмена правки: в поле лежал текст редактируемого сообщения, его убираем.
 function cancelEditing() {
-    if (editingMessageId) elements.messageInput.value = '';
+    if (editingMessageId) setMessageInputValue('');
     finishEditing();
 }
