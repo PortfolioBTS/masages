@@ -27,6 +27,14 @@ function installErrorHandler(app) {
         if (err.type === 'entity.too.large') {
             return res.status(413).json({ success: false, message: 'Слишком большой запрос' });
         }
+        // Ошибки запроса с кодом 4xx от самого Express и middleware (битое %-кодирование в пути:
+        // URIError со status 400, невалидный заголовок и т.п.) - вина клиента, а не сервера: отвечаем этим
+        // кодом и не пишем в лог как необработанную ошибку (R1 п.7). Текст ошибки в ответ не попадает.
+        const status = err.status || err.statusCode;
+        if (Number.isInteger(status) && status >= 400 && status <= 499) {
+            const message = status === 400 ? 'Некорректный запрос' : status === 404 ? 'Не найдено' : 'Запрос отклонён';
+            return res.status(status).json({ success: false, message });
+        }
         logError('Unhandled error', err);
         res.status(500).json({ success: false, message: 'Внутренняя ошибка сервера' });
     });
