@@ -492,7 +492,7 @@ function renderChatMenu() {
     setIconLabel(elements.archiveChatBtn, meta.archived ? 'archive-restore' : 'archive', meta.archived ? 'Вернуть из архива' : 'В архив');
     [elements.pinChatBtn, elements.muteChatBtn, elements.archiveChatBtn].forEach((b) => { b.disabled = !known; });
     // Из группы выходят (и решают судьбу своих сообщений), чат с ботом удаляют.
-    setIconLabel(elements.deleteChatBtn, 'trash', currentRoomId ? 'Выйти из группы' : 'Удалить чат');
+    setIconLabel(elements.deleteChatBtn, 'trash', currentRoomId ? 'Выйти из группы' : 'Удалить чат с ботом');
     elements.expiryHint.textContent = currentRoomId
         ? 'Срок действует для новых сообщений всех участников группы. Уже отправленные сообщения не изменятся.'
         : 'Срок действует для новых сообщений этого чата. Уже отправленные сообщения не изменятся.';

@@ -44,10 +44,15 @@ async function createChat() {
 // id действия: 'leave' (выйти), 'leave-keep' / 'leave-delete' (выйти, свои оставить/удалить), 'delete' (чат с ботом).
 function leaveChatDialog({ isRoom, memberCount, mayHaveOwnMessages }) {
     if (!isRoom) {
+        // Единственный чат без комнаты — чат с ботом. Он создаётся один раз, вместе с аккаунтом (services/accounts.js);
+        // после удаления в этом аккаунте его не вернуть — об этом сказано прямо.
         return {
-            title: 'Удалить чат?',
-            paragraphs: ['Переписка удалится безвозвратно.'],
-            actions: [{ id: 'delete', label: 'Удалить чат', style: 'danger' }],
+            title: 'Удалить чат с ботом?',
+            paragraphs: [
+                'Переписка с ботом удалится безвозвратно.',
+                'Бота вернуть нельзя: чат с ним создаётся один раз, вместе с аккаунтом. Новый чат с ботом не появится.',
+            ],
+            actions: [{ id: 'delete', label: 'Удалить чат с ботом', style: 'danger' }],
         };
     }
     if (memberCount === 1) {
@@ -93,7 +98,7 @@ async function deleteChat() {
         const data = await api(`/api/chats/${chatId}${removeMine ? '?deleteMessages=1' : ''}`, { method: 'DELETE' });
         if (data.success) {
             if (roomId) await forgetLeftRoom(roomId);
-            showToast(roomId ? 'Вы вышли из группы' : 'Чат удалён', 'success');
+            showToast(roomId ? 'Вы вышли из группы' : 'Чат с ботом удалён', 'success');
             closeModal(elements.chatMenuModal);
             resetChatView();
             loadChats();

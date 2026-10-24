@@ -139,10 +139,10 @@ test('confirmAction: true только по кнопке подтвержден�
 
 const fn = (c, call) => plain(c.run(call));
 
-test('leaveChatDialog: чат с ботом — одно действие «Удалить чат»', () => {
+test('leaveChatDialog: чат с ботом — одно действие «Удалить чат с ботом»', () => {
     const c = createClient({ functions: ['leaveChatDialog'] });
     const d = fn(c, 'leaveChatDialog({ isRoom: false })');
-    assert.strictEqual(d.title, 'Удалить чат?');
+    assert.strictEqual(d.title, 'Удалить чат с ботом?');
     assert.deepStrictEqual(d.actions.map((a) => a.id), ['delete']);
 });
 
