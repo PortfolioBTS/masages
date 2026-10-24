@@ -12,7 +12,7 @@ const { logError } = require('../../../lib/log-error');
 // Id и курсоры сообщений, тела ошибок 400/409 (docs/security/message-ordering.md).
 const {
     CLIENT_OUTDATED, parseSeq, BAD_SEQ, parseClientMessageId, BAD_MESSAGE_ID, isMessageIdConflict,
-    ID_CONFLICT,
+    ID_CONFLICT, insertDroppingGoneReply,
 } = require('../../../lib/message-ids');
 // Форма E2EE-конверта и тела отказов 400 для комнат и бота (R7).
 const { MAX_ENVELOPE_LENGTH } = require('../../../lib/e2ee-envelope');
@@ -408,10 +408,11 @@ function register(app, ctx) {
                 const roomId = chat.room_id;
                 let outcome;
                 try {
-                    outcome = await insertRoomMessage({
+                    // Цель ответа удалили после проверки видимости — сообщение уходит без ответа (R2.8).
+                    outcome = await insertDroppingGoneReply(() => insertRoomMessage({
                         userId, roomId, id: clientId, plainText: safeText, expirySeconds,
                         fields: { message_type: 'text', sent: 1, status: 'sent', reply_to_id: replyTo ? replyTo.id : null, encrypted },
-                    });
+                    }), () => { replyTo = null; });
                 } catch (err) {
                     if (isMessageIdConflict(err)) {
                         // Вставка откатилась целиком (в том числе приращение seq). Тот же
@@ -447,7 +448,10 @@ function register(app, ctx) {
                 message_type: 'text', sent: 1, status: 'sent',
                 reply_to_id: replyTo ? replyTo.id : null, encrypted,
             };
-            const inserted = await withMessageIdRetry(() => insertChatMessage(userId, fields, expirySeconds));
+            const inserted = await insertDroppingGoneReply(
+                () => withMessageIdRetry(() => insertChatMessage(userId, fields, expirySeconds)),
+                () => { replyTo = null; fields.reply_to_id = null; }
+            );
             // Нет строки пользователя: аккаунт удалён, пока шёл запрос.
             if (!inserted) return res.status(401).json({ success: false, message: 'Не авторизован' });
 
