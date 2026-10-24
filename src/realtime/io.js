@@ -18,7 +18,7 @@ function getSocketRoomKey(chatId, roomId) {
 }
 
 function createIo(ctx) {
-    const { resolveRealIp, isTrustedOrigin, server } = ctx;
+    const { resolveRealIp, isTrustedOrigin, trustProxyHops, server } = ctx;
 
     // Cross-Site WebSocket Hijacking: сессионная кука уходит и в рукопожатии,
     // которое открыла ЧУЖАЯ страница (CORS на WebSocket не действует), — и
@@ -32,7 +32,7 @@ function createIo(ctx) {
         // node_modules — мимо статики, и в манифест этот файл не попал бы.
         serveClient: false,
         allowRequest: (req, callback) => {
-            if (isTrustedOrigin(req.headers)) return callback(null, true);
+            if (isTrustedOrigin(req.headers, req)) return callback(null, true);
             callback('Origin not allowed', false);
         },
     });
@@ -57,7 +57,8 @@ function createIo(ctx) {
         // реально подключился к нашему прокси (последний хоп X-Forwarded-For —
         // соответствует "доверяем 1 прокси" из app.set('trust proxy', 1)), и только
         // если ЭТОТ адрес принадлежит Cloudflare — доверяем CF-Connecting-IP.
-        const xff = headers['x-forwarded-for'];
+        // TRUST_PROXY=0 (прокси нет): X-Forwarded-For присылает сам клиент, верен только адрес сокета.
+        const xff = trustProxyHops > 0 ? headers['x-forwarded-for'] : undefined;
         const connectingIp = xff
             ? xff.split(',').map(s => s.trim()).filter(Boolean).pop()
             : handshake.address;

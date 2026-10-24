@@ -102,7 +102,7 @@ function configureApp(ctx) {
             metrics.originRejected();
             return res.status(403).json({ success: false, message: 'Запрещено: запрос с чужого сайта' });
         }
-        if (SAFE_METHODS.has(req.method) || isTrustedOrigin(req.headers)) return next();
+        if (SAFE_METHODS.has(req.method) || isTrustedOrigin(req.headers, req)) return next();
         metrics.originRejected();
         res.status(403).json({ success: false, message: 'Запрещено: запрос с чужого сайта' });
     });
