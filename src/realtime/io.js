@@ -6,6 +6,7 @@
 
 const { Server } = require('socket.io');
 const { createCounter } = require('../../lib/security-utils');
+const { getPrivacyHeaders } = require('../../lib/privacy');
 
 // Лимиты одновременных сокетов: на аккаунт — всегда, на IP — только для
 // clearnet (у всех onion-клиентов один IP — контейнер tor).
@@ -34,6 +35,17 @@ function createIo(ctx) {
             if (isTrustedOrigin(req.headers)) return callback(null, true);
             callback('Origin not allowed', false);
         },
+    });
+
+    // Ответы engine.io (/socket.io/: рукопожатие и long-polling) обрабатывает сам engine.io, мимо цепочки
+    // Express, поэтому заголовки приватности из http/app.js до них не доходили (R1 п.9). Тело ответа -
+    // служебные пакеты с идентификатором сессии сокета: кэшировать его нельзя.
+    io.engine.on('headers', (headers) => {
+        Object.assign(headers, getPrivacyHeaders(), {
+            'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, private',
+            Pragma: 'no-cache',
+            'X-Robots-Tag': 'noindex, nofollow',
+        });
     });
 
     const userSocketCount = createCounter();

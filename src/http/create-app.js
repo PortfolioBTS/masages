@@ -22,6 +22,8 @@ function wrapAsync(handler) {
 function createApp() {
     const app = express();
     app.set('trust proxy', 1);
+    // Express по умолчанию сообщает в каждом ответе «X-Powered-By: Express»: лишняя подсказка о стеке (R1 п.9).
+    app.disable('x-powered-by');
 
     for (const method of ['get', 'post', 'put', 'delete']) {
         const original = app[method].bind(app);
