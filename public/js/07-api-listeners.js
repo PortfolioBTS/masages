@@ -15,14 +15,22 @@ function showApp() {
 
 let toastTimer = null;
 const TOAST_ICONS = { success: 'check', error: 'alert-triangle', info: 'info' };
-function showToast(message, type = 'info', duration = 3000) {
+// Сколько показывать всплывающее сообщение, если вызывающий не задал время: три секунды — минимум,
+// длинный текст (ошибки бывают в две строки) читается дольше — примерно 15 знаков в секунду, не больше 12 с.
+function toastDurationMs(message) {
+    const length = String(message || '').length;
+    return Math.min(12000, Math.max(3000, 1500 + length * 60));
+}
+
+function showToast(message, type = 'info', duration) {
     const kind = TOAST_ICONS[type] ? type : 'info';
+    const shownFor = Number.isFinite(duration) ? duration : toastDurationMs(message);
     const text = document.createElement('span');
     text.textContent = message || '';
     elements.toast.replaceChildren(icon(TOAST_ICONS[kind]), text);
     elements.toast.className = `toast toast-${kind}`;
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => elements.toast.classList.add('hidden'), duration);
+    toastTimer = setTimeout(() => elements.toast.classList.add('hidden'), shownFor);
 }
 
 function getCsrfToken() {
@@ -43,12 +51,21 @@ function onUnauthorizedResponse(data) {
 // обработчике клика, и кнопка просто "ничего не делала". networkError —
 // запрос не дошёл до сервера (важно для «Удалить и выйти»: тогда аккаунт
 // точно не удалён). skipAuthCheck — вызывающий сам разбирает «Не авторизован».
+//
+// Запрос без ответа дольше timeoutMs (по умолчанию API_TIMEOUT_MS) обрывается:
+// { success: false, timedOut: true } — исход НЕИЗВЕСТЕН (сервер мог успеть выполнить
+// запрос), поэтому это не networkError. Раньше зависший запрос держал кнопку и флаг
+// «идёт отправка» навсегда. Тот, кто повторяет запрос (отправка сообщения), делает
+// это идемпотентно — с тем же clientMessageId.
 async function api(url, options = {}, retried = false) {
-    const { skipAuthCheck = false, ...init } = options;
+    const { skipAuthCheck = false, timeoutMs = API_TIMEOUT_MS, ...init } = options;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     let res;
     try {
         res = await fetch(url, {
             ...init,
+            signal: controller.signal,
             headers: {
                 'Content-Type': 'application/json',
                 'X-CSRF-Token': getCsrfToken(),
@@ -56,13 +73,19 @@ async function api(url, options = {}, retried = false) {
             },
         });
     } catch {
+        clearTimeout(timer);
+        if (controller.signal.aborted) return { success: false, timedOut: true, message: TIMED_OUT_MESSAGE };
         return { success: false, networkError: true, message: 'Нет соединения с сервером' };
     }
+    // Таймер держится и пока читается тело ответа: оборванный на середине ответ тоже зависание.
     let data;
     try {
         data = await res.json();
     } catch {
+        if (controller.signal.aborted) return { success: false, timedOut: true, message: TIMED_OUT_MESSAGE };
         return { success: false, httpStatus: res.status, message: `Ошибка сервера (HTTP ${res.status})` };
+    } finally {
+        clearTimeout(timer);
     }
     if (!data || typeof data !== 'object') return { success: false, httpStatus: res.status, message: `Ошибка сервера (HTTP ${res.status})` };
     // Статус нужен тем, кто различает исходы (повтор отправки после 5xx и 409,
@@ -113,12 +136,36 @@ function postFormDataWithProgress(url, formData, options = {}, retried = false) 
         xhr.responseType = 'text';
         xhr.setRequestHeader('X-CSRF-Token', getCsrfToken());
         if (typeof options.onXhr === 'function') options.onXhr(xhr);
+        // Загрузка большого файла может идти долго, поэтому часы тут не общие, а на «тишину»:
+        // нет ни байта прогресса (а после отправки — ни байта ответа) дольше stallMs — обрыв
+        // с { timedOut: true }. Отмена пользователем остаётся { aborted: true }.
+        const stallMs = options.stallMs || UPLOAD_STALL_MS;
+        let stalled = false;
+        let stallTimer = null;
+        const armStall = () => {
+            clearTimeout(stallTimer);
+            stallTimer = setTimeout(() => {
+                stalled = true;
+                try { xhr.abort(); } catch { /* запрос уже завершён */ }
+            }, stallMs);
+        };
         xhr.upload.onprogress = (e) => {
+            armStall();
             if (e.lengthComputable && typeof options.onProgress === 'function') options.onProgress(e.loaded / e.total);
         };
-        xhr.onabort = () => resolve({ success: false, aborted: true, message: 'Загрузка отменена' });
-        xhr.onerror = () => resolve({ success: false, networkError: true, message: 'Нет соединения с сервером' });
+        xhr.upload.onload = armStall; // всё отправлено — ждём ответ сервера
+        xhr.onabort = () => {
+            clearTimeout(stallTimer);
+            resolve(stalled
+                ? { success: false, timedOut: true, message: TIMED_OUT_MESSAGE }
+                : { success: false, aborted: true, message: 'Загрузка отменена' });
+        };
+        xhr.onerror = () => {
+            clearTimeout(stallTimer);
+            resolve({ success: false, networkError: true, message: 'Нет соединения с сервером' });
+        };
         xhr.onload = async () => {
+            clearTimeout(stallTimer);
             let data;
             try {
                 data = JSON.parse(xhr.responseText);
@@ -134,6 +181,7 @@ function postFormDataWithProgress(url, formData, options = {}, retried = false) 
             onUnauthorizedResponse(data);
             resolve(data || { success: false });
         };
+        armStall();
         xhr.send(formData);
     });
 }
@@ -237,6 +285,7 @@ function setupChatMenuListeners() {
             if (radio.checked) setChatExpiry(Number(radio.value));
         });
     });
+    elements.chatItemMenu.addEventListener('keydown', (e) => onPopupMenuKeydown(e, elements.chatItemMenu, hideChatItemMenu));
     elements.ctxPinBtn.addEventListener('click', () => onChatItemMenuAction('pinned'));
     elements.ctxMuteBtn.addEventListener('click', () => onChatItemMenuAction('muted'));
     elements.ctxArchiveBtn.addEventListener('click', () => onChatItemMenuAction('archived'));
@@ -289,7 +338,8 @@ function setupProfileListeners() {
 function setupComposerListeners() {
     elements.sendBtn.addEventListener('click', sendMessage);
     elements.messageInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.isComposing) {
+        // Enter отправляет, Shift+Enter переносит строку (поле многострочное).
+        if (e.key === 'Enter' && !e.isComposing && !e.shiftKey) {
             e.preventDefault();
             sendMessage();
         } else if (e.key === 'Escape' && (editingMessageId || replyToMessageId)) {
@@ -297,6 +347,13 @@ function setupComposerListeners() {
             clearReply();
         }
     });
+    // Поле очищено вручную — правка отменяется (плашка пропадает): иначе
+    // следующий набранный текст тихо ушёл бы как правка старого сообщения.
+    elements.messageInput.addEventListener('input', () => {
+        if (editingMessageId && !elements.messageInput.value.trim()) cancelEditing();
+        autoResizeMessageInput();
+    });
+    window.addEventListener('resize', autoResizeMessageInput);
 
     elements.attachBtn.addEventListener('click', () => {
         if (uploadQueue) {
@@ -314,21 +371,22 @@ function setupComposerListeners() {
     elements.uploadCancelBtn.addEventListener('click', () => cancelUploadQueue(true));
     setupDragAndDrop();
     elements.cancelReplyBtn.addEventListener('click', clearReply);
+    elements.cancelEditBtn.addEventListener('click', () => {
+        cancelEditing();
+        elements.messageInput.focus();
+    });
     elements.botSuggestions.addEventListener('click', onBotSuggestionClick);
 }
 
 // Меню сообщения: панель реакций, ответ, копирование, правка, удаление.
 function setupMessageMenuListeners() {
     buildReactionPicker();
+    elements.messageMenu.addEventListener('keydown', (e) => onPopupMenuKeydown(e, elements.messageMenu, hideMessageMenu));
 
     elements.replyMessageBtn.addEventListener('click', () => {
         const message = menuMessage;
         hideMessageMenu();
-        if (!message) return;
-        replyToMessageId = message.id;
-        elements.replyPreviewText.textContent = messageSummary(message).substring(0, 100);
-        elements.replyPreview.classList.remove('hidden');
-        elements.messageInput.focus();
+        if (message) startReply(message);
     });
 
     elements.copyMessageBtn.addEventListener('click', () => {
@@ -340,10 +398,7 @@ function setupMessageMenuListeners() {
     elements.editMessageBtn.addEventListener('click', () => {
         const message = menuMessage;
         hideMessageMenu();
-        if (!message) return;
-        editingMessageId = message.id;
-        elements.messageInput.value = message.text || '';
-        elements.messageInput.focus();
+        if (message) startEditing(message);
     });
 
     elements.deleteMessageBtn.addEventListener('click', async () => {
@@ -389,18 +444,19 @@ function setupSearchListeners() {
     setupChatSearchListeners();
 }
 
-// Модальные окна: закрытие по крестику и кнопкам «Отмена», по оверлею и
-// Escape (а также удержание фокуса внутри окна — onModalKeydown).
+// Модальные окна: закрытие по крестику и кнопкам «Отмена», по клику на затемнение вокруг
+// окна и Escape (а также удержание фокуса внутри окна — onModalKeydown).
 function setupModalListeners() {
     document.querySelectorAll('.close-modal, [data-close-modal]').forEach(btn => {
         btn.addEventListener('click', closeAllModals);
     });
+    elements.confirmCloseBtn.addEventListener('click', () => closeModal(elements.confirmModal));
 
-    elements.overlay.addEventListener('click', () => {
-        closeAllModals();
-        hideMessageMenu();
-        hideChatItemMenu();
-    });
+    // Затемнением служит сам .modal (он на весь экран), а .overlay лежит под ним и кликов не
+    // получает — поэтому слушаем документ, а не .overlay (прежний обработчик на нём не
+    // срабатывал никогда).
+    document.addEventListener('pointerdown', rememberBackdropPress);
+    document.addEventListener('click', closeOnBackdropClick);
 
     document.addEventListener('keydown', onModalKeydown);
     document.addEventListener('keydown', (e) => {
@@ -450,6 +506,7 @@ function setupSocketListeners() {
             if (appendMessage(message, true)) {
                 if (stickToBottom) scrollToBottom();
                 else if (!mine) bumpJumpDown();
+                if (!mine) announceNewMessage(message);
             }
             updateChatListOnMessage(message, true);
             if (!mine) markVisibleMessagesRead();
@@ -476,6 +533,14 @@ function setupSocketListeners() {
         if (seq !== openChatSeq) return;
         applyMessageEdit(id, displayText, failed);
         scheduleLoadChats();
+    });
+
+    // Реакцию поставил или снял другой участник (или другая вкладка этого же аккаунта):
+    // сервер присылает итог по эмодзи, mine — только вкладкам автора реакции.
+    socket.on('reactionChanged', ({ id, emoji, count, mine, chat_id, room_id } = {}) => {
+        if (!currentUser || id === undefined || typeof emoji !== 'string') return;
+        if (!belongsToCurrentChat(chat_id, room_id)) return;
+        applyReactionChange(id, emoji, count, typeof mine === 'boolean' ? mine : undefined);
     });
 
     // Удаление теперь физическое (DELETE на сервере): элемент убирается

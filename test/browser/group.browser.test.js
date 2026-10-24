@@ -6,8 +6,8 @@
 //     авторы верны и после перезагрузки;
 //  2) заявка по коду без секрета: заявка, одобрение первым профилем, статусы
 //     участников, сообщения после передачи ключа.
-// Confirm страницы («Создать новый код?») принимается автоматически
-// (Page.javascriptDialogOpening, см. helpers/page.js).
+// Вопрос «Создать новый код?» — окно приложения #confirm-modal (app.answerConfirm); родных
+// диалогов в приложении нет (Page.javascriptDialogOpening, см. helpers/page.js, их не видит).
 
 const assert = require('assert');
 const { createBrowserSuite } = require('./helpers/suite');
@@ -40,7 +40,8 @@ suite.test('подписанная ссылка впускает без одоб
         const withApproval = await app.readInvite(pa);
         assert.strictEqual(withApproval.secret, null, 'у приглашения с одобрением нет секрета ссылки');
         const signed = await app.rotateToSignedInvite(pa);
-        assert.ok(pa.dialogs.some(d => d.type === 'confirm' && d.accepted), 'подтверждение «Создать новый код?» не появлялось');
+        assert.strictEqual(pa.lastConfirmTitle, 'Создать новый код?', 'окно подтверждения «Создать новый код?» не появлялось');
+        assert.strictEqual(pa.dialogs.length, 0, 'вопрос задан родным confirm, а не окном приложения');
         assert.notStrictEqual(signed.code, withApproval.code, 'код не сменился');
         const link = await app.copyInviteLink(pa, alice, suite.baseUrl);
         assert.strictEqual(link, `${suite.baseUrl}/#join=${signed.code}.${signed.secret}`, 'скопированная ссылка не та, что в окне приглашения');

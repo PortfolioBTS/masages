@@ -307,3 +307,98 @@
         border-color: CanvasText;
     }
 }
+
+
+/* --------------------------------------------------------------------------
+   17. Сенсорный экран: цели нажатия не меньше 44×44 px (T7.3, п.11 ревью W7 R3).
+   Блок стоит после узких экранов (там кнопки шапки сужены до 36 px) и перебивает их.
+   Индикатор режима в шапке — мелкий по замыслу (20 px), ему достаточно 32 px.
+   -------------------------------------------------------------------------- */
+
+@media (pointer: coarse) {
+    .icon-btn,
+    .icon-btn-sm,
+    .close-modal,
+    .chat-header .icon-btn,
+    .reaction-option,
+    .jump-down {
+        width: 44px;
+        height: 44px;
+    }
+
+    .btn,
+    .btn-sm,
+    .auth-btn,
+    .banner-btn,
+    .member-code-btn,
+    .footer-btn,
+    .menu-item,
+    .suggestion {
+        height: 44px;
+    }
+
+    button.indicator {
+        justify-content: center;
+        min-width: 32px;
+        min-height: 32px;
+    }
+
+    .input-wrapper textarea {
+        min-height: 44px;
+    }
+}
+
+
+/* --------------------------------------------------------------------------
+   18. Телефон 320 px: экран входа (T7.3, п.18 ревью W7 R3).
+   На 320×640 главная кнопка «Начать анонимно» уходила ниже первого экрана на ~75 px. Здесь
+   отступы и размеры сжаты ровно настолько, чтобы она помещалась целиком: поля карточки и
+   отступы между блоками, знак, заголовок. Варианты срока остаются столбиком (WCAG 1.4.10,
+   controls.css) и по 44 px — это цель нажатия. Блок после «Узких телефонов», иначе они его перебьют.
+   -------------------------------------------------------------------------- */
+
+@media (max-width: 359px) {
+    .auth-screen {
+        padding-top: max(12px, env(safe-area-inset-top));
+        padding-bottom: max(12px, env(safe-area-inset-bottom));
+    }
+
+    .auth-container {
+        padding: 16px;
+    }
+
+    .auth-hero {
+        gap: 4px;
+        margin-bottom: 16px;
+    }
+
+    .logo-icon {
+        width: 36px;
+        height: 36px;
+        margin-bottom: 4px;
+    }
+
+    .auth-hero .logo-icon svg.icon {
+        width: 36px;
+        height: 36px;
+    }
+
+    .auth-hero h1 {
+        font-size: 22px;
+        line-height: 28px;
+    }
+
+    .segmented-option {
+        min-height: 44px;
+    }
+
+    .lifetime-picker,
+    .auth-warning {
+        margin-bottom: 12px;
+    }
+
+    .auth-points {
+        margin-top: 20px;
+        padding-top: 16px;
+    }
+}

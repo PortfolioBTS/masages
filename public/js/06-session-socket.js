@@ -433,7 +433,7 @@ function resetChatView() {
     elements.chatMessages.replaceChildren();
     elements.sidebar.classList.remove('hidden-mobile');
     clearReply();
-    editingMessageId = null;
+    finishEditing();
     setActiveChatItem(null, null);
 }
 
@@ -486,9 +486,9 @@ function leaveApp(message) {
     clearTimeout(loadChatsTimer);
     cancelUploadQueue();
     roomParticipants.clear();
+    unknownSend = null;
     chatListData = [];
     chatsById.clear();
-    myReactions.clear();
     resetChatView();
     closeAllModals();
     hideChatItemMenu();

@@ -14,7 +14,14 @@ let sending = false;
 //                                    newMessage отсекается по id);
 //   обрыв сети, таймаут, 5xx         исход неизвестен: тот же запрос с тем же id
 //                                    и тем же конвертом, не больше трёх раз с
-//                                    нарастающей паузой. Повтор идемпотентен;
+//                                    нарастающей паузой. Повтор идемпотентен.
+//                                    Таймаут — запрос без ответа дольше SEND_TIMEOUT_MS
+//                                    (api() обрывает его, иначе замок отправки
+//                                    держался бы вечно); все попытки вместе — не дольше
+//                                    SEND_TOTAL_MS. Если исход так и не выяснился, запрос
+//                                    запоминается (unknownSend): повторное нажатие
+//                                    «Отправить» с тем же текстом шлёт его же, с тем же
+//                                    clientMessageId, а не новое сообщение;
 //   409 id-conflict                  новый id, содержимое шифруется заново (новый
 //                                    mid и итерация цепочки; старая итерация
 //                                    остаётся пропуском, получатели его терпят),
@@ -23,34 +30,51 @@ let sending = false;
 //   400 bad-message-id               ошибка клиента: не повторять, в консоль.
 const SEND_RETRY_DELAYS_MS = [500, 1500, 4000];
 const MAX_ID_CONFLICTS = 3;
+const SEND_TIMEOUT_MS = 20 * 1000;
+const SEND_TOTAL_MS = 60 * 1000;
+const UNKNOWN_SEND_TTL_MS = 5 * 60 * 1000;
 
 function isUnknownSendOutcome(data) {
-    return !data.success && (data.networkError === true || (Number(data.httpStatus) >= 500));
+    return !data.success && (data.networkError === true || data.timedOut === true || (Number(data.httpStatus) >= 500));
 }
 
 // buildRequest(clientMessageId) → запрос (шифрует содержимое под этим id) или
 // null, если собрать нельзя; post(запрос) → тело ответа. clientMessageId —
 // только для комнаты, у чата с ботом он null. shouldStop() — отмена между
-// повторами. Возвращает { data }; data.success === false с кодом из тела — отказ.
-async function sendWithOutcomes({ roomId, buildRequest, post, shouldStop = () => false }) {
+// повторами. reuse = { clientMessageId, request } — запрос прошлой отправки с
+// неизвестным исходом: первая попытка идёт им, без нового шифрования.
+// Возвращает { data, request, clientMessageId } (последние два — для запоминания
+// запроса с неизвестным исходом); data.success === false с кодом из тела — отказ.
+async function sendWithOutcomes({ roomId, buildRequest, post, shouldStop = () => false, reuse = null }) {
     let conflicts = 0;
-    let clientMessageId = roomId ? NyxoMessageOrder.newClientMessageId() : null;
+    let clientMessageId = reuse ? reuse.clientMessageId : (roomId ? NyxoMessageOrder.newClientMessageId() : null);
+    let reusable = reuse ? reuse.request : null;
     for (;;) {
-        const request = await buildRequest(clientMessageId);
+        const request = reusable || await buildRequest(clientMessageId);
+        reusable = null;
         if (request === null) return { data: { success: false, message: '' } };
         let data = await post(request);
         for (let retry = 0; isUnknownSendOutcome(data) && retry < SEND_RETRY_DELAYS_MS.length; retry++) {
-            if (shouldStop()) return { data };
+            if (shouldStop()) return { data, request, clientMessageId };
             await delay(SEND_RETRY_DELAYS_MS[retry]);
             data = await post(request);
         }
-        if (data.success) return { data };
+        if (data.success) return { data, request, clientMessageId };
         if (roomId && data.httpStatus === 409 && data.code === 'id-conflict' && ++conflicts < MAX_ID_CONFLICTS) {
             clientMessageId = NyxoMessageOrder.newClientMessageId();
             continue;
         }
-        return { data };
+        return { data, request, clientMessageId };
     }
+}
+
+// Запрос, чей исход неизвестен (таймаут, обрыв, 5xx после всех повторов): { key, request,
+// clientMessageId, at }. key — чат, ответ и текст; пока пользователь не изменил ни одного из
+// них, «Отправить» повторяет ЭТОТ запрос, и сервер по clientMessageId не создаст дубликат.
+let unknownSend = null;
+
+function unknownSendKey(chatId, roomId, text, replyToId) {
+    return JSON.stringify([chatId, roomId || null, text, replyToId || null]);
 }
 
 // Текст для пользователя по отказу сервера. client-outdated — просьба обновить
@@ -62,6 +86,9 @@ function sendFailureText(data, fallback) {
         return fallback;
     }
     if (data.code === 'id-conflict') return 'Не удалось отправить сообщение: идентификатор занят, попробуйте ещё раз';
+    // Исход неизвестен: сервер мог успеть принять сообщение. Повтор безопасен — уходит тот же
+    // запрос с тем же clientMessageId (unknownSend), второго сообщения не будет.
+    if (data.timedOut) return 'Сервер не отвечает — не удалось подтвердить отправку. Нажмите «Отправить» ещё раз: дубликата не будет';
     if (data.networkError) return 'Нет соединения с сервером — сообщение не отправлено';
     return data.message || fallback;
 }
@@ -94,8 +121,14 @@ async function sendText(text, { chatId, roomId, replyToId } = {}) {
     // ботом id не присылает. Исходы отправки — sendWithOutcomes (раздел 6.5).
     const encrypted = Boolean(client);
     let encryptFailed = false;
+    const key = unknownSendKey(chatId, roomId, text, replyToId);
+    const reuse = unknownSend && unknownSend.key === key && Date.now() - unknownSend.at < UNKNOWN_SEND_TTL_MS ? unknownSend : null;
+    unknownSend = null;
+    const deadline = Date.now() + SEND_TOTAL_MS;
     const outcome = await sendWithOutcomes({
         roomId,
+        reuse,
+        shouldStop: () => Date.now() >= deadline,
         buildRequest: async (clientMessageId) => {
             let outgoingText = text;
             if (client) {
@@ -114,8 +147,15 @@ async function sendText(text, { chatId, roomId, replyToId } = {}) {
             if (replyToId) payload.replyToId = replyToId;
             return payload;
         },
-        post: (payload) => api('/api/messages', { method: 'POST', body: JSON.stringify(payload) }),
+        post: (payload) => api('/api/messages', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+            timeoutMs: Math.max(5000, Math.min(SEND_TIMEOUT_MS, deadline - Date.now())),
+        }),
     });
+    if (isUnknownSendOutcome(outcome.data) && outcome.request) {
+        unknownSend = { key, request: outcome.request, clientMessageId: outcome.clientMessageId, at: Date.now() };
+    }
     if (encryptFailed) {
         showToast('Не удалось зашифровать сообщение — попробуйте ещё раз', 'error');
         return false;
@@ -147,6 +187,28 @@ async function sendText(text, { chatId, roomId, replyToId } = {}) {
     return true;
 }
 
+// Поле сообщения — textarea: растёт по тексту до max-height из CSS (шесть строк), дальше
+// прокручивается. Высоту надо пересчитывать при любом изменении значения, в том числе из
+// кода (setMessageInputValue), и при смене ширины окна (меняются переносы строк).
+function autoResizeMessageInput() {
+    const input = elements.messageInput;
+    input.style.height = 'auto';
+    if (input.offsetParent === null) {          // поле скрыто (чат не открыт): высоту посчитать нельзя
+        input.style.height = '';
+        return;
+    }
+    const max = parseFloat(getComputedStyle(input).maxHeight);
+    const wanted = input.scrollHeight + (input.offsetHeight - input.clientHeight);
+    const limit = Number.isFinite(max) ? max : wanted;
+    input.style.height = `${Math.min(wanted, limit)}px`;
+    input.style.overflowY = wanted > limit ? 'auto' : 'hidden';
+}
+
+function setMessageInputValue(text) {
+    elements.messageInput.value = text;
+    autoResizeMessageInput();
+}
+
 // Отправка из поля ввода: новое сообщение (через sendText) или сохранение
 // правки. Поле и ответ очищаются только после успеха — и только если
 // пользователь остался в том же чате.
@@ -161,6 +223,7 @@ async function sendMessage() {
     // переключиться — конверт комнаты A не должен уйти в чат B.
     const chatId = currentChatId;
     const roomId = currentRoomId;
+    const replyAtStart = replyToMessageId;
 
     setSending(true); // двойной Enter/клик не отправляет сообщение дважды
     try {
@@ -197,11 +260,9 @@ async function sendMessage() {
             showToast('Сообщение изменено', 'success');
             // в бабле — то, что реально набрано, открытым текстом
             if (chatId === currentChatId) applyMessageEdit(messageId, encryptEdit ? text : (data.text || text));
-            if (String(editingMessageId) === String(messageId)) {
-                editingMessageId = null;
-            }
+            if (String(editingMessageId) === String(messageId)) finishEditing();
         } else {
-            const sent = await sendText(text, { chatId, roomId, replyToId: replyToMessageId });
+            const sent = await sendText(text, { chatId, roomId, replyToId: replyAtStart });
             if (!sent) return;
         }
     } finally {
@@ -209,9 +270,12 @@ async function sendMessage() {
     }
 
     // Если пользователь успел уйти в другой чат, там в поле может быть уже
-    // новый черновик — его не трогаем.
+    // новый черновик — его не трогаем. В том же чате поле очищается, только если там
+    // всё ещё отправленный текст: за время отправки (до 60 с при плохой связи) человек
+    // мог набирать следующее сообщение, и стирать его нельзя. То же с ответом: если он
+    // успел выбрать другое сообщение для ответа, выбор остаётся.
     if (chatId === currentChatId) {
-        elements.messageInput.value = '';
-        clearReply();
+        if (elements.messageInput.value.trim() === text) setMessageInputValue('');
+        if (replyToMessageId === replyAtStart) clearReply();
     }
 }

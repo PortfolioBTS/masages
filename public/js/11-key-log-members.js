@@ -157,7 +157,7 @@ async function openTransparencyModal() {
                 btn.className = 'btn btn-secondary btn-sm';
                 btn.textContent = action.text;
                 btn.addEventListener('click', async () => {
-                    if (action.confirm && !confirm(action.confirm)) return;
+                    if (action.confirm && !(await confirmAction(action.confirm, { title: 'Подтвердите действие' }))) return;
                     btn.disabled = true;
                     try {
                         await action.run();
@@ -201,6 +201,32 @@ const KT_PEER_TEXT = {
     pending: 'Ключ ждёт подтверждения журналом',
     unavailable: 'Проверка журнала ключей сейчас недоступна',
 };
+
+// Включён ли журнал ключей на сервере. Выключенный журнал клиент видит как 'unavailable' у каждого
+// участника, и строка «проверка недоступна» повторялась бы под каждым именем, хотя ничего не сломано:
+// журнала просто нет. GET /api/kt/head при выключенном журнале отвечает { success: true, enabled: false }.
+// Ответ нужен только для вывода (проверки делает kt-client) и запоминается на KT_SERVER_STATE_TTL_MS;
+// null — не выяснили (нет связи): строку тогда показываем как раньше.
+const KT_SERVER_STATE_TTL_MS = 5 * 60 * 1000;
+let ktServerState = { enabled: null, at: 0 };
+
+async function ktEnabledOnServer() {
+    if (ktServerState.enabled !== null && Date.now() - ktServerState.at < KT_SERVER_STATE_TTL_MS) return ktServerState.enabled;
+    const data = await api('/api/kt/head', { skipAuthCheck: true, timeoutMs: 10000 });
+    if (!data || data.networkError || data.timedOut) return null;
+    // 404 и 503 kt-disabled — так выглядит выключенный журнал у других версий сервера.
+    const off = (data.success === true && data.enabled === false) || data.code === 'kt-disabled' || data.httpStatus === 404;
+    ktServerState = { enabled: !off, at: Date.now() };
+    return !off;
+}
+
+// Строки «журнал недоступен» у участников убираются, если журнал на сервере выключен.
+function dropKtUnavailableWhenOff(ktStatuses, enabledOnServer) {
+    if (enabledOnServer !== false) return;
+    for (const [userId, kt] of [...ktStatuses]) {
+        if (kt === 'unavailable') ktStatuses.delete(userId);
+    }
+}
 
 let membersModalSeq = 0;
 
@@ -304,7 +330,7 @@ async function markVerified(row, peer, ctx, btn) {
 
 // Пользователь явно продолжает общение с участником, чьего ключа нет в журнале: он снова адресат рассылки.
 async function overrideLogMismatch(row, peer, ctx, btn) {
-    if (!confirm(`Продолжить обмен ключами с ${peer.username} без проверки по журналу? Делайте это, только если уверены, что его ключ настоящий (код безопасности сверен лично).`)) return;
+    if (!(await confirmAction(`Обмен ключами с ${peer.username} продолжится без проверки по журналу. Делайте это, только если уверены, что его ключ настоящий (код безопасности сверен лично).`, { title: 'Продолжить без проверки по журналу?', confirmLabel: 'Продолжить', danger: true }))) return;
     btn.disabled = true;
     try {
         await ctx.client.overrideLogMismatch(peer.id);
@@ -324,7 +350,7 @@ async function overrideLogMismatch(row, peer, ctx, btn) {
 }
 
 async function acceptIdentityChange(row, peer, ctx, btn) {
-    if (!confirm(`Принять новый ключ участника ${peer.username}? Делайте это, только если код безопасности совпал с кодом на его устройстве. Участник останется подтверждённым в группах, где вы его уже подтверждали; в группах, где он был не подтверждён, он таким и останется.`)) return;
+    if (!(await confirmAction(`Делайте это, только если код безопасности совпал с кодом на устройстве участника ${peer.username}.\n\nУчастник останется подтверждённым в группах, где вы его уже подтверждали; в группах, где он был не подтверждён, он таким и останется.`, { title: 'Принять новый ключ?', confirmLabel: 'Принять ключ', danger: true }))) return;
     btn.disabled = true;
     try {
         await ctx.client.acceptPeerIdentityChange(peer.id);
@@ -349,7 +375,7 @@ async function acceptIdentityChange(row, peer, ctx, btn) {
 async function trustUnconfirmedMember(peer, ctx, btn, duplicate) {
     const warning = `Сервер добавил ${peer.username} в группу, но никто из участников это не подписал. Доверяйте, только если знаете, кто это.`
         + (duplicate ? ' У этого участника такие же ключи шифрования, как у другого: возможно, это подделка.' : '');
-    if (!confirm(warning)) return;
+    if (!(await confirmAction(warning, { title: 'Подтвердить участника?', confirmLabel: 'Подтвердить', danger: true }))) return;
     btn.disabled = true;
     let res;
     try {
@@ -367,6 +393,7 @@ async function trustUnconfirmedMember(peer, ctx, btn, duplicate) {
     if (res.cancelledIntent) showToast('Проверка по приглашению отменена: вы подтвердили участников вручную', 'info', 6000);
     if (Number(ctx.roomId) === Number(currentRoomId)) {
         pendingUnconfirmed.delete(Number(peer.id));
+        pendingSuspended.delete(Number(peer.id));
         renderIdentityBanner();
         ensureE2eeRoomSession(ctx.chatId, ctx.roomId);
     }
@@ -375,7 +402,7 @@ async function trustUnconfirmedMember(peer, ctx, btn, duplicate) {
 
 // Явное поручительство (9.5): подписать допуск за участника, подтверждённого вручную. Остальные начнут отправлять ему ключи.
 async function vouchForMember(peer, ctx, btn) {
-    if (!confirm(`Вы подпишете, что знаете ${peer.username}. Остальные участники начнут отправлять ему ключи.`)) return;
+    if (!(await confirmAction(`Вы подпишете, что знаете ${peer.username}. Остальные участники начнут отправлять ему ключи.`, { title: 'Поручиться за участника?', confirmLabel: 'Поручиться' }))) return;
     btn.disabled = true;
     let res;
     try {
@@ -540,6 +567,7 @@ async function openMembersModal() {
             console.warn('E2EE: checkPeerIdentities failed:', err);
         }
     }
+    if ([...ktStatuses.values()].includes('unavailable')) dropKtUnavailableWhenOff(ktStatuses, await ktEnabledOnServer());
     if (seq !== membersModalSeq) return;
 
     if (!client) {

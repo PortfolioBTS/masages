@@ -11,15 +11,15 @@
     <script src="theme.js" integrity="sha384-T1UMrJ7wNeCotEPdTY8WrewF5BfXH32Af6nBpCERowFUsATGa+iVI8vq2JwkSywQ"></script>
     <script src="icons.js" integrity="sha384-Y1YHD/B0RxyQDbpBNHVzRNYsP1ps2Tiujel4NwxbUFCWOf0c47syPEGDWKuWM6Gq"></script>
     <!-- Стили разбиты на части; порядок подключения = порядок каскада, переставлять нельзя. -->
-    <link rel="stylesheet" href="css/tokens.css" integrity="sha384-8F/USs01BH7JF0575Zx88I90/A/3anzkIOUsTxPTUF8IAsq+BFThFqHG147ow2Fg">
+    <link rel="stylesheet" href="css/tokens.css" integrity="sha384-UTiycNr9EgbUPdUprE47uHWmAUMgxRPxv+pK/4kRLImbiUJmgWXxIzSQqM6F1Dqh">
     <link rel="stylesheet" href="css/controls.css" integrity="sha384-kcgpYSd0nkLZXXj35DHNviipc69vD1rQTr6gFTOEw4KeRapaXhfmY6i5rugWZXxG">
     <link rel="stylesheet" href="css/auth.css" integrity="sha384-PiMCIhU6aYgSHkoTczbWkJI1gxf35vEUgKpJ0bpmduVrdYPlNjmA/gY0DEji9ZWY">
     <link rel="stylesheet" href="css/app-shell.css" integrity="sha384-pERlehZoKebLSb/igJzUZAnz1smG8rICO1oiqEWVhjLRJx/4DKbXznT9ZE/HgnzX">
     <link rel="stylesheet" href="css/messages.css" integrity="sha384-kzsZl8BzJ1Rka26a+gHBY06uyEJfEtKSAg3v+peF/pSVZRakalS6o0kpO6NY3lfN">
-    <link rel="stylesheet" href="css/composer.css" integrity="sha384-/MZVVTF6nGt8HiYQDJ3lgD67qEbH+NT+b6Ji1enfaWx5BWagxOz6IG3LvQ7+eCWq">
-    <link rel="stylesheet" href="css/modals.css" integrity="sha384-+bR67Xb8RBGExM+5UPmGf7nksR3yfJYxghGzDjK7NtA0XPQU83dK5BITxJe/1JSD">
+    <link rel="stylesheet" href="css/composer.css" integrity="sha384-HmBXm4iuvIQaw6vXNiLeq9CMPbwG/g2vL+jTXwFnApIDVg1WwLpGYKU+tBTyNG+5">
+    <link rel="stylesheet" href="css/modals.css" integrity="sha384-qkCf9DK9Sa3QwZvmYUcnwiXFc/NdIg2Kyq7Wcf67cKme61jhalk/BXQ6TmN2d/d9">
     <link rel="stylesheet" href="css/popups.css" integrity="sha384-2uuqAvPdNddpQsYDGq2ndXEuc7O3RRPPFCDKikXUJ7uy35JNVhp8v/iBv7HF3v+p">
-    <link rel="stylesheet" href="css/responsive.css" integrity="sha384-2us9UdyDffKSwJGBliT7t+SqB9q9oOfsahLTb6yaf162h9kWIweAl8tbYZjpM+7K">
+    <link rel="stylesheet" href="css/responsive.css" integrity="sha384-z5wuSuE9Gi0NdSppJjHQAgubengVh45I+rg0HrqN7pFYRpexhO73HgaHlrPlQceu">
 </head>
 <body>
     <main id="auth-screen" class="auth-screen" aria-labelledby="auth-title">
@@ -76,7 +76,7 @@
     </main>
 
     <div id="app" class="app hidden">
-        <div class="sidebar">
+        <aside class="sidebar" aria-label="Чаты и профиль">
             <div class="sidebar-header">
                 <div class="logo-small"><svg class="icon" aria-hidden="true"><use href="#i-brand"></use></svg><span>Nyxo</span></div>
                 <div class="chat-actions sidebar-actions">
@@ -99,13 +99,13 @@
                 <input type="search" id="search-input" placeholder="Поиск чатов" aria-label="Поиск по названиям чатов" aria-controls="chats-list" autocomplete="off">
             </div>
             <div id="chats-empty" class="chats-empty hidden" role="status">Ничего не найдено</div>
-            <div id="chats-list" class="chats-list"></div>
+            <div id="chats-list" class="chats-list" role="navigation" aria-label="Список чатов"></div>
             <div class="sidebar-footer">
                 <button id="profile-btn" class="footer-btn" type="button" aria-haspopup="dialog"><svg class="icon" aria-hidden="true"><use href="#i-user"></use></svg><span>Профиль</span></button>
                 <button id="logout-btn" class="footer-btn" type="button" aria-haspopup="dialog"><svg class="icon" aria-hidden="true"><use href="#i-log-out"></use></svg><span>Удалить и выйти</span></button>
             </div>
-        </div>
-        <div class="main-content">
+        </aside>
+        <main class="main-content">
             <div id="chat-header" class="chat-header hidden">
                 <div class="chat-info">
                     <button id="back-btn" class="icon-btn back-btn" title="Назад к чатам" aria-label="Назад к чатам"><svg class="icon" aria-hidden="true"><use href="#i-arrow-left"></use></svg></button>
@@ -156,7 +156,10 @@
                 <button id="chat-search-older" class="btn btn-sm btn-secondary chat-search-older" type="button">Искать в более ранних</button>
                 <button id="chat-search-close" class="icon-btn icon-btn-sm" type="button" title="Закрыть поиск" aria-label="Закрыть поиск"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"></use></svg></button>
             </div>
-            <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
+            <!-- Лента — журнал (role=log): добавления в него скринридер сам не зачитывает (aria-live=off), чтобы не читать всю историю
+                 при открытии чата и не повторять правки/реакции; о новых входящих говорит отдельный #new-message-status. -->
+            <div id="chat-messages" class="chat-messages" role="log" aria-label="Сообщения чата" aria-live="off" aria-relevant="additions"></div>
+            <div id="new-message-status" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
             <button id="jump-down" class="jump-down hidden" type="button" title="К последним сообщениям" aria-label="К последним сообщениям">
                 <svg class="icon" aria-hidden="true"><use href="#i-arrow-down"></use></svg>
                 <span id="jump-down-badge" class="badge hidden"></span>
@@ -180,9 +183,14 @@
                     <span id="reply-preview-text"></span>
                     <button id="cancel-reply-btn" class="icon-btn icon-btn-sm" title="Отменить ответ" aria-label="Отменить ответ"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"></use></svg></button>
                 </div>
+                <div id="edit-preview" class="reply-preview edit-preview hidden">
+                    <svg class="icon icon-sm" aria-hidden="true"><use href="#i-pencil"></use></svg>
+                    <span id="edit-preview-text"></span>
+                    <button id="cancel-edit-btn" type="button" class="icon-btn icon-btn-sm" title="Отменить правку" aria-label="Отменить правку"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"></use></svg></button>
+                </div>
                 <div class="input-wrapper">
                     <button id="attach-btn" class="icon-btn" title="Прикрепить файлы" aria-label="Прикрепить файлы"><svg class="icon" aria-hidden="true"><use href="#i-paperclip"></use></svg></button>
-                    <input type="text" id="message-input" placeholder="Введите сообщение..." maxlength="4000" aria-label="Текст сообщения">
+                    <textarea id="message-input" rows="1" placeholder="Введите сообщение..." maxlength="4000" aria-label="Текст сообщения" enterkeyhint="send" autocomplete="off"></textarea>
                     <button id="send-btn" class="icon-btn" title="Отправить" aria-label="Отправить"><svg class="icon" aria-hidden="true"><use href="#i-send"></use></svg></button>
                 </div>
                 <div id="composer-status" class="composer-status" role="status">
@@ -197,7 +205,7 @@
                 <h2>Добро пожаловать в Nyxo</h2>
                 <p>Выберите чат или создайте новый</p>
             </div>
-        </div>
+        </main>
     </div>
 
     <div id="connection-status" class="connection-status hidden" role="status" aria-live="polite">
@@ -583,6 +591,16 @@
             </div>
         </div>
     </div>
+    <div id="confirm-modal" class="modal hidden" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-body">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h3 id="confirm-title"></h3>
+                <button id="confirm-close-btn" class="icon-btn" type="button" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+            </div>
+            <div id="confirm-body" class="modal-body"></div>
+            <div id="confirm-actions" class="modal-footer"></div>
+        </div>
+    </div>
     <div id="overlay" class="overlay hidden"></div>
 
     <script src="vendor/socket.io.min.js" integrity="sha384-kzavj5fiMwLKzzD1f8S7TeoVIEi7uKHvbTA3ueZkrzYq75pNQUiUi6Dy98Q3fxb0"></script>
@@ -601,7 +619,7 @@
     <script src="lib/kt.js" integrity="sha384-PfoRX2Bt0RaWTdS939YkXl4jFVwi8Gr4ogG/wNA4FBE1Bv5oQLKcgCkDyoV656+O"></script>
     <script src="lib/kt-client.js" integrity="sha384-gkRyFXWmgtsKq940777YqgAeJjKFTZ5mn+AMbnmGcACsLDARwAG1igpjgzClc2Fd"></script>
     <script src="lib/membership.js" integrity="sha384-m3ddEQCczoONakNhEi35CeCiPaBtCWmSdoaVPySWZySfjoUzadPIIuNrTPSmYMLq"></script>
-    <script src="lib/membership-client.js" integrity="sha384-cDC0YeOQD9d8ZmShRcpHgd38dZuPUyAhZ9YzaDrrYlWS9sXlp23hr+P3Tc4k7Gdv"></script>
+    <script src="lib/membership-client.js" integrity="sha384-xmIFsMNutY/E50w8IsnP/Xhm4n+LwAxbHqmQQl0Nsb8p64UQnI+JvxneObbM/r4Q"></script>
     <script src="lib/e2ee-codec.js" integrity="sha384-PnQyCg9nuNVU2TOL7H5zn2B6V5s/zBRFAlhZB/JiP+I9Sle0LN0wDKEMRNhPPKYO"></script>
     <script src="lib/e2ee-crypto.js" integrity="sha384-bpR2NM2q1muL6Gq9XVLPPWjRy3dnvK7Rr8oQPYV4BjquvZH8oGediNS+QS2/CIOo"></script>
     <script src="lib/e2ee-formats.js" integrity="sha384-tbUUwv9uIyGXKZrmOdCj8ffNIAI7XBo3bdPT0/7IRiyHrJ0YUprCJvo7ZNnF24yS"></script>
@@ -616,23 +634,23 @@
     <script src="lib/text-search.js" integrity="sha384-f/M60HBwwIXwc50+a81RRopE0oTJLJZEOVrOGRin1mSD152lrJMFiAjTeBITGW0t"></script>
     <script src="lib/sw-core.js" integrity="sha384-Clw+QSYR6j6Vtkbs5mhNMAYfxGvn/dyR0fkRcFEG8mpPCCuac3s1uLWKpguoLhhb"></script>
     <script src="lib/sw-client.js" integrity="sha384-OjIhjN4SkkSSYTGZqo4H+4DmqgW4+k+CjGHJruklifNgTXHQBywbHMrlqRdX2Oyx"></script>
-    <script src="js/01-state.js" integrity="sha384-AAKosLt3uZIEFRxDFv6QgiBuQsVkiaCfzcwwWhmIiMrUeacSQdjumEqCdx/kZuV2"></script>
-    <script src="js/02-utils.js" integrity="sha384-9oFlfEb38OGvOdVqrceNS3Yyaxwimy4I2duZb1SZlu75N67j0V8OX2R4K9eIBlfK"></script>
+    <script src="js/01-state.js" integrity="sha384-oYniRqiFzJCboQZwc/jExA1/iT3SiVxuIAMfz50aiMOTGz+rfSb8Yh9iwXsLweww"></script>
+    <script src="js/02-utils.js" integrity="sha384-mc1+cW4EXoUv0cPr4kdaJWY/D31UOhd1BsV2RMI8dJbrrR1jwm96nbWbhXXRWsaA"></script>
     <script src="js/03-e2ee-client.js" integrity="sha384-cEYp9u4pGL9iTUffQG0rrJGAwzEwcqtSdGslMaeZQWD6btos7QriwYJt9+itRqLR"></script>
-    <script src="js/04-e2ee-rooms.js" integrity="sha384-+wiEKtAz9uJoChqWOBBQ35SIprBTjlsgPigx3o27ZX71t6J/CtK6V+dQxmpUp9O1"></script>
-    <script src="js/05-attachments.js" integrity="sha384-n1DBN5toSrYqAoNW1pd0ddKC1mKOduaBnk/gOuU09ABq8HjsjWGILNXEVS1fltF4"></script>
-    <script src="js/06-session-socket.js" integrity="sha384-/v8UHdvWwXww+NkB8pxGe2J6hrVUtb+tmWqH9bqfhSIUyuLqyXdt+orofgypwKSG"></script>
-    <script src="js/07-api-listeners.js" integrity="sha384-iq/Bm2zkbVdHhyz9eQS0EbhLJFNxnyTa0J4ylHy1QOo3q0h01d3gWkhWJFBE3qiR"></script>
-    <script src="js/08-modals-profile.js" integrity="sha384-Y6j8dsJvim3+XmQs7EYJxWYRfgYnopCY6Ww6pxTsPV7M1u2WuYiw+u+DiYKhJAKF"></script>
+    <script src="js/04-e2ee-rooms.js" integrity="sha384-ABSgxPvIvzjdMLpPVXTnnSMDbu45Ab6ax+fgduDtvPQOlSms0Rce2J0oFODmwkk0"></script>
+    <script src="js/05-attachments.js" integrity="sha384-N2Nr+cb/ZSqRsUG0g44u1nDACkD99VetGXoGlHO47spcSFTwHoYVDKd9K1+hny7d"></script>
+    <script src="js/06-session-socket.js" integrity="sha384-PnwytZdOvmdJOLQX/mzM8WE8lMXThuOwrqopVNOLzxG+rHaWXNY87IUHd65M6Hb+"></script>
+    <script src="js/07-api-listeners.js" integrity="sha384-9W/vl1XLvrlei0x5TpCFQ6gQ7naPenXYvdrRRKAFNBTU4YDQN8+YGTv0vExJWvJx"></script>
+    <script src="js/08-modals-profile.js" integrity="sha384-B/XEsUiJu2TFrcVKPtP7w7LjU6leuKccFYc4JY75lqXA1v4Ay4a+p/NAHDAZWX5p"></script>
     <script src="js/09-auth-screen.js" integrity="sha384-brjViOA57cGyEvT0gwDTaXc3LHbuLh3Xx5x0iN2LnkA7/CImOVCrrHTqClKyE8Td"></script>
-    <script src="js/10-invites-join.js" integrity="sha384-4VC4YhQQacFycdEAx2AE+tiyhd0AOglIUVlkVfB5Su48OI09riCqmkXYeH3P41zX"></script>
-    <script src="js/11-key-log-members.js" integrity="sha384-jeEh5H12k4afOJ+v8uixV6g97q5Gow8ygVf+PRyQdHyG+162y95E71LuU4KdHVBu"></script>
-    <script src="js/12-chat-list.js" integrity="sha384-Snh9IzB6bu6CMSuOT+rh61oYfjicBS2pcVtUizX/4Jv6XaKemVFJoPsr5XFyy889"></script>
-    <script src="js/13-chat-messages.js" integrity="sha384-JOIUr/BpJ8viPNtYHSElOGjGf7bD8dBQpBT+sD/o43KJvRNQ/xb7uREOnYXK0Ib+"></script>
-    <script src="js/14-send.js" integrity="sha384-3l0s7Ibr7JesKuVLJyU3RaLyUyOG4AgRTojnDaKR9zGMF/lHBQRXxZGVru/WETIi"></script>
-    <script src="js/15-bot-suggestions.js" integrity="sha384-oen/jWfjEGgSeYACOCdqBiKdaBMiDuZYPasFO0kyxxDEN0YsUTquytfhLNInbxRa"></script>
+    <script src="js/10-invites-join.js" integrity="sha384-OwxSLGOOdTK9XPTXLBbl/PbiD+SyZwgV/XgwZpxvjnAIhF+0oCP4Sqq5ovRwc0K4"></script>
+    <script src="js/11-key-log-members.js" integrity="sha384-9JVzuzcA6gOpnO7U2ZGT7wqK16WSvcXYYSgX+FNa2bYcY65Adr8X0sDM2bXF50eO"></script>
+    <script src="js/12-chat-list.js" integrity="sha384-rexV9L70X+YTKbSDUkJ0d3o90wjW8yuTMABcwiRPoQ4QGNrGIXPpSuU5USNkmN9x"></script>
+    <script src="js/13-chat-messages.js" integrity="sha384-irlrZcAqGsoZ5YtlSYjrZOREfaN3Lx0vDqCfcd5TGCP4RSyNAqwzHDQJZubvSVO4"></script>
+    <script src="js/14-send.js" integrity="sha384-e5JGYee9hjMwFQXuv2l8UMcnAZmbbyvXcXN35s2BSmPuO2656YTNnoJHqzdC0tKt"></script>
+    <script src="js/15-bot-suggestions.js" integrity="sha384-wweydTeInr4aMN2Z2+t1C82grT31h0yAY6/YeV/yqmh9Js9MI3PNqoQPctIAWQKp"></script>
     <script src="js/16-files-composer.js" integrity="sha384-XfVHEpRxUcUijWozEvUpoKDVpykLi7cPtc7KOpEc3tXeR4ajFIH66LOy+8gI6Mab"></script>
-    <script src="js/17-chats-search.js" integrity="sha384-ZsBostkC7eCLgHKPUXoYKNGOMkWkOVxqh0vbKkrsZZ7Ot2BTbUYFYGJpMe2l5vrn"></script>
+    <script src="js/17-chats-search.js" integrity="sha384-0VlkvHw9Du4YECinUJYpZohXKvArusSCGDy6BO6syGj4L3D0tgbp/u+/EXeswvSb"></script>
     <script src="js/18-init.js" integrity="sha384-/NHnQxIuoU9nPEO6EwEtfRLbjFSmkUD0AehbJdFa9Zy6ME64WVdisL8Hx6Hd8JZz"></script>
 </body>
 </html>

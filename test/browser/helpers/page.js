@@ -34,6 +34,10 @@ const KEYS = {
     Backspace: { code: 'Backspace', vk: 8 },
     ArrowDown: { code: 'ArrowDown', vk: 40 },
     ArrowUp: { code: 'ArrowUp', vk: 38 },
+    Home: { code: 'Home', vk: 36 },
+    End: { code: 'End', vk: 35 },
+    F10: { code: 'F10', vk: 121 },
+    ContextMenu: { code: 'ContextMenu', vk: 93 },
 };
 
 function remoteValue(arg) {
@@ -344,11 +348,13 @@ class BrowserPage {
         await this.press('Backspace');
     }
 
-    async press(key) {
+    // shift: true — с зажатым Shift (Shift+Enter — перенос строки, Shift+F10 — контекстное меню).
+    async press(key, { shift = false } = {}) {
         const k = KEYS[key];
         if (!k) throw new Error(`неизвестная клавиша ${key}`);
-        await this.send('Input.dispatchKeyEvent', { type: k.text ? 'keyDown' : 'rawKeyDown', key, code: k.code, windowsVirtualKeyCode: k.vk, text: k.text });
-        await this.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: k.code, windowsVirtualKeyCode: k.vk });
+        const modifiers = shift ? 8 : 0;
+        await this.send('Input.dispatchKeyEvent', { type: k.text ? 'keyDown' : 'rawKeyDown', key, code: k.code, windowsVirtualKeyCode: k.vk, text: k.text, modifiers });
+        await this.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: k.code, windowsVirtualKeyCode: k.vk, modifiers });
     }
 
     // Файлы в <input type="file">: как выбор в системном диалоге (события input и change приходят сами).

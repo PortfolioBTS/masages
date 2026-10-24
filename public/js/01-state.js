@@ -23,6 +23,12 @@ let loadingHistory = false;
 let lastSeenSeq = 0;          // до какого seq пользователь уже видел открытый чат (seq сравнивается только внутри чата)
 let membersChangedTimer = null; // debounce событий roomMembersChanged
 
+// Сколько ждать ответа сервера (api) и сколько допускается «тишина» при загрузке файла;
+// отправка сообщения ждёт меньше и повторяется (14-send.js).
+const API_TIMEOUT_MS = 60 * 1000;
+const UPLOAD_STALL_MS = 60 * 1000;
+const TIMED_OUT_MESSAGE = 'Сервер не отвечает';
+
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const MAX_FILES_PER_BATCH = 10;
 const POW_TIMEOUT_MS = 60 * 1000;
@@ -158,6 +164,7 @@ const elements = {
 
     // ---- Лента ----
     chatMessages: document.getElementById('chat-messages'),
+    newMessageStatus: document.getElementById('new-message-status'),
     jumpDown: document.getElementById('jump-down'),
     jumpDownBadge: document.getElementById('jump-down-badge'),
 
@@ -166,6 +173,9 @@ const elements = {
     replyPreview: document.getElementById('reply-preview'),
     replyPreviewText: document.getElementById('reply-preview-text'),
     cancelReplyBtn: document.getElementById('cancel-reply-btn'),
+    editPreview: document.getElementById('edit-preview'),
+    editPreviewText: document.getElementById('edit-preview-text'),
+    cancelEditBtn: document.getElementById('cancel-edit-btn'),
     attachBtn: document.getElementById('attach-btn'),
     messageInput: document.getElementById('message-input'),
     sendBtn: document.getElementById('send-btn'),
@@ -260,6 +270,11 @@ const elements = {
     // ---- «Удалить и выйти» ----
     deleteAccountBtn: document.getElementById('delete-account-btn'),
     deleteAccountModal: document.getElementById('delete-account-modal'),
+    confirmModal: document.getElementById('confirm-modal'),
+    confirmTitle: document.getElementById('confirm-title'),
+    confirmBody: document.getElementById('confirm-body'),
+    confirmActions: document.getElementById('confirm-actions'),
+    confirmCloseBtn: document.getElementById('confirm-close-btn'),
     deleteAccountAlt: document.getElementById('delete-account-alt'),
     deleteAccountError: document.getElementById('delete-account-error'),
     confirmDeleteAccountBtn: document.getElementById('confirm-delete-account-btn'),

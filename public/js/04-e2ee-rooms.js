@@ -12,6 +12,7 @@ const pendingLogMismatches = new Map();      // userId -> username: ключа �
 const notedLogMismatches = new Set();        // 'комната:участник': о чём уже писали в ленту
 const warnedRooms = new Set();               // о каких комнатах уже предупреждали, что не все получили ключ
 const pendingUnconfirmed = new Map();        // userId -> username: неподтверждённые участники открытой комнаты (баннер)
+const pendingSuspended = new Map();          // userId -> username: подтверждённые ранее, у которых сменился ключ (баннер)
 const notedMembership = new Set();           // 'комната:вид:...': о чём про состав группы уже писали в ленту
 
 function rememberRoomParticipants(roomId, participants) {
@@ -91,23 +92,30 @@ function renderIdentityBanner() {
     const names = Array.from(pendingIdentityChanges.values());
     const mismatched = Array.from(pendingLogMismatches.values());
     const unconfirmed = Array.from(pendingUnconfirmed.values());
-    if (!currentRoomId || (names.length === 0 && mismatched.length === 0 && unconfirmed.length === 0)) {
+    const suspended = Array.from(pendingSuspended.values());
+    if (!currentRoomId || (names.length === 0 && mismatched.length === 0 && unconfirmed.length === 0 && suspended.length === 0)) {
         elements.e2eeBanner.classList.add('hidden');
         elements.e2eeBannerText.textContent = '';
         return;
     }
     const parts = [];
     if (names.length > 0) {
+        // Отправка в группу не блокируется: остальные получают сообщения как обычно. Участнику со сменившимся ключом не
+        // передаётся ключ группы — новые сообщения он не прочитает, пока вы не проверите код безопасности.
         parts.push(names.length === 1
-            ? `У участника ${names[0]} сменился ключ шифрования. Сообщения ему не отправляются, пока вы не проверите код безопасности`
-            : `У участников ${names.join(', ')} сменились ключи шифрования. Сообщения им не отправляются, пока вы не проверите коды безопасности`);
+            ? `У участника ${names[0]} сменился ключ шифрования. Ключ группы ему не передаётся, и новые сообщения он не прочитает, пока вы не проверите код безопасности`
+            : `У участников ${names.join(', ')} сменились ключи шифрования. Ключ группы им не передаётся, и новые сообщения они не прочитают, пока вы не проверите коды безопасности`);
     }
     if (mismatched.length > 0) {
         parts.push(`Сервер показывает для ${mismatched.join(', ')} ключ, которого нет в журнале ключей (или журнал у участников разный). Возможна подмена. Сверьте код безопасности лично. Ключ комнаты ${mismatched.length === 1 ? 'этому участнику' : 'этим участникам'} не отправляется`);
     }
     // Подписанный состав группы (signed-membership.md, 10): сервер добавил участника, за которого никто не поручился.
     if (unconfirmed.length > 0) {
-        parts.push(`В группе есть неподтверждённые участники: ${unconfirmed.join(', ')}. Сообщения им не отправляются`);
+        parts.push(`В группе есть неподтверждённые участники: ${unconfirmed.join(', ')}. Ключ группы ${unconfirmed.length === 1 ? 'ему' : 'им'} не передаётся, пока вы не подтвердите ${unconfirmed.length === 1 ? 'его' : 'их'}`);
+    }
+    // Подтверждённые вами участники, у которых потом сменился ключ (suspended): не «вошли без подписи».
+    if (suspended.length > 0) {
+        parts.push(`${suspended.join(', ')}: ключ изменился после подтверждения. Ключ группы ${suspended.length === 1 ? 'ему' : 'им'} не передаётся, пока вы не проверите код безопасности`);
     }
     elements.e2eeBannerText.textContent = parts.join('. ');
     elements.e2eeBanner.classList.remove('hidden');
@@ -184,9 +192,10 @@ function membershipHowLine(roomId, entry) {
         return entry.how === 'unknown' ? 'Способ входа в группу неизвестен' : '';
     }
     if (entry.status === 'unconfirmed') {
-        return entry.duplicateKeys
-            ? 'Не подтверждён: ключи шифрования такие же, как у другого участника'
-            : 'Не подтверждён: вошёл без подписи участника';
+        if (entry.duplicateKeys) return 'Не подтверждён: ключи шифрования такие же, как у другого участника';
+        // Подтверждали, но ключ с тех пор изменился (suspended): это не «вошёл без подписи».
+        if (entry.suspended) return 'Не подтверждён: ключ изменился после подтверждения';
+        return 'Не подтверждён: вошёл без подписи участника';
     }
     switch (entry.how) {
         case 'approved': return `Одобрил(а) ${by}`;
@@ -212,7 +221,8 @@ function handleMembershipResult(roomId, result) {
     const unconfirmed = Array.isArray(result.unconfirmed) ? result.unconfirmed : [];
     const skip = new Set((result.identityChanges || []).concat(result.logMismatches || []).map(c => Number(c.userId)));
     pendingUnconfirmed.clear();
-    unconfirmed.filter(u => !skip.has(Number(u.id))).forEach(u => pendingUnconfirmed.set(Number(u.id), u.username || `участник #${u.id}`));
+    pendingSuspended.clear();
+    unconfirmed.filter(u => !skip.has(Number(u.id))).forEach(u => (u.suspended ? pendingSuspended : pendingUnconfirmed).set(Number(u.id), u.username || `участник #${u.id}`));
     renderIdentityBanner();
 
     const once = (key) => {
@@ -234,6 +244,13 @@ function handleMembershipResult(roomId, result) {
         const names = group.ids.map(id => memberLabel(roomId, id)).join(', ');
         appendSystemNotice(roomId, `Ключи шифрования участников ${names} совпадают. Сверьте код безопасности`, 'shield-alert');
     });
+}
+
+// «3 участника пока не могут читать…»: склонение и согласование по числу (1, 21: «не может», «у него»).
+function peersWithoutE2eeText(count) {
+    const noun = plural(count, ['участник', 'участника', 'участников']);
+    const single = noun === 'участник';
+    return `${count} ${noun} пока не ${single ? 'может' : 'могут'} читать зашифрованные сообщения: у ${single ? 'него' : 'них'} не настроено шифрование`;
 }
 
 function handleRoomSessionResult(roomId, result) {
@@ -305,7 +322,7 @@ function handleRoomSessionResult(roomId, result) {
         showToast(`Ключ шифрования не разослан: ${general.reason || 'ошибка сервера'} — собеседники могут не прочитать новые сообщения`, 'error', 6000);
     } else if (failedExisting.length > 0 && !warnedRooms.has(Number(roomId))) {
         warnedRooms.add(Number(roomId));
-        showToast(`${failedExisting.length} участник(ов) пока не могут читать зашифрованные сообщения: у них не настроено шифрование`, 'info', 6000);
+        showToast(peersWithoutE2eeText(failedExisting.length), 'info', 6000);
     }
 }
 

@@ -63,7 +63,14 @@ function setChatBadge(item, count) {
         item.appendChild(badge);
     }
     badge.dataset.count = String(count);
-    badge.textContent = count > 99 ? '99+' : String(count);
+    // Скринридеру — «3 непрочитанных сообщения» после названия чата, а не голая цифра; на экране — число.
+    const shown = document.createElement('span');
+    shown.setAttribute('aria-hidden', 'true');
+    shown.textContent = count > 99 ? '99+' : String(count);
+    const spoken = document.createElement('span');
+    spoken.className = 'visually-hidden';
+    spoken.textContent = `${count} ${plural(count, ['непрочитанное сообщение', 'непрочитанных сообщения', 'непрочитанных сообщений'])}`;
+    badge.replaceChildren(shown, spoken);
 }
 
 // ---- Кэш списка и личные флаги чатов ----
@@ -153,7 +160,10 @@ function createChatItem({ id, roomId, name, isBot, preview, unread, onClick, met
     div.dataset.roomId = roomId || '';
     div.tabIndex = 0;
     div.setAttribute('role', 'button');
-    if (Number(id) === Number(currentChatId)) div.classList.add('active', 'is-active');
+    if (Number(id) === Number(currentChatId)) {
+        div.classList.add('active', 'is-active');
+        div.setAttribute('aria-current', 'true');
+    }
     if (meta) {
         div.classList.toggle('is-pinned', Boolean(meta.pinned));
         div.classList.toggle('is-muted', Boolean(meta.muted));
@@ -197,16 +207,16 @@ function createChatItem({ id, roomId, name, isBot, preview, unread, onClick, met
         } else if (meta && (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10'))) {
             e.preventDefault();
             const rect = div.getBoundingClientRect();
-            showChatItemMenu(rect.left + 24, rect.bottom - 8, meta);
+            showChatItemMenu(rect.left + 24, rect.bottom - 8, meta, div);
         }
     });
     if (meta) {
         div.addEventListener('contextmenu', (e) => {
             e.preventDefault();
             e.stopPropagation();
-            showChatItemMenu(e.clientX, e.clientY, meta);
+            showChatItemMenu(e.clientX, e.clientY, meta, div);
         });
-        attachLongPress(div, (x, y) => showChatItemMenu(x, y, meta));
+        attachLongPress(div, (x, y) => showChatItemMenu(x, y, meta, div));
     }
     return div;
 }
@@ -360,24 +370,58 @@ function updateChatListOnMessage(message, isCurrent) {
 }
 
 function setActiveChatItem(chatId, roomId) {
-    elements.chatsList.querySelectorAll('.chat-item.active, .chat-item.is-active').forEach(el => el.classList.remove('active', 'is-active'));
+    elements.chatsList.querySelectorAll('.chat-item.active, .chat-item.is-active').forEach((el) => {
+        el.classList.remove('active', 'is-active');
+        el.removeAttribute('aria-current');
+    });
     if (chatId == null) return;
     const meta = chatsById.get(Number(chatId));
     if (meta) meta.unread = 0;
     const item = findChatItem(chatId, roomId);
     if (item) {
         item.classList.add('active', 'is-active');
+        item.setAttribute('aria-current', 'true');
         setChatBadge(item, 0);
     }
+}
+
+// ---- Клавиатура во всплывающих меню (сообщения и строки чата) ----
+
+function popupMenuItems(menu) {
+    return Array.from(menu.querySelectorAll('button')).filter((btn) => !btn.disabled && btn.offsetParent !== null);
+}
+
+// Стрелки двигают фокус по кругу, Home/End — в начало и конец; Esc и Tab закрывают
+// меню (hide сам возвращает фокус туда, откуда меню открыли).
+function onPopupMenuKeydown(e, menu, hide) {
+    if (e.key === 'Escape' || e.key === 'Tab') {
+        e.preventDefault();
+        hide();
+        return;
+    }
+    const items = popupMenuItems(menu);
+    if (items.length === 0) return;
+    const index = items.indexOf(document.activeElement);
+    let target = null;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowRight') target = items[(index + 1) % items.length];
+    else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') target = index < 0 ? items[items.length - 1] : items[(index - 1 + items.length) % items.length];
+    else if (e.key === 'Home') target = items[0];
+    else if (e.key === 'End') target = items[items.length - 1];
+    if (!target) return;
+    e.preventDefault();
+    target.focus({ preventScroll: true });
 }
 
 // ---- Контекстное меню строки чата и меню чата ----
 
 let chatItemMenuChat = null;
+let chatItemMenuReturnFocus = null;   // строка чата, с которой открыли меню: сюда вернётся фокус
 
-function showChatItemMenu(x, y, chat) {
+// opener — строка чата, из которой открыто меню (клавиатура, правый клик, долгое нажатие).
+function showChatItemMenu(x, y, chat, opener = null) {
     hideMessageMenu();
     chatItemMenuChat = chat;
+    chatItemMenuReturnFocus = opener || document.activeElement;
     setIconLabel(elements.ctxPinBtn, chat.pinned ? 'pin-off' : 'pin', chat.pinned ? 'Открепить' : 'Закрепить');
     setIconLabel(elements.ctxMuteBtn, chat.muted ? 'bell' : 'bell-off', chat.muted ? 'Включить звук' : 'Без звука');
     setIconLabel(elements.ctxArchiveBtn, chat.archived ? 'archive-restore' : 'archive', chat.archived ? 'Вернуть из архива' : 'В архив');
@@ -389,8 +433,19 @@ function showChatItemMenu(x, y, chat) {
     elements.ctxPinBtn.focus({ preventScroll: true });
 }
 
+// Закрывая меню, возвращает фокус на строку чата — но только если фокус был в самом меню
+// (после Escape он иначе уходил на body); клик в другое место фокус не отбирает. Список
+// чатов мог перерисоваться, пока меню было открыто: тогда строка ищется заново по чату.
 function hideChatItemMenu() {
-    elements.chatItemMenu.classList.add('hidden');
+    const menu = elements.chatItemMenu;
+    if (menu.classList.contains('hidden')) return;
+    const hadFocus = menu.contains(document.activeElement);
+    menu.classList.add('hidden');
+    let target = chatItemMenuReturnFocus;
+    chatItemMenuReturnFocus = null;
+    if (!hadFocus) return;
+    if ((!target || !target.isConnected) && chatItemMenuChat) target = findChatItem(chatItemMenuChat.id, chatItemMenuChat.room_id);
+    if (target && target.isConnected) target.focus({ preventScroll: true });
 }
 
 // Клик вне меню закрывает его — кроме click, который браузер прислал
@@ -451,7 +506,7 @@ function renderChatMenu() {
     setIconLabel(elements.archiveChatBtn, meta.archived ? 'archive-restore' : 'archive', meta.archived ? 'Вернуть из архива' : 'В архив');
     [elements.pinChatBtn, elements.muteChatBtn, elements.archiveChatBtn].forEach((b) => { b.disabled = !known; });
     // Из группы выходят (и решают судьбу своих сообщений), чат с ботом удаляют.
-    setIconLabel(elements.deleteChatBtn, 'trash', currentRoomId ? 'Выйти из группы' : 'Удалить чат');
+    setIconLabel(elements.deleteChatBtn, 'trash', currentRoomId ? 'Выйти из группы' : 'Удалить чат с ботом');
     elements.expiryHint.textContent = currentRoomId
         ? 'Срок действует для новых сообщений всех участников группы. Уже отправленные сообщения не изменятся.'
         : 'Срок действует для новых сообщений этого чата. Уже отправленные сообщения не изменятся.';
@@ -464,22 +519,23 @@ function renderChatMenu() {
 // Включение «Не хранить историю» необратимо для уже прочитанного, поэтому требует
 // подтверждения; выключение — без него. Что именно меняется и чего это не делает,
 // сказано в окне (раздел 6 плана криптографии).
-const NO_HISTORY_CONFIRM = 'Включить «Не хранить историю на этом устройстве»?\n\n'
-    + 'Ключи к прочитанным сообщениям этой группы будут стираться из браузера, когда вы закроете чат или вкладку. '
+const NO_HISTORY_CONFIRM = 'Ключи к прочитанным сообщениям этой группы будут стираться из браузера, когда вы закроете чат или вкладку. '
     + 'Более ранние сообщения здесь больше не откроются, вернуть их нельзя.\n\n'
     + 'Это касается только этого устройства: у других участников и на сервере сообщения остаются, '
     + 'а чтобы они исчезли у всех, включите исчезающие сообщения. Другие участники об этой настройке не узнают.\n\n'
     + 'Браузер не гарантирует, что данные сразу будут затёрты на диске.';
+const NO_HISTORY_CONFIRM_TITLE = 'Включить «Не хранить историю на этом устройстве»?';
 
 async function onNoHistoryToggle() {
     const roomId = currentRoomId;
     const toggle = elements.noHistoryToggle;
     if (!roomId) return;
     const wantNone = toggle.checked;
-    if (wantNone && !confirm(NO_HISTORY_CONFIRM)) {
+    if (wantNone && !(await confirmAction(NO_HISTORY_CONFIRM, { title: NO_HISTORY_CONFIRM_TITLE, confirmLabel: 'Включить', danger: true }))) {
         toggle.checked = false;
         return;
     }
+    if (roomId !== currentRoomId) return;   // пока отвечали, открыли другой чат
     toggle.disabled = true;
     try {
         await applyRoomHistoryMode(roomId, wantNone ? 'none' : 'keep');

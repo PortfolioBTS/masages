@@ -98,14 +98,27 @@ function readInvite(page) {
     });
 }
 
+// Окно подтверждения приложения (#confirm-modal, вместо родного confirm): ждёт его, возвращает
+// заголовок и подтверждает первой кнопкой действия (не «Отмена»); cancel: true — нажимает «Отмена».
+async function answerConfirm(page, { cancel = false, timeoutMs = APP_TIMEOUT_MS } = {}) {
+    await page.waitForSelector('#confirm-modal:not(.hidden)', { timeoutMs });
+    const title = (await page.text('#confirm-title')).trim();
+    await page.click(cancel ? '#confirm-actions [data-cancel]' : '#confirm-actions [data-action]');
+    await page.waitForGone('#confirm-modal:not(.hidden)');
+    return title;
+}
+
 // В открытом окне приглашения: выключить «Впускать после одобрения» и создать
-// новый код. Подтверждение window.confirm принимает обработчик диалогов вкладки.
+// новый код. Если код уже был, приложение спрашивает «Создать новый код?» — отвечаем «да».
+// Возвращает { code, secret, confirmTitle } (confirmTitle — null, если вопроса не было).
 async function rotateToSignedInvite(page) {
     await page.click('label[for="invite-approval"]');
     if (await page.evaluate(() => document.getElementById('invite-approval').checked)) {
         throw new Error('переключатель «Впускать после одобрения» не выключился');
     }
     await page.click('#rotate-invite-btn');
+    const confirmTitle = await answerConfirm(page, { timeoutMs: 3000 }).catch(() => null);
+    page.lastConfirmTitle = confirmTitle;
     await page.waitFor(() => document.getElementById('invite-code-display').dataset.secret, { what: 'секрет подписанной ссылки в окне приглашения', timeoutMs: 30000 });
     return readInvite(page);
 }
@@ -259,6 +272,7 @@ module.exports = {
     closeInvite,
     readInvite,
     rotateToSignedInvite,
+    answerConfirm,
     copyInviteLink,
     openInviteAsNewcomer,
     openCodeAsNewcomer,

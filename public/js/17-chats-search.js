@@ -8,48 +8,104 @@
 async function createChat() {
     const name = document.getElementById('new-chat-name').value.trim();
     if (!name) return showToast('Введите название', 'error');
-    const data = await api('/api/chats', {
-        method: 'POST',
-        body: JSON.stringify({ name }),
-    });
-    if (data.success) {
-        document.getElementById('new-chat-name').value = '';
-        // Создатель: V = {я}, how = creator, bootstrapDone записываются сразу (signed-membership.md, 5.1).
-        if (data.chat.room_id) {
-            const client = await getReadyE2eeClient();
-            if (client) {
-                try { await client.noteRoomCreated(data.chat.room_id, currentUser.username); } catch (err) { console.warn('E2EE: состав новой группы не записан:', err); }
+    // Кнопка занята на всё время запроса: двойной клик или Enter во время ответа сервера
+    // создавал бы вторую такую же группу.
+    await withBusyButton(elements.createChatBtn, async () => {
+        const data = await api('/api/chats', {
+            method: 'POST',
+            body: JSON.stringify({ name }),
+        });
+        if (data.success) {
+            document.getElementById('new-chat-name').value = '';
+            // Создатель: V = {я}, how = creator, bootstrapDone записываются сразу (signed-membership.md, 5.1).
+            if (data.chat.room_id) {
+                const client = await getReadyE2eeClient();
+                if (client) {
+                    try { await client.noteRoomCreated(data.chat.room_id, currentUser.username); } catch (err) { console.warn('E2EE: состав новой группы не записан:', err); }
+                }
             }
+            showToast('Чат создан', 'success');
+            closeModal(elements.newChatModal);
+            loadChats();
+            openChat(data.chat.id, data.chat.room_id, data.chat.name, data.chat.avatar, 0, 0);
+        } else {
+            showToast(data.message, 'error');
         }
-        showToast('Чат создан', 'success');
-        closeModal(elements.newChatModal);
-        loadChats();
-        openChat(data.chat.id, data.chat.room_id, data.chat.name, data.chat.avatar, 0, 0);
-    } else {
-        showToast(data.message, 'error');
+    }, 'Создаём…');
+}
+
+// Что спросить, когда человек выходит из чата (чистая функция: тексты проверяет тест).
+// Сообщения комнаты хранятся без автора и удаляются вместе с аккаунтом (sealed-sender.md,
+// 12.1): выходящий решает, убрать ли свои сразу. Поэтому:
+//  * последний участник — группа удалится целиком, выбор про сообщения не нужен;
+//  * своих сообщений в ленте нет и истории дальше нет — про сообщения не спрашиваем;
+//  * иначе три исхода: «Выйти и оставить», «Выйти и удалить», «Отмена».
+// Отмена — всегда отмена (раньше «Отмена» во втором вопросе всё равно выводила из группы).
+// id действия: 'leave' (выйти), 'leave-keep' / 'leave-delete' (выйти, свои оставить/удалить), 'delete' (чат с ботом).
+function leaveChatDialog({ isRoom, memberCount, mayHaveOwnMessages }) {
+    if (!isRoom) {
+        // Единственный чат без комнаты — чат с ботом. Он создаётся один раз, вместе с аккаунтом (services/accounts.js);
+        // после удаления в этом аккаунте его не вернуть — об этом сказано прямо.
+        return {
+            title: 'Удалить чат с ботом?',
+            paragraphs: [
+                'Переписка с ботом удалится безвозвратно.',
+                'Бота вернуть нельзя: чат с ним создаётся один раз, вместе с аккаунтом. Новый чат с ботом не появится.',
+            ],
+            actions: [{ id: 'delete', label: 'Удалить чат с ботом', style: 'danger' }],
+        };
     }
+    if (memberCount === 1) {
+        return {
+            title: 'Удалить группу?',
+            paragraphs: ['Вы последний участник: когда вы выйдете, группа и все её сообщения будут удалены безвозвратно.'],
+            actions: [{ id: 'leave', label: 'Удалить группу', style: 'danger' }],
+        };
+    }
+    if (!mayHaveOwnMessages) {
+        return {
+            title: 'Выйти из группы?',
+            paragraphs: ['Остальные участники останутся в группе. Чтобы вернуться, понадобится новое приглашение.'],
+            actions: [{ id: 'leave', label: 'Выйти', style: 'danger' }],
+        };
+    }
+    return {
+        title: 'Выйти из группы?',
+        paragraphs: [
+            'Остальные участники останутся в группе. Ваши сообщения в ней можно оставить или удалить сейчас.',
+            'Оставленные сообщения удалятся вместе с аккаунтом, но не раньше.',
+        ],
+        actions: [
+            { id: 'leave-keep', label: 'Выйти и оставить сообщения', style: 'secondary' },
+            { id: 'leave-delete', label: 'Выйти и удалить сообщения', style: 'danger' },
+        ],
+    };
 }
 
 async function deleteChat() {
     if (!currentChatId) return;
+    const chatId = currentChatId;
     const roomId = currentRoomId;
-    if (!confirm(roomId ? 'Выйти из группы?' : 'Удалить чат?')) return;
-    // Сообщения комнаты хранятся без автора и удаляются вместе с аккаунтом (sealed-sender.md,
-    // 12.1): выходящий решает, убрать ли свои сразу. По умолчанию (Отмена) - оставить.
-    let removeMine = false;
-    if (roomId) {
-        removeMine = confirm('Удалить ваши сообщения в этой группе?\n\nОК - удалить сейчас.\nОтмена - оставить: они удалятся вместе с аккаунтом, но не раньше.');
-    }
-    const data = await api(`/api/chats/${currentChatId}${removeMine ? '?deleteMessages=1' : ''}`, { method: 'DELETE' });
-    if (data.success) {
-        if (roomId) await forgetLeftRoom(roomId);
-        showToast(roomId ? 'Вы вышли из группы' : 'Чат удалён', 'success');
-        closeModal(elements.chatMenuModal);
-        resetChatView();
-        loadChats();
-    } else {
-        showToast(data.message, 'error');
-    }
+    const meta = chatsById.get(Number(chatId));
+    const choice = await confirmDialog(leaveChatDialog({
+        isRoom: Boolean(roomId),
+        memberCount: meta ? Number(meta.member_count) : NaN,
+        mayHaveOwnMessages: hasMoreHistory || Boolean(elements.chatMessages.querySelector('.message.sent')),
+    }));
+    if (!choice || chatId !== currentChatId) return;
+    const removeMine = choice === 'leave-delete';
+    await withBusyButton(elements.deleteChatBtn, async () => {
+        const data = await api(`/api/chats/${chatId}${removeMine ? '?deleteMessages=1' : ''}`, { method: 'DELETE' });
+        if (data.success) {
+            if (roomId) await forgetLeftRoom(roomId);
+            showToast(roomId ? 'Вы вышли из группы' : 'Чат с ботом удалён', 'success');
+            closeModal(elements.chatMenuModal);
+            resetChatView();
+            loadChats();
+        } else {
+            showToast(data.message, 'error');
+        }
+    });
 }
 
 // Локальная очистка комнаты после выхода: ключи, индекс отправителей (вместе с

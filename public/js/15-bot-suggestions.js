@@ -35,6 +35,21 @@ function syncBotSuggestionsBusy() {
 function setSending(value) {
     sending = value;
     syncBotSuggestionsBusy();
+    syncSendButtonBusy();
+}
+
+// Идущая отправка видна на кнопке: aria-busy и крутящийся значок вместо самолётика.
+// Кнопка остаётся включённой (иначе фокус уходит с неё), но клик при поднятом
+// замке ничего не делает.
+function syncSendButtonBusy() {
+    const btn = elements.sendBtn;
+    if (sending) btn.setAttribute('aria-busy', 'true');
+    else btn.removeAttribute('aria-busy');
+    btn.title = sending ? 'Отправляем…' : 'Отправить';
+    const svg = btn.querySelector('svg');
+    const use = svg && svg.querySelector('use');
+    if (use) use.setAttribute('href', sending ? '#i-loader' : '#i-send');
+    if (svg) svg.classList.toggle('spin', sending);
 }
 
 // labels — chat.quickReplies из ответа сервера. Рисуем только строки разумной
