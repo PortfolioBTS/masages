@@ -164,6 +164,7 @@ const elements = {
 
     // ---- Лента ----
     chatMessages: document.getElementById('chat-messages'),
+    newMessageStatus: document.getElementById('new-message-status'),
     jumpDown: document.getElementById('jump-down'),
     jumpDownBadge: document.getElementById('jump-down-badge'),
 

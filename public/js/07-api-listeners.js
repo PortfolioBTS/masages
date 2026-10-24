@@ -506,6 +506,7 @@ function setupSocketListeners() {
             if (appendMessage(message, true)) {
                 if (stickToBottom) scrollToBottom();
                 else if (!mine) bumpJumpDown();
+                if (!mine) announceNewMessage(message);
             }
             updateChatListOnMessage(message, true);
             if (!mine) markVisibleMessagesRead();

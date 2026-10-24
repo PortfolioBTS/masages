@@ -344,7 +344,7 @@ function createFileAttachmentElement(message) {
         img.loading = 'lazy';
         img.decoding = 'async';
         img.alt = file_name || 'Изображение';
-        img.addEventListener('click', () => window.open(file_url, '_blank', 'noopener'));
+        makeImageOpenable(img, file_url);
         return img;
     }
     if (message_type === 'video') {
@@ -488,6 +488,22 @@ function createMessageElement(message, animate) {
 
 let keyboardMenuAt = 0;
 let messageMenuReturnFocus = null;   // куда вернуть фокус при закрытии меню, открытого с клавиатуры
+
+// Новое входящее сообщение для скринридера: лента (role=log) сама не озвучивает добавления, поэтому
+// короткая фраза «Новое сообщение от …» пишется в отдельную область #new-message-status. Своё сообщение не
+// озвучивается. Очистка и запись на следующем кадре нужны, чтобы одинаковая фраза подряд прозвучала снова.
+let newMessageStatusTimer = null;
+function announceNewMessage(message) {
+    const author = message.room_id ? roomAuthorLabel(message.room_id, message._senderId) : (message.sender_username || 'Бот');
+    const summary = messageSummary(message).replace(/\s+/g, ' ').trim();
+    const snippet = summary.length > 120 ? `${summary.slice(0, 120)}…` : summary;
+    const text = snippet ? `Новое сообщение от ${author}: ${snippet}` : `Новое сообщение от ${author}`;
+    const el = elements.newMessageStatus;
+    el.textContent = '';
+    clearTimeout(newMessageStatusTimer);
+    requestAnimationFrame(() => { el.textContent = text; });
+    newMessageStatusTimer = setTimeout(() => { el.textContent = ''; }, 10000);
+}
 
 function showMessageMenu(x, y, message, { keyboard = false } = {}) {
     hideChatItemMenu();

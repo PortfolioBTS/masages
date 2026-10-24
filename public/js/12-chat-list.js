@@ -63,7 +63,14 @@ function setChatBadge(item, count) {
         item.appendChild(badge);
     }
     badge.dataset.count = String(count);
-    badge.textContent = count > 99 ? '99+' : String(count);
+    // Скринридеру — «3 непрочитанных сообщения» после названия чата, а не голая цифра; на экране — число.
+    const shown = document.createElement('span');
+    shown.setAttribute('aria-hidden', 'true');
+    shown.textContent = count > 99 ? '99+' : String(count);
+    const spoken = document.createElement('span');
+    spoken.className = 'visually-hidden';
+    spoken.textContent = `${count} ${plural(count, ['непрочитанное сообщение', 'непрочитанных сообщения', 'непрочитанных сообщений'])}`;
+    badge.replaceChildren(shown, spoken);
 }
 
 // ---- Кэш списка и личные флаги чатов ----
@@ -153,7 +160,10 @@ function createChatItem({ id, roomId, name, isBot, preview, unread, onClick, met
     div.dataset.roomId = roomId || '';
     div.tabIndex = 0;
     div.setAttribute('role', 'button');
-    if (Number(id) === Number(currentChatId)) div.classList.add('active', 'is-active');
+    if (Number(id) === Number(currentChatId)) {
+        div.classList.add('active', 'is-active');
+        div.setAttribute('aria-current', 'true');
+    }
     if (meta) {
         div.classList.toggle('is-pinned', Boolean(meta.pinned));
         div.classList.toggle('is-muted', Boolean(meta.muted));
@@ -360,13 +370,17 @@ function updateChatListOnMessage(message, isCurrent) {
 }
 
 function setActiveChatItem(chatId, roomId) {
-    elements.chatsList.querySelectorAll('.chat-item.active, .chat-item.is-active').forEach(el => el.classList.remove('active', 'is-active'));
+    elements.chatsList.querySelectorAll('.chat-item.active, .chat-item.is-active').forEach((el) => {
+        el.classList.remove('active', 'is-active');
+        el.removeAttribute('aria-current');
+    });
     if (chatId == null) return;
     const meta = chatsById.get(Number(chatId));
     if (meta) meta.unread = 0;
     const item = findChatItem(chatId, roomId);
     if (item) {
         item.classList.add('active', 'is-active');
+        item.setAttribute('aria-current', 'true');
         setChatBadge(item, 0);
     }
 }

@@ -113,6 +113,21 @@ function createDocumentLink(url, name, mime, extra = {}) {
     return wrapper;
 }
 
+// Картинка в ленте открывается в новой вкладке и мышью, и с клавиатуры: Tab ставит на неё фокус,
+// Enter или пробел открывают (раньше был только click, и клавиатурный пользователь картинку не открывал).
+function makeImageOpenable(img, url) {
+    const open = () => window.open(url, '_blank', 'noopener');
+    img.tabIndex = 0;
+    img.setAttribute('role', 'button');
+    img.setAttribute('aria-label', `Открыть изображение: ${img.alt}`);
+    img.addEventListener('click', open);
+    img.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        open();
+    });
+}
+
 function createMediaElement(mime, url, name) {
     if (mime.startsWith('image/')) {
         const img = document.createElement('img');
@@ -120,7 +135,7 @@ function createMediaElement(mime, url, name) {
         img.className = 'message-image';
         img.decoding = 'async';
         img.alt = name || 'Изображение';
-        img.addEventListener('click', () => window.open(url, '_blank', 'noopener'));
+        makeImageOpenable(img, url);
         return img;
     }
     if (mime.startsWith('video/')) {

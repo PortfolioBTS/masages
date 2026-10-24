@@ -84,6 +84,11 @@ class FakeEl {
     appendChild(node) { if (node instanceof FakeEl) node.parent = this; this.children.push(node); return node; }
     append(...nodes) { nodes.forEach((n) => this.appendChild(n)); }
     replaceChildren(...nodes) { this.children = []; nodes.forEach((n) => this.appendChild(n)); }
+    remove() {
+        if (!this.parent) return;
+        this.parent.children = this.parent.children.filter((c) => c !== this);
+        this.parent = null;
+    }
     contains(node) {
         for (let el = node; el; el = el.parent) if (el === this) return true;
         return false;
