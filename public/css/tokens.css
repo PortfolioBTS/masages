@@ -224,6 +224,21 @@ samp {
     font-size: 0.93em;
 }
 
+/* Названия и имена приходят от других людей и могут быть на арабском или иврите (или нарочно с
+   управляющими символами направления). Изоляция (как у <bdi>) не даёт такому тексту переставлять
+   соседние элементы строки: счётчики, значки, «(вы)», время (T7.3, п.16 ревью W7 R3). Сервер при
+   этом чистит сами символы в названиях (T7.2). */
+#chat-name,
+#join-preview-name,
+#profile-username,
+.chat-name,
+.member-name,
+.message-author,
+.pending-card h4,
+.reply-to small {
+    unicode-bidi: isolate;
+}
+
 ::selection {
     background: var(--text);
     color: var(--bg);
