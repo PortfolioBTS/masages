@@ -297,7 +297,8 @@ function listFiles(dir, base) {
 test('public/ (except vendor) has no voice recording, microphone or audio code (criterion 2.4)', () => {
     const files = listFiles(PUBLIC_DIR, '');
     assert.ok(files.includes('js/01-state.js') && files.includes('index.html') && files.includes('lib/mime-policy.js'), 'file list is broken');
-    const forbidden = /record|mic|голосов|MediaRecorder|getUserMedia|audio\/|\bmusic\b/i;
+    // (?<!ato)mic: атрибут доступности aria-atomic — не микрофон.
+    const forbidden = /record|(?<!ato)mic|голосов|MediaRecorder|getUserMedia|audio\/|\bmusic\b/i;
     const hits = [];
     for (const file of files) {
         readPublic(file).split('\n').forEach((line, index) => {

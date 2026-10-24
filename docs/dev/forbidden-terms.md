@@ -43,7 +43,8 @@
 
 ### `stage2-audio` — этап 2, голос и аудио
 
-Шаблон: `record|mic|голосов|MediaRecorder|getUserMedia|audio/`, без учёта регистра.
+Шаблон: `record|(?<!ato)mic|голосов|MediaRecorder|getUserMedia|audio/`, без учёта регистра (`mic` — кроме атрибута
+доступности `aria-atomic`).
 
 Область: прод-код — `server.js`, `src/**`, `lib/**`, `public/**` (кроме vendor). Тесты не проверяются: тесты отказа сами содержат
 `audio/mpeg`, их проверяет ревьюер.

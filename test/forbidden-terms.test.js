@@ -10,7 +10,8 @@
 // Правила:
 //   * этап 1 — остатки входа по почте и паролю
 //     (email|password|/api/login|register-btn|парол, без учёта регистра);
-//   * этап 2 — голос и аудио (record|mic|голосов|MediaRecorder|getUserMedia|audio/).
+//   * этап 2 — голос и аудио (record|mic|голосов|MediaRecorder|getUserMedia|audio/;
+//     mic — кроме aria-atomic).
 //
 // Тест зелёный, только когда реализация этапов 1–2 слита целиком. На ветке, где
 // клиент ещё старый, его можно пропустить: NYXO_SKIP_FORBIDDEN=1 npm test.
@@ -68,7 +69,8 @@ const RULES = [
     {
         id: 'stage2-audio',
         title: 'этап 2: голос и аудио',
-        pattern: /record|mic|голосов|MediaRecorder|getUserMedia|audio\//i,
+        // (?<!ato)mic: атрибут доступности aria-atomic — не микрофон.
+        pattern: /record|(?<!ato)mic|голосов|MediaRecorder|getUserMedia|audio\//i,
         scope: isProdCode,
         allow: [
             { file: 'lib/privacy.js', line: /Permissions-Policy.*microphone=\(\)/, reason: 'заголовок Permissions-Policy запрещает странице доступ к микрофону' },
