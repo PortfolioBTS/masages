@@ -393,6 +393,7 @@ async function trustUnconfirmedMember(peer, ctx, btn, duplicate) {
     if (res.cancelledIntent) showToast('Проверка по приглашению отменена: вы подтвердили участников вручную', 'info', 6000);
     if (Number(ctx.roomId) === Number(currentRoomId)) {
         pendingUnconfirmed.delete(Number(peer.id));
+        pendingSuspended.delete(Number(peer.id));
         renderIdentityBanner();
         ensureE2eeRoomSession(ctx.chatId, ctx.roomId);
     }

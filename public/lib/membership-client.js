@@ -432,14 +432,23 @@
                 if (!pin || pin.pending || pin.excluded) continue;
                 recipients.push({ id, memkey: entry.memkey });
             }
+            // Выпавшие из V из-за смены ключа (suspended, 9.7): человек подтверждал их до смены ключа. Интерфейс говорит о них
+            // «ключ изменился после подтверждения», а не «вошёл без подписи» (ревью W7 R3, п.13). Признак ставится, только если он истинен.
+            const suspendedIds = new Set([...suspendedStored, ...suspendedNow].map(e => e.id).filter(id => S.has(id) && !V.has(id)));
             const unconfirmed = [];
             for (const p of current) {
                 if (p.id === me.id || V.has(p.id)) continue;
-                unconfirmed.push({ id: p.id, username: p.username, duplicateKeys: blocked.has(p.id) });
+                const item = { id: p.id, username: p.username, duplicateKeys: blocked.has(p.id) };
+                if (suspendedIds.has(p.id)) item.suspended = true;
+                unconfirmed.push(item);
             }
             const members = current.map(p => {
                 const entry = V.get(p.id);
-                if (!entry) return { id: p.id, username: p.username, status: 'unconfirmed', how: null, by: null };
+                if (!entry) {
+                    const item = { id: p.id, username: p.username, status: 'unconfirmed', how: null, by: null };
+                    if (suspendedIds.has(p.id)) item.suspended = true;
+                    return item;
+                }
                 const item = { id: p.id, username: p.username, status: entry.status, how: entry.how, by: entry.by };
                 if (entry.vouchedByMe) item.vouchedByMe = true;
                 if (duplicateKeys.some(g => g.ids.includes(p.id))) item.duplicateKeys = true;
@@ -1018,6 +1027,7 @@
                 const trusted = await readTrusted(roomId);
                 const V = new Map(trusted.list.map(e => [e.id, e]));
                 const members = await storage.get(names.members(roomId));
+                const suspendedIds = new Set((await readSuspended(roomId)).map(e => e.id));
                 const me = Number(getUserId());
                 const list = [];
                 for (const p of Array.isArray(members) ? members : []) {
@@ -1027,6 +1037,7 @@
                         ? { id, username: p.username || entry.username || '', status: id === me ? 'self' : entry.status, how: entry.how, by: entry.by }
                         : { id, username: p.username || '', status: id === me ? 'self' : 'unconfirmed', how: null, by: null };
                     if (entry && entry.vouchedByMe) item.vouchedByMe = true;
+                    if (!entry && id !== me && suspendedIds.has(id)) item.suspended = true;
                     list.push(item);
                 }
                 return list;
