@@ -28,7 +28,7 @@ function register(app, ctx) {
     const {
         UPLOAD_QUOTA_BYTES, UPLOADS_DIR, cleanupUploadedFile, rejectUpload, rejectUploadWith, io,
         emitRoomMessageEvent, newMessageExpirySeconds, getOwnChat, unarchiveForRecipients, insertChatMessage,
-        insertRoomMessage, describeMessageIdUse, advanceSenderMarker, upload, uploadQuotaLeft,
+        insertRoomMessage, describeMessageIdUse, advanceSenderMarker, uploadFile, uploadQuotaLeft,
     } = ctx;
 
     // Квота вложений (sealed-sender.md, раздел 13): объём ЗАГРУЗОК ЗА ОКНО В 30 ДНЕЙ,
@@ -49,7 +49,7 @@ function register(app, ctx) {
     // его формат и занятость проверяет fileFilter ещё до приёма файла
     // (acceptUpload), здесь — повторно и для случая, когда chatId пришёл позже
     // файла. При 409 и при повторе той же отправки файл удаляется с диска.
-    app.post('/api/messages/file', upload.single('file'), async (req, res) => {
+    app.post('/api/messages/file', uploadFile, async (req, res) => {
         const file = req.file;
         const userId = req.session.userId;
         if (!userId) return rejectUpload(res, file, 401, 'Не авторизован');
