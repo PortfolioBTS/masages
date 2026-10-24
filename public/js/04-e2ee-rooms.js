@@ -246,6 +246,13 @@ function handleMembershipResult(roomId, result) {
     });
 }
 
+// «3 участника пока не могут читать…»: склонение и согласование по числу (1, 21: «не может», «у него»).
+function peersWithoutE2eeText(count) {
+    const noun = plural(count, ['участник', 'участника', 'участников']);
+    const single = noun === 'участник';
+    return `${count} ${noun} пока не ${single ? 'может' : 'могут'} читать зашифрованные сообщения: у ${single ? 'него' : 'них'} не настроено шифрование`;
+}
+
 function handleRoomSessionResult(roomId, result) {
     if (!result || Number(roomId) !== Number(currentRoomId)) return;
     handleMembershipResult(roomId, result);
@@ -315,7 +322,7 @@ function handleRoomSessionResult(roomId, result) {
         showToast(`Ключ шифрования не разослан: ${general.reason || 'ошибка сервера'} — собеседники могут не прочитать новые сообщения`, 'error', 6000);
     } else if (failedExisting.length > 0 && !warnedRooms.has(Number(roomId))) {
         warnedRooms.add(Number(roomId));
-        showToast(`${failedExisting.length} участник(ов) пока не могут читать зашифрованные сообщения: у них не настроено шифрование`, 'info', 6000);
+        showToast(peersWithoutE2eeText(failedExisting.length), 'info', 6000);
     }
 }
 

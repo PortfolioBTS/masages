@@ -633,8 +633,13 @@ async function showApplicantKeyCheck(req, info) {
     };
     const text = result && texts[result.status];
     if (!text || !info.isConnected) return;
+    // Подмена ключа — предупреждение (member-warning, как в окне участников), а не такая же неброская строка, как «ключ проверен».
+    if (result.status === 'mismatch') {
+        info.appendChild(iconText('p', 'member-warning', 'alert-triangle', text));
+        return;
+    }
     const line = document.createElement('small');
-    line.className = result.status === 'mismatch' ? 'member-kt' : 'member-kt';
+    line.className = 'member-kt';
     line.textContent = text;
     info.appendChild(line);
 }

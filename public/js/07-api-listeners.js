@@ -15,14 +15,22 @@ function showApp() {
 
 let toastTimer = null;
 const TOAST_ICONS = { success: 'check', error: 'alert-triangle', info: 'info' };
-function showToast(message, type = 'info', duration = 3000) {
+// Сколько показывать всплывающее сообщение, если вызывающий не задал время: три секунды — минимум,
+// длинный текст (ошибки бывают в две строки) читается дольше — примерно 15 знаков в секунду, не больше 12 с.
+function toastDurationMs(message) {
+    const length = String(message || '').length;
+    return Math.min(12000, Math.max(3000, 1500 + length * 60));
+}
+
+function showToast(message, type = 'info', duration) {
     const kind = TOAST_ICONS[type] ? type : 'info';
+    const shownFor = Number.isFinite(duration) ? duration : toastDurationMs(message);
     const text = document.createElement('span');
     text.textContent = message || '';
     elements.toast.replaceChildren(icon(TOAST_ICONS[kind]), text);
     elements.toast.className = `toast toast-${kind}`;
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => elements.toast.classList.add('hidden'), duration);
+    toastTimer = setTimeout(() => elements.toast.classList.add('hidden'), shownFor);
 }
 
 function getCsrfToken() {
