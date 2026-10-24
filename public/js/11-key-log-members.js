@@ -202,6 +202,32 @@ const KT_PEER_TEXT = {
     unavailable: 'Проверка журнала ключей сейчас недоступна',
 };
 
+// Включён ли журнал ключей на сервере. Выключенный журнал клиент видит как 'unavailable' у каждого
+// участника, и строка «проверка недоступна» повторялась бы под каждым именем, хотя ничего не сломано:
+// журнала просто нет. GET /api/kt/head при выключенном журнале отвечает { success: true, enabled: false }.
+// Ответ нужен только для вывода (проверки делает kt-client) и запоминается на KT_SERVER_STATE_TTL_MS;
+// null — не выяснили (нет связи): строку тогда показываем как раньше.
+const KT_SERVER_STATE_TTL_MS = 5 * 60 * 1000;
+let ktServerState = { enabled: null, at: 0 };
+
+async function ktEnabledOnServer() {
+    if (ktServerState.enabled !== null && Date.now() - ktServerState.at < KT_SERVER_STATE_TTL_MS) return ktServerState.enabled;
+    const data = await api('/api/kt/head', { skipAuthCheck: true, timeoutMs: 10000 });
+    if (!data || data.networkError || data.timedOut) return null;
+    // 404 и 503 kt-disabled — так выглядит выключенный журнал у других версий сервера.
+    const off = (data.success === true && data.enabled === false) || data.code === 'kt-disabled' || data.httpStatus === 404;
+    ktServerState = { enabled: !off, at: Date.now() };
+    return !off;
+}
+
+// Строки «журнал недоступен» у участников убираются, если журнал на сервере выключен.
+function dropKtUnavailableWhenOff(ktStatuses, enabledOnServer) {
+    if (enabledOnServer !== false) return;
+    for (const [userId, kt] of [...ktStatuses]) {
+        if (kt === 'unavailable') ktStatuses.delete(userId);
+    }
+}
+
 let membersModalSeq = 0;
 
 function setMembersPlaceholder(text) {
@@ -540,6 +566,7 @@ async function openMembersModal() {
             console.warn('E2EE: checkPeerIdentities failed:', err);
         }
     }
+    if ([...ktStatuses.values()].includes('unavailable')) dropKtUnavailableWhenOff(ktStatuses, await ktEnabledOnServer());
     if (seq !== membersModalSeq) return;
 
     if (!client) {
