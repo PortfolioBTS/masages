@@ -277,6 +277,7 @@ function setupChatMenuListeners() {
             if (radio.checked) setChatExpiry(Number(radio.value));
         });
     });
+    elements.chatItemMenu.addEventListener('keydown', (e) => onPopupMenuKeydown(e, elements.chatItemMenu, hideChatItemMenu));
     elements.ctxPinBtn.addEventListener('click', () => onChatItemMenuAction('pinned'));
     elements.ctxMuteBtn.addEventListener('click', () => onChatItemMenuAction('muted'));
     elements.ctxArchiveBtn.addEventListener('click', () => onChatItemMenuAction('archived'));

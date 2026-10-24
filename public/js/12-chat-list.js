@@ -197,16 +197,16 @@ function createChatItem({ id, roomId, name, isBot, preview, unread, onClick, met
         } else if (meta && (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10'))) {
             e.preventDefault();
             const rect = div.getBoundingClientRect();
-            showChatItemMenu(rect.left + 24, rect.bottom - 8, meta);
+            showChatItemMenu(rect.left + 24, rect.bottom - 8, meta, div);
         }
     });
     if (meta) {
         div.addEventListener('contextmenu', (e) => {
             e.preventDefault();
             e.stopPropagation();
-            showChatItemMenu(e.clientX, e.clientY, meta);
+            showChatItemMenu(e.clientX, e.clientY, meta, div);
         });
-        attachLongPress(div, (x, y) => showChatItemMenu(x, y, meta));
+        attachLongPress(div, (x, y) => showChatItemMenu(x, y, meta, div));
     }
     return div;
 }
@@ -401,10 +401,13 @@ function onPopupMenuKeydown(e, menu, hide) {
 // ---- Контекстное меню строки чата и меню чата ----
 
 let chatItemMenuChat = null;
+let chatItemMenuReturnFocus = null;   // строка чата, с которой открыли меню: сюда вернётся фокус
 
-function showChatItemMenu(x, y, chat) {
+// opener — строка чата, из которой открыто меню (клавиатура, правый клик, долгое нажатие).
+function showChatItemMenu(x, y, chat, opener = null) {
     hideMessageMenu();
     chatItemMenuChat = chat;
+    chatItemMenuReturnFocus = opener || document.activeElement;
     setIconLabel(elements.ctxPinBtn, chat.pinned ? 'pin-off' : 'pin', chat.pinned ? 'Открепить' : 'Закрепить');
     setIconLabel(elements.ctxMuteBtn, chat.muted ? 'bell' : 'bell-off', chat.muted ? 'Включить звук' : 'Без звука');
     setIconLabel(elements.ctxArchiveBtn, chat.archived ? 'archive-restore' : 'archive', chat.archived ? 'Вернуть из архива' : 'В архив');
@@ -416,8 +419,19 @@ function showChatItemMenu(x, y, chat) {
     elements.ctxPinBtn.focus({ preventScroll: true });
 }
 
+// Закрывая меню, возвращает фокус на строку чата — но только если фокус был в самом меню
+// (после Escape он иначе уходил на body); клик в другое место фокус не отбирает. Список
+// чатов мог перерисоваться, пока меню было открыто: тогда строка ищется заново по чату.
 function hideChatItemMenu() {
-    elements.chatItemMenu.classList.add('hidden');
+    const menu = elements.chatItemMenu;
+    if (menu.classList.contains('hidden')) return;
+    const hadFocus = menu.contains(document.activeElement);
+    menu.classList.add('hidden');
+    let target = chatItemMenuReturnFocus;
+    chatItemMenuReturnFocus = null;
+    if (!hadFocus) return;
+    if ((!target || !target.isConnected) && chatItemMenuChat) target = findChatItem(chatItemMenuChat.id, chatItemMenuChat.room_id);
+    if (target && target.isConnected) target.focus({ preventScroll: true });
 }
 
 // Клик вне меню закрывает его — кроме click, который браузер прислал
