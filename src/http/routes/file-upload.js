@@ -153,6 +153,10 @@ function register(app, ctx) {
         }
         await coarsenFileTimes(uploadedFilePath);
 
+        // После COMMIT вставки файл принадлежит сохранённому сообщению: сбой дальше
+        // (рассылка, ответ) не должен его удалять, иначе в чате осталось бы сообщение без
+        // файла (ревью W7 R2.12). Повтор той же отправки получит сохранённую строку.
+        let committed = false;
         try {
             const roomId = chat.room_id || null;
             const fileUrl = `/uploads/${file.filename}`;
@@ -191,6 +195,7 @@ function register(app, ctx) {
                     cleanupUploadedFile(file);
                     return respondRoomSendError(res, outcome.error);
                 }
+                committed = true;
                 // Раньше здесь по setTimeout статус "доставлено"/"прочитано"
                 // выставлялся через 1 и 2 секунды независимо от реальности (и без
                 // обработки ошибок — сбой БД ронял процесс). Теперь 'read' ставит
@@ -217,6 +222,7 @@ function register(app, ctx) {
             const inserted = await withMessageIdRetry(() => insertChatMessage(userId, fields, expirySeconds, quotaUpload));
             if (!inserted) return rejectUpload(res, file, 401, 'Не авторизован');
             if (inserted.error) return rejectUpload(res, file, 413, 'Превышена квота хранилища вложений');
+            committed = true;
 
             const fileMessage = apiMessage({
                 id: inserted.id, seq: inserted.seq, chat_id: chat.id, room_id: null, user_id: userId,
@@ -229,7 +235,7 @@ function register(app, ctx) {
             io.to(getSocketRoomKey(chat.id, null)).emit('newMessage', fileMessage);
             res.json({ success: true, message: fileMessage });
         } catch (error) {
-            cleanupUploadedFile(file);
+            if (!committed) cleanupUploadedFile(file);
             if (respondIfDbBusy(res, error)) return;
             logError('Upload file error', error);
             res.status(500).json({ success: false, message: 'Ошибка отправки файла' });
