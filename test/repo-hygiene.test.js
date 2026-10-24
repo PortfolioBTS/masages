@@ -57,5 +57,23 @@ if (!entries) {
     });
 }
 
+// Тест-ловушка: раннер test/run-unit.js судит о файле по коду выхода. Файл с мини-харнессом, который
+// считает failed, но не выставляет process.exitCode, никогда не покраснеет (так было с e2ee-modules.test.js,
+// ревью W7 R5, В-1). Достаточно, чтобы файл ставил код выхода сам или вызывал finish() из
+// sender-keys-helpers.js; комментарии не в счёт.
+test('каждый test/*.test.js умеет падать: ставит process.exitCode / process.exit или вызывает finish()', () => {
+    const stripComments = (source) => source.split('\n').filter(line => !/^\s*\/\//.test(line)).join('\n');
+    const setsExit = /process\.exitCode\s*=|process\.exit\s*\(/;
+    const callsFinish = /^\s*finish\(\);/m;
+    const files = fs.readdirSync(__dirname).filter(name => name.endsWith('.test.js')).sort();
+    assert.ok(files.length > 50, 'не нашли тестовые файлы в ' + __dirname);
+    const silent = files.filter((name) => {
+        const source = stripComments(fs.readFileSync(path.join(__dirname, name), 'utf8'));
+        if (setsExit.test(source)) return false;
+        return !(callsFinish.test(source) && /sender-keys-helpers/.test(source));
+    });
+    assert.deepStrictEqual(silent, [], 'эти тесты не выставляют код выхода и не смогут покраснеть:\n' + silent.join('\n'));
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 if (failed > 0) process.exitCode = 1;
