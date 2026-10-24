@@ -55,6 +55,13 @@ test('вопросы про ключи участников идут через 
     }
 });
 
+test('CSS: подтверждение с тремя кнопками — столбец на всю ширину, «Отмена» последней', () => {
+    const { readClientCss } = require('./client-css');
+    const css = readClientCss();
+    assert.match(css, /#confirm-actions:has\(> button:nth-child\(3\)\) \{\s*flex-direction: column;\s*align-items: stretch;/);
+    assert.match(css, /#confirm-actions:has\(> button:nth-child\(3\)\) > \[data-cancel\] \{\s*order: 1;/);
+});
+
 // ---- окно подтверждения в vm ----
 
 function dialogClient() {

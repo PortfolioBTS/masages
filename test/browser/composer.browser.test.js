@@ -233,6 +233,17 @@ suite.test('выход из группы: «Отмена» не выводит; 
         await pb.waitForGone('#chat-menu-modal:not(.hidden)');
         await pb.screenshot('composer-03-confirm');
 
+        // Светлая тема: то же окно подтверждения читается и в ней (снимок для просмотра человеком).
+        await pb.click('#theme-toggle-btn');
+        assert.strictEqual(await pb.evaluate(() => document.documentElement.dataset.theme), 'light');
+        await openLeave();
+        await pb.screenshot('composer-03-confirm-light');
+        await pb.press('Escape');
+        await pb.waitForGone('#confirm-modal:not(.hidden)');
+        await pb.press('Escape');
+        await pb.waitForGone('#chat-menu-modal:not(.hidden)');
+        await pb.click('#theme-toggle-btn');
+
         // «Выйти и удалить сообщения»: Боб выходит, сообщение исчезает у Алисы.
         await openLeave();
         await pb.click('#confirm-actions [data-action="leave-delete"]');
