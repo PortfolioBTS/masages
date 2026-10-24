@@ -10,7 +10,7 @@ const path = require('path');
 const cookieParser = require('cookie-parser');
 const { getPrivacyHeaders, createHstsMiddleware } = require('../../lib/privacy');
 const { createSwKillSwitch } = require('../../lib/sw-kill-switch');
-const { buildContentSecurityPolicy } = require('../../lib/security-utils');
+const { buildContentSecurityPolicy, isCrossSiteApiRequest } = require('../../lib/security-utils');
 // Сессии в Postgres с огрублением времени, их продление и активность
 // анонимов (контракт этапа 1, §4).
 const { renewSession } = require('../../lib/session-store');
@@ -95,6 +95,13 @@ function configureApp(ctx) {
     app.use(createHstsMiddleware({ production: IS_PRODUCTION, preload: HSTS_PRELOAD }));
 
     app.use((req, res, next) => {
+        // Межсайтовый запрос к API отклоняется при любом методе, в том числе GET по переходу с чужой
+        // страницы: у части GET есть побочные эффекты (отметка «прочитано», выдача ключей), а кука
+        // SameSite=Lax при таком переходе уходит (W7 R1 п.5). Sec-Fetch-Site подделать со страницы нельзя.
+        if (isCrossSiteApiRequest({ secFetchSite: req.headers['sec-fetch-site'], path: req.path })) {
+            metrics.originRejected();
+            return res.status(403).json({ success: false, message: 'Запрещено: запрос с чужого сайта' });
+        }
         if (SAFE_METHODS.has(req.method) || isTrustedOrigin(req.headers)) return next();
         metrics.originRejected();
         res.status(403).json({ success: false, message: 'Запрещено: запрос с чужого сайта' });
