@@ -86,7 +86,9 @@ function sendFailureText(data, fallback) {
         return fallback;
     }
     if (data.code === 'id-conflict') return 'Не удалось отправить сообщение: идентификатор занят, попробуйте ещё раз';
-    if (data.timedOut) return 'Сервер не отвечает — сообщение не отправлено. Нажмите «Отправить» ещё раз';
+    // Исход неизвестен: сервер мог успеть принять сообщение. Повтор безопасен — уходит тот же
+    // запрос с тем же clientMessageId (unknownSend), второго сообщения не будет.
+    if (data.timedOut) return 'Сервер не отвечает — не удалось подтвердить отправку. Нажмите «Отправить» ещё раз: дубликата не будет';
     if (data.networkError) return 'Нет соединения с сервером — сообщение не отправлено';
     return data.message || fallback;
 }
