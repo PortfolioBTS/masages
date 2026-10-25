@@ -12,6 +12,7 @@ const { logError } = require('../../../lib/log-error');
 // Лимиты аккаунта: суточный объём текста и число комнат (W7 R1 п.3).
 const { TEXT_QUOTA_MESSAGE, roomsLimitMessage } = require('../../../lib/account-limits');
 const { LimitStoreError, respondBusy } = require('../../../lib/pg-limits');
+const { cleanRoomName, avatarOfName, MAX_ROOM_NAME_LENGTH } = require('../../../lib/room-name');
 // Id и курсоры сообщений, тела ошибок 400/409 (docs/security/message-ordering.md).
 const {
     CLIENT_OUTDATED, parseSeq, BAD_SEQ, parseClientMessageId, BAD_MESSAGE_ID, isMessageIdConflict,
@@ -486,11 +487,14 @@ function register(app, ctx) {
     app.post('/api/chats', async (req, res) => {
         const userId = req.session.userId;
         if (!userId) return res.json({ success: false, message: 'Не авторизован' });
-        const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+        // Название очищается от управляющих, двунаправленных и невидимых символов (lib/room-name.js, R1 п.11):
+        // его видят все участники, и U+202E или нулевая ширина подделывают то, что на экране.
+        const name = cleanRoomName(req.body?.name);
         if (!name) return res.json({ success: false, message: 'Введите имя чата' });
-        if (name.length > 64) return res.json({ success: false, message: 'Название чата не может быть длиннее 64 символов' });
+        if (name.length > MAX_ROOM_NAME_LENGTH) return res.json({ success: false, message: 'Название чата не может быть длиннее 64 символов' });
 
-        const avatar = name.charAt(0).toUpperCase();
+        // Аватар - первая графема, а не charAt(0): для эмодзи это половина суррогатной пары.
+        const avatar = avatarOfName(name);
         try {
             const roomCode = generateInviteCode();
             // Порядок блокировок users → rooms → room_participants → chats

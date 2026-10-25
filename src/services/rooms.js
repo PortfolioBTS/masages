@@ -8,6 +8,7 @@ const {
     JOIN_REQUEST_TTL_SECONDS,
 } = require('../../lib/invites');
 const { logError } = require('../../lib/log-error');
+const { avatarOfName } = require('../../lib/room-name');
 
 // ---- Приглашения и заявки на вступление ----
 //
@@ -147,7 +148,7 @@ function createRooms(ctx) {
             // приглашения. Раньше строка называлась «Чат с <имя первого
             // участника>»: в группе это неверно и лишний раз показывает имя.
             const name = room.name;
-            const avatar = name.charAt(0).toUpperCase();
+            const avatar = avatarOfName(name);
             await client.query(
                 `INSERT INTO room_participants (room_id, user_id, visible_from_seq)
              VALUES ($1, $2, $3)
