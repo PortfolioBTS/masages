@@ -41,8 +41,11 @@ function startProduction(extraEnv, name) {
 }
 
 // Клиент, который ходит «через https-прокси»: заголовок на каждый запрос, Secure-куки принимаются (secureContext).
+// Origin - со схемой https, как у настоящего браузера за прокси: сервер сверяет схему Origin с протоколом запроса
+// (ревью W7 R1 п.10), и Origin http:// при X-Forwarded-Proto: https отклоняется как чужой сайт.
 function httpsClient(server) {
     const client = server.client({ secureContext: true });
+    client.originOverride = client.baseUrl.replace(/^http:/, 'https:');
     const request = client.request.bind(client);
     client.request = (method, urlPath, opts = {}) => request(method, urlPath, { ...opts, headers: { 'X-Forwarded-Proto': 'https', ...opts.headers } });
     return client;

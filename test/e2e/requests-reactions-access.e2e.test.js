@@ -153,14 +153,16 @@ test('реакция на сообщение чата с ботом: чужом�
 
 test('контроль: участник и новичок (на позднее сообщение) ставят и снимают реакцию, она видна в истории', async () => {
     const w = await world();
-    assert.deepStrictEqual((await w.member.post('/api/reactions', { messageId: w.early.id, emoji: LIKE })).body, { success: true });
-    assert.deepStrictEqual((await w.newcomer.post('/api/reactions', { messageId: w.late.id, emoji: LIKE })).body, { success: true });
+    // Ответ и история - в форме T7.3 (ревью W7 R3 п.2): сколько поставили эмодзи и стоит ли оно у читающего.
+    assert.deepStrictEqual((await w.member.post('/api/reactions', { messageId: w.early.id, emoji: LIKE })).body, { success: true, count: 1, mine: true });
+    assert.deepStrictEqual((await w.newcomer.post('/api/reactions', { messageId: w.late.id, emoji: LIKE })).body, { success: true, count: 1, mine: true });
     assert.deepStrictEqual((await reactionRows(w.early.id)).map(r => Number(r.user_id)), [Number(w.member.user.id)]);
     assert.deepStrictEqual((await reactionRows(w.late.id)).map(r => Number(r.user_id)), [Number(w.newcomer.user.id)]);
     const history = (await w.owner.messages(w.room.ownerChat.id)).messages;
-    assert.deepStrictEqual(history.map(m => [m.id, m.reactions]), [[w.early.id, [LIKE]], [w.late.id, [LIKE]]]);
-    assert.deepStrictEqual((await w.member.del(`/api/reactions/${w.early.id}/${encodeURIComponent(LIKE)}`)).body, { success: true });
+    const notMine = [{ emoji: LIKE, count: 1, mine: false }];
+    assert.deepStrictEqual(history.map(m => [m.id, m.reactions]), [[w.early.id, notMine], [w.late.id, notMine]]);
+    assert.deepStrictEqual((await w.member.del(`/api/reactions/${w.early.id}/${encodeURIComponent(LIKE)}`)).body, { success: true, count: 0, mine: false });
     assert.deepStrictEqual(await reactionRows(w.early.id), []);
     // Владелец ставит на бота-сообщение свою реакцию - у чата с ботом он единственный, кому оно видно.
-    assert.deepStrictEqual((await w.owner.post('/api/reactions', { messageId: w.botMessage.id, emoji: LIKE })).body, { success: true });
+    assert.deepStrictEqual((await w.owner.post('/api/reactions', { messageId: w.botMessage.id, emoji: LIKE })).body, { success: true, count: 1, mine: true });
 });
