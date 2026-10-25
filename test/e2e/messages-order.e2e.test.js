@@ -155,9 +155,17 @@ test('граница видимости детерминированно: оче
     const ownerChat = await owner.createRoom('Очередь');
     const { code } = await owner.invite(ownerChat.id);
     const pending = await guest.join(code);
-    const blocked = async () => Number((await suite.query(
+    // Считаем ожидающие на блокировке запросы ПО ИХ ТЕКСТУ, а не все ожидания в базе: любое постороннее ожидание
+    // (фоновая задача на advisory-блокировке, чужой запрос набора) раньше засчитывалось как "наш запрос встал в
+    // очередь", вступление вставало позже второй отправки, и граница получалась на единицу выше (ревью W7 R5, З-8).
+    // Отправка берёт строку комнаты запросом messages.js (`SELECT id FROM rooms ... FOR NO KEY UPDATE`), вступление -
+    // запросом rooms.js (addRoomMember: тот же замок, но выбирает msg_seq и поля приглашения).
+    const SEND_LOCK = 'SELECT id FROM rooms WHERE id = $1 FOR NO KEY UPDATE%';
+    const JOIN_LOCK = '%msg_seq%FROM rooms WHERE id = $1 FOR NO KEY UPDATE%';
+    const waitingOn = async (pattern) => Number((await suite.query(
         `SELECT count(*) AS n FROM pg_stat_activity
-         WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()`)).rows[0].n);
+         WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()
+           AND query LIKE $1`, [pattern])).rows[0].n);
 
     // Тест держит строку комнаты, как держала бы транзакция отправки: три запроса выстраиваются в очередь в известном порядке.
     const holder = await suite.db.connect();
@@ -166,11 +174,12 @@ test('граница видимости детерминированно: оче
         await holder.query('BEGIN');
         await holder.query('SELECT id FROM rooms WHERE id = $1 FOR NO KEY UPDATE', [ownerChat.room_id]);
         beforeJoin = owner.send(ownerChat.id, 'в очереди до вступления');
-        await waitUntil(async () => (await blocked()) >= 1, { what: 'первая отправка встала в очередь' });
+        await waitUntil(async () => (await waitingOn(SEND_LOCK)) === 1, { what: 'первая отправка встала в очередь' });
         approval = owner.approve(pending.requestId);
-        await waitUntil(async () => (await blocked()) >= 2, { what: 'вступление встало в очередь' });
+        await waitUntil(async () => (await waitingOn(JOIN_LOCK)) === 1, { what: 'вступление встало в очередь' });
+        assert.strictEqual(await waitingOn(SEND_LOCK), 1, 'в очереди пока одна отправка');
         afterJoin = owner.send(ownerChat.id, 'в очереди после вступления');
-        await waitUntil(async () => (await blocked()) >= 3, { what: 'вторая отправка встала в очередь' });
+        await waitUntil(async () => (await waitingOn(SEND_LOCK)) === 2, { what: 'вторая отправка встала в очередь' });
         await holder.query('COMMIT');
     } finally {
         await holder.query('ROLLBACK').catch(() => {});

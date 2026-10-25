@@ -67,8 +67,70 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Те же сквозные тесты и проверка зависимостей, что в ci.yml, на ТОМ ЖЕ коммите тега (ревью W7 R5, З-11а): без
+  # них тег на коммите без зелёного e2e и audit выпустил бы релиз, ведь юнит-тесты есть только в build. Это копии
+  # jobs e2e и audit из ci.yml (workflow_call не подходит: у ci.yml своя группа concurrency по SHA, и вызов
+  # из релиза встал бы в очередь за прогоном main того же коммита). Менять их надо вместе — это проверяет
+  # test/ci-release-gates.test.js. Смоук в браузере (job browser) в условия релиза НЕ входит, пока он не доказал
+  # стабильность на ubuntu-latest (см. комментарий к нему в ci.yml).
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_USER: nyxo
+          POSTGRES_PASSWORD: nyxo-ci-only
+          POSTGRES_DB: nyxo
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nyxo -d nyxo"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: Получить код
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Установить Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Установить зависимости
+        run: npm ci
+      - name: Сквозные тесты
+        env:
+          E2E_DATABASE_URL: postgresql://nyxo:nyxo-ci-only@127.0.0.1:5432/postgres
+        run: npm run test:e2e
+
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Получить код
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Установить Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Установить зависимости без скриптов установки
+        id: install
+        run: npm ci --ignore-scripts
+      - name: Политика npm audit
+        run: node scripts/audit-check.js
+      - name: Подписи и происхождение пакетов
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: npm audit signatures
+
   release:
-    needs: build
+    needs: [build, e2e, audit]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
