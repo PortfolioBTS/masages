@@ -10,7 +10,7 @@ const express = require('express');
 const { isDbUnavailable, respondIfDbBusy, createBusyReporter } = require('../lib/db-errors');
 const { BUSY_RESPONSE } = require('../lib/pg-limits');
 const { installErrorHandler } = require('../src/http/middleware/error-handler');
-const { resolveDbSessionTimeouts } = require('../src/db/pool');
+const { resolveDbSessionTimeouts, DB_SESSION_OPTIONS } = require('../src/db/pool');
 
 let passed = 0, failed = 0;
 async function test(name, fn) {
@@ -134,6 +134,12 @@ async function main() {
         assert.deepStrictEqual(resolveDbSessionTimeouts({ DB_LOCK_TIMEOUT_MS: '0', DB_STATEMENT_TIMEOUT_MS: 'abc', DB_IDLE_TX_TIMEOUT_MS: '99999999' }), {
             statement_timeout: 30000, lock_timeout: 5000, idle_in_transaction_session_timeout: 30000,
         });
+    });
+
+    await test('пояс сессии Postgres закреплён: UTC (колонки TIMESTAMP без пояса)', () => {
+        assert.strictEqual(DB_SESSION_OPTIONS, '-c TimeZone=UTC');
+        const source = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'db', 'pool.js'), 'utf8');
+        assert.match(source, /options: DB_SESSION_OPTIONS,/);
     });
 
     console.log(`\n${passed} passed, ${failed} failed`);

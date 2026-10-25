@@ -23,6 +23,13 @@ const SESSION_TIMEOUTS = [
     ['idle_in_transaction_session_timeout', 'DB_IDLE_TX_TIMEOUT_MS'],
 ];
 
+// Часовой пояс сессии — UTC при любом умолчании базы. Колонки session.expire и
+// message_expiry.expires_at — TIMESTAMP без пояса: их пишут to_timestamp() и LOCALTIMESTAMP
+// и сравнивают с now() в поясе сессии. В поясе с переходом на летнее время значения в час
+// перехода неоднозначны (срок сдвигается на час), а смена пояса базы (ALTER DATABASE … SET
+// timezone, перенос на другой сервер) сдвинула бы все сохранённые сроки на разницу поясов.
+const DB_SESSION_OPTIONS = '-c TimeZone=UTC';
+
 function resolveDbSessionTimeouts(env = process.env) {
     const timeouts = {};
     for (const [param, name] of SESSION_TIMEOUTS) {
@@ -64,6 +71,7 @@ function createPool(ctx) {
         idleTimeoutMillis: 30000,
         connectionTimeoutMillis: 10000,
         ...resolveDbSessionTimeouts(process.env),
+        options: DB_SESSION_OPTIONS,
     };
     const pool = new Pool(DB_POOL_CONFIG);
     metrics.attachRuntime({ pool, io });
@@ -92,4 +100,4 @@ function createPool(ctx) {
     return { DB_POOL_CONFIG, pool, dbGet, dbAll, dbRun };
 }
 
-module.exports = { createPool, resolveDbSessionTimeouts };
+module.exports = { createPool, resolveDbSessionTimeouts, DB_SESSION_OPTIONS };
