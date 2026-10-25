@@ -9,6 +9,7 @@
 const assert = require('assert');
 const { createClient, createHarness, FakeEl, fakeElements } = require('./client-vm');
 const { readClientScript } = require('./client-script-source');
+const NyxoSendOutcomes = require('../public/lib/send-outcomes.js');
 
 const { test, done } = createHarness();
 // Объекты из vm имеют чужой Object.prototype: для deepStrictEqual приводим к обычным.
@@ -138,12 +139,14 @@ function sendClient({ responses }) {
     let idCounter = 0;
     class E2eeBlockedError extends Error {}
     const client = createClient({
-        functions: ['isUnknownSendOutcome', 'sendWithOutcomes', 'unknownSendKey', 'sendFailureText', 'sendText'],
-        consts: ['SEND_RETRY_DELAYS_MS', 'MAX_ID_CONFLICTS', 'SEND_TIMEOUT_MS', 'SEND_TOTAL_MS', 'UNKNOWN_SEND_TTL_MS'],
+        functions: ['sendWithOutcomes', 'unknownSendKey', 'sendFailureText', 'sendText'],
+        consts: ['SEND_TIMEOUT_MS', 'SEND_TOTAL_MS', 'UNKNOWN_SEND_TTL_MS'],
         prelude: 'let unknownSend = null; let currentChatId = 1; const PROTO_VERSION = 4;',
         sandbox: {
             elements: fakeElements(),
             Date: { now: () => clock },
+            // Логика повторов — настоящий модуль страницы (public/lib/send-outcomes.js); пауза (delay) и генератор id (NyxoMessageOrder) — заглушки ниже.
+            NyxoSendOutcomes,
             E2eeBlockedError,
             NyxoMessageOrder: { newClientMessageId: () => `id-${++idCounter}` },
             delay: async () => { log.delays++; },

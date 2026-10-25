@@ -28,44 +28,16 @@ let sending = false;
 //                                    не больше трёх конфликтов подряд;
 //   400 client-outdated              «Обновите страницу», не повторять;
 //   400 bad-message-id               ошибка клиента: не повторять, в консоль.
-const SEND_RETRY_DELAYS_MS = [500, 1500, 4000];
-const MAX_ID_CONFLICTS = 3;
 const SEND_TIMEOUT_MS = 20 * 1000;
 const SEND_TOTAL_MS = 60 * 1000;
 const UNKNOWN_SEND_TTL_MS = 5 * 60 * 1000;
 
-function isUnknownSendOutcome(data) {
-    return !data.success && (data.networkError === true || data.timedOut === true || (Number(data.httpStatus) >= 500));
-}
-
-// buildRequest(clientMessageId) → запрос (шифрует содержимое под этим id) или
-// null, если собрать нельзя; post(запрос) → тело ответа. clientMessageId —
-// только для комнаты, у чата с ботом он null. shouldStop() — отмена между
-// повторами. reuse = { clientMessageId, request } — запрос прошлой отправки с
-// неизвестным исходом: первая попытка идёт им, без нового шифрования.
-// Возвращает { data, request, clientMessageId } (последние два — для запоминания
-// запроса с неизвестным исходом); data.success === false с кодом из тела — отказ.
-async function sendWithOutcomes({ roomId, buildRequest, post, shouldStop = () => false, reuse = null }) {
-    let conflicts = 0;
-    let clientMessageId = reuse ? reuse.clientMessageId : (roomId ? NyxoMessageOrder.newClientMessageId() : null);
-    let reusable = reuse ? reuse.request : null;
-    for (;;) {
-        const request = reusable || await buildRequest(clientMessageId);
-        reusable = null;
-        if (request === null) return { data: { success: false, message: '' } };
-        let data = await post(request);
-        for (let retry = 0; isUnknownSendOutcome(data) && retry < SEND_RETRY_DELAYS_MS.length; retry++) {
-            if (shouldStop()) return { data, request, clientMessageId };
-            await delay(SEND_RETRY_DELAYS_MS[retry]);
-            data = await post(request);
-        }
-        if (data.success) return { data, request, clientMessageId };
-        if (roomId && data.httpStatus === 409 && data.code === 'id-conflict' && ++conflicts < MAX_ID_CONFLICTS) {
-            clientMessageId = NyxoMessageOrder.newClientMessageId();
-            continue;
-        }
-        return { data, request, clientMessageId };
-    }
+// Сами повторы, паузы (SEND_RETRY_DELAYS_MS) и замена id при 409 (MAX_ID_CONFLICTS) живут в
+// public/lib/send-outcomes.js (NyxoSendOutcomes) — чистая логика, проверяемая таблицей тестов
+// без браузера (test/send-outcomes.test.js). Здесь только подставляется то, что принадлежит
+// странице: пауза и источник id. Вызывающие (sendText, файлы) пользуются этой обёрткой.
+function sendWithOutcomes(options) {
+    return NyxoSendOutcomes.sendWithOutcomes({ delay, newClientMessageId: NyxoMessageOrder.newClientMessageId, ...options });
 }
 
 // Запрос, чей исход неизвестен (таймаут, обрыв, 5xx после всех повторов): { key, request,
@@ -153,7 +125,7 @@ async function sendText(text, { chatId, roomId, replyToId } = {}) {
             timeoutMs: Math.max(5000, Math.min(SEND_TIMEOUT_MS, deadline - Date.now())),
         }),
     });
-    if (isUnknownSendOutcome(outcome.data) && outcome.request) {
+    if (NyxoSendOutcomes.isUnknownSendOutcome(outcome.data) && outcome.request) {
         unknownSend = { key, request: outcome.request, clientMessageId: outcome.clientMessageId, at: Date.now() };
     }
     if (encryptFailed) {
