@@ -296,7 +296,7 @@ state = SELECT … FROM kt_state FOR UPDATE
 
 ## 7. Клиент
 
-Новый модуль `public/kt-verify.js` (UMD, чистые функции; исполняется и в браузере, и в Node): `label`, `commit`, `value`, `leaf`, `node`, проверка доказательства, продление цепочки, проверка STH и SKT, проверка ключа Ed25519 (каноничность, малый порядок). Интеграция — в `public/e2ee.js` (`init`, `checkPeersWithServer`, `applyShare`, подготовка SKDM). Запись в `CLIENT_SCRIPTS` теста `test/client-static.test.js`.
+Новый модуль `public/kt-verify.js` (в реализации — `public/lib/kt.js` и `public/lib/kt-client.js`, см. «Примечания реализации (T4.4)») (UMD, чистые функции; исполняется и в браузере, и в Node): `label`, `commit`, `value`, `leaf`, `node`, проверка доказательства, продление цепочки, проверка STH и SKT, проверка ключа Ed25519 (каноничность, малый порядок). Интеграция — в `public/e2ee.js` (`init`, `checkPeersWithServer`, `applyShare`, подготовка SKDM). Запись в `CLIENT_SCRIPTS` теста `test/client-static.test.js`.
 
 ### 7.1 Что хранится (хранилище ключей устройства, префиксы `kt:`)
 
@@ -583,7 +583,7 @@ state = SELECT … FROM kt_state FOR UPDATE
 
 Клиент:
 
-- `public/kt-verify.js` (новый, UMD); запись в `CLIENT_SCRIPTS`.
+- `public/kt-verify.js` (новый, UMD); запись в `CLIENT_SCRIPTS`. В реализации — `public/lib/kt.js`, `public/lib/kt-client.js` и `public/lib/ed25519-strict.js` (см. «Примечания реализации (T4.4)»).
 - `public/e2ee.js`: `syncLog`, `runKtChecks` и очередь `kt:queue` (сеть вне `withLock`), проверка собеседника по 7.3, самомониторинг, сплетни, `checkTransparency`, `overrideLogMismatch`, `ext.kt` в SKDM и сверка при применении (поле отбрасывается при порче), правило ротации; методы клиента — в `CLIENT_METHODS` теста `test/e2ee-api.test.js`.
 - Скрипты приложения `public/js/` (до волны 6 — `public/script.js`; в основном `11-key-log-members.js`): статус `log-mismatch`, баннеры (`inconsistent`, `log-disabled`, `key-split`), строки «Проверка журнала ключей сейчас недоступна» и «Ключ ждёт подтверждения журналом», отметка «ключ проверен по журналу», диалог `self-foreign-entry`.
 
