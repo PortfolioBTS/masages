@@ -9,7 +9,7 @@ const {
 } = require('../../lib/message-crypto');
 const { sanitizeText } = require('../../lib/privacy');
 const { anonymizedFileName } = require('../../lib/security-utils');
-const { reserveUploadQuota } = require('../../lib/upload-quota');
+const { reserveUploadQuota, remainingUploadQuota } = require('../../lib/upload-quota');
 const { logError } = require('../../lib/log-error');
 // Огрубление времени сообщений и файлов (раздел 11 контракта).
 const { floorToMinute } = require('../../lib/coarse-time');
@@ -156,7 +156,8 @@ function messageFromRow(row, text, replyTo = null) {
 
 function createMessages(ctx) {
     const {
-        UPLOAD_QUOTA_BYTES, authorTags, dbGet, dbRun, withTransactionRetry, disappearingMessagesManager,
+        UPLOAD_QUOTA_BYTES, authorTags, dbGet, dbAll, dbRun, withTransactionRetry, disappearingMessagesManager,
+        emitRoomMessageEvent,
     } = ctx;
 
     // Вставка сообщения ЧАТА С БОТОМ от пользователя userId. Порядок блокировок
@@ -271,6 +272,28 @@ function createMessages(ctx) {
         }
     }
 
+    // Рассылка события сообщения комнаты (newMessage, messageEdited) с учётом границ
+    // видимости: тем, кто вступил после этого сообщения (visible_from_seq >= seq), оно
+    // не уходит — для них его нет (message-ordering.md, О2 раздел 10). Событие идёт
+    // после COMMIT, и новичок, одобренный между вставкой и рассылкой, уже подписан на
+    // room:<id>; поэтому список читается непосредственно перед emit, а не в транзакции.
+    // Не прочитался — комнате событие не уходит (участники получат сообщение с историей),
+    // автору — его копия: сообщение уже сохранено, и ответ на запрос не должен ломаться.
+    async function emitVisibleRoomMessage(event, roomId, authorId, seq, payload) {
+        let hidden;
+        try {
+            hidden = await dbAll(
+                'SELECT user_id FROM room_participants WHERE room_id = $1 AND visible_from_seq >= $2',
+                [roomId, seq]
+            );
+        } catch (err) {
+            logError('[Chats] Не удалось прочитать границы видимости — событие комнате не отправлено', err);
+            emitRoomMessageEvent(event, roomId, authorId, payload, { onlyAuthor: true });
+            return;
+        }
+        emitRoomMessageEvent(event, roomId, authorId, payload, { hiddenUserIds: hidden.map(row => row.user_id) });
+    }
+
     // Сообщение, которое пользователь вправе менять или удалять (sealed-sender.md,
     // 8.2). В комнате автора в строке нет, поэтому: пользователь - ТЕКУЩИЙ участник
     // комнаты, сообщение для него ВИДНО (seq > visible_from_seq) и тег строки входит
@@ -347,9 +370,14 @@ function createMessages(ctx) {
         return userCanAccessMessage(userId, message.id);
     }
 
+    // Остаток квоты вложений пользователя (подсказка до обработки файла, R1 п.1).
+    function uploadQuotaLeft(userId) {
+        return remainingUploadQuota({ dbGet }, authorTags.qkey(userId), UPLOAD_QUOTA_BYTES);
+    }
+
     return {
-        insertChatMessage, insertRoomMessage, describeMessageIdUse, advanceSenderMarker, findOwnMessage,
-        userCanAccessMessage, userCanAccessFile,
+        insertChatMessage, insertRoomMessage, describeMessageIdUse, advanceSenderMarker, emitVisibleRoomMessage, findOwnMessage,
+        userCanAccessMessage, userCanAccessFile, uploadQuotaLeft,
     };
 }
 

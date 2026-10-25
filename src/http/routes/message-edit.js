@@ -4,6 +4,8 @@
 const { sanitizeText } = require('../../../lib/privacy');
 const { isClientOutdated: isOutdatedProto } = require('../../../lib/proto');
 const { logError } = require('../../../lib/log-error');
+// База недоступна или занята — 503 busy с Retry-After (lib/db-errors.js).
+const { respondIfDbBusy } = require('../../../lib/db-errors');
 // Огрубление времени сообщений и файлов (раздел 11 контракта).
 const { floorToMinute } = require('../../../lib/coarse-time');
 // Id и курсоры сообщений, тела ошибок 400/409 (docs/security/message-ordering.md).
@@ -15,7 +17,7 @@ const { e2eePolicyViolation, writeMessageText } = require('../../services/messag
 const { getSocketRoomKey } = require('../../realtime/io');
 
 function register(app, ctx) {
-    const { io, emitRoomMessageEvent, dbAll, dbRun, disappearingMessagesManager, findOwnMessage } = ctx;
+    const { io, emitVisibleRoomMessage, dbRun, disappearingMessagesManager, findOwnMessage } = ctx;
 
     app.put('/api/messages/:messageId', async (req, res) => {
         const userId = req.session.userId;
@@ -64,14 +66,10 @@ function register(app, ctx) {
             if (message.room_id) {
                 // Тем, кто вступил в комнату после этого сообщения, новый текст не
                 // уходит: для них этого сообщения нет (visible_from_seq >= seq).
-                const hidden = await dbAll(
-                    'SELECT user_id FROM room_participants WHERE room_id = $1 AND visible_from_seq >= $2',
-                    [message.room_id, message.seq]
-                );
-                emitRoomMessageEvent('messageEdited', message.room_id, userId, {
+                await emitVisibleRoomMessage('messageEdited', message.room_id, userId, message.seq, {
                     id: String(messageId), seq: Number(message.seq), text: newText, edited_at: editedAt,
                     room_id: message.room_id, encrypted: message.encrypted,
-                }, { hiddenUserIds: hidden.map(row => row.user_id) });
+                });
             } else {
                 io.to(getSocketRoomKey(message.chat_id, null)).emit('messageEdited', {
                     id: String(messageId), seq: Number(message.seq), text: newText, edited_at: editedAt,
@@ -81,6 +79,7 @@ function register(app, ctx) {
 
             res.json({ success: true, edited_at: editedAt, text: newText });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('Edit message error', error);
             res.json({ success: false, message: 'Ошибка редактирования' });
         }
@@ -104,6 +103,7 @@ function register(app, ctx) {
             if (deleted.length === 0) return res.json({ success: false, message: 'Ошибка удаления' });
             res.json({ success: true });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('Delete message error', error);
             res.json({ success: false, message: 'Ошибка удаления' });
         }

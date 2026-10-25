@@ -15,11 +15,14 @@ function createEvents(ctx) {
     // Рассылка события сообщения комнаты. Сокеты отправителя состоят и в room:<id>, и
     // в user:<id>: без except комнатное событие пришло бы его вкладке дважды (с mine и
     // без). Поэтому комнате — except автора (и тех, для кого сообщение под границей
-    // видимости), а автору — одна копия на user:<id> с mine: true.
-    function emitRoomMessageEvent(event, roomId, authorId, payload, { hiddenUserIds = [], toAuthor = true } = {}) {
-        let target = io.to(getSocketRoomKey(null, roomId)).except('user:' + authorId);
-        for (const id of hiddenUserIds) target = target.except('user:' + id);
-        target.emit(event, payload);
+    // видимости), а автору — одна копия на user:<id> с mine: true. onlyAuthor — только
+    // копия автору (границы видимости не удалось прочитать, services/messages.js).
+    function emitRoomMessageEvent(event, roomId, authorId, payload, { hiddenUserIds = [], toAuthor = true, onlyAuthor = false } = {}) {
+        if (!onlyAuthor) {
+            let target = io.to(getSocketRoomKey(null, roomId)).except('user:' + authorId);
+            for (const id of hiddenUserIds) target = target.except('user:' + id);
+            target.emit(event, payload);
+        }
         if (toAuthor) io.to('user:' + authorId).emit(event, { ...payload, mine: true });
     }
 

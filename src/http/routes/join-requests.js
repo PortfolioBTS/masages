@@ -11,7 +11,8 @@ const { logError } = require('../../../lib/log-error');
 const { CLIENT_OUTDATED } = require('../../../lib/message-ids');
 const { JOIN_REQUEST_LIVE_SQL, JOIN_REQUEST_NOT_FOUND, respondCertVerdict } = require('../../services/rooms');
 const { toPositiveInt } = require('../params');
-const { respondIfDeadlock } = require('../../db/transactions');
+// База недоступна или занята — 503 busy с Retry-After (lib/db-errors.js).
+const { respondIfDbBusy } = require('../../../lib/db-errors');
 
 function register(app, ctx) {
     const {
@@ -60,6 +61,7 @@ function register(app, ctx) {
                 })),
             });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('Get join requests error', error);
             res.json({ success: false, message: 'Ошибка загрузки заявок' });
         }
@@ -79,6 +81,7 @@ function register(app, ctx) {
             );
             res.json({ success: true, requests: rows.map(r => ({ id: r.id, roomName: r.room_name, createdAt: r.created_at })) });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('Get own join requests error', error);
             res.json({ success: false, message: 'Ошибка загрузки заявок' });
         }
@@ -149,7 +152,7 @@ function register(app, ctx) {
             notifyJoinRequestDecided(request.user_id, { requestId, approved: true, chat: result.chat });
             res.json({ success: true });
         } catch (error) {
-            if (respondIfDeadlock(res, error)) return;
+            if (respondIfDbBusy(res, error)) return;
             logError('Approve join request error', error);
             res.json({ success: false, message: 'Ошибка одобрения заявки' });
         }
@@ -172,6 +175,7 @@ function register(app, ctx) {
             notifyJoinRequestDecided(removed.user_id, { requestId: removed.id, approved: false });
             res.json({ success: true });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('Deny join request error', error);
             res.json({ success: false, message: 'Ошибка отклонения заявки' });
         }
@@ -189,6 +193,7 @@ function register(app, ctx) {
             notifyJoinRequestsChanged(removed.room_id);
             res.json({ success: true });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('Cancel join request error', error);
             res.json({ success: false, message: 'Ошибка отмены заявки' });
         }

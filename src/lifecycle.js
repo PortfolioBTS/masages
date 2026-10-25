@@ -10,6 +10,8 @@ const { ONION_ADDRESS, ONION_PORT, listenOnionPort } = require('../lib/tor-suppo
 // под advisory-блокировками) и запись ошибок в лог без id из detail.
 const { LOCK_NOT_AVAILABLE } = require('../lib/advisory-locks');
 const { logError } = require('../lib/log-error');
+// Штатная остановка по SIGTERM/SIGINT (ревью W7 R2.5).
+const { createShutdown } = require('./shutdown');
 
 function getLocalAddresses() {
     const nets = os.networkInterfaces();
@@ -25,7 +27,8 @@ function getLocalAddresses() {
 }
 
 function createLifecycle(ctx) {
-    const { IS_PRODUCTION, PORT, HOST, readiness, server, initDatabaseExclusive, jobs } = ctx;
+    const { IS_PRODUCTION, PORT, HOST, readiness, server, io, pool, initDatabaseExclusive, jobs } = ctx;
+    let onionListener = null;
 
     function onServerListening() {
         // Адреса сетевых интерфейсов нужны только при разработке (открыть сервер
@@ -73,6 +76,10 @@ function createLifecycle(ctx) {
             logError('[Process] Необработанное исключение', err);
             process.exit(1);
         });
+        // SIGTERM — деплой и перезапуск на хостинге, SIGINT — Ctrl+C при разработке.
+        const shutdown = createShutdown({ server, io, pool, jobs, getOnionListener: () => onionListener });
+        process.on('SIGTERM', () => shutdown('SIGTERM'));
+        process.on('SIGINT', () => shutdown('SIGINT'));
 
         // Порт открывается только ПОСЛЕ миграций. Раньше listen() вызывался сразу,
         // параллельно с initDatabase(): первые запросы попадали на недомигрированную
@@ -83,7 +90,7 @@ function createLifecycle(ctx) {
                 server.listen(PORT, HOST, onServerListening);
                 // Отдельный внутренний порт для tor-service: соединения с него
                 // помечаются как onion (lib/tor-support.js). Наружу его не публиковать.
-                listenOnionPort(server, HOST, () => console.log(`[Tor] Onion-порт ${ONION_PORT} слушается`));
+                onionListener = listenOnionPort(server, HOST, () => console.log(`[Tor] Onion-порт ${ONION_PORT} слушается`));
             })
             .catch((err) => {
                 logError(err && err.code === LOCK_NOT_AVAILABLE

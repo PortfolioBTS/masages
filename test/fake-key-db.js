@@ -13,8 +13,10 @@ function makeFakeKeyDb() {
     let nextOpkId = 1;
     let nextPqOpkId = 1;
     let failNext = null;
+    // Удалённые аккаунты: строки users нет (по умолчанию строка есть у любого id).
+    const deletedUsers = new Set();
 
-    const isKeySql = (sql) => /identity_keys|signed_prekeys|signed_pq_prekeys|one_time_prekeys/.test(sql);
+    const isKeySql = (sql) => /identity_keys|signed_prekeys|signed_pq_prekeys|one_time_prekeys|kt_pending/.test(sql);
 
     // Пул пользователя по возрастанию id — порядок вставки.
     const poolOf = (list, uid) => list.filter(o => o.user_id === uid);
@@ -33,6 +35,7 @@ function makeFakeKeyDb() {
             identities.set(uid, { identity_signing_key: params[1], identity_dh_key: params[2] });
             return [{ inserted: !old }];
         }
+        if (q === 'SELECT 1 FROM users WHERE id = $1 FOR KEY SHARE') return deletedUsers.has(uid) ? [] : [{ '?column?': 1 }];
         let m = /^INSERT INTO (signed_prekeys|signed_pq_prekeys)/.exec(q);
         if (m) {
             (m[1] === 'signed_prekeys' ? spks : pqs).set(uid, { key_id: params[1], public_key: params[2], signature: params[3] });
@@ -101,6 +104,7 @@ function makeFakeKeyDb() {
         }
         m = /^DELETE FROM (\w+) WHERE user_id = \$1$/.exec(q);
         if (m) {
+            if (m[1] === 'kt_pending') return [];
             if (m[1] === 'one_time_prekeys' || m[1] === 'pq_one_time_prekeys') {
                 const list = m[1] === 'one_time_prekeys' ? opks : pqOpks;
                 for (let i = list.length - 1; i >= 0; i--) if (list[i].user_id === uid) list.splice(i, 1);
@@ -120,6 +124,7 @@ function makeFakeKeyDb() {
     return {
         dbGet, dbAll, isKeySql,
         failNextQuery(err) { failNext = err; },
+        deleteUser(uid) { deletedUsers.add(Number(uid)); },
         _state: { identities, spks, pqs, opks, pqOpks },
     };
 }

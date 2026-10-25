@@ -109,13 +109,16 @@ async function main() {
 
         assert.strictEqual(result, 'готово');
         assert.deepStrictEqual(seen, { attempt: 1, clientId: 1, samePool: true, via: 'migration-pool' });
+        // Таймауты соединений сервера (DB_*_TIMEOUT_MS) у сессии миграций сняты: ожидание
+        // блокировки миграций — без ограничения, lock_timeout — свой; RESET возвращает умолчания.
         assert.deepStrictEqual(sqlOf(calls, 1), [
+            'SET statement_timeout = 0; SET idle_in_transaction_session_timeout = 0; SET lock_timeout = 0',
             'SELECT pg_try_advisory_lock($1::bigint) AS locked',
             'SET lock_timeout = 2500',
-            'RESET lock_timeout',
+            'RESET statement_timeout; RESET idle_in_transaction_session_timeout; RESET lock_timeout',
             'SELECT pg_advisory_unlock($1::bigint)',
         ]);
-        assert.strictEqual(calls[0].params[0], MIGRATION_LOCK_KEY);
+        assert.strictEqual(calls[1].params[0], MIGRATION_LOCK_KEY);
         assert.deepStrictEqual(released, [{ id: 1, err: undefined }]);
         // Маршрутизация снята, пул миграций закрыт; у его соединений — тот же lock_timeout.
         assert.strictEqual(pool.query, originalQuery);
@@ -125,7 +128,7 @@ async function main() {
         assert.strictEqual(created[0].options.max, 2);
         const onConnectSql = [];
         await created[0].options.onConnect({ query: async (sql) => { onConnectSql.push(sql); } });
-        assert.deepStrictEqual(onConnectSql, ['SET lock_timeout = 2500']);
+        assert.deepStrictEqual(onConnectSql, ['SET statement_timeout = 0; SET idle_in_transaction_session_timeout = 0; SET lock_timeout = 2500']);
     });
 
     await test('миграции: блокировка занята — сообщение в лог и ожидание pg_advisory_lock', async () => {
@@ -133,7 +136,7 @@ async function main() {
         const { factory } = makeMigrationPoolFactory();
         const logs = [];
         await runMigrationsExclusive(pool, async () => {}, { createMigrationPool: factory, log: (l) => logs.push(l) });
-        assert.deepStrictEqual(sqlOf(calls, 1).slice(0, 3), [
+        assert.deepStrictEqual(sqlOf(calls, 1).slice(1, 4), [
             'SELECT pg_try_advisory_lock($1::bigint) AS locked',
             'SELECT pg_advisory_lock($1::bigint)',
             'SET lock_timeout = 2500',

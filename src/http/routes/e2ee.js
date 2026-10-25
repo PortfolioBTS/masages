@@ -10,7 +10,6 @@ const { registerKtRoutes } = require('../../../lib/kt-routes');
 // (key-shares). Тоже регистрируется после sessionMiddleware.
 const { registerE2eeGroupRoutes } = require('../../../lib/e2ee-groups');
 const { JOIN_REQUEST_LIVE_SQL } = require('../../services/rooms');
-const { respondIfDeadlock } = require('../../db/transactions');
 
 function register(app, ctx) {
     const {
@@ -30,7 +29,7 @@ function register(app, ctx) {
     // Групповой E2EE: список участников чата + key-shares (тоже нужна сессия).
     // Транзакция member-certs (7.1) идёт через withTransactionRetry (db/transactions.js): оболочка вызывается при запросах.
     registerE2eeGroupRoutes(app, {
-        dbGet, dbAll, dbRun, io, queryWithRetry, respondIfDeadlock, keyShareLimiter, keyRequestLimiter, memberCertLimiter,
+        dbGet, dbAll, dbRun, io, queryWithRetry, keyShareLimiter, keyRequestLimiter, memberCertLimiter,
         withTransaction: (work) => withTransactionRetry(work),
     });
 }

@@ -18,7 +18,9 @@ const {
     apiMessage,
 } = require('../../services/messages');
 const { readFileHead, coarsenFileTimes } = require('../../services/uploads');
-const { withMessageIdRetry, respondIfDeadlock } = require('../../db/transactions');
+const { withMessageIdRetry } = require('../../db/transactions');
+// База недоступна или занята — 503 busy с Retry-After (lib/db-errors.js).
+const { respondIfDbBusy } = require('../../../lib/db-errors');
 const { getSocketRoomKey } = require('../../realtime/io');
 
 // checkMagicBytes (сигнатура файла против заявленного типа) — в
@@ -27,8 +29,8 @@ const { getSocketRoomKey } = require('../../realtime/io');
 function register(app, ctx) {
     const {
         UPLOAD_QUOTA_BYTES, UPLOADS_DIR, cleanupUploadedFile, rejectUpload, rejectUploadWith, io,
-        emitRoomMessageEvent, newMessageExpirySeconds, getOwnChat, unarchiveForRecipients, insertChatMessage,
-        insertRoomMessage, describeMessageIdUse, advanceSenderMarker, upload,
+        emitVisibleRoomMessage, newMessageExpirySeconds, getOwnChat, unarchiveForRecipients, insertChatMessage,
+        insertRoomMessage, describeMessageIdUse, advanceSenderMarker, upload, uploadQuotaLeft,
     } = ctx;
 
     // Квота вложений (sealed-sender.md, раздел 13): объём ЗАГРУЗОК ЗА ОКНО В 30 ДНЕЙ,
@@ -110,6 +112,12 @@ function register(app, ctx) {
             if (file.size > UPLOAD_QUOTA_BYTES) {
                 return rejectUpload(res, file, 413, 'Превышена квота хранилища вложений');
             }
+            // Остаток квоты — ДО санитайзера (R1 п.1): резерв делается только в
+            // транзакции вставки, а обработка файла дорогая; аккаунт с исчерпанной
+            // квотой иначе гонял бы её впустую. Окончательно решает резерв в транзакции.
+            if (file.size > await uploadQuotaLeft(userId)) {
+                return rejectUpload(res, file, 413, 'Превышена квота хранилища вложений');
+            }
         } catch (err) {
             cleanupUploadedFile(file);
             throw err;
@@ -128,6 +136,12 @@ function register(app, ctx) {
                 await stripMetadataFromFile(uploadedFilePath, file.mimetype);
                 fileSize = (await fs.promises.stat(uploadedFilePath)).size;
             } catch (magicErr) {
+                // Очередь обработки переполнена (lib/work-limiter.js): не ошибка файла,
+                // повтор через несколько секунд пройдёт. В лог не пишем — это штатный отказ.
+                if (magicErr && magicErr.busy) {
+                    res.set('Retry-After', '5');
+                    return rejectUpload(res, file, 503, magicErr.message);
+                }
                 // Раньше при исключении здесь проверка молча пропускалась и файл
                 // проходил дальше — теоретическая лазейка мимо проверки типа файла.
                 // Теперь любая ошибка проверки = отказ (fail closed), а не fail open.
@@ -139,6 +153,10 @@ function register(app, ctx) {
         }
         await coarsenFileTimes(uploadedFilePath);
 
+        // После COMMIT вставки файл принадлежит сохранённому сообщению: сбой дальше
+        // (рассылка, ответ) не должен его удалять, иначе в чате осталось бы сообщение без
+        // файла (ревью W7 R2.12). Повтор той же отправки получит сохранённую строку.
+        let committed = false;
         try {
             const roomId = chat.room_id || null;
             const fileUrl = `/uploads/${file.filename}`;
@@ -177,6 +195,7 @@ function register(app, ctx) {
                     cleanupUploadedFile(file);
                     return respondRoomSendError(res, outcome.error);
                 }
+                committed = true;
                 // Раньше здесь по setTimeout статус "доставлено"/"прочитано"
                 // выставлялся через 1 и 2 секунды независимо от реальности (и без
                 // обработки ошибок — сбой БД ронял процесс). Теперь 'read' ставит
@@ -187,7 +206,8 @@ function register(app, ctx) {
                     created_at: outcome.row.created_at,
                 };
                 await advanceSenderMarker(chat, row.seq);
-                emitRoomMessageEvent('newMessage', roomId, userId, roomMessagePayload(row, messageText));
+                // Новичкам, вступившим уже после этого сообщения, событие не уходит.
+                await emitVisibleRoomMessage('newMessage', roomId, userId, row.seq, roomMessagePayload(row, messageText));
                 res.json({ success: true, message: roomMessagePayload(row, messageText, { mine: true }) });
                 unarchiveForRecipients(chat, userId);
                 return;
@@ -202,6 +222,7 @@ function register(app, ctx) {
             const inserted = await withMessageIdRetry(() => insertChatMessage(userId, fields, expirySeconds, quotaUpload));
             if (!inserted) return rejectUpload(res, file, 401, 'Не авторизован');
             if (inserted.error) return rejectUpload(res, file, 413, 'Превышена квота хранилища вложений');
+            committed = true;
 
             const fileMessage = apiMessage({
                 id: inserted.id, seq: inserted.seq, chat_id: chat.id, room_id: null, user_id: userId,
@@ -214,8 +235,8 @@ function register(app, ctx) {
             io.to(getSocketRoomKey(chat.id, null)).emit('newMessage', fileMessage);
             res.json({ success: true, message: fileMessage });
         } catch (error) {
-            cleanupUploadedFile(file);
-            if (respondIfDeadlock(res, error)) return;
+            if (!committed) cleanupUploadedFile(file);
+            if (respondIfDbBusy(res, error)) return;
             logError('Upload file error', error);
             res.status(500).json({ success: false, message: 'Ошибка отправки файла' });
         }

@@ -14,6 +14,8 @@ const botGuide = require('../../../lib/bot-guide');
 // Onion-сервис (контейнер tor-service/)
 const { onionUrlFor } = require('../../../lib/tor-support');
 const { logError } = require('../../../lib/log-error');
+// База недоступна или занята — 503 busy с Retry-After (lib/db-errors.js).
+const { respondIfDbBusy } = require('../../../lib/db-errors');
 const { withMessageIdRetry } = require('../../db/transactions');
 const { insertUserWithBotChat, signedOutResponse } = require('../../services/accounts');
 
@@ -79,6 +81,7 @@ function register(app, ctx) {
                 botChatId,
             });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('[Anon] Не удалось зарегистрировать аккаунт', error);
             res.json({ success: false, message: 'Ошибка сервера' });
         }
@@ -93,6 +96,7 @@ function register(app, ctx) {
         try {
             await deleteUserAccount(userId);
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('[Account] Не удалось удалить аккаунт', error);
             return res.json({ success: false, message: 'Ошибка удаления аккаунта' });
         }

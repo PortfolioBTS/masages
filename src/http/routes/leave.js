@@ -4,13 +4,13 @@
 
 const { logError } = require('../../../lib/log-error');
 const { resetInviteAfterLeave } = require('../../services/rooms');
-const { getSocketRoomKey } = require('../../realtime/io');
-const { respondIfDeadlock } = require('../../db/transactions');
+// База недоступна или занята — 503 busy с Retry-After (lib/db-errors.js).
+const { respondIfDbBusy } = require('../../../lib/db-errors');
 
 function register(app, ctx) {
     const {
-        authorTags, removeUploadedFiles, io, unsubscribeUserFromChat, notifyChatListChanged,
-        notifyRoomMembersChanged, notifyJoinRequestDecided, withTransactionRetry, getOwnChat,
+        authorTags, removeUploadedFiles, unsubscribeUserFromChat, notifyChatListChanged,
+        notifyRoomMembersChanged, notifyJoinRequestDecided, withTransactionRetry, getOwnChat, emitRoomMessagesDeleted,
     } = ctx;
 
     // Выход из комнаты или удаление чата с ботом. Для комнаты сообщения выходящего
@@ -38,7 +38,7 @@ function register(app, ctx) {
             const outcome = await withTransactionRetry(async (client) => {
                 const me = await client.query('SELECT id, created_at FROM users WHERE id = $1 FOR KEY SHARE', [userId]);
                 if (me.rows.length === 0) return null; // аккаунт удалён между проверкой сессии и этим запросом
-                const state = { fileUrls: [], roomSurvived: false, droppedRequests: [], deletedIds: [] };
+                const state = { fileUrls: [], roomSurvived: false, droppedRequests: [], deletedRows: [] };
                 if (chat.room_id) {
                     // Блокировка комнаты: два последних участника, выходящих
                     // одновременно, иначе оба видели бы "остался ещё один" и
@@ -75,11 +75,11 @@ function register(app, ctx) {
                         const tags = authorTags.tagsForAccount(chat.room_id, userId, me.rows[0].created_at, Date.now());
                         if (deleteOwnMessages) {
                             const deleted = await client.query(
-                                'DELETE FROM messages WHERE room_id = $1 AND author_tag = ANY($2::bytea[]) RETURNING id, file_url',
+                                'DELETE FROM messages WHERE room_id = $1 AND author_tag = ANY($2::bytea[]) RETURNING id, seq, file_url',
                                 [chat.room_id, tags]
                             );
                             state.fileUrls = deleted.rows.map(r => r.file_url);
-                            state.deletedIds = deleted.rows.map(r => r.id);
+                            state.deletedRows = deleted.rows.map(r => ({ id: r.id, seq: r.seq }));
                             await client.query('DELETE FROM user_left_rooms WHERE user_id = $1 AND room_id = $2', [userId, chat.room_id]);
                         } else {
                             const own = await client.query(
@@ -113,16 +113,15 @@ function register(app, ctx) {
             if (!outcome) return res.json({ success: false, message: 'Не авторизован' });
             removeUploadedFiles(outcome.fileUrls);
             unsubscribeUserFromChat(userId, chat.id, chat.room_id);
-            // Удалённые при выходе сообщения исчезают у остальных сразу.
-            for (const id of outcome.deletedIds) {
-                io.to(getSocketRoomKey(null, chat.room_id)).emit('messageDeleted', { id: String(id), room_id: chat.room_id });
-            }
+            // Удалённые при выходе сообщения исчезают у остальных сразу — у тех, кому они были
+            // видны (новичкам после сообщения событие не уходит, src/services/expiry.js).
+            await emitRoomMessagesDeleted(chat.room_id, outcome.deletedRows);
             if (outcome.roomSurvived) notifyRoomMembersChanged(chat.room_id, { inviteRotated: true });
             for (const request of outcome.droppedRequests) notifyJoinRequestDecided(request.user_id, { requestId: request.id, approved: false });
             notifyChatListChanged(userId);
             res.json({ success: true });
         } catch (error) {
-            if (respondIfDeadlock(res, error)) return;
+            if (respondIfDbBusy(res, error)) return;
             logError('Delete chat error', error);
             res.json({ success: false, message: 'Ошибка удаления чата' });
         }

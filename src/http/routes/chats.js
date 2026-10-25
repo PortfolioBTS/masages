@@ -12,7 +12,7 @@ const { logError } = require('../../../lib/log-error');
 // Id и курсоры сообщений, тела ошибок 400/409 (docs/security/message-ordering.md).
 const {
     CLIENT_OUTDATED, parseSeq, BAD_SEQ, parseClientMessageId, BAD_MESSAGE_ID, isMessageIdConflict,
-    ID_CONFLICT,
+    ID_CONFLICT, insertDroppingGoneReply,
 } = require('../../../lib/message-ids');
 // Форма E2EE-конверта и тела отказов 400 для комнат и бота (R7).
 const { MAX_ENVELOPE_LENGTH } = require('../../../lib/e2ee-envelope');
@@ -23,7 +23,9 @@ const {
 const { toPositiveInt, isNonEmptyString } = require('../params');
 const { chatScope } = require('../../services/chats');
 const { parseRequestedExpiry } = require('../../services/expiry');
-const { withMessageIdRetry, respondIfDeadlock } = require('../../db/transactions');
+const { withMessageIdRetry } = require('../../db/transactions');
+// База недоступна или занята — 503 busy с Retry-After (lib/db-errors.js).
+const { respondIfDbBusy } = require('../../../lib/db-errors');
 const { getSocketRoomKey } = require('../../realtime/io');
 
 // Список чатов с последним сообщением и числом непрочитанных.
@@ -119,7 +121,7 @@ const MAX_MESSAGES_PAGE_SIZE = 200;
 function register(app, ctx) {
     const {
         GLOBAL_DEFAULT_EXPIRY_SECONDS, INVITE_TTL_SECONDS, io, subscribeUserToChat, notifyChatListChanged,
-        emitRoomMessageEvent, dbGet, dbAll, withTransactionRetry, newMessageExpirySeconds, getOwnChat,
+        emitVisibleRoomMessage, dbGet, dbAll, withTransactionRetry, newMessageExpirySeconds, getOwnChat,
         markChatRead, unarchiveForRecipients, insertChatMessage, insertRoomMessage, describeMessageIdUse,
         advanceSenderMarker, scheduleBotReply,
     } = ctx;
@@ -148,6 +150,7 @@ function register(app, ctx) {
                 })),
             });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('Get chats error', error);
             res.json({ success: false, message: 'Ошибка загрузки чатов' });
         }
@@ -277,9 +280,16 @@ function register(app, ctx) {
                     } : (reply_target_id ? { id: reply_target_id, deleted: true } : null)
                 }));
 
-            // Первая (самая свежая) страница = пользователь видит конец чата.
+            // Первая (самая свежая) страница = пользователь видит конец чата. Отметка
+            // прочитанного — побочное действие загрузки: её сбой (взаимная блокировка с
+            // отправкой, таймаут блокировки; ревью W7 R2.9) не должен ломать саму историю —
+            // клиент отметит прочитанное позже через POST /api/chats/:chatId/read.
             if (!beforeSeq && messages.length > 0) {
-                await markChatRead(chat, userId, messages[messages.length - 1].seq);
+                try {
+                    await markChatRead(chat, userId, messages[messages.length - 1].seq);
+                } catch (err) {
+                    logError('[Chats] Не удалось отметить прочитанное при загрузке истории', err);
+                }
             }
 
             res.json({
@@ -294,6 +304,7 @@ function register(app, ctx) {
                 },
             });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('Get messages error', error);
             res.json({ success: false, message: 'Ошибка загрузки сообщений' });
         }
@@ -410,10 +421,11 @@ function register(app, ctx) {
                 const roomId = chat.room_id;
                 let outcome;
                 try {
-                    outcome = await insertRoomMessage({
+                    // Цель ответа удалили после проверки видимости — сообщение уходит без ответа (R2.8).
+                    outcome = await insertDroppingGoneReply(() => insertRoomMessage({
                         userId, roomId, id: clientId, plainText: safeText, expirySeconds,
                         fields: { message_type: 'text', sent: 1, status: 'sent', reply_to_id: replyTo ? replyTo.id : null, encrypted },
-                    });
+                    }), () => { replyTo = null; });
                 } catch (err) {
                     if (isMessageIdConflict(err)) {
                         // Вставка откатилась целиком (в том числе приращение seq). Тот же
@@ -435,7 +447,8 @@ function register(app, ctx) {
                     message_type: 'text', sent: 1, status: 'sent', edited_at: null, encrypted, created_at: outcome.row.created_at,
                 };
                 await advanceSenderMarker(chat, row.seq);
-                emitRoomMessageEvent('newMessage', roomId, userId, roomMessagePayload(row, safeText, { replyTo }));
+                // Новичкам, вступившим уже после этого сообщения, событие не уходит.
+                await emitVisibleRoomMessage('newMessage', roomId, userId, row.seq, roomMessagePayload(row, safeText, { replyTo }));
                 res.json({ success: true, message: roomMessagePayload(row, safeText, { replyTo, mine: true }) });
                 unarchiveForRecipients(chat, userId);
                 return;
@@ -448,7 +461,10 @@ function register(app, ctx) {
                 message_type: 'text', sent: 1, status: 'sent',
                 reply_to_id: replyTo ? replyTo.id : null, encrypted,
             };
-            const inserted = await withMessageIdRetry(() => insertChatMessage(userId, fields, expirySeconds));
+            const inserted = await insertDroppingGoneReply(
+                () => withMessageIdRetry(() => insertChatMessage(userId, fields, expirySeconds)),
+                () => { replyTo = null; fields.reply_to_id = null; }
+            );
             // Нет строки пользователя: аккаунт удалён, пока шёл запрос.
             if (!inserted) return res.status(401).json({ success: false, message: 'Не авторизован' });
 
@@ -468,7 +484,7 @@ function register(app, ctx) {
             // Чат с ботом ходит открытым текстом: конверт сюда не принимается (выше).
             if (chat.is_bot) scheduleBotReply(chat, safeText);
         } catch (error) {
-            if (respondIfDeadlock(res, error)) return;
+            if (respondIfDbBusy(res, error)) return;
             logError('Send message error', error);
             res.json({ success: false, message: 'Ошибка отправки' });
         }
@@ -512,7 +528,7 @@ function register(app, ctx) {
             notifyChatListChanged(userId);
             res.json({ success: true, chat: { id: chatId, name, avatar, online: 0, is_bot: 0, room_id: roomId, invite_code: roomCode } });
         } catch (error) {
-            if (respondIfDeadlock(res, error)) return;
+            if (respondIfDbBusy(res, error)) return;
             logError('Create chat error', error);
             res.json({ success: false, message: 'Ошибка создания чата' });
         }

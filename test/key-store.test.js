@@ -207,7 +207,7 @@ async function main() {
         assert.strictEqual((await store.call(1, 'GET', '/internal/v1/keys/identities?ids=1,x')).status, 400);
     });
 
-    await test('delete removes everything; unknown route → 404; DB errors propagate (the route answers 502)', async () => {
+    await test('delete removes everything; unknown route → 404; DB errors propagate (the route answers 503 busy or 500)', async () => {
         const { store, db } = makeStore();
         await register(store, 6);
         await store.call(6, 'POST', '/internal/v1/keys/one-time-prekeys', { keys: [{ key_id: 1, public_key: b64(x25519Raw()) }] });

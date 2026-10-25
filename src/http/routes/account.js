@@ -8,6 +8,8 @@ const {
 // анонимов (контракт этапа 1, §4).
 const { setSessionCookieLifetime } = require('../../../lib/session-store');
 const { logError } = require('../../../lib/log-error');
+// База недоступна или занята — 503 busy с Retry-After (lib/db-errors.js).
+const { respondIfDbBusy } = require('../../../lib/db-errors');
 
 function register(app, ctx) {
     const { SESSION_RENEW_MS, dbGet, startUserSession, anonActivity, loadAccount } = ctx;
@@ -24,6 +26,7 @@ function register(app, ctx) {
             if (!row) return res.json({ success: false, message: 'Пользователь не найден' });
             res.json({ success: true, readReceipts: row.read_receipts });
         } catch (error) {
+            if (respondIfDbBusy(res, error)) return;
             logError('Update privacy error', error);
             res.json({ success: false, message: 'Ошибка сохранения настроек' });
         }

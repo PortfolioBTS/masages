@@ -5,6 +5,7 @@
 const multer = require('multer');
 const { logError } = require('../../../lib/log-error');
 const { EarlyResponse } = require('../early-response');
+const { respondIfDbBusy } = require('../../../lib/db-errors');
 
 function installErrorHandler(app) {
     app.use((err, req, res, next) => {
@@ -27,6 +28,9 @@ function installErrorHandler(app) {
         if (err.type === 'entity.too.large') {
             return res.status(413).json({ success: false, message: 'Слишком большой запрос' });
         }
+        // База недоступна или занята (обрыв, пул, таймауты сессии — lib/db-errors.js):
+        // 503 busy с Retry-After, клиент повторит, а не «внутренняя ошибка».
+        if (respondIfDbBusy(res, err)) return;
         logError('Unhandled error', err);
         res.status(500).json({ success: false, message: 'Внутренняя ошибка сервера' });
     });
