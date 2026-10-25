@@ -5,7 +5,7 @@
 
 const { parseAllowedOrigins, isRequestOriginAllowed } = require('../../../lib/security-utils');
 // Onion-сервис (контейнер tor-service/)
-const { isOnionHost } = require('../../../lib/tor-support');
+const { isOnionHost, isOnionSocket } = require('../../../lib/tor-support');
 // Доверенные прокси (TRUST_PROXY): X-Forwarded-Host и X-Forwarded-Proto принимаются только от них.
 const { resolveTrustProxy, proxyHeaderValue } = require('../../../lib/trust-proxy');
 
@@ -22,6 +22,10 @@ function createOrigin() {
     // X-Forwarded-Proto от доверенного прокси (Railway завершает TLS у себя). Неизвестен - undefined:
     // схема Origin тогда не сверяется (простая разработка по http без прокси).
     function requestProtocol(req) {
+        // Соединение с ONION_PORT: onionMiddleware ставит ему X-Forwarded-Proto: https (Tor шифрует сам, а
+        // Tor Browser считает .onion защищённым), хотя страница открыта по http://…onion и Origin у неё
+        // http. Протокол для onion не определяется - схема не сверяется.
+        if (req && isOnionSocket(req.socket)) return undefined;
         if (req && req.socket && req.socket.encrypted) return 'https';
         const forwarded = proxyHeaderValue(req && req.headers && req.headers['x-forwarded-proto'], trustProxyHops);
         const proto = forwarded ? forwarded.toLowerCase() : null;

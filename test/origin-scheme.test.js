@@ -105,6 +105,15 @@ test('isTrustedOrigin при TRUST_PROXY=1: хост из последнего X
     assert.strictEqual(isTrustedOrigin(unknownProto), true, 'без req (сокет без запроса) тоже');
 });
 
+test('isTrustedOrigin: сокет ONION_PORT - схема не сверяется (onionMiddleware ставит X-Forwarded-Proto: https, а у страницы Origin http)', () => {
+    const { isTrustedOrigin } = originWith({});
+    const onionSocket = {};
+    require('../lib/tor-support')._internal.markOnionSocket(onionSocket);
+    const headers = { origin: 'http://127.0.0.1:3001', host: '127.0.0.1:3001', 'x-forwarded-proto': 'https' };
+    assert.strictEqual(isTrustedOrigin(headers, { headers, socket: onionSocket }), true);
+    assert.strictEqual(isTrustedOrigin(headers, { headers, socket: {} }), false, 'тот же запрос с обычного сокета отклоняется');
+});
+
 test('isTrustedOrigin: TLS на самом сокете даёт протокол https без заголовков', () => {
     const { isTrustedOrigin } = originWith({ TRUST_PROXY: '0' });
     const headers = { origin: 'http://localhost:3000', host: 'localhost:3000' };
