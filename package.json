@@ -9,6 +9,7 @@
     "dev": "node --watch server.js",
     "check-env": "node scripts/check-env.js",
     "test": "node test/run-unit.js",
+    "test:coverage": "node --test --experimental-test-coverage --test-concurrency=4 \"--test-coverage-include=src/**\" \"--test-coverage-include=lib/**\" \"--test-coverage-include=public/**\" \"--test-coverage-exclude=public/vendor/**\" \"test/*.test.js\"",
     "test:e2e": "node test/e2e/run.js",
     "test:e2e:docker": "node test/e2e/run.js --docker",
     "test:browser": "node test/browser/run.js",

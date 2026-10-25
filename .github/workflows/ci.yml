@@ -54,14 +54,59 @@ jobs:
       - name: Юнит-тесты
         run: npm test
 
+  # Покрытие юнит-тестов: ИНФОРМАТИВНО, ничего не блокирует (continue-on-error) и не входит в защиту main.
+  # `node --test --experimental-test-coverage` запускает каждый test/*.test.js отдельным процессом и сводит
+  # покрытие по всем (порог не задан намеренно: цифра нужна, чтобы видеть непокрытое — пробелы ревью W7 R5
+  # находили только мутациями). Сквозные тесты сюда не входят: серверный процесс e2e собирал бы покрытие
+  # отдельно (NODE_V8_COVERAGE), это сознательно не сделано. Таблица идёт в сводку прогона и в артефакт.
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - name: Получить код
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Установить Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Установить зависимости
+        run: npm ci
+      - name: Юнит-тесты с покрытием
+        run: |
+          set -o pipefail
+          npm run test:coverage 2>&1 | tee coverage-unit.txt
+      - name: Сводка покрытия
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo '### Покрытие юнит-тестов (информативно)'
+            echo '```'
+            sed -n '/start of coverage report/,/end of coverage report/p' coverage-unit.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Сохранить отчёт о покрытии
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-unit
+          path: coverage-unit.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
   # Сквозные тесты на настоящем Postgres. Только Linux: контейнеры сервисов
-  # работают лишь там. Версия образа совпадает с локальным nyxo-pg-test.
+  # работают лишь там. Версия образа совпадает с локальным nyxo-pg-test. Образ закреплён и тегом,
+  # и digest индекса (как actionlint ниже): тег в реестре можно перепривязать. Digest этого образа
+  # обновляют вручную вместе с тегом (docs/dev/ci.md), Dependabot services.image не видит.
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
         env:
           POSTGRES_USER: nyxo
           POSTGRES_PASSWORD: nyxo-ci-only
@@ -107,12 +152,17 @@ jobs:
   # проверкой консоли и CSP. Chrome на образе ubuntu-latest предустановлен
   # (/usr/bin/google-chrome); раннер без браузера в CI падает, а не пропускает
   # прогон. Postgres тот же, что у e2e.
+  #
+  # Пока этот job не продержался зелёным на ubuntu-latest хотя бы в 10 прогонах main подряд, он НЕ входит в
+  # обязательные проверки защиты main и НЕ является условием релиза (release.yml): девять UI-сценариев в CI
+  # ничего не гарантируют, пока прогон нестабилен на этом образе (docs/dev/testing.md, «CI»). Красный
+  # прогон при этом не прячется: job виден в проверках PR, снимки экрана и логи сохраняются.
   browser:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
         env:
           POSTGRES_USER: nyxo
           POSTGRES_PASSWORD: nyxo-ci-only

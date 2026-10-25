@@ -110,7 +110,8 @@ test('release.yml: сборка на Ubuntu и Windows с npm ci, npm test и sc
 
 test('release.yml: файлы с двух ОС сравниваются через cmp до публикации', () => {
     const publish = jobBlock(release, 'release');
-    assert.match(publish, /needs: build/);
+    // build среди условий релиза (вместе с e2e и audit - их охраняет test/ci-release-gates.test.js).
+    assert.match(publish, /needs: \[[^\]]*\bbuild\b[^\]]*\]/);
     assert.match(publish, /cmp "artifacts\/release-ubuntu-latest\/\$name" "artifacts\/release-windows-latest\/\$name"/);
     assert.ok(publish.indexOf('cmp ') < publish.indexOf('gh release create'), 'сравнение должно идти раньше публикации');
 });
