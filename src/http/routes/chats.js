@@ -9,6 +9,10 @@ const { isClientOutdated: isOutdatedProto } = require('../../../lib/proto');
 // кнопок-подсказок — чистые функции без БД (lib/bot-guide.js).
 const botGuide = require('../../../lib/bot-guide');
 const { logError } = require('../../../lib/log-error');
+// Лимиты аккаунта: суточный объём текста и число комнат (W7 R1 п.3).
+const { TEXT_QUOTA_MESSAGE, roomsLimitMessage } = require('../../../lib/account-limits');
+const { LimitStoreError, respondBusy } = require('../../../lib/pg-limits');
+const { cleanRoomName, avatarOfName, MAX_ROOM_NAME_LENGTH } = require('../../../lib/room-name');
 // Id и курсоры сообщений, тела ошибок 400/409 (docs/security/message-ordering.md).
 const {
     CLIENT_OUTDATED, parseSeq, BAD_SEQ, parseClientMessageId, BAD_MESSAGE_ID, isMessageIdConflict,
@@ -123,7 +127,7 @@ function register(app, ctx) {
         GLOBAL_DEFAULT_EXPIRY_SECONDS, INVITE_TTL_SECONDS, io, subscribeUserToChat, notifyChatListChanged,
         emitVisibleRoomMessage, dbGet, dbAll, withTransactionRetry, newMessageExpirySeconds, getOwnChat,
         markChatRead, unarchiveForRecipients, insertChatMessage, insertRoomMessage, describeMessageIdUse,
-        advanceSenderMarker, scheduleBotReply,
+        advanceSenderMarker, scheduleBotReply, textQuota, ACCOUNT_LIMITS,
     } = ctx;
 
     app.get('/api/chats', async (req, res) => {
@@ -374,6 +378,18 @@ function register(app, ctx) {
             const violation = e2eePolicyViolation(chat, encrypted, text.trim());
             if (violation) return res.status(400).json(violation);
 
+            // Суточный объём текста на аккаунт (R1 п.3): конверты по ~11 КБ иначе шли бы
+            // до общего лимита запросов, около гигабайта в сутки с аккаунта.
+            try {
+                if (!(await textQuota.reserve(userId, Buffer.byteLength(text, 'utf8')))) {
+                    return res.status(429).json({ success: false, code: 'text-quota', message: TEXT_QUOTA_MESSAGE });
+                }
+            } catch (quotaErr) {
+                if (!(quotaErr instanceof LimitStoreError)) throw quotaErr;
+                logError('Send message: счётчик текста недоступен', quotaErr);
+                return respondBusy(res);
+            }
+
             // Для E2EE-конверта sanitizeText не нужен и вреден по смыслу: это
             // не человеческий текст, а base64/JSON, который клиент должен
             // получить обратно байт-в-байт для расшифровки.
@@ -493,11 +509,14 @@ function register(app, ctx) {
     app.post('/api/chats', async (req, res) => {
         const userId = req.session.userId;
         if (!userId) return res.json({ success: false, message: 'Не авторизован' });
-        const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+        // Название очищается от управляющих, двунаправленных и невидимых символов (lib/room-name.js, R1 п.11):
+        // его видят все участники, и U+202E или нулевая ширина подделывают то, что на экране.
+        const name = cleanRoomName(req.body?.name);
         if (!name) return res.json({ success: false, message: 'Введите имя чата' });
-        if (name.length > 64) return res.json({ success: false, message: 'Название чата не может быть длиннее 64 символов' });
+        if (name.length > MAX_ROOM_NAME_LENGTH) return res.json({ success: false, message: 'Название чата не может быть длиннее 64 символов' });
 
-        const avatar = name.charAt(0).toUpperCase();
+        // Аватар - первая графема, а не charAt(0): для эмодзи это половина суррогатной пары.
+        const avatar = avatarOfName(name);
         try {
             const roomCode = generateInviteCode();
             // Порядок блокировок users → rooms → room_participants → chats
@@ -507,6 +526,12 @@ function register(app, ctx) {
             const created = await withTransactionRetry(async (client) => {
                 const owner = await client.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE', [userId]);
                 if (owner.rows.length === 0) return null; // аккаунт удалён между проверкой сессии и этим запросом
+                // Потолок числа комнат на аккаунт (R1 п.3): 300 комнат подряд без отказа раздували
+                // chats, rooms и room_participants. Строка users уже взята, поэтому параллельное удаление
+                // аккаунта не мешает; параллельные создания одного аккаунта могут превысить потолок на
+                // единицы - как и задумано, это защита от потока, а не точная квота.
+                const owned = await client.query('SELECT COUNT(*)::int AS n FROM chats WHERE user_id = $1 AND room_id IS NOT NULL', [userId]);
+                if (owned.rows[0].n >= ACCOUNT_LIMITS.roomsPerUserMax) return 'rooms-limit';
                 const roomResult = await client.query(
                     `INSERT INTO rooms (name, code, code_expires_at) VALUES ($1, $2, NOW() + $3::integer * INTERVAL '1 second')
                  RETURNING id, msg_seq`,
@@ -522,6 +547,9 @@ function register(app, ctx) {
                 );
                 return { roomId: newRoomId, chatId: chatResult.rows[0].id };
             });
+            if (created === 'rooms-limit') {
+                return res.status(403).json({ success: false, code: 'rooms-limit', message: roomsLimitMessage(ACCOUNT_LIMITS.roomsPerUserMax) });
+            }
             if (!created) return res.json({ success: false, message: 'Не авторизован' });
             const { roomId, chatId } = created;
             subscribeUserToChat(userId, chatId, roomId);

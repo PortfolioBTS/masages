@@ -91,6 +91,11 @@ function serverEnv({ databaseUrl, port, uploadsDir, secrets, extra = {} }) {
         DATABASE_URL: databaseUrl,
         ...secrets,
         POW_DIFFICULTY: '8',
+        // Лимиты против массовых аккаунтов (T7.2) не должны мешать наборам, которые за минуту заводят сотни
+        // аккаунтов; сами лимиты проверяют registration-limits, account-quotas и upload-disk-guard.
+        REGISTER_GLOBAL_PER_MIN: '100000',
+        REGISTER_PACE_PER_MIN: '100000',
+        UPLOAD_MIN_FREE_MB: '1',
         UPLOADS_DIR: uploadsDir,
         PG_POOL_MAX: '3',
         CLEANUP_INTERVAL_MS: '500',

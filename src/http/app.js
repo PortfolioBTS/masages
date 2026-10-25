@@ -10,7 +10,7 @@ const path = require('path');
 const cookieParser = require('cookie-parser');
 const { getPrivacyHeaders, createHstsMiddleware } = require('../../lib/privacy');
 const { createSwKillSwitch } = require('../../lib/sw-kill-switch');
-const { buildContentSecurityPolicy } = require('../../lib/security-utils');
+const { buildContentSecurityPolicy, isCrossSiteApiRequest } = require('../../lib/security-utils');
 // Сессии в Postgres с огрублением времени, их продление и активность
 // анонимов (контракт этапа 1, §4).
 const { renewSession } = require('../../lib/session-store');
@@ -42,7 +42,7 @@ function setRevalidateCacheHeaders(res, isPrivate) {
 function configureApp(ctx) {
     const {
         ROOT_DIR, IS_PRODUCTION, HSTS_PRELOAD, SESSION_RENEW_MS, metrics, app, resolveRealIp, isTrustedOrigin,
-        apiLimiter, csrf, sessionMiddleware, anonActivity, serverContext,
+        apiLimiter, uploadsIpLimiter, uploadsUserLimiter, csrf, httpSessionMiddleware, anonActivity, serverContext,
     } = ctx;
 
     // Самым первым: признак onion-запроса (req.isOnion) нужен лимитерам и
@@ -95,7 +95,14 @@ function configureApp(ctx) {
     app.use(createHstsMiddleware({ production: IS_PRODUCTION, preload: HSTS_PRELOAD }));
 
     app.use((req, res, next) => {
-        if (SAFE_METHODS.has(req.method) || isTrustedOrigin(req.headers)) return next();
+        // Межсайтовый запрос к API отклоняется при любом методе, в том числе GET по переходу с чужой
+        // страницы: у части GET есть побочные эффекты (отметка «прочитано», выдача ключей), а кука
+        // SameSite=Lax при таком переходе уходит (W7 R1 п.5). Sec-Fetch-Site подделать со страницы нельзя.
+        if (isCrossSiteApiRequest({ secFetchSite: req.headers['sec-fetch-site'], path: req.path })) {
+            metrics.originRejected();
+            return res.status(403).json({ success: false, message: 'Запрещено: запрос с чужого сайта' });
+        }
+        if (SAFE_METHODS.has(req.method) || isTrustedOrigin(req.headers, req)) return next();
         metrics.originRejected();
         res.status(403).json({ success: false, message: 'Запрещено: запрос с чужого сайта' });
     });
@@ -127,7 +134,12 @@ function configureApp(ctx) {
     // сессия не нужна; ниже, после лимитера /api/, — обычные маршруты API.
     registerPreSessionRoutes(app, serverContext);
 
-    app.use(sessionMiddleware);
+    // Выдача вложений: лимит по IP стоит ДО сессии (поток запросов с кукой не должен ходить в БД),
+    // лимит по аккаунту - после неё и проверки сессии (ниже).
+    app.use('/uploads', uploadsIpLimiter);
+
+    // Сессия грузится только для /api и /uploads (httpSessionMiddleware): остальным путям она не нужна.
+    app.use(httpSessionMiddleware);
 
     // Сессия проверяется на КАЖДОМ запросе (validateSession). Недействительная
     // (без isAnonymous — от прежней версии с постоянными аккаунтами) или истёкшая
@@ -162,6 +174,8 @@ function configureApp(ctx) {
     // запроса без входа, например регистрации, — кука nyxo_pre) и до разбора тела.
     // Источник небезопасного запроса проверен ещё раньше (isTrustedOrigin).
     app.use(csrf.middleware);
+
+    app.use('/uploads', uploadsUserLimiter);
 
     // Разбор тела запроса: парсеры и их порядок — в middleware/body-parsers.js.
     installBodyParsers(app);

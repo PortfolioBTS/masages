@@ -8,6 +8,8 @@ const fs = require('fs');
 const { logError } = require('../../lib/log-error');
 // Огрубление времени сообщений и файлов (раздел 11 контракта).
 const { floorToHour } = require('../../lib/coarse-time');
+// Порог свободного места папки вложений (W7 R1 п.3).
+const { createDiskGuard } = require('../../lib/disk-space');
 
 // Итоговое имя файла на диске должно состоять только из "безопасных" для
 // файловой системы символов — доп. страховка на случай, если MIME_EXTENSIONS
@@ -40,7 +42,10 @@ async function coarsenFileTimes(filePath) {
 }
 
 function createUploads(ctx) {
-    const { UPLOADS_DIR } = ctx;
+    const { UPLOADS_DIR, ACCOUNT_LIMITS } = ctx;
+
+    // Новые загрузки отклоняются, когда свободного места меньше UPLOAD_MIN_FREE_MB (middleware/upload.js).
+    const diskGuard = createDiskGuard({ dir: UPLOADS_DIR, minFreeBytes: ACCOUNT_LIMITS.uploadMinFreeBytes });
 
     fs.mkdirSync(UPLOADS_DIR, { recursive: true });
     try {
@@ -86,7 +91,7 @@ function createUploads(ctx) {
         return res.status(status).json(body);
     }
 
-    return { removeUploadedFiles, cleanupUploadedFile, rejectUpload, rejectUploadWith };
+    return { removeUploadedFiles, cleanupUploadedFile, rejectUpload, rejectUploadWith, diskGuard };
 }
 
 module.exports = { createUploads, SAFE_FILENAME_RE, readFileHead, coarsenFileTimes };

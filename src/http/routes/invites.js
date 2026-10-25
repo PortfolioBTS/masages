@@ -10,6 +10,7 @@ const { isClientOutdated: isOutdatedProto } = require('../../../lib/proto');
 const MembershipCerts = require('../../../lib/membership-certs');
 const Membership = require('../../../public/lib/membership');
 const { logError } = require('../../../lib/log-error');
+const { roomsLimitMessage } = require('../../../lib/account-limits');
 // Id и курсоры сообщений, тела ошибок 400/409 (docs/security/message-ordering.md).
 const { CLIENT_OUTDATED } = require('../../../lib/message-ids');
 const { respondCertVerdict, inviteExpiresAtIso, roomChatPayload } = require('../../services/rooms');
@@ -19,7 +20,7 @@ const { respondIfDbBusy } = require('../../../lib/db-errors');
 function register(app, ctx) {
     const {
         INVITE_TTL_SECONDS, dbGet, withTransactionRetry, joinUserLimiter, joinIpLimiter, getOwnChat,
-        getOwnRoom, findRoomByInviteCode, addRoomMember, identityKeysOf, createJoinRequest,
+        getOwnRoom, findRoomByInviteCode, addRoomMember, identityKeysOf, createJoinRequest, ACCOUNT_LIMITS,
     } = ctx;
 
     app.get('/api/chats/invite/:chatId', async (req, res) => {
@@ -236,6 +237,9 @@ function register(app, ctx) {
             });
             if (result.error === 'approval') return pendingResponse();
             if (result.error === 'full') return res.json({ success: false, message: ROOM_FULL_MESSAGE });
+            if (result.error === 'rooms-limit') {
+                return res.status(403).json({ success: false, code: 'rooms-limit', message: roomsLimitMessage(ACCOUNT_LIMITS.roomsPerUserMax) });
+            }
             if (result.error && result.error.reply) return respondCertVerdict(res, result.error.reply);
             if (result.error) return res.json({ success: false, message: INVALID_INVITE_MESSAGE });
             const reply = { success: true, chat: result.chat };

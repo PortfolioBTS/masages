@@ -81,10 +81,9 @@ async function openChat(chatId, roomId, name, avatar, online, isBot) {
     lastSeenSeq = data.messages.length ? Number(data.messages[data.messages.length - 1].seq) : 0;
     flushSystemNotices();
     scrollToBottom();
-
-    // Сокет уже подписан на все чаты при подключении; это — страховка для
-    // чата, созданного/добавленного до переподключения.
-    socket.emit('joinChat', room ? `room:${room}` : `chat:${chatId}`);
+    // Подписку на чат делает сервер: при подключении сокета на все чаты и при создании
+    // чата или входе в комнату. Событие joinChat убрано (R1 п.2): его обработчик
+    // ходил в БД на каждое событие, а теперь сервер любые события клиента отбрасывает.
 }
 
 async function loadOlderMessages() {

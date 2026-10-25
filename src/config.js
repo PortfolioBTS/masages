@@ -8,6 +8,7 @@
 const path = require('path');
 const { positiveNumberOr } = require('../lib/security-utils');
 const { sessionRenewIntervalMs, SESSION_RENEW_INTERVAL_MS } = require('../lib/anon-lifetime');
+const { resolveAccountLimits } = require('../lib/account-limits');
 
 function loadConfig(rootDir) {
     const IS_PRODUCTION = process.env.NODE_ENV === 'production';
@@ -48,8 +49,11 @@ function loadConfig(rootDir) {
         console.log(`[Test] NYXO_TEST_RENEW_INTERVAL_MS=${SESSION_RENEW_MS}: сессии продлеваются каждые ${SESSION_RENEW_MS} мс`);
     }
 
+    // Лимиты против массовых аккаунтов и разрастания хранилища (lib/account-limits.js).
+    const ACCOUNT_LIMITS = resolveAccountLimits(process.env);
+
     return {
-        IS_PRODUCTION, HSTS_PRELOAD, UPLOAD_QUOTA_BYTES, UPLOADS_DIR, PORT, HOST,
+        IS_PRODUCTION, HSTS_PRELOAD, UPLOAD_QUOTA_BYTES, UPLOADS_DIR, PORT, HOST, ACCOUNT_LIMITS,
         GLOBAL_DEFAULT_EXPIRY_SECONDS, INVITE_TTL_SECONDS, sessionSecret, SESSION_RENEW_MS, ROOT_DIR: rootDir,
     };
 }

@@ -6,6 +6,7 @@
 
 const { Server } = require('socket.io');
 const { createCounter } = require('../../lib/security-utils');
+const { getPrivacyHeaders } = require('../../lib/privacy');
 
 // Лимиты одновременных сокетов: на аккаунт — всегда, на IP — только для
 // clearnet (у всех onion-клиентов один IP — контейнер tor).
@@ -17,7 +18,7 @@ function getSocketRoomKey(chatId, roomId) {
 }
 
 function createIo(ctx) {
-    const { resolveRealIp, isTrustedOrigin, server } = ctx;
+    const { resolveRealIp, isTrustedOrigin, trustProxyHops, server } = ctx;
 
     // Cross-Site WebSocket Hijacking: сессионная кука уходит и в рукопожатии,
     // которое открыла ЧУЖАЯ страница (CORS на WebSocket не действует), — и
@@ -31,9 +32,20 @@ function createIo(ctx) {
         // node_modules — мимо статики, и в манифест этот файл не попал бы.
         serveClient: false,
         allowRequest: (req, callback) => {
-            if (isTrustedOrigin(req.headers)) return callback(null, true);
+            if (isTrustedOrigin(req.headers, req)) return callback(null, true);
             callback('Origin not allowed', false);
         },
+    });
+
+    // Ответы engine.io (/socket.io/: рукопожатие и long-polling) обрабатывает сам engine.io, мимо цепочки
+    // Express, поэтому заголовки приватности из http/app.js до них не доходили (R1 п.9). Тело ответа -
+    // служебные пакеты с идентификатором сессии сокета: кэшировать его нельзя.
+    io.engine.on('headers', (headers) => {
+        Object.assign(headers, getPrivacyHeaders(), {
+            'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, private',
+            Pragma: 'no-cache',
+            'X-Robots-Tag': 'noindex, nofollow',
+        });
     });
 
     const userSocketCount = createCounter();
@@ -45,7 +57,8 @@ function createIo(ctx) {
         // реально подключился к нашему прокси (последний хоп X-Forwarded-For —
         // соответствует "доверяем 1 прокси" из app.set('trust proxy', 1)), и только
         // если ЭТОТ адрес принадлежит Cloudflare — доверяем CF-Connecting-IP.
-        const xff = headers['x-forwarded-for'];
+        // TRUST_PROXY=0 (прокси нет): X-Forwarded-For присылает сам клиент, верен только адрес сокета.
+        const xff = trustProxyHops > 0 ? headers['x-forwarded-for'] : undefined;
         const connectingIp = xff
             ? xff.split(',').map(s => s.trim()).filter(Boolean).pop()
             : handshake.address;

@@ -1,16 +1,27 @@
 'use strict';
 // Обработчики socket.io: источник -> сессия -> авторизация -> лимиты подключений; подключение,
-// вход в комнаты чатов и отключение. Вынесено из server.js.
+// подписка на чаты пользователя, ограничитель частоты событий и отключение. Вынесено из server.js.
 
 // Onion-сервис (контейнер tor-service/)
 const { isOnionSocket } = require('../../lib/tor-support');
 const { logError } = require('../../lib/log-error');
+const { createTokenBucket } = require('../../lib/token-bucket');
 const { MAX_SOCKETS_PER_USER, MAX_SOCKETS_PER_IP, getSocketRoomKey } = require('./io');
+
+// Частота входящих событий одного сокета (токен-бакет): клиент от себя ничего не шлёт, подписка
+// на чаты делается сервером, так что любой поток событий - не работа, а нагрузка. SOCKET_EVENT_RATE
+// - событий в секунду в среднем, SOCKET_EVENT_BURST - всплеск. Превышение - disconnect.
+function envInt(value, fallback) {
+    const n = typeof value === 'string' && /^\d{1,9}$/.test(value.trim()) ? Number(value) : NaN;
+    return Number.isInteger(n) && n >= 1 ? n : fallback;
+}
 
 function registerSocketHandlers(ctx) {
     const {
-        io, userSocketCount, ipSocketCount, getClientIp, dbGet, dbAll, sessionMiddleware, anonActivity,
+        io, userSocketCount, ipSocketCount, getClientIp, dbAll, sessionMiddleware, anonActivity,
     } = ctx;
+    const eventRate = envInt(process.env.SOCKET_EVENT_RATE, 5);
+    const eventBurst = envInt(process.env.SOCKET_EVENT_BURST, 20);
 
     // Socket.io: источник (allowRequest — в realtime/io.js) -> сессия -> авторизация ->
     // лимит подключений на аккаунт и (для clearnet) на IP.
@@ -71,40 +82,32 @@ function registerSocketHandlers(ctx) {
         // подписка на новый чат, принудительный выход).
         socket.join('user:' + userId);
 
-        socket.on('joinChat', async (roomKey) => {
-            if (typeof roomKey !== 'string' || roomKey.length === 0) return;
-            try {
-                if (roomKey.startsWith('room:')) {
-                    const roomId = parseInt(roomKey.slice(5), 10);
-                    if (!Number.isFinite(roomId)) return;
-                    const participant = await dbGet(
-                        'SELECT id FROM room_participants WHERE room_id = $1 AND user_id = $2',
-                        [roomId, userId]
-                    );
-                    if (!participant) return;
-                } else if (roomKey.startsWith('chat:')) {
-                    const chatId = parseInt(roomKey.slice(5), 10);
-                    if (!Number.isFinite(chatId)) return;
-                    const chat = await dbGet(
-                        'SELECT id FROM chats WHERE id = $1 AND user_id = $2',
-                        [chatId, userId]
-                    );
-                    if (!chat) return;
-                } else {
-                    return;
-                }
-                socket.join(roomKey);
-            } catch (err) {
-                logError('joinChat error', err);
-            }
+        // Событий от клиента сервер не принимает (обработчиков нет): подписка на чаты - дело сервера
+        // (ниже и subscribeUserToChat при создании чата или входе в комнату). Раньше был обработчик
+        // joinChat с запросом в БД на каждое событие: 10 сокетов по 8000 событий забивали пул
+        // соединений (R1 п.2), а проверка членства и подписка расходились во времени с выходом из
+        // комнаты. Лишние события отбрасываются ограничителем, а сокет, превысивший частоту, закрывается.
+        const bucket = createTokenBucket({ capacity: eventBurst, refillPerSecond: eventRate });
+        socket.use((packet, next) => {
+            if (bucket.take()) return next();
+            socket.disconnect(true);
         });
 
         // Сразу подписываем сокет на ВСЕ чаты пользователя. Раньше подписка
         // появлялась только при открытии конкретного чата, поэтому новые
         // сообщения в остальных чатах не обновляли ни список, ни счётчики.
         try {
-            const chats = await dbAll('SELECT id, room_id FROM chats WHERE user_id = $1', [userId]);
-            socket.join(chats.map(c => getSocketRoomKey(c.id, c.room_id)));
+            const roomKeys = async () => (await dbAll('SELECT id, room_id FROM chats WHERE user_id = $1', [userId]))
+                .map(c => getSocketRoomKey(c.id, c.room_id));
+            const subscribed = await roomKeys();
+            socket.join(subscribed);
+            // Гонка с выходом из комнаты (R2.2): список мог устареть, пока шёл запрос, а
+            // выход отписывает сокеты пользователя сразу после коммита - раньше, чем этот
+            // сокет вошёл. Поэтому после join список читается ещё раз и лишнее снимается.
+            // Порядок «join, потом проверка» не оставляет окна: выход после проверки
+            // отпишет уже вошедший сокет, выход до неё увидит проверка.
+            const actual = new Set(await roomKeys());
+            for (const key of subscribed) if (!actual.has(key)) socket.leave(key);
         } catch (err) {
             logError('Socket auto-join error', err);
         }

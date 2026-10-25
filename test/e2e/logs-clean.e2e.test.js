@@ -106,6 +106,24 @@ test('типичный сценарий не оставляет в логе се
     assert.match(prefsLine.text, /тестовый сбой базы/, 'причина ошибки в логе осталась');
     assert.match(prefsLine.text, /code=23503/, 'и код ошибки тоже');
 
+    // Ошибка данных (22003, как у id вне диапазона int): код остаётся, значение из текста ошибки Postgres - нет.
+    // Сами запросы с таким id теперь отклоняет проверка параметров (W7 R1 п.7) и ошибки в логе не оставляют,
+    // поэтому сбой с тем же кодом и значением в тексте имитирует триггер.
+    const rangeMark = logs.mark();
+    await suite.query(`CREATE OR REPLACE FUNCTION nyxo_test_fail() RETURNS trigger AS $$
+     BEGIN
+         RAISE EXCEPTION 'value "${HUGE_ID}" is out of range for type integer' USING ERRCODE = '22003';
+     END $$ LANGUAGE plpgsql`);
+    await suite.query(TRIGGER_SQL[1]);
+    try {
+        await owner.post(`/api/chats/${ownerChat.id}/prefs`, { pinned: true });
+    } finally {
+        await suite.query('DROP TRIGGER IF EXISTS nyxo_test_fail ON chats');
+        await suite.query('DROP FUNCTION IF EXISTS nyxo_test_fail()');
+    }
+    const rangeLine = await logs.waitFor('Set chat prefs error', { from: rangeMark });
+    assert.match(rangeLine.text, /code=22003/, 'код ошибки данных остался в логе');
+
     // Всё, что известно тесту, собрано ДО удаления аккаунтов (после него сессий в базе нет).
     const sessions = (await suite.query('SELECT sid FROM session')).rows.map(r => r.sid);
     const cookieSids = [owner, guest, stranger].map(c => sidOfCookie(c.jar.get('connect.sid')));
@@ -161,8 +179,9 @@ test('типичный сценарий не оставляет в логе се
     assert.ok(!all.includes('SQL statement'), 'where ошибки Postgres в лог не попал');
     assert.ok(!/\n\s+at /.test(`\n${all}`), 'стеков вызовов в логе нет');
 
-    // Ошибка данных (id вне диапазона int): код остаётся, значение из запроса — нет.
-    const hugeLine = logs.find('Get messages error');
-    assert.ok(hugeLine, 'ошибка запроса с id вне диапазона записана в лог');
-    assert.match(hugeLine.text, /code=22003/);
+    // Ошибка данных (22003): код остался (проверено выше), значения из текста ошибки в логе нет - его ловит
+    // assertNoSensitive (hugeId). Запрос с id вне диапазона int теперь отклоняется до базы: ни «Get messages
+    // error», ни «Unhandled error» он в логе не оставляет.
+    assert.ok(!logs.find('Get messages error'), 'id вне диапазона отклонён проверкой, ошибки в логе нет');
+    assert.ok(!logs.find('Unhandled error'), 'и битый %-путь или id не дают «Unhandled error»');
 });

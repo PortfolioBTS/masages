@@ -8,6 +8,7 @@ const {
     JOIN_REQUEST_TTL_SECONDS,
 } = require('../../lib/invites');
 const { logError } = require('../../lib/log-error');
+const { avatarOfName } = require('../../lib/room-name');
 
 // ---- Приглашения и заявки на вступление ----
 //
@@ -52,6 +53,7 @@ function createRooms(ctx) {
     const {
         subscribeUserToChat, notifyChatListChanged, notifyRoomMembersChanged, notifyJoinRequestsChanged,
         notifyJoinRequestDecided, dbGet, dbAll, dbRun, withTransactionRetry, queryWithRetry, getOwnChat,
+        ACCOUNT_LIMITS,
     } = ctx;
 
     // Комната вызывающего по его личному чату — с проверкой участия.
@@ -117,6 +119,10 @@ function createRooms(ctx) {
         const result = await withTransactionRetry(async (client) => {
             const newcomer = await client.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE', [userId]);
             if (newcomer.rows.length === 0) return { error: 'not-found' };
+            // Потолок числа комнат на аккаунт (R1 п.3), как и при создании комнаты. Уже состоящему в комнате
+            // (повторный вход по коду) потолок не мешает - это проверяется ниже, по existing.
+            const memberOf = await client.query('SELECT COUNT(*)::int AS n FROM chats WHERE user_id = $1 AND room_id IS NOT NULL', [userId]);
+            const atLimit = memberOf.rows[0].n >= ACCOUNT_LIMITS.roomsPerUserMax;
             const locked = await client.query(
                 `SELECT id, name, code, invite_max_members, invite_require_approval, invite_disabled, msg_seq,
                     invite_cert, invite_snap,
@@ -130,6 +136,7 @@ function createRooms(ctx) {
             if (checkError) return { error: checkError };
 
             const existing = await client.query('SELECT id, name, avatar FROM chats WHERE room_id = $1 AND user_id = $2', [roomId, userId]);
+            if (!existing.rows[0] && atLimit) return { error: 'rooms-limit' };
             if (existing.rows[0]) {
                 const dropped = await client.query('DELETE FROM join_requests WHERE room_id = $1 AND user_id = $2', [roomId, userId]);
                 return { chat: existing.rows[0], room, joined: false, requestRemoved: dropped.rowCount > 0 };
@@ -141,7 +148,7 @@ function createRooms(ctx) {
             // приглашения. Раньше строка называлась «Чат с <имя первого
             // участника>»: в группе это неверно и лишний раз показывает имя.
             const name = room.name;
-            const avatar = name.charAt(0).toUpperCase();
+            const avatar = avatarOfName(name);
             await client.query(
                 `INSERT INTO room_participants (room_id, user_id, visible_from_seq)
              VALUES ($1, $2, $3)

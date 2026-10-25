@@ -17,6 +17,7 @@ const { SAFE_FILENAME_RE } = require('../../services/uploads');
 const { EarlyResponse } = require('../early-response');
 const { toPositiveInt } = require('../params');
 const { e2eePolicyViolation, expectedFileMessageText, messageFromRow } = require('../../services/messages');
+const { STORAGE_FULL_MESSAGE } = require('../../../lib/account-limits');
 
 // ALLOWED_MIME_TYPES и MIME_EXTENSIONS (жёсткий маппинг mimetype ->
 // расширение на диске, расширение никогда не берётся из имени файла) —
@@ -29,7 +30,7 @@ const { e2eePolicyViolation, expectedFileMessageText, messageFromRow } = require
 const BLOCKED_EXTENSIONS = new Set(['.html', '.htm', '.php', '.exe', '.js', '.sh', '.py', '.rb', '.pl', '.bat', '.cmd', '.ps1', '.vbs', '.jar', '.msi', '.svg']);
 
 function createUploadMiddleware(ctx) {
-    const { UPLOADS_DIR, getOwnChat, describeMessageIdUse } = ctx;
+    const { UPLOADS_DIR, getOwnChat, describeMessageIdUse, diskGuard } = ctx;
 
     const upload = multer({
         storage: multer.diskStorage({
@@ -50,7 +51,9 @@ function createUploadMiddleware(ctx) {
                 cb(null, safeName);
             }
         }),
-        limits: { fileSize: 50 * 1024 * 1024, files: 1, fields: 10 },
+        // fieldSize: самое длинное текстовое поле - конверт E2EE (~11 КБ) или подпись (4000 символов);
+        // по умолчанию multer пускает по 1 МБ на поле, то есть до 10 МБ полей ещё до проверки сессии (R1 п.8).
+        limits: { fileSize: 50 * 1024 * 1024, files: 1, fields: 10, fieldSize: 64 * 1024 },
         // Имя файла в multipart — UTF-8 (по умолчанию busboy декодировал его как
         // latin1). Само имя больше нигде не хранится, но BLOCKED_EXTENSIONS
         // ниже смотрит на его расширение.
@@ -105,6 +108,10 @@ function createUploadMiddleware(ctx) {
     async function checkUploadBeforeStore(session, body, file) {
         const userId = session && session.userId;
         if (!userId) throw new EarlyResponse(401, { success: false, message: 'Не авторизован' });
+        // Места на томе вложений почти нет (UPLOAD_MIN_FREE_MB): файл не принимается совсем (R1 п.3).
+        if (!(await diskGuard.hasRoom())) {
+            throw new EarlyResponse(507, { success: false, code: 'storage-full', message: STORAGE_FULL_MESSAGE });
+        }
         // Общий признак версии клиента (message-ordering.md, 14.1) — первая проверка
         // запроса после сессии. Поле proto лежит в FormData ДО файла; пришло позже —
         // здесь его ещё нет, и ответ — client-outdated.
@@ -136,7 +143,24 @@ function createUploadMiddleware(ctx) {
         if (use.status === 'conflict') throw new EarlyResponse(409, ID_CONFLICT);
     }
 
-    return { upload };
+    // Приём вложения целиком: сессия проверяется ДО разбора multipart. Раньше multer разбирал тело (поля до
+    // 10 МБ и файл на диск) и только потом обработчик отвечал 401: неавторизованный запрос стоил как
+    // настоящая загрузка (R1 п.8). Теперь тело не разбирается и на диск не пишется: ответ уходит сразу, а
+    // остаток тела дочитывается и отбрасывается (req.resume) - так клиент получает ответ, а не обрыв
+    // соединения. Заведомо огромное или неизвестной длины тело (больше предела файла с запасом на поля) не
+    // дочитывается: соединение закрывается после ответа.
+    const MAX_DRAINED_BODY_BYTES = 51 * 1024 * 1024;
+    const uploadSingleFile = upload.single('file');
+    function uploadFile(req, res, next) {
+        if (!(req.session && req.session.userId)) {
+            if (!(Number(req.headers['content-length']) <= MAX_DRAINED_BODY_BYTES)) res.set('Connection', 'close');
+            req.resume();
+            return res.status(401).json({ success: false, message: 'Не авторизован' });
+        }
+        uploadSingleFile(req, res, next);
+    }
+
+    return { upload, uploadFile };
 }
 
 module.exports = { createUploadMiddleware };

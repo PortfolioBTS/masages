@@ -67,9 +67,12 @@ const EXPECTED_STACK = [
     'get /.well-known/security.txt [1]',
     'get /security.txt [1]',
     'get /client-manifest.json [1]',
+    // W7 R1 п.4: лимит выдачи вложений по IP - до загрузки сессии, по аккаунту - после csrf.
+    'use <anonymous> /^\\/uploads\\/?(?=\\/|$)/i',
     'use session',
     'use <anonymous>',
     'use middleware',
+    'use <anonymous> /^\\/uploads\\/?(?=\\/|$)/i',
     'use jsonParser /^\\/api\\/keys\\/key-shares\\/?(?=\\/|$)/i',
     'use jsonParser /^\\/api\\/keys\\/pq-one-time-prekeys\\/?(?=\\/|$)/i',
     'use <anonymous>',
