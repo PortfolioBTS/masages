@@ -73,3 +73,44 @@ test('новичок, одобренный между COMMIT сообщения 
         await newcomerSocket.close();
     }
 });
+
+// Находка T7.4 (тот же класс, что R2.3): messageDeleted исчезающих сообщений и удаления
+// автором уходил всей комнате — новичок узнавал об удалении сообщения, которого для него нет.
+test('новичок не получает messageDeleted для сообщений до своего вступления (таймер и удаление автором)', async () => {
+    const owner = suite.client({ name: 'владелец' });
+    const member = suite.client({ name: 'участник' });
+    const newcomer = suite.client({ name: 'новичок' });
+    await owner.registerAnon();
+    await member.registerAnon();
+    await newcomer.registerAnon();
+    const { roomId, ownerChat } = await roomWithMember(owner, member);
+    await owner.isRoomChat(ownerChat.id);
+    const byTimer = await owner.send(ownerChat.id, 'исчезнет по таймеру');
+    const byAuthor = await owner.send(ownerChat.id, 'удалит автор');
+    const { code } = await owner.invite(ownerChat.id);
+    const pending = await newcomer.join(code);
+    await owner.approve(pending.requestId);
+    const memberSocket = await member.socket();
+    const newcomerSocket = await newcomer.socket();
+    try {
+        const memberMark = memberSocket.mark();
+        const newcomerMark = newcomerSocket.mark();
+        const expiry = await owner.post(`/api/messages/${byTimer.id}/set-expiry`, { expirySeconds: 2 });
+        assert.strictEqual(expiry.body.success, true, JSON.stringify(expiry.body));
+        await owner.ok(owner.del(`/api/messages/${byAuthor.id}`), 'удаление автором');
+        // Старый участник получает оба удаления.
+        await memberSocket.waitFor('messageDeleted', (m) => m.id === byAuthor.id, { since: memberMark });
+        await memberSocket.waitFor('messageDeleted', (m) => m.id === byTimer.id, { since: memberMark, timeoutMs: 15000 });
+        // Сообщение после вступления: его удаление новичок получает — и, раз события идут
+        // по порядку, к этому моменту получил бы и прежние.
+        const after = await owner.send(ownerChat.id, 'после вступления');
+        await owner.ok(owner.del(`/api/messages/${after.id}`), 'удаление автором');
+        await newcomerSocket.waitFor('messageDeleted', (m) => m.id === after.id, { since: newcomerMark });
+        const heard = newcomerSocket.collect('messageDeleted', { since: newcomerMark }).map(m => m.id);
+        assert.deepStrictEqual(heard, [after.id], 'новичок не узнал об удалении сообщений до своего вступления');
+        assert.strictEqual((await suite.query('SELECT count(*)::int AS n FROM messages WHERE room_id = $1', [roomId])).rows[0].n, 0);
+    } finally {
+        await memberSocket.close();
+        await newcomerSocket.close();
+    }
+});

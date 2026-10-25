@@ -6,6 +6,7 @@
 const DisappearingMessagesManager = require('../../lib/disappearing-messages');
 const { effectiveMessageExpiry } = require('../../lib/chat-settings');
 const { getSocketRoomKey } = require('../realtime/io');
+const { logError } = require('../../lib/log-error');
 
 // expirySeconds из тела запроса: null — не задан, число — валидный срок;
 // некорректное значение бросает RangeError с текстом для пользователя.
@@ -17,19 +18,51 @@ function parseRequestedExpiry(value) {
 function createExpiry(ctx) {
     const { GLOBAL_DEFAULT_EXPIRY_SECONDS, removeUploadedFiles, io, pool } = ctx;
 
+    // messageDeleted комнаты — только тем, кому сообщение было видно: участникам с
+    // visible_from_seq < seq. Новичок, вступивший после сообщения, о нём не знает и не должен
+    // узнать о его удалении (sealed-sender.md 8.1, message-ordering.md О2 раздел 10; та же
+    // граница, что у newMessage и messageEdited). Границы не прочитались — событие не уходит:
+    // у остальных сообщение исчезнет при следующей загрузке истории.
+    async function emitRoomMessagesDeleted(roomId, rows) {
+        if (rows.length === 0) return;
+        const minSeq = Math.min(...rows.map(row => Number(row.seq)));
+        let boundaries;
+        try {
+            boundaries = (await pool.query(
+                'SELECT user_id, visible_from_seq FROM room_participants WHERE room_id = $1 AND visible_from_seq >= $2',
+                [roomId, minSeq]
+            )).rows;
+        } catch (err) {
+            logError('[Expiry] Не удалось прочитать границы видимости — messageDeleted комнате не отправлен', err);
+            return;
+        }
+        for (const row of rows) {
+            let target = io.to(getSocketRoomKey(null, roomId));
+            for (const b of boundaries) {
+                if (Number(b.visible_from_seq) >= Number(row.seq)) target = target.except('user:' + b.user_id);
+            }
+            // У строки комнаты chat_id нет (sealed-sender.md, 8.1): событие несёт только room_id.
+            target.emit('messageDeleted', { id: String(row.id), room_id: roomId });
+        }
+    }
+
     // Менеджер исчезающих сообщений. Удалённые им сообщения сразу пропадают
     // и у открытых клиентов (раньше — только после перезагрузки страницы), а
     // их вложения удаляются с диска.
     const disappearingMessagesManager = new DisappearingMessagesManager(pool, {
         cleanupIntervalMs: process.env.CLEANUP_INTERVAL_MS,
-        onMessagesDeleted: (rows) => {
+        onMessagesDeleted: async (rows) => {
             removeUploadedFiles(rows.map(r => r.file_url));
+            const byRoom = new Map();
             for (const row of rows) {
-                // У строки комнаты chat_id нет (sealed-sender.md, 8.1): событие несёт только room_id.
-                io.to(getSocketRoomKey(row.chat_id, row.room_id)).emit('messageDeleted', row.room_id
-                    ? { id: String(row.id), room_id: row.room_id }
-                    : { id: String(row.id), chat_id: row.chat_id, room_id: null });
+                if (!row.room_id) {
+                    io.to(getSocketRoomKey(row.chat_id, null)).emit('messageDeleted', { id: String(row.id), chat_id: row.chat_id, room_id: null });
+                    continue;
+                }
+                if (!byRoom.has(row.room_id)) byRoom.set(row.room_id, []);
+                byRoom.get(row.room_id).push(row);
             }
+            for (const [roomId, roomRows] of byRoom) await emitRoomMessagesDeleted(roomId, roomRows);
         },
     });
 
@@ -76,7 +109,7 @@ function createExpiry(ctx) {
 
     return {
         disappearingMessagesManager, getDefaultExpirySeconds, applyNewMessageExpiry, newMessageExpirySeconds,
-        setChatExpiry,
+        setChatExpiry, emitRoomMessagesDeleted,
     };
 }
 
