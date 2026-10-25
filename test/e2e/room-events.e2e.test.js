@@ -104,14 +104,10 @@ test('новичок получает правку только сообщени
     assert.ok(!history.includes(String(w.hiddenEdit.id)), 'скрытое сообщение попало в историю гостя');
 });
 
-// Ошибка продакшен-кода, найденная этим тестом (не пробел тестов): удаление сообщения идёт через
-// disappearingMessagesManager.deleteMessages -> onMessagesDeleted (src/services/expiry.js, createExpiry), который шлёт
-// messageDeleted ВСЕЙ комнате без except по участникам с visible_from_seq >= seq. sealed-sender.md, строка 272, требует
-// того же исключения, что у newMessage и messageEdited. Утечка небольшая (случайный id и room_id чужого для гостя
-// сообщения), но граница видимости задумана без исключений. Исправляет владелец src/services/expiry.js.
-test('новичок не получает messageDeleted для сообщения под границей видимости', {
-    todo: 'src/services/expiry.js, onMessagesDeleted: messageDeleted уходит всей комнате без except по visible_from_seq (sealed-sender.md, 8.1)',
-}, async (t) => {
+// Этот тест нашёл ошибку продакшен-кода (W7, T7.4): onMessagesDeleted (src/services/expiry.js) слал messageDeleted
+// ВСЕЙ комнате, без исключения участников с visible_from_seq >= seq, которого требует sealed-sender.md 8.1 (как у
+// newMessage и messageEdited). Исправлено в T7.2b (emitRoomMessagesDeleted).
+test('новичок не получает messageDeleted для сообщения под границей видимости', async (t) => {
     const w = await guestJoinsAfterMessages(t, 'Граница удаления');
     const mark = w.guestSock.mark();
     await w.owner.ok(w.owner.del(`/api/messages/${w.hiddenDelete.id}`), 'удаление скрытого сообщения');
