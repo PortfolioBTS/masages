@@ -577,15 +577,15 @@ state = SELECT … FROM kt_state FOR UPDATE
 Сервер:
 
 - `lib/kt-log.js` (новый): формулы раздела 5, SMT и доказательства (в том числе из компактного индекса), подписи, проверка ключа Ed25519, цепочка, задача эпох и поколений (`lib/jobs`), SKT перенесённым ключам; `lib/kt-routes.js` (новый): маршруты 6.5, регистрация в `lib/routes/index.js`.
-- `lib/key-store.js` и `lib/e2ee-keys.js`: `createKeyStore({ dbGet, dbAll, withTransaction })` (клиент транзакции из `server.js`), столбцы `kt_*` включая `kt_skt`, регистрация при `putIdentity` одной транзакцией с пределом 16, поле `kt` (с `skt`) в `getIdentities`, `getBundle` и `join-requests`.
-- `server.js`/`deleteUserAccount`: удаление `identity_keys` и `kt_pending` по `user_id` в порядке `kt_state → identity_keys → kt_pending` после основных таблиц (порядок — message-ordering.md §8.1).
+- `lib/key-store.js` и `lib/e2ee-keys.js`: `createKeyStore({ dbGet, dbAll, withTransaction })` (клиент транзакции — `withTransaction` из `src/db/transactions.js`), столбцы `kt_*` включая `kt_skt`, регистрация при `putIdentity` одной транзакцией с пределом 16, поле `kt` (с `skt`) в `getIdentities`, `getBundle` и `join-requests`.
+- `deleteUserAccount` (`src/services/accounts.js`): удаление `identity_keys` и `kt_pending` по `user_id` в порядке `kt_state → identity_keys → kt_pending` после основных таблиц (порядок — message-ordering.md §8.1).
 - `lib/env-check.js`: `KT_SIGNING_KEY`, `KT_SIGNING_KEY_PREVIOUS`; `.env.example`: блок «Прозрачность ключей» с командой генерации; переменных длины поколения нет.
 
 Клиент:
 
 - `public/kt-verify.js` (новый, UMD); запись в `CLIENT_SCRIPTS`.
 - `public/e2ee.js`: `syncLog`, `runKtChecks` и очередь `kt:queue` (сеть вне `withLock`), проверка собеседника по 7.3, самомониторинг, сплетни, `checkTransparency`, `overrideLogMismatch`, `ext.kt` в SKDM и сверка при применении (поле отбрасывается при порче), правило ротации; методы клиента — в `CLIENT_METHODS` теста `test/e2ee-api.test.js`.
-- `public/script.js`: статус `log-mismatch`, баннеры (`inconsistent`, `log-disabled`, `key-split`), строки «Проверка журнала ключей сейчас недоступна» и «Ключ ждёт подтверждения журналом», отметка «ключ проверен по журналу», диалог `self-foreign-entry`.
+- Скрипты приложения `public/js/` (до волны 6 — `public/script.js`; в основном `11-key-log-members.js`): статус `log-mismatch`, баннеры (`inconsistent`, `log-disabled`, `key-split`), строки «Проверка журнала ключей сейчас недоступна» и «Ключ ждёт подтверждения журналом», отметка «ключ проверен по журналу», диалог `self-foreign-entry`.
 
 Тексты: «Как это работает», SECURITY.md (открытый ключ журнала), README — T5.1.
 
@@ -605,7 +605,7 @@ state = SELECT … FROM kt_state FOR UPDATE
 | Регистрация identity | клиент шлёт `PUT /api/keys/identity` при каждом `init()` (раньше — только при смене identity) | ответ несёт `nonce` и SKT текущих ключей (раздел 7.4, К9); identity, внесённые до включения журнала, регистрируются при первом `init()` |
 | Ротация и mismatch | свой ключ комнаты ротируется по статусу: в состоянии ключа (`logExcluded`) записано, кто был исключён журналом при его создании; ротация нужна, если исключённый собеседник в этом списке отсутствует. Отметки рассылки (`sharedWith2`) не участвуют | запрос ключа и принятие нового ключа стирают отметки; решение по ним подавило бы ротацию. `pending` не исключает из рассылки и не блокирует отправку |
 | Сплетни | `ext.kt` ограничен тем же пределом `ext` в 2048 символов: при превышении или порче поле `kt` отбрасывается с предупреждением, SKDM принимается; испорченный `prev` по-прежнему отвергает SKDM целиком | раздел 7.5 |
-| Манифест релиза (R10) | клиент принимает `ktManifestKey()` (необязательный обратный вызов); с T5.4 `script.js` передаёт `NyxoKtClient.fetchManifestKey`, ключ `keys.kt` кладут релиз (`--kt-key`, `KT_PUBLIC_KEY`) и сервер (из `KT_SIGNING_KEY`) | сверка только при первом закреплении (`pins.length === 0`); дальше действует цепочка заявлений о смене |
+| Манифест релиза (R10) | клиент принимает `ktManifestKey()` (необязательный обратный вызов); с T5.4 страница (`public/js/03-e2ee-client.js`) передаёт `NyxoKtClient.fetchManifestKey`, ключ `keys.kt` кладут релиз (`--kt-key`, `KT_PUBLIC_KEY`) и сервер (из `KT_SIGNING_KEY`) | сверка только при первом закреплении (`pins.length === 0`); дальше действует цепочка заявлений о смене |
 | Время создания identity | поле `identity.createdHour` (час) в локальной записи identity устройства | вопрос 16: на сервер не уходит |
 
 Открытые вопросы 12–16 приняты по умолчанию: 3 закрытые эпохи или 4 часа до `mismatch` (вопрос 12); SKT перенесённым ключам подписывается сразу после начала поколения порциями по 1000 (13); предел 16 регистраций и `KT_COMPACT_MIN = 4096` (14; порог ручкой не меняется, кроме тестов); нарушение длины поколения и льготного срока — `log-fork` с причиной (15); время создания identity — на устройстве (16). Вопрос 11 (лимитер): скользящее окно в час через `pgLimits.slidingLimiter('kt')` — 600 запросов головы и корней, 400 доказательств и 60 на пару «кто — чей», 120 запросов самомониторинга на пользователя; отказ — 429 `rate-limited` (клиент повторяет, а не засчитывает как «нет доказательства»).

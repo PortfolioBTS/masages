@@ -8,7 +8,7 @@
 
 **Аккаунт**
 - Временный анонимный аккаунт: срок хранения выбирается при входе и меняется в «Профиле» — пока открыта вкладка (аккаунт удаляется через 30 минут после закрытия последней вкладки), 1 день или 7 дней без активности. Потолка от даты создания нет: пока человек заходит, аккаунт живёт. В боковой панели постоянно написано, когда аккаунт удалится.
-- Создание аккаунта защищено proof-of-work, лимитами и CSRF-токеном.
+- Создание аккаунта защищено proof-of-work, лимитами и CSRF-токеном. Массовым регистрациям мешают потолок в минуту на весь сервер (в том числе через onion) и рост сложности proof-of-work, когда темп выше обычного; у аккаунта есть суточная квота текста и потолок числа комнат.
 - «Удалить и выйти» удаляет аккаунт, сообщения (в том числе у собеседников), файлы и ключи на сервере и стирает ключи и настройки на устройстве.
 - Восстановления нет: аккаунт живёт только в этом браузере.
 
@@ -20,9 +20,9 @@
 
 **Шифрование** (обязательно для групп, выключателя нет)
 - Обмен ключами PQXDH: X25519 плюс ML-KEM-768 с одноразовыми PQ-prekey; сообщения — Sender Keys с ротацией раз в 100 сообщений или 7 дней и при выходе участника.
-- Коды безопасности (60 цифр) в окне «Участники и ключи»; смена ключа собеседника блокирует передачу ему ключа группы до явного подтверждения.
-- Подписанный состав группы: участник без подписи допуска помечен «не подтверждён» и ключа группы не получает, пока вы не нажмёте «Доверять участнику».
-- Журнал ключей (прозрачность ключей): работает, если оператор задал `KT_SIGNING_KEY`; выявляет подмену ключа сервером, но не защищает от сервера, который с самого начала показывает разным группам разные журналы. Открытый ключ журнала публикуется в `/client-manifest.json` (`keys.kt`) и в релизе (переменная репозитория `KT_PUBLIC_KEY`); клиент сверяет его при первом закреплении ([docs/VERIFY.md](docs/VERIFY.md)).
+- Коды безопасности (60 цифр) в окне «Участники и ключи»; смена ключа собеседника блокирует передачу ему ключа группы до явного подтверждения. Принять новый ключ можно только там, где собеседник был подтверждён до смены: в группе, где его никто не подписывал, он остаётся неподтверждённым. Если ключ группы некому передать (остальные участники не подтверждены, сменили ключ или расходятся с журналом), отправка блокируется с причиной `keys-withheld` и просьбой подтвердить участников: иначе сообщение не прочитал бы никто, в том числе подтверждённый позже.
+- Подписанный состав группы: участник без подписи допуска помечен «не подтверждён» и ключа группы не получает, пока вы не нажмёте «Доверять участнику». Если у вас самого нет записи о способе входа (учётную запись добавил сервер или данные устройства потеряны), окно участников пишет «Способ входа в группу неизвестен» (`how = unknown`), а не «Вы создали группу».
+- Журнал ключей (прозрачность ключей): работает, если оператор задал `KT_SIGNING_KEY`; выявляет подмену ключа сервером, но не защищает от сервера, который с самого начала показывает разным группам разные журналы. Открытый ключ журнала публикуется в `/client-manifest.json` (`keys.kt`) и в релизе (переменная репозитория `KT_PUBLIC_KEY`); клиент сверяет его при первом закреплении ([docs/VERIFY.md](docs/VERIFY.md)). Клиент сам проверяет журнал на чужие записи под своей меткой: если самопроверка не удаётся довести до конца 6 часов подряд (сервер не отдаёт данные `/api/kt/self`), поднимается отдельная тревога `self-unreachable`, а ответ 404 на поколение, которое сервер обязан отдавать, — тревога `log-fork`.
 - Режим «Не хранить историю на этом устройстве» для группы; исчезающие сообщения стирают ключи вместе с сообщениями.
 - Скрытие автора сообщения на хранении (sealed sender): в базе у сообщения группы нет ссылки на аккаунт, есть только недельный тег. Косвенные признаки (позиция чтения, время активности, квота вложений) остаются, поэтому анонимным дамп не считается.
 
@@ -30,7 +30,7 @@
 - Ответы, реакции, правка и удаление своих сообщений, общий для группы таймер исчезающих сообщений (5 минут, 1 час, 1 день, 7 дней), время сообщений огрублено до минуты.
 - Отметки о прочтении выключены по умолчанию и работают взаимно; уведомления выключены по умолчанию, приходят только при скрытой вкладке и без текста.
 - Поиск работает только на устройстве: по названиям чатов и по сообщениям, загруженным в браузер.
-- Файлы: фото, видео, PDF и TXT, до 50 МБ и до 10 за раз; метаданные удаляются в браузере до шифрования; в группах файл шифруется на устройстве, сервер видит только размер. PDF со сжатыми метаданными отклоняется.
+- Файлы: фото, видео, PDF и TXT, до 50 МБ и до 10 за раз; метаданные удаляются в браузере до шифрования; в группах файл шифруется на устройстве, сервер видит только размер. PDF со сжатыми метаданными отклоняется. Открытые вложения (их принимает только чат с ботом) сервер разбирает сам и защищается от «бомб»: по умолчанию изображение крупнее 24 Мпикс (у анимации — на все кадры вместе) или длиннее 500 кадров отклоняется до декодирования, файлы обрабатываются по одному, а когда очередь из четырёх ожидающих полна, сервер отвечает 503 с `Retry-After` (пределы задаются переменными из таблицы ниже).
 - Чат с ботом-помощником (гайд по мессенджеру) сквозным шифрованием не защищён, и интерфейс об этом говорит.
 
 **Проверка кода клиента**
@@ -81,6 +81,15 @@ railway run npm run check-env  # с переменными сервиса на R
 | `MESSAGE_ENCRYPTION_KEY` | да | ключ слоя шифрования сообщений на сервере (AES-256-GCM, 32 байта в base64); без него сервер не стартует, потеря делает сохранённые сообщения нечитаемыми |
 | `NODE_ENV` | в production — да | `production`: HTTP за прокси хостинга, HSTS, cookie с `Secure` |
 | `UPLOADS_DIR`, `UPLOAD_QUOTA_MB` | нет | папка вложений (на Railway — volume) и квота на 30 суток |
+| `IMAGE_MAX_PIXELS`, `IMAGE_MAX_FRAMES`, `UPLOAD_PROCESS_CONCURRENCY`, `UPLOAD_PROCESS_QUEUE` | нет | обработка открытых вложений: потолок пикселей изображения (24 000 000; у анимации — на все кадры вместе) и кадров GIF/WebP (500), сколько файлов обрабатывается одновременно (1) и сколько ждёт очереди (4; дальше 503 с `Retry-After`) |
+| `REGISTER_GLOBAL_PER_MIN`, `REGISTER_PACE_PER_MIN` | нет | регистраций в минуту на весь сервер (120; сверх потолка 429 `registration-busy`) и обычный темп (20), выше которого растёт сложность proof-of-work |
+| `TEXT_QUOTA_MB_PER_DAY`, `ROOMS_PER_USER_MAX` | нет | суточный объём текста сообщений на аккаунт, МБ (20; сверх — 429 `text-quota`) и число комнат на аккаунте (50; сверх — 403 `rooms-limit`) |
+| `UPLOAD_MIN_FREE_MB` | нет | свободное место на томе вложений, МБ (256): ниже порога загрузки отклоняются (507 `storage-full`) |
+| `UPLOADS_IP_PER_MIN`, `UPLOADS_USER_PER_15MIN` | нет | выдача вложений (`GET /uploads/*`): запросов в минуту с одного IP (600; для onion не считается) и за 15 минут с одного аккаунта (3000); сверх — 429 |
+| `SOCKET_EVENT_RATE`, `SOCKET_EVENT_BURST` | нет | события от одного сокета, в секунду в среднем (5) и всплеск (20); клиент почти ничего не шлёт, превысивший частоту сокет закрывается |
+| `TRUST_PROXY` | нет | сколько прокси стоит перед приложением: `1` (по умолчанию, край Railway) или `0` (приложение открыто напрямую, заголовки `X-Forwarded-*` игнорируются) |
+| `ONION_ALLOWED_CIDR` | нет | кому можно подключаться к `ONION_PORT`: адреса или CIDR через запятую; по умолчанию только частные и loopback-адреса |
+| `DB_LOCK_TIMEOUT_MS`, `DB_STATEMENT_TIMEOUT_MS`, `DB_IDLE_TX_TIMEOUT_MS` | нет | таймауты сессии PostgreSQL, мс (5000, 30000, 30000): запрос, не дождавшийся блокировки или своего времени, получает 503 `busy` с `Retry-After`, а не занимает пул соединений |
 | `KT_SIGNING_KEY` | нет | ключ подписи журнала ключей; без него журнал выключен. Открытая часть попадает в `/client-manifest.json` (`keys.kt`); релиз получает её из переменной репозитория `KT_PUBLIC_KEY`. Сброс базы требует нового ключа |
 | `METRICS_TOKEN` | нет | токен для `/metrics`; без него адрес отвечает 404 |
 | `PUBLIC_ORIGIN`, `SECURITY_CONTACT`, `SECURITY_TXT_EXPIRES` | нет | `security.txt` |
@@ -94,7 +103,9 @@ railway run npm run check-env  # с переменными сервиса на R
 ## Тесты
 
 ```
-npm test                  # юнит-тесты, без БД, только Node 24
+npm test                  # юнит-тесты, без БД, только Node 24; файлы идут пулом до 4 процессов
+npm test -- --serial      # по одному, вывод сразу (отладка зависшего файла)
+npm run test:coverage     # юнит-тесты с покрытием (информативно, порога нет)
 npm run test:e2e          # сквозные: настоящий Postgres 16, E2E_DATABASE_URL
 npm run test:e2e:docker   # то же во временном контейнере Docker
 npm run test:browser      # смоук в настоящем Chrome/Chromium/Edge (CDP) + Postgres
@@ -111,7 +122,8 @@ npm run test:all          # юнит, затем сквозные
 - Объём независимого аудита криптографии: [docs/security/audit-scope.md](docs/security/audit-scope.md); аудит ещё не проводился.
 - Дизайн-документы протоколов: [порядок и идентификаторы сообщений](docs/security/message-ordering.md), [скрытие автора](docs/security/sealed-sender.md), [подписанный состав группы](docs/security/signed-membership.md), [прозрачность ключей](docs/security/key-transparency.md).
 - Слой сервера: текст сообщений перед записью в базу шифруется ещё и ключом сервера (`lib/message-crypto.js`, формат `enc:v3` привязан к id сообщения); его снимает тот, у кого есть `MESSAGE_ENCRYPTION_KEY`, поэтому E2EE-слой он не заменяет. Смена ключа — [docs/ops/message-key-rotation.md](docs/ops/message-key-rotation.md).
-- Веб-слой: проверка Origin и CSRF-токен на изменяющих запросах, рукопожатие сокета только со своего Origin, CSP без inline-скриптов, заголовки изоляции, `Referrer-Policy: no-referrer`, вложения с `Cache-Control: no-store`.
+- Веб-слой: проверка Origin (с сверкой схемы; хост берётся из `X-Forwarded-Host` только при доверенном прокси) и CSRF-токен на изменяющих запросах, отказ 403 любому межсайтовому запросу к `/api` по `Sec-Fetch-Site` (в том числе GET), рукопожатие сокета только со своего Origin, CSP без inline-скриптов, заголовки изоляции, `Referrer-Policy: no-referrer`, вложения с `Cache-Control: no-store`.
+- Лимиты нагрузки и ресурсов: потолки обработки изображений (раздел «Сообщения и файлы» выше), глобальный потолок регистраций и рост сложности proof-of-work, суточная квота текста, потолок числа комнат, порог свободного места для загрузок, лимиты выдачи вложений, ограничение частоты событий сокета, таймауты сессии PostgreSQL (все — в таблице переменных). Режим onion включает сам порт `ONION_PORT`, поэтому к нему принимаются только частные и loopback-адреса (`ONION_ALLOWED_CIDR`).
 
 ## Известные ограничения
 
@@ -143,6 +155,8 @@ lib/                       # серверные модули (чистые фу�
   disappearing-messages.js, chat-settings.js, upload-quota.js, metadata-stripper.js    # таймеры, квоты, вложения
   bot-guide.js, privacy.js, security-utils.js, security-txt.js, tor-support.js         # бот, заголовки, onion
   client-manifest.js, client-sri.js, sw-kill-switch.js           # манифест клиента и service worker
+  account-limits.js, registration-pressure.js, text-quota.js, disk-space.js, work-limiter.js, token-bucket.js  # лимиты против массовых аккаунтов и «бомб»
+  trust-proxy.js, onion-access.js, db-errors.js, pg-client-guard.js, ids.js, room-name.js, drain-batches.js, orphan-uploads.js  # прокси и onion-порт, 503 busy, разбор id и названий, чистка
   env-check.js, legacy-reset.js, metrics.js, advisory-locks.js, tx-retry.js, log-error.js, proto.js
   jobs/, routes/, migrations/                                    # фоновые задачи, вынесенные маршруты, миграции
 public/                    # клиент без сборщика
@@ -166,18 +180,18 @@ SECURITY.md                # политика сообщений об уязви
 
 ## API
 
-Сессионная cookie; на изменяющие запросы нужны заголовок `X-CSRF-Token`, совпадающий с cookie `csrf_token`, и Origin своего сайта. Клиент передаёт признак версии `proto`: слишком старая страница получает 400 с кодом `client-outdated`. Другие коды отказов: `bad-message-id` и `id-conflict` (идентификатор сообщения выбирает клиент), `busy` (хранилище лимитов или базы занято, повторить), `e2ee-required`, `bad-envelope` и `e2ee-not-allowed` (в группу принимается только корректный E2EE-конверт), `already-member`, `bad-request`.
+Сессионная cookie; на изменяющие запросы нужны заголовок `X-CSRF-Token`, совпадающий с cookie `csrf_token`, и Origin своего сайта. Клиент передаёт признак версии `proto`: слишком старая страница получает 400 с кодом `client-outdated`. Другие коды отказов: `bad-message-id` и `id-conflict` (идентификатор сообщения выбирает клиент), `busy` (хранилище лимитов или базы занято, в том числе запрос не дождался блокировки или своего времени, 503 с `Retry-After`: повторить), `e2ee-required`, `bad-envelope` и `e2ee-not-allowed` (в группу принимается только корректный E2EE-конверт), `already-member`, `bad-request`. Лимиты отвечают отдельными кодами: `registration-busy` (429, регистраций слишком много), `text-quota` (429, суточный объём текста исчерпан), `rooms-limit` (403, у аккаунта предельное число комнат), `storage-full` (507, на томе вложений кончилось место). Битое %-кодирование в адресе даёт 400 `Некорректный запрос`, а нечисловой или слишком большой id — обычный отказ JSON, а не 500.
 
 - Аккаунт: `GET /api/pow/challenge`, `POST /api/register/anonymous`, `GET /api/auth`, `GET /api/user`, `POST /api/user/lifetime`, `POST /api/user/privacy`, `POST /api/logout`, `POST /api/account/delete`
 - Чаты: `GET /api/chats`, `POST /api/chats`, `DELETE /api/chats/:chatId` (выход из группы, `?deleteMessages=1`), `POST /api/chats/:chatId/prefs`, `POST /api/chats/:chatId/expiry`, `GET /api/chats/:chatId/settings`, `GET /api/chats/:chatId/participants`
 - Приглашения и заявки: `GET /api/chats/invite/:chatId`, `POST /api/chats/:chatId/invite/rotate`, `POST /api/chats/:chatId/invite/disable`, `POST /api/chats/join/preview`, `POST /api/chats/join`, `GET /api/chats/:chatId/join-requests`, `POST /api/join-requests/:id/approve`, `POST /api/join-requests/:id/deny`, `GET /api/join-requests/mine`, `DELETE /api/join-requests/:id`
 - Состав группы: `GET` и `POST /api/chats/:chatId/member-certs`
-- Сообщения: `GET /api/messages/:chatId` (курсор `beforeSeq`), `POST /api/chats/:chatId/read`, `POST /api/messages` (в группу — только E2EE-конверт, открытый текст принимает лишь чат с ботом), `PUT` и `DELETE /api/messages/:messageId`, `POST /api/messages/file`, `POST /api/messages/:messageId/set-expiry`, `POST /api/reactions`, `DELETE /api/reactions/:messageId/:emoji`
+- Сообщения: `GET /api/messages/:chatId` (курсор `beforeSeq`), `POST /api/chats/:chatId/read`, `POST /api/messages` (в группу — только E2EE-конверт, открытый текст принимает лишь чат с ботом), `PUT` и `DELETE /api/messages/:messageId`, `POST /api/messages/file`, `POST /api/messages/:messageId/set-expiry`, `POST /api/reactions` и `DELETE /api/reactions/:messageId/:emoji` (ответ `{success, count, mine}`: сколько человек поставили это эмодзи и стоит ли оно теперь у вас; допустим фиксированный набор из пяти эмодзи; в истории `GET /api/messages/:chatId` реакции приходят как `[{emoji, count, mine}]`)
 - Ключи: `PUT /api/keys/identity`, `PUT /api/keys/signed-prekey`, `PUT /api/keys/pq-prekey`, `POST /api/keys/one-time-prekeys`, `POST` и `DELETE /api/keys/pq-one-time-prekeys`, `GET /api/keys/one-time-prekeys/count`, `GET /api/keys/identities`, `GET /api/keys/bundle/:targetUserId`, `DELETE /api/keys`, `POST /api/keys/key-shares`, `GET /api/keys/key-shares/:chatId`, `POST /api/keys/key-requests`, `GET /api/keys/key-requests/:chatId`, `POST /api/keys/key-requests/done`
 - Журнал ключей: `GET /api/kt/head`, `/api/kt/roots`, `/api/kt/proof`, `/api/kt/self` (без `KT_SIGNING_KEY`: `/api/kt/head` отвечает `{enabled:false}`, остальные — 503)
 - Файлы: `GET /uploads/:filename` — только участникам чата, вступившим до сообщения
 - Служебные: `GET /healthz`, `/readyz`, `/metrics` (по токену), `/client-manifest.json`, `/.well-known/security.txt`
-- Socket.io: клиент отправляет `joinChat`; сервер присылает `newMessage`, `messageEdited`, `messageDeleted`, `messagesRead`, `e2eeKeyShare`, `e2eeKeyRequest`, `roomMembersChanged`, `chatExpiryChanged`, `chatListChanged`, `joinRequestsChanged`, `joinRequestDecided`
+- Socket.io: клиент событий не отправляет — на свои чаты сокет подписывает сам сервер при подключении (событие `joinChat` убрано; частота входящих событий ограничена токен-бакетом `SOCKET_EVENT_RATE`/`SOCKET_EVENT_BURST`, превысивший её сокет закрывается); сервер присылает `newMessage`, `messageEdited`, `messageDeleted`, `messagesRead`, `reactionChanged` (`{id, emoji, count, room_id | chat_id}`, в копии автору реакции ещё `mine`), `e2eeKeyShare`, `e2eeKeyRequest`, `roomMembersChanged`, `chatExpiryChanged`, `chatListChanged`, `joinRequestsChanged`, `joinRequestDecided`
 
 ## Документация
 

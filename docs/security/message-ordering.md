@@ -205,7 +205,7 @@ CREATE TRIGGER messages_90_tombstone AFTER  DELETE ON messages FOR EACH ROW EXEC
 ### 6.1 Формат
 
 - Строка `^[1-9]\d{6,9}$`, значение не больше `2147483647`. В запросе — только строка; число принимается лишь там, где оно было и раньше (`replyToId`, `messageId` в реакциях).
-- В ответах и событиях id всегда `String`, `seq` — `Number`. Тест-запрет не пускает в `server.js` и `script.js` выражения `ORDER BY m.id`, `id < $`, `Number(m.id)`.
+- В ответах и событиях id всегда `String`, `seq` — `Number`. Тест-запрет (`test/message-order-guard.test.js`) не пускает в код сервера (`server.js`, `src/**`) и в скрипты приложения (`public/js/*.js`) выражения `ORDER BY m.id`, `id < $`, `Number(m.id)`.
 - Чистая функция `parseClientMessageId(value)` лежит в `lib/` (её проверяет юнит-тест), клиентская `newClientMessageId()` — в `public/lib/message-order.js` рядом с функциями порядка.
 
 ### 6.2 Генерация на клиенте
@@ -299,6 +299,12 @@ function newClientMessageId() {
 
 `addRoomMember` читает `rooms.msg_seq` тем же запросом, который берёт `FOR NO KEY UPDATE` на строку комнаты. Любая отправка в эту комнату либо уже зафиксирована (её `seq ≤ visible_from_seq`, новичок её не видит), либо ждёт на `UPDATE rooms` внутри триггера и получит `seq > visible_from_seq` (новичок её видит). Промежуточных состояний нет. Это инвариант О2 из раздела 10.
 
+### 7.4 Рассылка событий и принятый предел (ревью W7 R2.3)
+
+События сообщения комнаты (`newMessage`, `messageEdited`, `messageDeleted`, `reactionChanged`) уходят после `COMMIT` и не должны доходить до тех, для кого сообщение лежит под границей видимости (`visible_from_seq >= seq`): о сообщении, отправленном до вступления, новичок не знает и о его правке, удалении или реакциях тоже. Сервер читает границы из `room_participants` непосредственно перед рассылкой (`emitVisibleRoomMessage` в `src/services/messages.js`; для удаления — `emitRoomMessagesDeleted` в `src/services/expiry.js`; для реакций — `announceReaction` в `src/http/routes/reactions.js`) и исключает таких участников (`except('user:<id>')`); автору идёт одна копия на `user:<id>` с `mine: true`. Не удалось прочитать границы — комнате событие не отправляется (участники увидят изменение при следующей загрузке истории); для `newMessage` и `messageEdited` автору при этом уходит его копия.
+
+**Принятый предел.** Чтение границ и `emit` — два отдельных шага без общей блокировки, между ними проходят миллисекунды. Участник, который вступил именно в это окно, уже подписан на `room:<id>`, но в прочитанном списке границ его нет (на момент чтения он в комнате ещё не состоял), поэтому он может получить событие сообщения, лежащего ниже его границы. Содержимое он не прочитает: ключа отправителя у него нет (новичок получает ключ отправителя с текущей позиции цепочки, [threat-model.md](../threat-model.md) раздел 2), а файл по ссылке из такого сообщения сервер ему не отдаёт (доступ только участникам, вступившим до сообщения). Утечка — метаданные события: `id`, `seq` и время сообщения (до минуты), то есть факт, что сообщение было, и по `seq` — примерное число сообщений, отправленных незадолго до вступления. Клиент такие события сам не отбрасывает. Предел принят: закрыть окно целиком значило бы держать блокировку комнаты на время рассылки, а утечка ограничена метаданными нескольких сообщений на границе. Инвариант О2 (раздел 10) поэтому относится к истории (`GET /api/messages/:chatId`) и к событиям с этой оговоркой.
+
 ## 8. Блокировки
 
 ### 8.1 Правило
@@ -369,7 +375,7 @@ decryptIncoming(roomId, senderIdHint | null, text, messageId)
    → { ok:true, text, file?, senderId, ts, edit, replyTo } | { ok:false, reason }   // replyTo: id из re либо null
 ```
 
-Новые причины отказа: `'id-mismatch'`, `'sender-mismatch'`, `'stale-edit'`, `'no-mid'`. Тексты — в таблице `E2EE_FAILURE_TEXTS` в `script.js` (по строке на причину). Подсказка отправителя `senderIdHint` — только для юнит-тестов; production-код в комнатах передаёт `null`, а отправитель определяется по `senderKeyId`, привязанному к нему ([sealed-sender.md](sealed-sender.md) §9.2–9.3).
+Новые причины отказа: `'id-mismatch'`, `'sender-mismatch'`, `'stale-edit'`, `'no-mid'`. Тексты — в таблице `E2EE_FAILURE_TEXTS` в `public/js/04-e2ee-rooms.js` (по строке на причину). Подсказка отправителя `senderIdHint` — только для юнит-тестов; production-код в комнатах передаёт `null`, а отправитель определяется по `senderKeyId`, привязанному к нему ([sealed-sender.md](sealed-sender.md) §9.2–9.3).
 
 ### 9.3 Запись о версии сообщения
 
@@ -419,7 +425,7 @@ decryptIncoming(roomId, senderIdHint | null, text, messageId)
 
 ### 9.7 Две вкладки: Web Locks
 
-В `script.js` при создании клиента передаётся блокировка:
+В `public/js/03-e2ee-client.js` при создании клиента передаётся блокировка (в коде её собирает `NyxoE2eeLock.makeLock` из `public/lib/e2ee-lock.js`; ниже — суть):
 
 ```js
 const lock = (typeof navigator !== 'undefined' && navigator.locks)
@@ -435,7 +441,7 @@ E2EE.createClient({ storage, userId, lock });
 | № | Инвариант | Чем обеспечен |
 |---|---|---|
 | О1 | Внутри области пара `(область, seq)` уникальна, а `seq` растёт в порядке фиксации вставляющих транзакций | уникальные индексы; блокировка строки области в триггере; вставка — последний оператор |
-| О2 | Новичок видит ровно сообщения с `seq > visible_from_seq`; ни одно зафиксированное до вступления не видно, ни одно после — не скрыто | `visible_from_seq` читается под блокировкой, которую берёт и отправка |
+| О2 | Новичок видит ровно сообщения с `seq > visible_from_seq`; ни одно зафиксированное до вступления не видно, ни одно после — не скрыто | `visible_from_seq` читается под блокировкой, которую берёт и отправка. Для событий сокета действует принятый предел 7.4 |
 | О3 | Для сообщения комнаты `mid` внутри содержимого равен `String(id)`; клиент не показывает содержимое под другим id | шаг 2 проверок 9.4 |
 | О4 | Проверки `mid`, автора и версии выполняются до записи в `seen` и `edits` | порядок шагов 9.4; тест на содержимое хранилища |
 | О5 | Id сообщения, удалённого менее 30 суток назад, не принимается как новый | триггер `nyxo_message_id_check` (узкая гонка — раздел 12, строка 8) |
@@ -540,7 +546,7 @@ sendText(text, { chatId, roomId, replyToId }):
 - **Ответ сервера.** Поле отсутствует, не целое или меньше `PROTO_MIN` — 400 `{ success:false, code:'client-outdated', message:'Обновите страницу…' }`. Значение больше `PROTO_CURRENT` принимается (будущий клиент против старого сервера возможен только при несовместном выкате; в одном выкате такого нет).
 - **Порядок проверок.** Первая проверка запроса — `proto` (до `clientMessageId` и остальных, §6.3), чтобы старая вкладка получала одну понятную ошибку.
 - **`multipart/form-data`.** Для `POST /api/messages/file` поле `proto` кладётся в `FormData` **до** поля `file`, как `clientMessageId`; проверяется в `fileFilter` multer до приёма файла. Поле после файла при проверке ещё не видно — ответ `client-outdated`, файл на диск не пишется.
-- **Единственный источник.** Клиент берёт значение из одной константы (`PROTO_VERSION` в `public/lib/proto.js` или в `script.js`), сервер — из `lib/proto.js`; тест сверяет, что они равны. Менять признак — только вместе с несовместимым изменением контракта; увеличение на единицу не требует новых маркеров в запросах.
+- **Единственный источник.** Клиент берёт значение из константы `PROTO_VERSION` (`public/e2ee.js` для запросов ключей, `public/js/04-e2ee-rooms.js` для запросов страницы), сервер — из `lib/proto.js`; тест `test/proto-client.test.js` сверяет константу `e2ee.js` с серверной. Менять признак — только вместе с несовместимым изменением контракта; увеличение на единицу не требует новых маркеров в запросах.
 - **Что не меняется.** Остальные коды `client-outdated` из §6 и §7 (старый параметр `?before=`, `{ upToId }`) сохраняются; `bad-message-id` — отдельный код ошибки клиента, а не устаревшей вкладки.
 
 ## 15. Тесты
@@ -559,7 +565,7 @@ sendText(text, { chatId, roomId, replyToId }):
   - `encryptOutgoing` без `messageId` → `E2eeError('protocol')`;
   - два клиента на одном `MemoryStorage` с общей блокировкой получают разные итерации; без блокировки воспроизводится коллизия (контрольный прогон).
 - Серверные юнит-тесты на фейковой БД (`makeFakeApp`, `makeFakeDb`): форма ответов 400 `client-outdated`, 400 `bad-message-id`, 409 `id-conflict`; порядок полей `FormData` и проверка в `fileFilter`.
-- Тест-запрет: в `server.js` и `public/script.js` нет `ORDER BY m.id`, `id < $`, `Number(m.id)`.
+- Тест-запрет: в `server.js`, `src/**` и `public/js/*.js` нет `ORDER BY m.id`, `id < $`, `Number(m.id)`.
 
 ### Сквозные (настоящий Postgres)
 
@@ -596,9 +602,9 @@ sendText(text, { chatId, roomId, replyToId }):
 
 ## Приложение: что менять в коде
 
-Сервер (`server.js`, `lib/`):
+Сервер (`src/`, `lib/`; до волны 6 весь серверный код лежал в `server.js`, теперь это точка входа на 24 строки):
 
-- DDL: функции, триггеры, `message_tombstones`, колонки и индексы раздела 5; `lib/jobs`: очистка надгробий.
+- DDL (`src/db/schema.js`): функции, триггеры, `message_tombstones`, колонки и индексы раздела 5; `lib/jobs`: очистка надгробий.
 - `lib/message-ids.js` (новый): `parseClientMessageId`, определение конфликта по `error.constraint`.
 - Маршруты: `POST /api/messages`, `POST /api/messages/file` (порядок полей, `fileFilter`), `PUT /api/messages/:id`, `GET /api/messages/:chatId`, `POST /api/chats/:chatId/read`, `GET /api/chats` (`CHAT_LIST_SQL`), `markChatRead`, `scheduleBotReply`, `addRoomMember`, `POST /api/chats`, `DELETE /api/chats/:chatId`, `deleteUserAccount`, `userCanAccessMessage`.
 - Хелпер `withTransactionRetry`; явная блокировка `users` в транзакции отправки.
@@ -607,7 +613,7 @@ sendText(text, { chatId, roomId, replyToId }):
 Клиент (`public/`):
 
 - `e2ee.js`: `encodeContent` и `decodeContent` с `mid`, `ts`, `e`; `encryptOutgoing(roomId, content, { messageId, edit })`; `decryptIncoming` с проверками 9.4 и новым результатом; запись версий; методы клиента — в `CLIENT_METHODS` теста `test/e2ee-api.test.js`.
-- `script.js`: курсоры по `seq`, `placeMessageElement`, генерация и повтор `clientMessageId` в `sendText` и `sendOneFile`, показ времени, `E2EE_FAILURE_TEXTS`, Web Locks при создании клиента.
+- Скрипты приложения `public/js/` (до волны 6 — `public/script.js`): курсоры по `seq` и `placeMessageElement` (`13-chat-messages.js`), генерация и повтор `clientMessageId` в `sendText` (`14-send.js`) и `sendOneFile` (`16-files-composer.js`), показ времени, `E2EE_FAILURE_TEXTS` (`04-e2ee-rooms.js`), Web Locks при создании клиента (`03-e2ee-client.js`).
 - `public/lib/message-order.js` (новый, UMD) и запись в `CLIENT_SCRIPTS`.
 
 Тесты: раздел 15.
@@ -621,3 +627,4 @@ sendText(text, { chatId, roomId, replyToId }):
 | 2026-10-11 | Согласование с повторным ревью signed-membership.md (T4.0b): §14.1 — в список запросов с `proto` добавлен `POST /api/chats/:chatId/invite/disable` |
 | 2026-10-17 | T5.4: конверт сообщения комнаты версии 3 (`senderkey-v3`) вместо `senderkey-v2` (§2.1): подпись с меткой домена и комнатой, форма для сервера в `lib/e2ee-envelope.js` |
 | 2026-10-23 | Правки по ревью криптографии W7 R4 (T7.1): З3 — поле `re` в содержимом, `replyTo` в `encryptOutgoing` и `decryptIncoming`, цитата сервера сверяется с подписанным id (3, 9.1, 9.2); З7 — строгое снятие дополнения Padmé и каноническое base64 (9.4) |
+| 2026-10-25 | Ревью W7 R2.3 (T7.2b, документ — T7.5): 7.4 — рассылка событий по границе видимости и принятый предел (окно в миллисекунды между чтением границ и `emit`; содержимое недоступно, утекают `id`, `seq`, время); оговорка в О2 |

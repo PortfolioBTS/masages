@@ -781,13 +781,13 @@ mine = view(S, закреплённые ключи)        (6.3); для уча�
 Сервер:
 
 - DDL: `room_member_certs` (`kind` 1, 3, 4; `snap`; проверки длины), `rooms.invite_cert`, `invite_snap`, `invite_actor_id` и `CHECK`; удаление при выходе и удалении аккаунта; `lib/membership-certs.js` (новый): разбор фиксированных макетов, `verifyCert`, строгая проверка Ed25519 (6.1: каноничность `y < p`, `x = 0` при бите знака 1 — отказ, `[8]P ≠ O`, `S < L`; для ключей и точки `R`), лимиты, `snapHash`.
-- Маршруты раздела 7.2 (`server.js`: `approve`, `join`, `join/preview`, `invite/rotate`, `invite/disable`, `join-requests`; `lib/e2ee-groups.js`: `participants` (только свои сертификаты), `GET member-certs?subjects=`, `POST member-certs` в транзакции 7.1; `approve` и `join` — транзакции вступления 7.1; `join` отдаёт `inviteSnap`, `join/preview` — нет); лимит тела 32 КБ у `approve`, `invite/rotate`, `POST member-certs`; `invite/rotate` сверяет длительность срока; `proto: 4` во всех изменяющих запросах (включая `invite/disable`); ограничение `INVITE_TTL_HOURS` значением 720 ч при `requireApproval = false`.
+- Маршруты раздела 7.2 (`src/http/routes/join-requests.js`: `approve`, `join-requests`; `src/http/routes/invites.js`: `join`, `join/preview`, `invite/rotate`, `invite/disable`; `lib/e2ee-groups.js`: `participants` (только свои сертификаты), `GET member-certs?subjects=`, `POST member-certs` в транзакции 7.1; `approve` и `join` — транзакции вступления 7.1; `join` отдаёт `inviteSnap`, `join/preview` — нет); лимит тела 32 КБ у `approve`, `invite/rotate`, `POST member-certs`; `invite/rotate` сверяет длительность срока; `proto: 4` во всех изменяющих запросах (включая `invite/disable`); ограничение `INVITE_TTL_HOURS` значением 720 ч при `requireApproval = false`.
 
 Клиент:
 
 - `public/lib/membership.js` (новый, UMD, чистые функции): разбор и сборка сертификатов, `memkey` v2, `snapHash`, хэш взгляда, ключ приглашения из секрета, строгая проверка Ed25519, проверка снимка. Запись в `CLIENT_SCRIPTS` теста `test/client-static.test.js`.
 - `public/e2ee.js`: `verifyMembershipLocked` (без сети в блокировке), `joinIntent` (с `inviteHash`, `inviteSnap`)/`bootstrapDone`, `removed` (для всех ушедших из прежнего `S`), стирание записей комнаты при собственном выходе, отправка ключа только `recipients`, журнал доставок `delivered:<room>:<senderKeyId>` (запись в `prepareShareForPeer` до сети), `entitled` = пары `{id, memkey}` из `recipients` на момент создания ключа (правки `knownMemberIdsLocked`, сейчас возвращающей весь `S`, и `rotateRoomKeyLocked` / `ensureRoomSession`, где `entitledNow` — все, кроме меня), правило ротации по журналу (`answerKeyRequests` отвечает только `recipients`; `acceptPeerIdentityChange` и `answerKeyRequests` стирают `sharedWith2`, но не журнал), `ext.view` и правила разбора `ext` (2048 символов, отбрасывание справочных полей), `runViewChecks`, `signApproval`, `signInvite`, `prepareJoin`, `trustMember`, `vouchForMember`, очередь `revouch`, `getMembers`; `parseSkdm` — поле `ext`; `keyConflicts` не нужен.
-- `public/script.js`: окно участников (в том числе «Поручиться за участника»), лента, баннер, окно приглашения (ссылка по `certHash`), одобрение с подписью и снимком, разбор `#join=` (секрет передаётся в `prepareJoin`, затем стирается).
+- Скрипты приложения `public/js/` (до волны 6 — `public/script.js`): окно участников (в том числе «Поручиться за участника», `11-key-log-members.js`), лента, баннер, окно приглашения (ссылка по `certHash`), одобрение с подписью и снимком, разбор `#join=` (секрет передаётся в `prepareJoin`, затем стирается; `10-invites-join.js`).
 
 Тексты: «Как это работает», окно приглашения, политика приватности (предпросмотр по коду раскрывает пригласившего), README — T5.1.
 
@@ -795,7 +795,7 @@ mine = view(S, закреплённые ключи)        (6.3); для уча�
 
 Что и где лежит: форматы, разбор, подписи и `validateCert` — `public/lib/membership.js` (один файл для клиента и сервера; строгий Ed25519
 подключается одной функцией `strictVerify` из `public/lib/ed25519-strict.js`); состояние устройства и алгоритм 9.1 — `public/lib/membership-client.js`;
-серверные проверки — `lib/membership-certs.js`; маршруты — `server.js` (approve, join, preview, rotate, disable) и `lib/e2ee-groups.js`
+серверные проверки — `lib/membership-certs.js`; маршруты — `src/http/routes/join-requests.js` (approve) и `src/http/routes/invites.js` (join, preview, rotate, disable) и `lib/e2ee-groups.js`
 (participants, member-certs). Тесты: `test/membership*.test.js` (векторы 6.6, допуск, жизнь состава, проверка сертификата), `test/e2e/signed-membership*.e2e.test.js`.
 
 Коды ошибок маршрутов (7.2): 400 `cert-required`, `snap-required`, `bad-cert`, `bad-cert-time`; 409 `applicant-no-keys` (заявитель без ключей) и
