@@ -205,7 +205,7 @@ CREATE TRIGGER messages_90_tombstone AFTER  DELETE ON messages FOR EACH ROW EXEC
 ### 6.1 Формат
 
 - Строка `^[1-9]\d{6,9}$`, значение не больше `2147483647`. В запросе — только строка; число принимается лишь там, где оно было и раньше (`replyToId`, `messageId` в реакциях).
-- В ответах и событиях id всегда `String`, `seq` — `Number`. Тест-запрет не пускает в `server.js` и `script.js` выражения `ORDER BY m.id`, `id < $`, `Number(m.id)`.
+- В ответах и событиях id всегда `String`, `seq` — `Number`. Тест-запрет (`test/message-order-guard.test.js`) не пускает в код сервера (`server.js`, `src/**`) и в скрипты приложения (`public/js/*.js`) выражения `ORDER BY m.id`, `id < $`, `Number(m.id)`.
 - Чистая функция `parseClientMessageId(value)` лежит в `lib/` (её проверяет юнит-тест), клиентская `newClientMessageId()` — в `public/lib/message-order.js` рядом с функциями порядка.
 
 ### 6.2 Генерация на клиенте
@@ -369,7 +369,7 @@ decryptIncoming(roomId, senderIdHint | null, text, messageId)
    → { ok:true, text, file?, senderId, ts, edit, replyTo } | { ok:false, reason }   // replyTo: id из re либо null
 ```
 
-Новые причины отказа: `'id-mismatch'`, `'sender-mismatch'`, `'stale-edit'`, `'no-mid'`. Тексты — в таблице `E2EE_FAILURE_TEXTS` в `script.js` (по строке на причину). Подсказка отправителя `senderIdHint` — только для юнит-тестов; production-код в комнатах передаёт `null`, а отправитель определяется по `senderKeyId`, привязанному к нему ([sealed-sender.md](sealed-sender.md) §9.2–9.3).
+Новые причины отказа: `'id-mismatch'`, `'sender-mismatch'`, `'stale-edit'`, `'no-mid'`. Тексты — в таблице `E2EE_FAILURE_TEXTS` в `public/js/04-e2ee-rooms.js` (по строке на причину). Подсказка отправителя `senderIdHint` — только для юнит-тестов; production-код в комнатах передаёт `null`, а отправитель определяется по `senderKeyId`, привязанному к нему ([sealed-sender.md](sealed-sender.md) §9.2–9.3).
 
 ### 9.3 Запись о версии сообщения
 
@@ -419,7 +419,7 @@ decryptIncoming(roomId, senderIdHint | null, text, messageId)
 
 ### 9.7 Две вкладки: Web Locks
 
-В `script.js` при создании клиента передаётся блокировка:
+В `public/js/03-e2ee-client.js` при создании клиента передаётся блокировка (в коде её собирает `NyxoE2eeLock.makeLock` из `public/lib/e2ee-lock.js`; ниже — суть):
 
 ```js
 const lock = (typeof navigator !== 'undefined' && navigator.locks)
@@ -540,7 +540,7 @@ sendText(text, { chatId, roomId, replyToId }):
 - **Ответ сервера.** Поле отсутствует, не целое или меньше `PROTO_MIN` — 400 `{ success:false, code:'client-outdated', message:'Обновите страницу…' }`. Значение больше `PROTO_CURRENT` принимается (будущий клиент против старого сервера возможен только при несовместном выкате; в одном выкате такого нет).
 - **Порядок проверок.** Первая проверка запроса — `proto` (до `clientMessageId` и остальных, §6.3), чтобы старая вкладка получала одну понятную ошибку.
 - **`multipart/form-data`.** Для `POST /api/messages/file` поле `proto` кладётся в `FormData` **до** поля `file`, как `clientMessageId`; проверяется в `fileFilter` multer до приёма файла. Поле после файла при проверке ещё не видно — ответ `client-outdated`, файл на диск не пишется.
-- **Единственный источник.** Клиент берёт значение из одной константы (`PROTO_VERSION` в `public/lib/proto.js` или в `script.js`), сервер — из `lib/proto.js`; тест сверяет, что они равны. Менять признак — только вместе с несовместимым изменением контракта; увеличение на единицу не требует новых маркеров в запросах.
+- **Единственный источник.** Клиент берёт значение из константы `PROTO_VERSION` (`public/e2ee.js` для запросов ключей, `public/js/04-e2ee-rooms.js` для запросов страницы), сервер — из `lib/proto.js`; тест `test/proto-client.test.js` сверяет константу `e2ee.js` с серверной. Менять признак — только вместе с несовместимым изменением контракта; увеличение на единицу не требует новых маркеров в запросах.
 - **Что не меняется.** Остальные коды `client-outdated` из §6 и §7 (старый параметр `?before=`, `{ upToId }`) сохраняются; `bad-message-id` — отдельный код ошибки клиента, а не устаревшей вкладки.
 
 ## 15. Тесты
@@ -559,7 +559,7 @@ sendText(text, { chatId, roomId, replyToId }):
   - `encryptOutgoing` без `messageId` → `E2eeError('protocol')`;
   - два клиента на одном `MemoryStorage` с общей блокировкой получают разные итерации; без блокировки воспроизводится коллизия (контрольный прогон).
 - Серверные юнит-тесты на фейковой БД (`makeFakeApp`, `makeFakeDb`): форма ответов 400 `client-outdated`, 400 `bad-message-id`, 409 `id-conflict`; порядок полей `FormData` и проверка в `fileFilter`.
-- Тест-запрет: в `server.js` и `public/script.js` нет `ORDER BY m.id`, `id < $`, `Number(m.id)`.
+- Тест-запрет: в `server.js`, `src/**` и `public/js/*.js` нет `ORDER BY m.id`, `id < $`, `Number(m.id)`.
 
 ### Сквозные (настоящий Postgres)
 
@@ -596,9 +596,9 @@ sendText(text, { chatId, roomId, replyToId }):
 
 ## Приложение: что менять в коде
 
-Сервер (`server.js`, `lib/`):
+Сервер (`src/`, `lib/`; до волны 6 весь серверный код лежал в `server.js`, теперь это точка входа на 24 строки):
 
-- DDL: функции, триггеры, `message_tombstones`, колонки и индексы раздела 5; `lib/jobs`: очистка надгробий.
+- DDL (`src/db/schema.js`): функции, триггеры, `message_tombstones`, колонки и индексы раздела 5; `lib/jobs`: очистка надгробий.
 - `lib/message-ids.js` (новый): `parseClientMessageId`, определение конфликта по `error.constraint`.
 - Маршруты: `POST /api/messages`, `POST /api/messages/file` (порядок полей, `fileFilter`), `PUT /api/messages/:id`, `GET /api/messages/:chatId`, `POST /api/chats/:chatId/read`, `GET /api/chats` (`CHAT_LIST_SQL`), `markChatRead`, `scheduleBotReply`, `addRoomMember`, `POST /api/chats`, `DELETE /api/chats/:chatId`, `deleteUserAccount`, `userCanAccessMessage`.
 - Хелпер `withTransactionRetry`; явная блокировка `users` в транзакции отправки.
@@ -607,7 +607,7 @@ sendText(text, { chatId, roomId, replyToId }):
 Клиент (`public/`):
 
 - `e2ee.js`: `encodeContent` и `decodeContent` с `mid`, `ts`, `e`; `encryptOutgoing(roomId, content, { messageId, edit })`; `decryptIncoming` с проверками 9.4 и новым результатом; запись версий; методы клиента — в `CLIENT_METHODS` теста `test/e2ee-api.test.js`.
-- `script.js`: курсоры по `seq`, `placeMessageElement`, генерация и повтор `clientMessageId` в `sendText` и `sendOneFile`, показ времени, `E2EE_FAILURE_TEXTS`, Web Locks при создании клиента.
+- Скрипты приложения `public/js/` (до волны 6 — `public/script.js`): курсоры по `seq` и `placeMessageElement` (`13-chat-messages.js`), генерация и повтор `clientMessageId` в `sendText` (`14-send.js`) и `sendOneFile` (`16-files-composer.js`), показ времени, `E2EE_FAILURE_TEXTS` (`04-e2ee-rooms.js`), Web Locks при создании клиента (`03-e2ee-client.js`).
 - `public/lib/message-order.js` (новый, UMD) и запись в `CLIENT_SCRIPTS`.
 
 Тесты: раздел 15.

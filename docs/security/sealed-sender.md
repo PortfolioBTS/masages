@@ -322,7 +322,7 @@ COMMIT
 - Из ответов и событий исчезают `user_id`, `sender_username`, `sender_avatar` у комнатных сообщений. `isOwnMessage(message)` для комнат использует результат расшифровки (9.4); без расшифровки — косметическую подсказку `mine`, если она есть (ответ на отправку, копия события), иначе сообщение считается чужим.
 - Имя и аватар автора берутся из списка участников (`GET /api/chats/:chatId/participants`, он не меняется) по `senderId` из результата расшифровки.
 - Не расшифрованное сообщение показывается без имени автора («Участник группы»), с причиной отказа из таблицы `E2EE_FAILURE_TEXTS`.
-- `decryptEnvelope(roomId, senderId, text, messageId)` в `script.js` в комнатах вызывается с `senderId = null` (9.3). Параметр остаётся в сигнатуре ради юнит-тестов.
+- `decryptEnvelope(roomId, senderId, text, messageId)` в `public/js/04-e2ee-rooms.js` в комнатах вызывается с `senderId = null` (9.3). Параметр остаётся в сигнатуре ради юнит-тестов.
 
 ### 9.2 Идентификатор ключа и индекс отправителей `skIndex`
 
@@ -650,12 +650,12 @@ RETURNING 1;
 - `lib/author-tag.js` (новый), `lib/message-crypto.js`: `messageAadV3` (с тегом), `enc:v3` на `K_enc3`, строгое чтение для комнат; экспорт перечня производных ключей; `qkey`/`K_quota` для квоты. `deriveKey` вызывается с `Buffer` из 32 байт после `parseKey`.
 - Маршруты и функции: `POST /api/messages`, `POST /api/messages/file` (транзакция 8.5: `users` KEY SHARE, `rooms` FOR NO KEY UPDATE, проверка членства, резервирование квоты, `INSERT`), `GET /api/messages/:chatId`, `PUT`/`DELETE /api/messages/:id` и `set-expiry` (условие `seq > visible_from_seq`), `markChatRead`, `CHAT_LIST_SQL`, `exceedsUploadQuota` (заменяется резервированием), `DELETE /api/chats/:chatId`, `deleteUserAccount`, события `newMessage`, `messageEdited`, `messageDeleted` (`except` отправителя); `proto: 4` во всех изменяющих запросах.
 - `docs/ops/message-key-rotation.md` и `scripts/retag-messages.js` (14.1).
-- Тест-запрет: в `server.js` нет `sender_username`/`sender_avatar` для комнат, `JOIN users u ON u.id = m.user_id` для комнат, `SUM(file_size)`, `upload_window`.
+- Тест-запрет (`test/sealed-sender-guard.test.js`): в коде сервера (`server.js`, `src/**`) нет `sender_username`/`sender_avatar` для комнат, `JOIN users u ON u.id = m.user_id` для комнат, `SUM(file_size)`, `upload_window`.
 
 Клиент:
 
 - `public/e2ee.js`: порождение `senderKeyId` из `(room, userId, signingPublicKey)` (`newOwnSenderKeyState`), проверка привязки в `installSenderKeyLocked`, `skIndex` с надгробиями `gone` (запись в `installSenderKeyLocked`, ротации, удалении ключей, очистке), выбор автора в `decryptIncoming` (раздел 9.3, без `senderkey-v1`), поле результата `senderId`; `keyConflicts` не вводится. Методы клиента — в `CLIENT_METHODS` теста `test/e2ee-api.test.js`.
-- `public/script.js`: `isOwnMessage` для комнат по результату расшифровки, `decryptEnvelope` с `senderId = null`, имена из участников и `memberNames:<room>`, цитаты, `proto: 4` в запросах, дедупликация `newMessage` по `id`, вопрос при выходе («Удалить ваши сообщения?»), тексты в `E2EE_FAILURE_TEXTS`.
+- Скрипты приложения `public/js/` (до волны 6 — `public/script.js`): `isOwnMessage` для комнат по результату расшифровки (`12-chat-list.js`), `decryptEnvelope` с `senderId = null`, имена из участников и `memberNames:<room>`, тексты в `E2EE_FAILURE_TEXTS` (все три — `04-e2ee-rooms.js`), цитаты (`13-chat-messages.js`), `proto: 4` в запросах, дедупликация `newMessage` по `id`, вопрос при выходе (диалог «Выйти из группы?» с выбором оставить или удалить свои сообщения, `leaveChatDialog` в `17-chats-search.js`).
 
 Тексты: «Как это работает», бот-гайд, README (квота, выход из группы, что видит сервер, сильные корреляции У1–У3 в политике приватности) — T5.1. Для T5.1 отдельно (ревью С11): в `docs/threat-model.md` §5.3, строка «Автор сообщения комнаты», убрать «id ключа отправителя» из способов вывести автора по дампу без ключа — после `enc:v3` и E2EE-конверта `senderKeyId` внутри строки дампу без ключа сервера не виден; оставить состав комнаты, недельный псевдоним и корреляции У1–У3.
 
