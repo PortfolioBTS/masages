@@ -54,6 +54,14 @@ function waitForNoMessage(page, text, { timeoutMs = APP_TIMEOUT_MS } = {}) {
         { args: [text], what: `сообщение «${text}» исчезло из ленты`, timeoutMs });
 }
 
+// Служебная строка ленты с нужным текстом: app.waitForNotice смотрит только на первую строку ленты,
+// а после «Состав группы подтверждён…» там появляются и другие (срок исчезновения, участники).
+function waitForNoticeText(page, pattern, { timeoutMs = APP_TIMEOUT_MS } = {}) {
+    const source = pattern instanceof RegExp ? pattern.source : String(pattern).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return page.waitFor((src) => Array.from(document.querySelectorAll('#chat-messages .system-notice')).some((el) => new RegExp(src).test(el.textContent || '')),
+        { args: [source], what: `служебная строка в ленте: ${pattern}`, timeoutMs });
+}
+
 // Клик в точку окна страницы (по затемнению вокруг окна).
 async function clickAt(page, x, y) {
     await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
@@ -86,6 +94,7 @@ module.exports = {
     editMessage,
     deleteMessage,
     waitForNoMessage,
+    waitForNoticeText,
     clickAt,
     messageViews,
     roomIdByName,

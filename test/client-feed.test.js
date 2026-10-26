@@ -8,6 +8,7 @@
 //   - обработчик socket.io 'reconnect' (06): после переподключения догружает ленту;
 //   - newMessage / messageEdited (07): перепутанный порядок по сокету, ответ сокета раньше ответа POST;
 //   - setChatExpiry (12): запрос уходит с выбранным сроком;
+//   - меню сообщения (07): «Удалить» шлёт DELETE и убирает сообщение, «Изменить»/«Ответить» передают выбранное;
 //   - sendMessage в режиме правки (14): конверт правки несёт edit: true и mid правляемого сообщения.
 // Вёрстка, настоящие события и сеть — в test/browser (messages.browser.test.js).
 // Запуск: node test/client-feed.test.js
@@ -465,6 +466,62 @@ test('таймер исчезновения: срок из ответа серв
     await c.run('setChatExpiry(300)');
     assert.strictEqual(c.meta.expiry_seconds, 86400);
     assert.deepStrictEqual(c.log.policy, [[9, 86400]]);
+});
+
+// ---- Меню сообщения: удаление, правка, ответ (setupMessageMenuListeners, 07-api-listeners.js) ----
+
+function menuClient({ message = { id: 41, text: 'текст' }, response = { success: true } } = {}) {
+    const log = { requests: [], toasts: [], removed: [], hidden: 0, editing: [], replying: [] };
+    const elements = fakeElements();
+    const client = createClient({
+        functions: ['setupMessageMenuListeners'],
+        prelude: 'let menuMessage = null;',
+        sandbox: {
+            elements,
+            buildReactionPicker() {},
+            onPopupMenuKeydown() {},
+            hideMessageMenu: () => { log.hidden++; },
+            startReply: (m) => log.replying.push(m.id),
+            startEditing: (m) => log.editing.push(m.id),
+            copyText() {},
+            api: async (url, init) => { log.requests.push([url, init && init.method]); return response; },
+            showToast: (text, kind) => log.toasts.push([text, kind]),
+            removeMessageElement: (id) => log.removed.push(id),
+        },
+    });
+    client.run('setupMessageMenuListeners()');
+    if (message) client.context.__message = message;
+    client.run(message ? 'menuMessage = __message' : 'menuMessage = null');
+    const click = (name) => elements[name].listeners.get('click')[0]();
+    return { ...client, log, click };
+}
+
+test('меню сообщения «Удалить»: DELETE, при успехе тост и сообщение сразу убирается из ленты', async () => {
+    const c = menuClient();
+    await c.click('deleteMessageBtn');
+    assert.deepStrictEqual(c.log.requests, [['/api/messages/41', 'DELETE']]);
+    assert.deepStrictEqual(c.log.removed, [41]);
+    assert.deepStrictEqual(c.log.toasts, [['Сообщение удалено', 'success']]);
+    assert.strictEqual(c.log.hidden, 1, 'меню закрывается');
+});
+
+test('меню сообщения «Удалить»: отказ сервера — сообщение остаётся, пользователь видит причину; без выбранного сообщения ничего не уходит', async () => {
+    const c = menuClient({ response: { success: false, message: 'Нельзя удалить чужое' } });
+    await c.click('deleteMessageBtn');
+    assert.deepStrictEqual(c.log.removed, []);
+    assert.deepStrictEqual(c.log.toasts, [['Нельзя удалить чужое', 'error']]);
+    const none = menuClient({ message: null });
+    await none.click('deleteMessageBtn');
+    assert.deepStrictEqual(none.log.requests, []);
+});
+
+test('меню сообщения «Изменить» и «Ответить» передают выбранное сообщение в режим правки и ответа', async () => {
+    const c = menuClient();
+    await c.click('editMessageBtn');
+    await c.click('replyMessageBtn');
+    assert.deepStrictEqual(c.log.editing, [41]);
+    assert.deepStrictEqual(c.log.replying, [41]);
+    assert.strictEqual(c.log.hidden, 2);
 });
 
 // ---- Правка своего сообщения (sendMessage, 14-send.js) ----
