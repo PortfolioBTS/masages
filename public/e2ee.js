@@ -1872,7 +1872,10 @@
             });
         }
 
-        // Код безопасности для закреплённого (не pending) ключа собеседника.
+        // Код безопасности с собеседником. Если ключ сменился и ещё не принят (pin.pending), код считается по НОВОМУ
+        // ключу: именно его пользователь сверяет перед «Принять новый ключ». По прежнему ключу сверка работала бы наоборот
+        // (повторное ревью W7, RR-0): при подмене ключа сервером настоящий собеседник держит прежний ключ, и код совпал бы,
+        // а при честной переустановке не совпал бы никогда.
         async function getSafetyNumber(peerId) {
             await ensureLocal();
             const id = Number(peerId);
@@ -1880,7 +1883,8 @@
             const identity = await storage.get('identity');
             const pin = await storage.get('peer:' + id);
             if (!identity || !pin) return null;
-            return computeSafetyNumber(Number(userId), identity.signPub, identity.dhPub, id, pin.signPub, pin.dhPub);
+            const key = pin.pending || pin;
+            return computeSafetyNumber(Number(userId), identity.signPub, identity.dhPub, id, key.signPub, key.dhPub);
         }
 
         // Пользователь принял новый ключ собеседника: он становится
@@ -1906,7 +1910,8 @@
                 for (const name of await storage.keys('sharedWith2:')) {
                     if (name.split(':')[3] === String(id)) await storage.delete(name);
                 }
-                // Решение человека о новом ключе подтверждает участника вручную там, где он есть в списке сервера (9.7).
+                // Решение человека о новом ключе подтверждает участника вручную только там, где он был в V до смены ключа
+                // (запись в trusted или в suspended) и есть в списке сервера (9.7, ревью W7 F1).
                 await membership.trustAfterAcceptLocked(id, (members, peerId) => {
                     const found = members.find(p => Number(p.id) === peerId);
                     return found && typeof found.username === 'string' ? found.username : '';

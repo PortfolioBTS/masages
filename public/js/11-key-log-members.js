@@ -271,13 +271,17 @@ async function renderMemberDetails(row, peer, ctx) {
         details.appendChild(iconText('p', 'member-warning', 'alert-triangle', 'Ключ шифрования этого участника изменился. Так бывает после переустановки браузера или входа с нового устройства — но так же выглядит и подмена ключа сервером. Сверьте код безопасности с участником лично, прежде чем принимать новый ключ.'));
     }
 
+    // При смене ключа код считается по НОВОМУ ключу (getSafetyNumber): его и сверяют перед «Принять новый ключ».
+    const changed = status === 'changed';
     const code = document.createElement('div');
     code.className = 'safety-number';
-    code.setAttribute('aria-label', `Код безопасности с ${peer.username}`);
+    code.setAttribute('aria-label', changed ? `Код безопасности с новым ключом ${peer.username}` : `Код безопасности с ${peer.username}`);
     code.textContent = 'Загрузка кода…';
     const hint = document.createElement('p');
     hint.className = 'safety-hint';
-    hint.textContent = `${peer.username} видит у себя такой же код для вас. Сравните все 12 групп цифр.`;
+    hint.textContent = changed
+        ? `Это код для нового ключа. Попросите ${peer.username} открыть ваш код у себя и сравните все 12 групп цифр: совпали — ключ действительно его; не совпали — не принимайте ключ.`
+        : `${peer.username} видит у себя такой же код для вас. Сравните все 12 групп цифр.`;
     const actions = document.createElement('div');
     actions.className = 'member-actions';
     details.append(code, hint, actions);
