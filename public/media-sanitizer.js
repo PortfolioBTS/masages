@@ -144,14 +144,16 @@
         return Object.prototype.hasOwnProperty.call(HANDLERS, normalizeMimeType(mimeType));
     }
 
-    function sanitize(bytes, mimeType) {
+    // options — только для сервера: { maxInflateTotal } — бюджет распаковки PDF на файл, меньше клиентского
+    // (lib/metadata-stripper.js). Клиент вызывает без options.
+    function sanitize(bytes, mimeType, options) {
         const mime = normalizeMimeType(mimeType);
         if (!Object.prototype.hasOwnProperty.call(HANDLERS, mime)) {
             throw new MediaSanitizeError('Неподдерживаемый тип файла: ' + String(mimeType).slice(0, 100));
         }
         const handler = HANDLERS[mime];
         try {
-            return handler.fn(toUint8Array(bytes));
+            return handler.fn(toUint8Array(bytes), options);
         } catch (err) {
             if (err instanceof MediaSanitizeError) {
                 if (err.userFacing) throw err;

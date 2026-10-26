@@ -564,9 +564,17 @@
         pdfUnsafe('метаданные в неподдерживаемом сжатии');
     }
 
+    // Бюджет распаковки на файл. Клиент берёт INFLATE_MAX_TOTAL; сервер передаёт меньший (options.maxInflateTotal,
+    // lib/metadata-stripper.js): там разбор одного файла занимает поток, общий для всех (повторное ревью W7, Н0).
+    // Негодное значение предел не снимает — тогда тоже INFLATE_MAX_TOTAL.
+    function inflateBudgetTotal(options) {
+        const v = options ? options.maxInflateTotal : undefined;
+        return Number.isSafeInteger(v) && v > 0 ? Math.min(v, INFLATE_MAX_TOTAL) : INFLATE_MAX_TOTAL;
+    }
+
     // Структурный проход: то, что нельзя найти поиском по тексту — сжатые
     // потоки и идентификатор документа. Меняет buf на месте или бросает исключение.
-    function sanitizePdfStructure(buf) {
+    function sanitizePdfStructure(buf, options) {
         const n = buf.length;
         const text = latin1(buf);
         // Шифруются строки и потоки: ни Info, ни XMP, ни object streams не прочитать.
@@ -576,7 +584,7 @@
         const ctx = {
             b: buf, n, text, guard,
             objs: new Map(), // N * 65536 + G → позиция сразу за "obj" (последнее определение)
-            budget: { out: INFLATE_MAX_TOTAL, blocks: INFLATE_MAX_BLOCKS },
+            budget: { out: inflateBudgetTotal(options), blocks: INFLATE_MAX_BLOCKS },
             idMap: new Map(),
         };
 
@@ -625,12 +633,13 @@
         }
     }
 
-    function sanitizePdf(src) {
+    // options.maxInflateTotal — бюджет распаковки на файл (см. inflateBudgetTotal).
+    function sanitizePdf(src, options) {
         // Заголовок %PDF- по спецификации может стоять не в самом начале, а в пределах первого килобайта.
         if (latin1(src.subarray(0, Math.min(1024, src.length))).indexOf('%PDF-') === -1) fail('нет заголовка %PDF-');
         const buf = new Uint8Array(src);
         try {
-            sanitizePdfStructure(buf);
+            sanitizePdfStructure(buf, options);
         } catch (err) {
             // Всё, что не удалось разобрать или распаковать, — тоже "сохраните заново", а не просто "файл повреждён".
             if (err instanceof MediaSanitizeError && !err.userFacing) pdfUnsafe(err.message);

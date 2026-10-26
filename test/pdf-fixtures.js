@@ -138,4 +138,22 @@ function sample({ info = 'compressed', infoBody = '<< /Producer (Secret Producer
     return b.finish({ info: info === 'none' ? undefined : 3, id, extra });
 }
 
-module.exports = { bytes, XMP, PdfBuilder, readXref, assertOffsetsValid, streamData, classicPdf, CATALOG, PAGES, sample };
+// PDF-«бомба» для очистки на сервере (повторное ревью W7, Н0): несколько ObjStm, каждый распаковывается в мегабайты
+// пробелов. Файл ~20 КБ на поток, распаковка — streamBytes на поток; по умолчанию 5 × (20 МБ − 64 байта), то есть в
+// пределах клиентских бюджетов (20 МБ на поток, 100 МБ на файл) — клиентский санитайзер такой файл принимает.
+function objStmBomb({ streams = 5, streamBytes = 20 * 1024 * 1024 - 64 } = {}) {
+    const b = new PdfBuilder();
+    b.obj(1, CATALOG);
+    b.obj(2, PAGES);
+    for (let i = 0; i < streams; i++) {
+        const num = 3 + i;
+        const header = `${100 + i} 0 `;
+        const payload = Buffer.alloc(streamBytes, 0x20);
+        payload.write(header + '<< >>', 0, 'latin1');
+        const data = zlib.deflateSync(payload, { level: 9 });
+        b.stream(num, `/Type /ObjStm /N 1 /First ${header.length} /Filter /FlateDecode`, data);
+    }
+    return b.finish({});
+}
+
+module.exports = { bytes, XMP, PdfBuilder, readXref, assertOffsetsValid, streamData, classicPdf, CATALOG, PAGES, sample, objStmBomb };

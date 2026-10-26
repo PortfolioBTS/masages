@@ -86,6 +86,7 @@ railway run npm run check-env  # с переменными сервиса на R
 | `TEXT_QUOTA_MB_PER_DAY`, `ROOMS_PER_USER_MAX` | нет | суточный объём текста сообщений на аккаунт, МБ (20; сверх — 429 `text-quota`) и число комнат на аккаунте (50; сверх — 403 `rooms-limit`) |
 | `UPLOAD_MIN_FREE_MB` | нет | свободное место на томе вложений, МБ (256): ниже порога загрузки отклоняются (507 `storage-full`) |
 | `UPLOADS_IP_PER_MIN`, `UPLOADS_USER_PER_15MIN` | нет | выдача вложений (`GET /uploads/*`): запросов в минуту с одного IP (600; для onion не считается) и за 15 минут с одного аккаунта (3000); сверх — 429 |
+| `OPEN_UPLOADS_PER_10MIN` | нет | открытых вложений (в чат с ботом) за 10 минут на аккаунт (20): их сервер разбирает сам, поэтому частота ограничена до записи файла; сверх — 429 `open-uploads-limit` |
 | `SOCKET_EVENT_RATE`, `SOCKET_EVENT_BURST` | нет | события от одного сокета, в секунду в среднем (5) и всплеск (20); клиент почти ничего не шлёт, превысивший частоту сокет закрывается |
 | `TRUST_PROXY` | нет | сколько прокси стоит перед приложением: `1` (по умолчанию, край Railway) или `0` (приложение открыто напрямую, заголовки `X-Forwarded-*` игнорируются) |
 | `ONION_ALLOWED_CIDR` | нет | кому можно подключаться к `ONION_PORT`: адреса или CIDR через запятую; по умолчанию только частные и loopback-адреса |
@@ -156,6 +157,7 @@ lib/                       # серверные модули (чистые фу�
   bot-guide.js, privacy.js, security-utils.js, security-txt.js, tor-support.js         # бот, заголовки, onion
   client-manifest.js, client-sri.js, sw-kill-switch.js           # манифест клиента и service worker
   account-limits.js, registration-pressure.js, text-quota.js, disk-space.js, work-limiter.js, token-bucket.js  # лимиты против массовых аккаунтов и «бомб»
+  sanitizer-pool.js, sanitizer-worker.js                         # очистка PDF и видео в отдельном потоке: тайм-аут, предел памяти
   trust-proxy.js, onion-access.js, db-errors.js, pg-client-guard.js, ids.js, room-name.js, drain-batches.js, orphan-uploads.js  # прокси и onion-порт, 503 busy, разбор id и названий, чистка
   env-check.js, legacy-reset.js, metrics.js, advisory-locks.js, tx-retry.js, log-error.js, proto.js
   jobs/, routes/, migrations/                                    # фоновые задачи, вынесенные маршруты, миграции
@@ -180,7 +182,7 @@ SECURITY.md                # политика сообщений об уязви
 
 ## API
 
-Сессионная cookie; на изменяющие запросы нужны заголовок `X-CSRF-Token`, совпадающий с cookie `csrf_token`, и Origin своего сайта. Клиент передаёт признак версии `proto`: слишком старая страница получает 400 с кодом `client-outdated`. Другие коды отказов: `bad-message-id` и `id-conflict` (идентификатор сообщения выбирает клиент), `busy` (хранилище лимитов или базы занято, в том числе запрос не дождался блокировки или своего времени, 503 с `Retry-After`: повторить), `e2ee-required`, `bad-envelope` и `e2ee-not-allowed` (в группу принимается только корректный E2EE-конверт), `already-member`, `bad-request`. Лимиты отвечают отдельными кодами: `registration-busy` (429, регистраций слишком много), `text-quota` (429, суточный объём текста исчерпан), `rooms-limit` (403, у аккаунта предельное число комнат), `storage-full` (507, на томе вложений кончилось место). Битое %-кодирование в адресе даёт 400 `Некорректный запрос`, а нечисловой или слишком большой id — обычный отказ JSON, а не 500.
+Сессионная cookie; на изменяющие запросы нужны заголовок `X-CSRF-Token`, совпадающий с cookie `csrf_token`, и Origin своего сайта. Клиент передаёт признак версии `proto`: слишком старая страница получает 400 с кодом `client-outdated`. Другие коды отказов: `bad-message-id` и `id-conflict` (идентификатор сообщения выбирает клиент), `busy` (хранилище лимитов или базы занято, в том числе запрос не дождался блокировки или своего времени, 503 с `Retry-After`: повторить), `e2ee-required`, `bad-envelope` и `e2ee-not-allowed` (в группу принимается только корректный E2EE-конверт), `already-member`, `bad-request`. Лимиты отвечают отдельными кодами: `registration-busy` (429, регистраций слишком много), `text-quota` (429, суточный объём текста исчерпан), `rooms-limit` (403, у аккаунта предельное число комнат), `storage-full` (507, на томе вложений кончилось место), `open-uploads-limit` (429, слишком много открытых вложений в чат с ботом). Битое %-кодирование в адресе даёт 400 `Некорректный запрос`, а нечисловой или слишком большой id — обычный отказ JSON, а не 500.
 
 - Аккаунт: `GET /api/pow/challenge`, `POST /api/register/anonymous`, `GET /api/auth`, `GET /api/user`, `POST /api/user/lifetime`, `POST /api/user/privacy`, `POST /api/logout`, `POST /api/account/delete`
 - Чаты: `GET /api/chats`, `POST /api/chats`, `DELETE /api/chats/:chatId` (выход из группы, `?deleteMessages=1`), `POST /api/chats/:chatId/prefs`, `POST /api/chats/:chatId/expiry`, `GET /api/chats/:chatId/settings`, `GET /api/chats/:chatId/participants`

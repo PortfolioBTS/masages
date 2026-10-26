@@ -30,7 +30,7 @@ const { STORAGE_FULL_MESSAGE } = require('../../../lib/account-limits');
 const BLOCKED_EXTENSIONS = new Set(['.html', '.htm', '.php', '.exe', '.js', '.sh', '.py', '.rb', '.pl', '.bat', '.cmd', '.ps1', '.vbs', '.jar', '.msi', '.svg']);
 
 function createUploadMiddleware(ctx) {
-    const { UPLOADS_DIR, getOwnChat, describeMessageIdUse, diskGuard } = ctx;
+    const { UPLOADS_DIR, getOwnChat, describeMessageIdUse, diskGuard, openUploadGate } = ctx;
 
     const upload = multer({
         storage: multer.diskStorage({
@@ -121,6 +121,9 @@ function createUploadMiddleware(ctx) {
             // Чат с ботом: шифротекст читать некому — отказ до записи файла на диск.
             const violation = e2eePolicyViolation(chat, body.encrypted === 'true', null);
             if (violation) throw new EarlyResponse(400, violation);
+            // Открытое вложение сервер разбирает сам: частота на аккаунт ограничена до записи файла (Н0).
+            const limited = await openUploadGate(userId);
+            if (limited) throw new EarlyResponse(limited.status, limited.body, limited.headers);
             return;
         }
         const raw = body.clientMessageId;

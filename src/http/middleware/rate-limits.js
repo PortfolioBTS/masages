@@ -5,7 +5,8 @@
 const rateLimit = require('express-rate-limit');
 const { setSecret: setPowSecret } = require('../../../lib/pow');
 // Точные лимиты и одноразовость PoW в Postgres (UNLOGGED-таблицы, ключи — HMAC).
-const { createPgLimits, LimitStoreError, respondBusy } = require('../../../lib/pg-limits');
+const { createPgLimits, LimitStoreError, respondBusy, BUSY_RESPONSE } = require('../../../lib/pg-limits');
+const { openUploadsLimitMessage } = require('../../../lib/account-limits');
 // Суточный объём текста на аккаунт (W7 R1 п.3).
 const { createTextQuota } = require('../../../lib/text-quota');
 
@@ -126,6 +127,33 @@ function createRateLimits(ctx) {
         }
     }
 
+    // Открытые вложения (чат с ботом) на аккаунт (повторное ревью W7, Н0): каждое сервер разбирает сам - изображение
+    // в sharp, PDF и видео в потоке санитайзера, - поэтому частота ограничена. Считаются до записи файла на диск
+    // (src/http/middleware/upload.js), в том числе те, что потом будут отклонены: попытка тоже стоит места и времени.
+    const openUploadLimiter = pgLimits.rateLimiter('open-upload', {
+        windowMs: 10 * 60 * 1000,
+        max: ACCOUNT_LIMITS.openUploadsPer10Min,
+        keyGenerator: (req) => `user:${sessionUserId(req)}`,
+    });
+    // null - можно; иначе { status, body, headers } для ответа (429 или 503 busy).
+    async function openUploadGate(userId) {
+        try {
+            const { totalHits, resetTime } = await openUploadLimiter.store.increment(`user:${userId}`);
+            if (totalHits <= ACCOUNT_LIMITS.openUploadsPer10Min) return null;
+            metrics.rateLimited('open-upload');
+            const waitSeconds = Math.max(1, Math.ceil((new Date(resetTime).getTime() - Date.now()) / 1000));
+            return {
+                status: 429,
+                headers: { 'Retry-After': String(waitSeconds) },
+                body: { success: false, code: 'open-uploads-limit', message: openUploadsLimitMessage(ACCOUNT_LIMITS.openUploadsPer10Min) },
+            };
+        } catch (err) {
+            if (!(err instanceof LimitStoreError)) throw err;
+            metrics.limitStoreError('open-upload');
+            return { status: 503, headers: { 'Retry-After': '5' }, body: BUSY_RESPONSE };
+        }
+    }
+
     // Суточный объём текста сообщений на аккаунт (lib/text-quota.js).
     const textQuota = createTextQuota({ pool, secret: sessionSecret, limitBytes: ACCOUNT_LIMITS.textQuotaBytesPerDay });
 
@@ -148,7 +176,7 @@ function createRateLimits(ctx) {
 
     return {
         apiLimiter, uploadsIpLimiter, uploadsUserLimiter, pgLimits, powUsedStore, bundleLimiter, keyShareLimiter, keyRequestLimiter,
-        memberCertLimiter, registerLimiter, joinUserLimiter, joinIpLimiter, registerGlobalGate, textQuota,
+        memberCertLimiter, registerLimiter, joinUserLimiter, joinIpLimiter, registerGlobalGate, textQuota, openUploadGate,
     };
 }
 

@@ -12,7 +12,10 @@ function installErrorHandler(app) {
         if (res.headersSent) return next(err);
         // Ответ из fileFilter multer: 400/409 с кодом контракта порядка сообщений
         // или 200 с уже сохранённым сообщением (повтор отправки).
-        if (err instanceof EarlyResponse) return res.status(err.status).json(err.body);
+        if (err instanceof EarlyResponse) {
+            if (err.headers) res.set(err.headers);
+            return res.status(err.status).json(err.body);
+        }
         if (err instanceof multer.MulterError) {
             if (err.code === 'LIMIT_FILE_SIZE') {
                 return res.status(413).json({ success: false, message: 'Файл слишком большой (макс. 50 МБ)' });
