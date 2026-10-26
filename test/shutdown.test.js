@@ -62,6 +62,79 @@ async function main() {
         assert.deepStrictEqual(order, ['запрос начат', 'jobs.stop', 'io.close', 'запрос завершён', 'pool.end']);
     });
 
+    // Повторное ревью W7, Н4: closeIdleConnections() вызывался один раз, в начале остановки. Соединение, занятое
+    // запросом в этот момент, после ответа оставалось простаивающим keep-alive и держало server.close() до своего
+    // тайм-аута (keepAliveTimeout, 5 с) — остановка шла дольше нужного или упиралась в общий тайм-аут (выход 1).
+    await test('keep-alive, занятый запросом при сигнале: после ответа соединение закрывается, выход 0 без ожидания keep-alive', async () => {
+        let finishRequest;
+        let requests = 0;
+        const server = http.createServer((req, res) => {
+            requests++;
+            if (requests === 1) { res.end('первый'); return; }
+            finishRequest = () => res.end('готово');
+        });
+        server.keepAliveTimeout = 30000;
+        await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+        const port = server.address().port;
+        const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+        const get = () => new Promise((resolve, reject) => {
+            http.get({ host: '127.0.0.1', port, path: '/', agent }, (res) => {
+                let body = '';
+                res.on('data', (c) => { body += c; });
+                res.on('end', () => resolve({ body, connection: res.headers.connection }));
+            }).on('error', reject);
+        });
+        assert.strictEqual((await get()).body, 'первый');
+        const pending = get();
+        while (!finishRequest) await new Promise(r => setTimeout(r, 5));
+
+        let exitCode = null;
+        const started = Date.now();
+        const exited = new Promise((resolve) => {
+            createShutdown({
+                server, pool: { end: async () => {} }, exit: (code) => { exitCode = code; resolve(); }, log: quiet, timeoutMs: 20000,
+            })('SIGTERM');
+        });
+        await new Promise(r => setTimeout(r, 50));
+        finishRequest();
+        assert.strictEqual((await pending).body, 'готово');
+        await exited;
+        agent.destroy();
+        assert.strictEqual(exitCode, 0);
+        assert.ok(Date.now() - started < 2000, `остановка заняла ${Date.now() - started} мс`);
+    });
+
+    await test('запрос по уже открытому соединению во время остановки обслуживается с Connection: close', async () => {
+        const net = require('net');
+        let finishFirst;
+        const server = http.createServer((req, res) => {
+            if (req.url === '/first') { finishFirst = () => res.end('1'); return; }
+            res.end('2');
+        });
+        server.keepAliveTimeout = 30000;
+        await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+        const socket = net.connect(server.address().port, '127.0.0.1');
+        let raw = '';
+        socket.on('data', (chunk) => { raw += chunk; });
+        const closed = new Promise((resolve) => socket.on('close', resolve));
+        socket.write('GET /first HTTP/1.1\r\nHost: x\r\n\r\n');
+        while (!finishFirst) await new Promise(r => setTimeout(r, 5));
+        let exitCode = null;
+        const exited = new Promise((resolve) => {
+            createShutdown({ server, pool: { end: async () => {} }, exit: (code) => { exitCode = code; resolve(); }, log: quiet, timeoutMs: 20000 })('SIGTERM');
+        });
+        // Второй запрос по тому же соединению (конвейер HTTP/1.1) приходит уже во время остановки.
+        socket.write('GET /second HTTP/1.1\r\nHost: x\r\n\r\n');
+        await new Promise(r => setTimeout(r, 50));
+        finishFirst();
+        await closed;
+        await exited;
+        const responses = raw.split('HTTP/1.1 ').filter(Boolean);
+        assert.strictEqual(responses.length, 2, raw);
+        assert.match(responses[1], /\r\nConnection: close\r\n/i, 'ответ во время остановки закрывает соединение');
+        assert.strictEqual(exitCode, 0);
+    });
+
     await test('не уложились в тайм-аут — соединения рвутся, выход 1; повторный сигнал — сразу 1', async () => {
         const codes = [];
         let fire;
