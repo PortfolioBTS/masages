@@ -736,8 +736,17 @@
             graceEpochs: options.ktGraceEpochs,
             epochSeconds: options.ktEpochSeconds,
             schedule: options.ktSchedule,
+            callTimeoutMs: options.ktCallTimeoutMs,
         }) : null;
         const ktOn = () => Boolean(ktLog) && ktLog.supported();
+        // Исключён ли собеседник журналом ключей сейчас: logExcluded и ещё pending дольше 4 часов по локальным часам
+        // (RR-2) — для проверок состава, которые читают закрепления без записи (запись делает logExcludedIdsLocked).
+        const logExcludedNow = (pin) => {
+            if (logExcluded(pin)) return true;
+            if (!ktModule || !pin || !pin.kt) return false;
+            const copy = { ...pin };
+            return ktModule.expirePendingPin(copy, now()) && logExcluded(copy);
+        };
 
         // Подписанный состав группы (public/lib/membership-client.js): состояние V, removed, joinIntent, журнал доставок,
         // проверка сертификатов. Сеть вне withLock; в блокировке клиент состава только читает и пишет хранилище.
@@ -748,7 +757,7 @@
             getUserId: () => userId,
             loadIdentityLocked,
             sign,
-            logExcluded,
+            logExcluded: logExcludedNow,
             checkPeers: (ids) => checkPeersWithServer(ids),
         });
 
@@ -761,13 +770,14 @@
         }
 
         // Проверки журнала с пределом ожидания: ответ сервера не должен задерживать отправку.
+        const ktWaitMs = options.ktWaitMs > 0 ? options.ktWaitMs : KT_WAIT_MS;
         async function runKtChecksBounded() {
             if (!ktOn()) return;
             let timer = null;
             try {
                 await Promise.race([
                     ktLog.runKtChecks(),
-                    new Promise((resolve) => { timer = setTimeout(resolve, KT_WAIT_MS); if (timer.unref) timer.unref(); }),
+                    new Promise((resolve) => { timer = setTimeout(resolve, ktWaitMs); if (timer.unref) timer.unref(); }),
                 ]);
             } catch (err) {
                 console.warn('E2EE: проверка журнала ключей не удалась:', err);
@@ -2644,11 +2654,16 @@
             return out;
         }
 
-        // Из ids — те, кого журнал ключей исключил из рассылки (в блокировке).
+        // Из ids — те, кого журнал ключей исключил из рассылки (в блокировке). Ключ, ждущий доказательства журнала
+        // дольше 4 часов, становится mismatch прямо здесь, по локальным часам: зависший проход проверок журнала не
+        // должен оставлять подменённый ключ адресатом рассылки (повторное ревью W7, RR-2).
         async function logExcludedIdsLocked(ids) {
             const out = [];
             for (const id of ids) {
-                if (logExcluded(await storage.get('peer:' + Number(id)))) out.push(Number(id));
+                const name = 'peer:' + Number(id);
+                const pin = await storage.get(name);
+                if (ktModule && ktModule.expirePendingPin(pin, now())) await storage.set(name, pin);
+                if (logExcluded(pin)) out.push(Number(id));
             }
             return out;
         }

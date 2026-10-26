@@ -244,6 +244,160 @@ async function main() {
         assert.ok((await selfState(alice)).lastScanAt > 0);
     });
 
+    // ===================== Повторное ревью W7 (клиент): RR-1, RR-2 =====================
+
+    // Транспорт Алисы с фильтром ответа /api/kt/self: ctl.filter(res) получает настоящий ответ сервера.
+    function filteredSelfWorld() {
+        const world = makeWorld();
+        const base = world.server.transportFor(1);
+        const ctl = { filter: null };
+        const transport = new Proxy(base, {
+            get(target, name) {
+                if (name === 'ktSelf') {
+                    return async (gen, from, limit) => {
+                        const res = await target.ktSelf(gen, from, limit);
+                        return ctl.filter ? ctl.filter(res, { gen, from, limit }) : res;
+                    };
+                }
+                return target[name];
+            },
+        });
+        return { world, ctl, transport };
+    }
+
+    // RR-1: F3 обходился ответом 200 с пустым (или обрезанным) списком доказательств: цикл выходил, «как будто эпохи
+    // кончились», скан засчитывался успешным, а эпоха с чужим обязательством не проверялась никогда.
+    for (const [mode, filter] of [
+        ['пустой список (200, proofs: [], next: null)', () => ({ status: 200, data: { success: true, proofs: [], next: null } })],
+        ['обрезанный список (честные доказательства до эпохи с чужой записью, next: null)', (res) => {
+            const proofs = res.data.proofs;
+            return res.data.next === null && proofs.length > 0 ? { status: 200, data: { ...res.data, proofs: proofs.slice(0, -1), next: null } } : res;
+        }],
+    ]) {
+        await test(`RR-1: ${mode} на /api/kt/self - тревога log-fork self-incomplete, self не ok, скан не засчитан`, async () => {
+            const { world, ctl, transport } = filteredSelfWorld();
+            const alice = await world.addUser(1, { transport });
+            await world.addUser(2);
+            await world.kt.closeEpochs(2);
+            world.kt.injectEntry(1);
+            await world.kt.closeEpoch();
+            ctl.filter = filter;
+            await alice.check();
+            for (const item of alice.scheduled.splice(0)) await item.fn();
+            const fork = alice.alerts.find(a => a.kind === 'log-fork');
+            assert.ok(fork, 'тревога: ' + alertKinds(alice).join());
+            assert.strictEqual(fork.reason, 'self-incomplete');
+            assert.strictEqual(fork.gen, 1);
+            const t = await alice.client.checkTransparency();
+            assert.strictEqual(t.status, 'inconsistent');
+            assert.strictEqual(t.self, 'alert');
+            const state = await selfState(alice);
+            assert.ok(!state || !state.lastScanAt, 'lastScanAt не обновляется, как после успеха');
+            noViolations(world);
+        });
+    }
+
+    await test('RR-1: честный сервер с несколькими страницами доказательств - тревоги нет, скан засчитан (контроль)', async () => {
+        const { world, transport } = filteredSelfWorld();
+        const alice = await world.addUser(1, { transport });
+        await world.addUser(2);
+        await world.kt.closeEpochs(5);
+        await alice.check();
+        assert.deepStrictEqual(alertKinds(alice), []);
+        assert.ok((await selfState(alice)).lastScanAt > 0);
+    });
+
+    // RR-2: F2 и self-unreachable обходились зависшим запросом журнала: ни kt-client call(), ни fetch-транспорт не
+    // ограничены по времени, runKtChecks склеивал все следующие вызовы в тот же зависший проход, и подменённый ключ
+    // оставался pending бессрочно — ключ комнаты уходил на него.
+    const hang = () => new Promise(() => {});
+    const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    // Таймеры клиента не держат процесс (unref), а «зависший» ответ — просто невыполняемое обещание: без этого таймера
+    // Node завершился бы посреди теста, решив, что работы больше нет.
+    const keepAlive = setInterval(() => {}, 60 * 1000);
+
+    await test('RR-2: зависший /api/kt/head - каждый вызов журнала ограничен по времени: через 4 часа mismatch kt-unreachable, рассылка прекращена', async () => {
+        const world = makeWorld();
+        const alice = await world.addUser(1, { clientOptions: { ktCallTimeoutMs: 20, ktWaitMs: 2000 } });
+        await world.addUser(2);
+        await world.addUser(3, { roomId: 999 });
+        await world.kt.closeEpoch();
+        await world.session(alice);
+        await world.addUser(4);
+        world.server.evil.impersonate(4, 3);
+        world.kt.evil.hideHint.add(4);
+        world.kt.head = hang;
+        await world.session(alice);
+        assert.strictEqual((await statusOf(alice, 4)).status, 'pending');
+        // Проход проверок заканчивается (вызов журнала прерван тайм-аутом), а не висит, склеивая все следующие вызовы.
+        const finished = await Promise.race([alice.client.runKtChecks().then(() => 'done'), delay(1000).then(() => 'hung')]);
+        assert.strictEqual(finished, 'done', 'проход проверок завершился');
+        await liveHours(world, alice, 3);
+        assert.strictEqual((await statusOf(alice, 4)).status, 'pending', 'до 4 часов - pending');
+        const late = await liveHours(world, alice, 2);
+        const kt = await statusOf(alice, 4);
+        assert.strictEqual(kt.status, 'mismatch');
+        assert.strictEqual(kt.reason, 'kt-unreachable');
+        assert.deepStrictEqual(late.logMismatches.map(m => m.userId), [4]);
+        assert.strictEqual(await alice.client.getPeerIdentityStatus(4), 'log-mismatch');
+        const after = sharesTo(world, 4, 1);
+        await liveHours(world, alice, 3);
+        assert.strictEqual(sharesTo(world, 4, 1), after, 'новых key-share на подменённый ключ нет');
+        noViolations(world);
+    });
+
+    await test('RR-2: проход проверок завис совсем (сеть без ответа дольше теста) - правило «pending дольше 4 часов» срабатывает локально, без сети', async () => {
+        const world = makeWorld();
+        const alice = await world.addUser(1, { clientOptions: { ktCallTimeoutMs: 10 * 60 * 1000, ktWaitMs: 20 } });
+        await world.addUser(2);
+        await world.addUser(3, { roomId: 999 });
+        await world.kt.closeEpoch();
+        await world.session(alice);
+        await world.addUser(4);
+        world.server.evil.impersonate(4, 3);
+        world.kt.evil.hideHint.add(4);
+        world.kt.head = hang;
+        await world.session(alice);
+        assert.strictEqual((await statusOf(alice, 4)).status, 'pending');
+        const late = await liveHours(world, alice, 5);
+        assert.deepStrictEqual(late.logMismatches.map(m => m.userId), [4], 'исключён из рассылки по локальным часам');
+        assert.strictEqual(await alice.client.getPeerIdentityStatus(4), 'log-mismatch');
+        assert.strictEqual((await statusOf(alice, 4)).reason, 'kt-unreachable');
+    });
+
+    await test('RR-2: зависший /api/kt/self дольше 6 часов - тревога self-unreachable; отсчёт идёт с начала попытки', async () => {
+        const { world, ctl, transport } = selfWorld();
+        const alice = await world.addUser(1, { transport, clientOptions: { ktCallTimeoutMs: 20 } });
+        await world.addUser(2);
+        await world.kt.closeEpoch();
+        ctl.self = hang;
+        const bounded = (promise) => Promise.race([promise, delay(1000)]);
+        await bounded(alice.check());
+        for (let h = 0; h < 7; h++) {
+            world.advance(HOUR);
+            await bounded(alice.check());
+            for (const item of alice.scheduled.splice(0)) await bounded(item.fn());
+        }
+        assert.ok(alertKinds(alice).includes('self-unreachable'), alertKinds(alice).join());
+        assert.strictEqual((await alice.client.checkTransparency()).self, 'alert');
+        ctl.self = null;
+        world.advance(HOUR);
+        await alice.check();
+        assert.ok(!(await alice.client.getTransparencyAlerts()).some(a => a.kind === 'self-unreachable'), 'после ответа тревога снята');
+    });
+
+    await test('RR-2: срок самомониторинга идёт с начала попытки - даже если проход проверок завис и не вернулся', async () => {
+        const { world, ctl, transport } = selfWorld();
+        const alice = await world.addUser(1, { transport, clientOptions: { ktCallTimeoutMs: 10 * 60 * 1000 } });
+        await world.addUser(2);
+        await world.kt.closeEpoch();
+        ctl.self = hang;
+        await Promise.race([alice.check(), delay(300)]);
+        assert.ok((await selfState(alice)).failSince > 0, 'попытка начата - отсчёт идёт, хотя ответа нет');
+    });
+
+    clearInterval(keepAlive);
+
     // ===================== З4: отправитель сплетни записывается в доказательство =====================
 
     async function gossipWorld() {

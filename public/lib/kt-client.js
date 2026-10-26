@@ -37,6 +37,9 @@
     const SELF_MIN_INTERVAL_MS = 20 * 60 * 1000;
     // Самомониторинг не удаётся довести до конца дольше этого срока - отдельная тревога self-unreachable (7.4).
     const SELF_UNREACHABLE_MS = 6 * HOUR_MS;
+    // Предел ожидания одного сетевого вызова журнала (повторное ревью W7, RR-2): сервер, держащий запрос без ответа,
+    // иначе останавливал весь проход проверок — и правила «pending дольше 4 часов» и self-unreachable не срабатывали.
+    const CALL_TIMEOUT_MS = 30 * 1000;
     // Паузы повтора при сетевой ошибке, секунды (7.3, п. 2).
     const RETRY_STEPS_S = [1, 2, 4, 8, 16, 32, 64, 128, 256, 300];
     const MAX_QUEUE = 200;
@@ -52,6 +55,19 @@
     const u8 = (text, len) => Kt.b64decode(text, len);
     const isUint = (n, max = U32_MAX) => Number.isSafeInteger(n) && n >= 0 && n <= max;
     const posOf = (gen, epoch) => ({ gen, epoch });
+
+    // pending дольше PENDING_MS по локальным часам (от since.at — когда ключ стал pending) становится mismatch
+    // 'kt-unreachable' без обращения к сети (7.3, п. 6б). Сеть для этого не нужна, поэтому правило проверяется и там, где
+    // решается рассылка ключа комнаты (e2ee.js), — зависший проход проверок его не останавливает (RR-2). Меняет pin.kt
+    // на месте; true — изменено. Ключ «изменился» (pin.pending) и отметка о другом ключе (kt.for) не трогаются.
+    function expirePendingPin(pin, nowMs) {
+        if (!pin || pin.pending || !pin.kt) return false;
+        const kt = pin.kt;
+        if (kt.for !== pin.signPub + ':' + pin.dhPub || kt.status !== 'pending') return false;
+        if (!kt.since || !Number.isSafeInteger(kt.since.at) || nowMs - kt.since.at < PENDING_MS) return false;
+        pin.kt = { ...kt, status: 'mismatch', reason: 'kt-unreachable' };
+        return true;
+    }
 
     // ---------- Ключ журнала из манифеста релиза (R10) ----------
 
@@ -170,7 +186,8 @@
     //   storage, transport (ktHead/ktRoots/ktProof/ktSelf → { status, data }), withLock, now, getUserId,
     //   getIdentity() → { signPub, dhPub (base64), createdHour } | null,
     //   onAlert(alert), warn, schedule(fn, ms), manifestKey() → base64 | null (ключ журнала из манифеста релиза, R10),
-    //   genEpochs, graceEpochs, epochSeconds — константы протокола (тесты задают меньшие).
+    //   genEpochs, graceEpochs, epochSeconds — константы протокола (тесты задают меньшие);
+    //   callTimeoutMs — предел ожидания одного сетевого вызова (по умолчанию CALL_TIMEOUT_MS).
     function createLogClient(options) {
         const { storage, transport, withLock } = options;
         const now = typeof options.now === 'function' ? options.now : () => Date.now();
@@ -188,14 +205,24 @@
         const supported = () => Boolean(transport) && typeof transport.ktHead === 'function'
             && typeof transport.ktRoots === 'function' && typeof transport.ktProof === 'function' && typeof transport.ktSelf === 'function';
 
-        // Вызов сети: { res } либо { error } (отказ fetch, таймаут, нетипизированная ошибка).
+        const callTimeoutMs = options.callTimeoutMs > 0 ? options.callTimeoutMs : CALL_TIMEOUT_MS;
+
+        // Вызов сети: { res } либо { error } (отказ fetch, таймаут, нетипизированная ошибка). Не ответивший за
+        // callTimeoutMs вызов — сетевая ошибка (ветка повтора), а не вечное ожидание (RR-2).
         async function call(method, ...args) {
+            let timer = null;
             try {
-                const res = await transport[method](...args);
+                const timeout = new Promise((resolve, reject) => {
+                    timer = setTimeout(() => reject(new Error('журнал ключей не ответил за ' + callTimeoutMs + ' мс')), callTimeoutMs);
+                    if (timer && typeof timer.unref === 'function') timer.unref();
+                });
+                const res = await Promise.race([transport[method](...args), timeout]);
                 if (!res || typeof res.status !== 'number') return { error: new Error('нет ответа') };
                 return { res };
             } catch (error) {
                 return { error };
+            } finally {
+                if (timer) clearTimeout(timer);
             }
         }
         const body = (res) => (res && res.data && typeof res.data === 'object' ? res.data : {});
@@ -714,11 +741,8 @@
             return withLock(async () => {
                 const name = 'peer:' + task.u;
                 const pin = await storage.get(name);
-                if (!pin || pin.pending || pin.signPub !== task.signPub || pin.dhPub !== task.dhPub) return false;
-                const kt = pin.kt;
-                if (!kt || kt.for !== ktFor(pin) || kt.status !== 'pending' || !kt.since || !Number.isSafeInteger(kt.since.at)) return false;
-                if (now() - kt.since.at < PENDING_MS) return false;
-                pin.kt = { ...kt, status: 'mismatch', reason: 'kt-unreachable' };
+                if (!pin || pin.signPub !== task.signPub || pin.dhPub !== task.dhPub) return false;
+                if (!expirePendingPin(pin, now())) return false;
                 await storage.set(name, pin);
                 return true;
             });
@@ -933,6 +957,7 @@
                 const held = await readGen(gen);
                 if (!held) continue;
                 let from = progress && progress.gen === gen ? progress.epoch + 1 : held.rec.genStart;
+                let incomplete = false;
                 while (from <= held.rec.headEpoch) {
                     const { res, error } = await call('ktSelf', gen, from, SELF_BATCH);
                     if (error) { network = true; break; }
@@ -951,7 +976,9 @@
                     }
                     const data = body(res);
                     if (transient(res) || res.status !== 200 || data.success !== true || !Array.isArray(data.proofs)) { network = true; break; }
-                    if (data.proofs.length === 0) break;
+                    // Пустой список, пока from <= headEpoch, — не «эпохи кончились»: честный сервер отдаёт все закрытые эпохи
+                    // до головы (RR-1, ниже).
+                    if (data.proofs.length === 0) { incomplete = true; break; }
                     let expected = from;
                     let badProof = false;
                     for (const item of data.proofs) {
@@ -987,7 +1014,17 @@
                         s.scanned = saved;
                         await storage.set('kt:self', s);
                     });
-                    if (data.next === null || data.next === undefined) break;
+                    if (data.next === null || data.next === undefined) {
+                        if (from <= held.rec.headEpoch) incomplete = true;
+                        break;
+                    }
+                }
+                // Повторное ревью W7, RR-1: сервер ответил 200, но не довёл список до головы, которую я знаю по своей
+                // проверенной цепочке (пустой или обрезанный список, next: null). Это не «конец», а та же атака, что 404
+                // (F3): непроверенная эпоха могла прятать чужое обязательство под моей меткой.
+                if (incomplete && !network) {
+                    await logFork('self-incomplete', { gen, epoch: from, source: 'self' });
+                    violation = true;
                 }
                 if (network || violation) break;
             }
@@ -1029,6 +1066,18 @@
             });
             if (ok) await clearAlerts(['self-unreachable']);
             else if (since) await addAlert('self-unreachable', { since }, 'self-unreachable');
+        }
+
+        // Попытка самомониторинга начата (до сетевых вызовов, RR-2): отсчёт срока идёт уже с неё, а не с её неудачи —
+        // запрос, который сервер держит без ответа, не останавливает часы. Уже истёкший срок — тревога сразу.
+        async function noteSelfAttempt() {
+            let since = 0;
+            await withLock(async () => {
+                const state = await readSelf();
+                if (!state.failSince) { state.failSince = now(); await storage.set('kt:self', state); return; }
+                if (now() - state.failSince >= SELF_UNREACHABLE_MS) since = state.failSince;
+            });
+            if (since) await addAlert('self-unreachable', { since }, 'self-unreachable');
         }
 
         // Пользователь подтвердил, что часть обязательств — его прежние ключи («Это были мои прежние ключи»).
@@ -1107,6 +1156,10 @@
             const latest = await latestHead();
             const needFresh = !latest || wantSelf || queue.some(t => t.kind === 'peer'
                 || (t.kind === 'gossip' && (t.g > latest.gen || (t.g === latest.gen && t.e > latest.epoch))));
+            if (wantSelf) {
+                const before = await readSelf();
+                if (before.lastScanAt === 0 || now() - before.lastScanAt >= SELF_MIN_INTERVAL_MS) await noteSelfAttempt();
+            }
             const sync = await syncLog({ force: needFresh });
             let retry = !sync.ok && sync.reason === 'network';
 
@@ -1260,5 +1313,8 @@
         };
     }
 
-    return { createLogClient, fetchManifestKey, manifestKeyFromText, parseHint, parseGossip, parseHead, INCONSISTENT_KINDS, PENDING_EPOCHS, PENDING_MS };
+    return {
+        createLogClient, fetchManifestKey, manifestKeyFromText, parseHint, parseGossip, parseHead, expirePendingPin,
+        INCONSISTENT_KINDS, PENDING_EPOCHS, PENDING_MS,
+    };
 });
