@@ -92,6 +92,32 @@ async function main() {
         await stripMetadataFromFile(tmpFile('edge.png', png), 'image/png', { limits: { maxPixels: 60000, maxFrames: 500 } });
     });
 
+    // Повторное ревью W7, Н3: у конвейера sharp не было тайм-аута — изображение в пределах IMAGE_MAX_PIXELS, но
+    // дорогое в обработке, держало слот ограничителя (по умолчанию единственный) сколько угодно долго.
+    await test('тайм-аут обработки изображения: долгий конвейер прерывается, отказ с понятным текстом, файл не тронут', async () => {
+        const png = await sharp({ create: { width: 5000, height: 4000, channels: 3, noise: { type: 'gaussian', mean: 128, sigma: 60 } } })
+            .png({ compressionLevel: 1 }).toBuffer();
+        // Без тайм-аута такой файл обрабатывается дольше секунды — иначе проверка ниже ничего не доказывает.
+        const full = tmpFile('slow-full.png', png);
+        let started = Date.now();
+        await stripMetadataFromFile(full, 'image/png', { limiter: createLimiter() });
+        const fullMs = Date.now() - started;
+        assert.ok(fullMs > 1500, `обработка без тайм-аута: ${fullMs} мс`);
+        assert.strictEqual(_internal.DEFAULT_IMAGE_TIMEOUT_S, 20);
+
+        const file = tmpFile('slow.png', png);
+        started = Date.now();
+        const err = await rejection(stripMetadataFromFile(file, 'image/png', {
+            limiter: createLimiter(), limits: { maxPixels: 24000000, maxFrames: 500, timeoutSeconds: 1 },
+        }));
+        const ms = Date.now() - started;
+        assert.strictEqual(err.userFacing, true, err.message);
+        assert.match(err.message, /слишком долго/);
+        assert.ok(ms < fullMs, `прервано раньше конца (${ms} мс из ${fullMs})`);
+        assert.ok(fs.readFileSync(file).equals(png), 'исходный файл не тронут');
+        assert.ok(!fs.readdirSync(tmp).some(name => name.includes('-cleaned-')), 'временный файл убран');
+    });
+
     await test('анимированный GIF: предел кадров и предел пикселей на все кадры вместе', async () => {
         const frames = [];
         for (let i = 0; i < 12; i++) {
