@@ -123,18 +123,18 @@ async function main() {
         return env;
     }
 
-    await test('настоящий server.js: база недоступна - «Ошибка инициализации БД», выход 1, пароль базы в лог не попадает', async () => {
+    await test('настоящий server.js: база недоступна - «Ошибка инициализации БД», выход 1, секрет из адреса базы в лог не попадает', async () => {
         const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'nyxo-lifecycle-'));
         try {
-            const password = crypto.randomBytes(12).toString('hex');
+            const dbSecret = crypto.randomBytes(12).toString('hex');
             const r = await run([SERVER], {
                 cwd,
-                env: serverEnv({ DATABASE_URL: `postgresql://nyxo:${password}@127.0.0.1:1/nope`, UPLOADS_DIR: path.join(cwd, 'uploads') }),
+                env: serverEnv({ DATABASE_URL: `postgresql://nyxo:${dbSecret}@127.0.0.1:1/nope`, UPLOADS_DIR: path.join(cwd, 'uploads') }),
             });
             assert.strictEqual(r.timedOut, false, r.out);
             assert.strictEqual(r.code, 1, r.out);
             assert.match(r.out, /Ошибка инициализации БД: .*ECONNREFUSED/);
-            assert.ok(!r.out.includes(password), 'пароль базы попал в лог');
+            assert.ok(!r.out.includes(dbSecret), 'секрет подключения к базе попал в лог');
             assert.ok(!/Nyxo Messenger запущен/.test(r.out), 'сервер объявил запуск при сбое миграций');
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true });
