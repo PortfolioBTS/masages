@@ -19,7 +19,7 @@ function botClient({ choice }) {
     const log = { dialogs: [], api: [], toasts: [], reset: 0 };
     const elements = fakeElements();
     const client = createClient({
-        functions: ['leaveChatDialog', 'deleteChat', 'withBusyButton'],
+        functions: ['leaveChatDialog', 'deleteChat', 'withBusyButton', 'feedMayHaveOwnMessages'],
         prelude: 'let currentChatId = 3; let currentRoomId = null; let hasMoreHistory = false; const chatsById = new Map([[3, { is_bot: 1 }]]);',
         sandbox: {
             elements,

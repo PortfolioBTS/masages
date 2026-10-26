@@ -187,7 +187,7 @@ function deleteChatClient({ choice, memberCount = 3, hasMore = false, sentInFeed
     const elements = fakeElements();
     if (sentInFeed) elements.chatMessages.appendChild(Object.assign(new FakeEl(), { className: 'message sent' }));
     const client = createClient({
-        functions: ['leaveChatDialog', 'deleteChat', 'withBusyButton'],
+        functions: ['leaveChatDialog', 'deleteChat', 'withBusyButton', 'feedMayHaveOwnMessages'],
         prelude: `let currentChatId = 5; let currentRoomId = 50; let hasMoreHistory = ${hasMore}; const chatsById = new Map([[5, { member_count: ${memberCount} }]]);`,
         sandbox: {
             elements,

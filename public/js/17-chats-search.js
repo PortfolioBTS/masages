@@ -82,6 +82,13 @@ function leaveChatDialog({ isRoom, memberCount, mayHaveOwnMessages }) {
     };
 }
 
+// Могут ли в группе быть мои сообщения: история загружена не вся, в ленте есть своё — или сообщение, которое не
+// расшифровалось (режим «Не хранить историю»): чьё оно, по ленте не узнать, поэтому выбор «удалить мои» нужно дать
+// (повторное ревью W7, мелочь).
+function feedMayHaveOwnMessages() {
+    return hasMoreHistory || Boolean(elements.chatMessages.querySelector('.message.sent, .e2ee-failed'));
+}
+
 async function deleteChat() {
     if (!currentChatId) return;
     const chatId = currentChatId;
@@ -90,7 +97,7 @@ async function deleteChat() {
     const choice = await confirmDialog(leaveChatDialog({
         isRoom: Boolean(roomId),
         memberCount: meta ? Number(meta.member_count) : NaN,
-        mayHaveOwnMessages: hasMoreHistory || Boolean(elements.chatMessages.querySelector('.message.sent')),
+        mayHaveOwnMessages: feedMayHaveOwnMessages(),
     }));
     if (!choice || chatId !== currentChatId) return;
     const removeMine = choice === 'leave-delete';

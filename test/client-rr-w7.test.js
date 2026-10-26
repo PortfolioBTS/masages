@@ -152,4 +152,34 @@ test('повтор после 403 CSRF: обновление куки огран
     assert.strictEqual(result.success, true);
 });
 
+// ===================== Мелочь: «есть ли мои сообщения» при выходе из группы =====================
+
+test('выход из группы: нерасшифрованное сообщение в ленте — может быть своим, вопрос «удалить мои» задаётся', () => {
+    const elements = fakeElements();
+    const c = createClient({ functions: ['feedMayHaveOwnMessages'], prelude: 'let hasMoreHistory = false;', sandbox: { elements } });
+    const feed = elements.chatMessages;
+    const other = new FakeEl('div');
+    other.className = 'message received';
+    other.classList.add('message', 'received');
+    feed.appendChild(other);
+    assert.strictEqual(c.run('feedMayHaveOwnMessages()'), false, 'только чужие расшифрованные');
+    // Своё сообщение, которое не расшифровалось (режим «Не хранить историю»): по ленте автора не узнать.
+    const failedText = new FakeEl('div');
+    failedText.classList.add('message-text', 'e2ee-failed');
+    other.appendChild(failedText);
+    assert.strictEqual(c.run('feedMayHaveOwnMessages()'), true);
+    const sent = makeEl('div', ['message', 'sent']);
+    const plain = createClient({ functions: ['feedMayHaveOwnMessages'], prelude: 'let hasMoreHistory = false;', sandbox: { elements: fakeElements({ chatMessages: makeEl('div', [], [sent]) }) } });
+    assert.strictEqual(plain.run('feedMayHaveOwnMessages()'), true, 'своё сообщение в ленте');
+    const more = createClient({ functions: ['feedMayHaveOwnMessages'], prelude: 'let hasMoreHistory = true;', sandbox: { elements: fakeElements() } });
+    assert.strictEqual(more.run('feedMayHaveOwnMessages()'), true, 'история загружена не вся');
+});
+
+function makeEl(tag, classes, children = []) {
+    const el = new FakeEl(tag);
+    el.classList.add(...classes);
+    children.forEach((child) => el.appendChild(child));
+    return el;
+}
+
 done();
