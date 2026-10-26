@@ -65,6 +65,12 @@ function signedOutResponse(req) {
     return body;
 }
 
+// Адреса файлов удалённых строк — циклом, а не push(...rows): DELETE … RETURNING file_url возвращает строку на каждое
+// сообщение, и на сотнях тысяч строк spread переполняет стек — удаление аккаунта откатывалось (повторное ревью W7, Н5).
+function addFileUrls(list, rows) {
+    for (const row of rows) list.push(row.file_url);
+}
+
 function createAccounts(ctx) {
     const {
         authorTags, metrics, removeUploadedFiles, io, userSocketCount, notifyRoomMembersChanged,
@@ -167,7 +173,7 @@ function createAccounts(ctx) {
                 'SELECT file_url FROM messages WHERE room_id IS NULL AND user_id = $1 AND file_url IS NOT NULL',
                 [userId]
             );
-            result.fileUrls.push(...botFiles.rows.map(r => r.file_url));
+            addFileUrls(result.fileUrls, botFiles.rows);
             await client.query('DELETE FROM chats WHERE user_id = $1', [userId]);
             // Сертификаты состава, где он субъект или подписавший, и подписанные приглашения комнат, из которых он уходит
             // (решение владельца, вопрос 17): код заменяется новым. Комнаты уже заблокированы выше.
@@ -186,12 +192,12 @@ function createAccounts(ctx) {
                     'DELETE FROM messages WHERE room_id = $1 AND author_tag = ANY($2::bytea[]) RETURNING file_url',
                     [roomId, tags]
                 );
-                result.fileUrls.push(...roomMessages.rows.map(r => r.file_url));
+                addFileUrls(result.fileUrls, roomMessages.rows);
             }
             // Чат с ботом: сообщения владельца (в том числе ответы бота) каскадом уже ушли вместе
             // с чатом; это страховка на случай строки без чата.
             const botMessages = await client.query('DELETE FROM messages WHERE room_id IS NULL AND user_id = $1 RETURNING file_url', [userId]);
-            result.fileUrls.push(...botMessages.rows.map(r => r.file_url));
+            addFileUrls(result.fileUrls, botMessages.rows);
             await client.query('DELETE FROM reactions WHERE user_id = $1', [userId]);
             const ownRequests = await client.query('DELETE FROM join_requests WHERE user_id = $1 RETURNING room_id', [userId]);
             result.requestRoomIds = [...new Set(ownRequests.rows.map(r => r.room_id))];
@@ -203,7 +209,7 @@ function createAccounts(ctx) {
                  RETURNING file_url`,
                     [messageRoomIds]
                 );
-                result.fileUrls.push(...orphaned.rows.map(r => r.file_url));
+                addFileUrls(result.fileUrls, orphaned.rows);
                 // Заявки в опустевшие комнаты ушли бы и каскадом, но заявителям
                 // надо сказать, что рассматривать их больше некому.
                 const orphanedRequests = await client.query(

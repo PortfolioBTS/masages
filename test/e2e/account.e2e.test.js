@@ -247,3 +247,34 @@ test('без входа — «Не авторизован» (оба адреса
     assert.deepStrictEqual(res.body, DELETED);
     assert.strictEqual(await userRow(suite, user.id), null);
 });
+
+// Повторное ревью W7, Н5 (тот же класс): адреса файлов удалённых сообщений собирались через push(...rows), а
+// DELETE … RETURNING file_url возвращает строку на КАЖДОЕ сообщение. В комнате, где пользователь остался последним,
+// сотни тысяч сообщений переполняли стек — транзакция откатывалась, и аккаунт не удалялся.
+test('удаление аккаунта, оставившего комнату со 150 000 сообщений: аккаунт и сообщения удалены', async () => {
+    const v = suite.client();
+    await v.registerAnon();
+    const room = await v.createRoom('Большая история');
+    const COUNT = 150000;
+    // Триггер seq обновляет строку комнаты на каждую вставку: 150 000 вставок одним запросом шли бы минутами. Для
+    // подготовки он выключается, seq проставляется явно, счётчик комнаты — после.
+    await suite.query('ALTER TABLE messages DISABLE TRIGGER messages_20_seq');
+    try {
+        await suite.query(
+            `INSERT INTO messages (id, room_id, seq, author_tag, text, encrypted)
+             SELECT 2000000000 + g, $1, g, decode(md5(g::text), 'hex'), 'x', true FROM generate_series(1, $2::int) AS g`,
+            [room.room_id, COUNT]
+        );
+    } finally {
+        await suite.query('ALTER TABLE messages ENABLE TRIGGER messages_20_seq');
+    }
+    await suite.query('UPDATE rooms SET msg_seq = GREATEST(msg_seq, $2) WHERE id = $1', [room.room_id, COUNT]);
+    assert.strictEqual(await count(suite, 'SELECT 1 FROM messages WHERE room_id = $1', [room.room_id]), COUNT);
+    const mark = suite.server.logs.mark();
+    const res = await v.post('/api/account/delete', {});
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.body.success, true, JSON.stringify(res.body));
+    assert.strictEqual(suite.server.logs.count('Не удалось удалить аккаунт', { from: mark }), 0);
+    assert.strictEqual(await count(suite, 'SELECT 1 FROM messages WHERE room_id = $1', [room.room_id]), 0);
+    assert.strictEqual(await count(suite, 'SELECT 1 FROM users WHERE id = $1', [v.user.id]), 0);
+});
