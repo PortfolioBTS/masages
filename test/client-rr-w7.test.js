@@ -76,4 +76,80 @@ test('RR-5б: suspended без ожидающего ключа — своё по
     assert.match(c.confirms[1], /Сервер добавил Боб в группу, но никто из участников это не подписал/);
 });
 
+// ===================== RR-3: «Удалить и выйти» при таймауте api() =====================
+
+function deleteClient({ apiResult, authState }) {
+    const calls = { api: [], errors: [], left: [], events: [] };
+    const client = createClient({
+        functions: ['deleteAccountAndLeave'],
+        consts: ['ACCOUNT_DELETE_TIMEOUT_MS'],
+        prelude: 'let deletingAccount = false; let currentUser = { id: 9 };',
+        sandbox: {
+            api: async (url, options) => { calls.api.push({ url, options }); return apiResult; },
+            fetchAuthState: async () => authState,
+            showDeleteAccountError: (text) => { if (text) calls.errors.push(text); },
+            isCurrentUser: () => true,
+            postSessionEvent: (e) => calls.events.push(e),
+            leaveApp: (notice) => calls.left.push(notice),
+            AUTH_NOTICES: { deleted: 'удалён' },
+        },
+    });
+    return { ...client, calls };
+}
+
+const TIMED_OUT = { success: false, timedOut: true, message: 'Сервер не отвечает' };
+
+test('RR-3: таймаут удаления, а сессии уже нет — аккаунт удалён: ключи стираются, выход', async () => {
+    const c = deleteClient({ apiResult: TIMED_OUT, authState: { authenticated: false } });
+    await c.run('deleteAccountAndLeave()');
+    assert.deepStrictEqual(c.calls.left, ['удалён']);
+    assert.deepStrictEqual(c.calls.errors, []);
+});
+
+test('RR-3: таймаут удаления, сессия жива — не «Аккаунт не удалён», а «не ответил вовремя»; нет связи — «неизвестно»', async () => {
+    const alive = deleteClient({ apiResult: TIMED_OUT, authState: { authenticated: true } });
+    await alive.run('deleteAccountAndLeave()');
+    assert.deepStrictEqual(alive.calls.left, []);
+    assert.match(alive.calls.errors[0], /не ответил вовремя/);
+    assert.doesNotMatch(alive.calls.errors[0], /^Сервер не отвечает\. Аккаунт не удалён/);
+    const offline = deleteClient({ apiResult: TIMED_OUT, authState: null });
+    await offline.run('deleteAccountAndLeave()');
+    assert.match(offline.calls.errors[0], /неизвестно, удалён ли аккаунт/);
+});
+
+test('RR-3: у запроса удаления свой, увеличенный предел ожидания', async () => {
+    const c = deleteClient({ apiResult: { success: true }, authState: null });
+    await c.run('deleteAccountAndLeave()');
+    assert.strictEqual(c.calls.api[0].url, '/api/account/delete');
+    assert.ok(c.calls.api[0].options.timeoutMs >= 3 * 60 * 1000, String(c.calls.api[0].options.timeoutMs));
+});
+
+// ===================== Мелочь: повтор после 403 CSRF ждёт /api/auth без предела =====================
+
+test('повтор после 403 CSRF: обновление куки ограничено по времени — зависший /api/auth не держит запрос', async () => {
+    let calls = 0;
+    const c = createClient({
+        functions: ['api', 'getCsrfToken', 'refreshCsrfCookie'],
+        consts: ['API_TIMEOUT_MS', 'TIMED_OUT_MESSAGE'],
+        sandbox: {
+            AbortController,
+            document: { cookie: 'csrf_token=abc' },
+            onUnauthorizedResponse() {},
+            fetch: (url, init) => {
+                calls++;
+                if (url === '/api/auth') {
+                    return new Promise((_resolve, reject) => init && init.signal && init.signal.addEventListener('abort', () => reject(new Error('aborted'))));
+                }
+                return Promise.resolve(calls === 1
+                    ? { status: 403, json: async () => ({ success: false, message: 'Запрещено: неверный CSRF-токен' }) }
+                    : { status: 200, json: async () => ({ success: true }) });
+            },
+        },
+    });
+    const started = Date.now();
+    const result = await c.run("api('/api/x', { method: 'POST', timeoutMs: 50 })");
+    assert.ok(Date.now() - started < 2000, 'повтор не завис на /api/auth');
+    assert.strictEqual(result.success, true);
+});
+
 done();

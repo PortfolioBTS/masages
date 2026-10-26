@@ -57,6 +57,20 @@ function onUnauthorizedResponse(data) {
 // запрос), поэтому это не networkError. Раньше зависший запрос держал кнопку и флаг
 // «идёт отправка» навсегда. Тот, кто повторяет запрос (отправка сообщения), делает
 // это идемпотентно — с тем же clientMessageId.
+// Кука csrf_token живёт сутки; если она истекла, любой GET выдаст новую. Запрос ограничен по времени: зависший
+// /api/auth иначе снова держал бы замок отправки, который чинил таймаут api() (повторное ревью W7, мелочь RR).
+async function refreshCsrfCookie(timeoutMs = API_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        await fetch('/api/auth', { signal: controller.signal });
+    } catch {
+        // нет связи или таймаут: повтор запроса скажет, что с ним
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 async function api(url, options = {}, retried = false) {
     const { skipAuthCheck = false, timeoutMs = API_TIMEOUT_MS, ...init } = options;
     const controller = new AbortController();
@@ -91,9 +105,8 @@ async function api(url, options = {}, retried = false) {
     // Статус нужен тем, кто различает исходы (повтор отправки после 5xx и 409,
     // sendText); тело при этом остаётся прежним.
     data.httpStatus = res.status;
-    // Кука csrf_token живёт сутки; если она истекла, любой GET выдаст новую.
     if (res.status === 403 && !retried && /CSRF/i.test(data.message || '')) {
-        await fetch('/api/auth').catch(() => {});
+        await refreshCsrfCookie(timeoutMs);
         return api(url, options, true);
     }
     if (!skipAuthCheck) onUnauthorizedResponse(data);
@@ -116,7 +129,7 @@ async function postFormData(url, formData, retried = false) {
     const data = await res.json().catch(() => ({ success: false, message: `Ошибка сервера (HTTP ${res.status})` }));
     if (data && typeof data === 'object') data.httpStatus = res.status;
     if (res.status === 403 && !retried && /CSRF/i.test(data.message || '')) {
-        await fetch('/api/auth').catch(() => {});
+        await refreshCsrfCookie();
         return postFormData(url, formData, true);
     }
     onUnauthorizedResponse(data);
@@ -174,7 +187,7 @@ function postFormDataWithProgress(url, formData, options = {}, retried = false) 
             }
             if (data && typeof data === 'object') data.httpStatus = xhr.status;
             if (xhr.status === 403 && !retried && /CSRF/i.test((data && data.message) || '')) {
-                await fetch('/api/auth').catch(() => {});
+                await refreshCsrfCookie();
                 resolve(postFormDataWithProgress(url, formData, options, true));
                 return;
             }

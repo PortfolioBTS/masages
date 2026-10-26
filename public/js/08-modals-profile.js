@@ -427,9 +427,17 @@ async function deleteAccountAndLeave() {
     showDeleteAccountError('');
     let gone = false;
     let failure = '';
-    const data = await api('/api/account/delete', { method: 'POST', body: '{}', skipAuthCheck: true });
+    const data = await api('/api/account/delete', { method: 'POST', body: '{}', skipAuthCheck: true, timeoutMs: ACCOUNT_DELETE_TIMEOUT_MS });
     if (data.success) {
         gone = true;
+    } else if (data.timedOut) {
+        // Исход неизвестен: сервер мог успеть удалить аккаунт (повторное ревью W7, RR-3). Сессии нет — удалён: ключи
+        // стираются и выход, как при успехе; сессия жива — удаление не завершилось; связи нет — сказать как есть.
+        const state = await fetchAuthState();
+        if (state && !state.authenticated) gone = true;
+        else failure = state
+            ? 'Сервер не ответил вовремя, и аккаунт пока не удалён. Попробуйте ещё раз.'
+            : 'Сервер не ответил вовремя — неизвестно, удалён ли аккаунт. Проверьте связь и попробуйте ещё раз.';
     } else if (data.message === 'Не авторизован' || data.message === 'Пользователь не найден') {
         // Сессии уже нет — проверяем, что аккаунта действительно нет, а не
         // запрос ушёл со старой кукой (пока сервер пересоздавал сессию).

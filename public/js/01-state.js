@@ -26,6 +26,8 @@ let membersChangedTimer = null; // debounce событий roomMembersChanged
 // Сколько ждать ответа сервера (api) и сколько допускается «тишина» при загрузке файла;
 // отправка сообщения ждёт меньше и повторяется (14-send.js).
 const API_TIMEOUT_MS = 60 * 1000;
+// Удаление аккаунта стирает сообщения и файлы и может идти дольше обычного запроса (повторное ревью W7, RR-3).
+const ACCOUNT_DELETE_TIMEOUT_MS = 3 * 60 * 1000;
 const UPLOAD_STALL_MS = 60 * 1000;
 const TIMED_OUT_MESSAGE = 'Сервер не отвечает';
 
