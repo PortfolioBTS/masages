@@ -13,6 +13,8 @@ const APP_TIMEOUT_MS = 30000;
 // Тексты, которые тесты проверяют именно как тексты.
 const TEXT = {
     membershipByInvite: /Состав группы подтверждён по подписи приглашения/,
+    // Строка в ленте того, кто передал свой ключ комнаты новому участнику (handleRoomSessionResult).
+    keyDelivered: /Ключ шифрования передан|им передан ключ шифрования/,
     deletedElsewhere: /Аккаунт удалён в другой вкладке/,
     deleted: /^Аккаунт удалён\./,
 };
@@ -176,6 +178,10 @@ async function groupWithMember({ baseUrl, name, owner, ownerPage, memberPage }) 
     await confirmJoin(memberPage);
     await memberPage.waitForText('#chat-name', name, { timeoutMs: APP_TIMEOUT_MS });
     await waitForNotice(memberPage, TEXT.membershipByInvite);
+    // Владелец должен успеть передать новичку свой ключ комнаты. Новичок получает его с текущей позиции цепочки
+    // (docs/threat-model.md, раздел 2), поэтому сообщение, зашифрованное до того, как клиент владельца обработал
+    // вступление (roomMembersChanged), новичок не прочитает никогда, хотя сервер уже считал его участником.
+    await waitForNotice(ownerPage, TEXT.keyDelivered);
 }
 
 // Участник открывает заявки, одобряет первую и закрывает окно.
