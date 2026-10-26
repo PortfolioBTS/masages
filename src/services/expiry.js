@@ -25,7 +25,9 @@ function createExpiry(ctx) {
     // у остальных сообщение исчезнет при следующей загрузке истории.
     async function emitRoomMessagesDeleted(roomId, rows) {
         if (rows.length === 0) return;
-        const minSeq = Math.min(...rows.map(row => Number(row.seq)));
+        // Циклом, а не Math.min(...rows): на сотнях тысяч строк spread переполняет стек (повторное ревью W7, Н5).
+        let minSeq = Infinity;
+        for (const row of rows) minSeq = Math.min(minSeq, Number(row.seq));
         let boundaries;
         try {
             boundaries = (await pool.query(

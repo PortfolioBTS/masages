@@ -140,6 +140,20 @@ async function main() {
         }
     });
 
+    // Повторное ревью W7, Н5: Math.min(...rows) на большой пачке (снос комнаты, выход с удалением) бросал RangeError
+    // «Maximum call stack size exceeded» — и события messageDeleted не уходили вовсе.
+    await test('большая пачка удалённых сообщений комнаты (300 000): граница считается без spread, события уходят', async () => {
+        const io = fakeIo();
+        const queries = [];
+        const pool = { query: async (sql, params) => { queries.push(params); return { rows: [] }; } };
+        const { emitRoomMessagesDeleted } = createExpiry({ io, pool, removeUploadedFiles: () => {} });
+        const rows = [];
+        for (let i = 0; i < 300000; i++) rows.push({ id: 1000000 + i, seq: 500000 - i });
+        await emitRoomMessagesDeleted(5, rows);
+        assert.deepStrictEqual(queries, [[5, 200001]], 'граница — наименьший seq');
+        assert.strictEqual(io.sent.length, rows.length);
+    });
+
     await test('код: messageDeleted комнаты — только через emitRoomMessagesDeleted', () => {
         const direct = [];
         for (const dir of ['src/http/routes', 'src/services', 'src/realtime']) {
