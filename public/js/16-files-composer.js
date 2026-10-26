@@ -153,6 +153,14 @@ async function runUploadQueue(chatId, roomId, items) {
     }
 }
 
+// Отказ при отправке файла. Таймаут — исход неизвестен, но в отличие от текста (unknownSend) запрос файла не
+// запоминается: повтор шифрует файл заново под новым clientMessageId, и если первый дошёл, будет второе сообщение.
+// Поэтому обещания «дубликата не будет» здесь нет (повторное ревью W7, RR-4).
+function fileSendFailureText(data) {
+    if (data.timedOut) return 'Сервер не ответил — файл мог быть отправлен. Проверьте ленту, прежде чем отправлять его снова';
+    return sendFailureText(data, 'Не удалось отправить файл');
+}
+
 async function sendOneFile(queue, item, index, total) {
     const { chatId, roomId } = queue;
     const prefix = total > 1 ? `Файл ${index + 1} из ${total}: ` : '';
@@ -241,7 +249,7 @@ async function sendOneFile(queue, item, index, total) {
     if (encryptFailed) return { ok: false, message: 'Не удалось зашифровать файл' };
     const data = outcome.data;
     if (data.aborted || queue.cancelled) return { ok: false };
-    if (!data.success) return { ok: false, message: sendFailureText(data, 'Не удалось отправить файл') };
+    if (!data.success) return { ok: false, message: fileSendFailureText(data) };
     checkRoomKeyRotation(chatId, roomId);
     if (chatId === currentChatId && data.message) {
         const message = localFile

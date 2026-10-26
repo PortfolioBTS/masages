@@ -175,6 +175,25 @@ test('выход из группы: нерасшифрованное сообщ�
     assert.strictEqual(more.run('feedMayHaveOwnMessages()'), true, 'история загружена не вся');
 });
 
+// ===================== RR-4: тост таймаута у файлов =====================
+
+test('RR-4: таймаут загрузки файла — не «дубликата не будет», а «файл мог быть отправлен, проверьте ленту»', () => {
+    const c = createClient({ functions: ['sendFailureText', 'fileSendFailureText'] });
+    const timedOut = c.run("fileSendFailureText({ success: false, timedOut: true, message: 'Сервер не отвечает' })");
+    assert.match(timedOut, /файл мог быть отправлен/);
+    assert.match(timedOut, /Проверьте ленту/);
+    assert.doesNotMatch(timedOut, /дубликата не будет/);
+    // Остальные отказы — как у сообщений.
+    assert.strictEqual(c.run("fileSendFailureText({ success: false, networkError: true })"), 'Нет соединения с сервером — сообщение не отправлено');
+    assert.strictEqual(c.run("fileSendFailureText({ success: false, message: 'Файл слишком большой' })"), 'Файл слишком большой');
+    // Текст сообщения при таймауте по-прежнему обещает повтор без дубликата: там запрос запоминается (unknownSend).
+    assert.match(c.run("sendFailureText({ timedOut: true }, 'x')"), /дубликата не будет/);
+    const script = require('./client-script-source').readClientScript();
+    const sendOneFile = script.slice(script.indexOf('async function sendOneFile('), script.indexOf('function setUploadStatus('));
+    assert.match(sendOneFile, /fileSendFailureText\(data\)/);
+    assert.doesNotMatch(sendOneFile, /sendFailureText\(data, 'Не удалось отправить файл'\)/);
+});
+
 // ===================== Мелочь: два <main> =====================
 
 test('<main> без атрибута hidden ровно один: в разметке и после переключения экранов', () => {
