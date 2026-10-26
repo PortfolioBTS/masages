@@ -181,6 +181,37 @@ async function main() {
         assert.strictEqual(await off.hasRoom(), true);
     });
 
+    // Повторное ревью W7, Н8: порог сверялся без учёта загрузок, которые пишутся прямо сейчас, — несколько
+    // одновременных загрузок по 50 МБ проходили проверку разом (statfs ещё и в кэше на 5 с) и вместе уходили ниже порога.
+    await test('свободное место: резерв на время записи — идущие загрузки учитываются, освобождение сбрасывает кэш', async () => {
+        const MB = 1024 * 1024;
+        let calls = 0;
+        let free = 300 * MB;
+        const statfs = async () => { calls++; return { bavail: free / 4096, bsize: 4096 }; };
+        const guard = createDiskGuard({ dir: '/data', minFreeBytes: 256 * MB, ttlMs: 60000, statfs, now: () => 0 });
+        const first = await guard.tryReserve(30 * MB);
+        assert.strictEqual(typeof first, 'function', 'первая загрузка помещается: 300 - 30 >= 256');
+        assert.strictEqual(await guard.tryReserve(30 * MB), null, 'вторая — нет: 300 - 30 - 30 < 256');
+        assert.strictEqual(await guard.hasRoom(20 * MB), false, 'hasRoom тоже учитывает резерв');
+        const small = await guard.tryReserve(10 * MB);
+        assert.strictEqual(typeof small, 'function', '300 - 30 - 10 >= 256');
+        // Файл записан: место на диске уменьшилось, резерв снят, кэш statfs сброшен — следующая проверка видит диск.
+        free = 270 * MB;
+        const before = calls;
+        first();
+        first(); // повторное освобождение ничего не меняет
+        small();
+        assert.strictEqual(await guard.tryReserve(30 * MB), null, '270 - 30 < 256: проверка по свежему statfs');
+        assert.ok(calls > before, 'кэш statfs сброшен освобождением');
+        assert.strictEqual(typeof (await guard.tryReserve(10 * MB)), 'function');
+
+        // Место неизвестно или порог выключен — загрузку не блокируем, резерв не нужен.
+        const broken = createDiskGuard({ dir: '/data', minFreeBytes: 1, statfs: async () => { throw new Error('ENOSYS'); } });
+        assert.strictEqual(typeof (await broken.tryReserve(50 * MB)), 'function');
+        const off = createDiskGuard({ dir: '/data', minFreeBytes: 0, statfs: async () => { throw new Error('не должен вызываться'); } });
+        assert.strictEqual(typeof (await off.tryReserve(50 * MB)), 'function');
+    });
+
     console.log(`\n${passed} passed, ${failed} failed`);
     if (failed > 0) process.exitCode = 1;
 }

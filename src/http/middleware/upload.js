@@ -29,6 +29,10 @@ const { STORAGE_FULL_MESSAGE } = require('../../../lib/account-limits');
 // когда-либо попадёт в разрешённый список по ошибке.
 const BLOCKED_EXTENSIONS = new Set(['.html', '.htm', '.php', '.exe', '.js', '.sh', '.py', '.rb', '.pl', '.bat', '.cmd', '.ps1', '.vbs', '.jar', '.msi', '.svg']);
 
+// Предел тела загрузки: файл (50 МБ) и поля с запасом. Больше или неизвестной длины тело без сессии не дочитывается;
+// столько же резервируется места под файл неизвестной длины.
+const MAX_DRAINED_BODY_BYTES = 51 * 1024 * 1024;
+
 function createUploadMiddleware(ctx) {
     const { UPLOADS_DIR, getOwnChat, describeMessageIdUse, diskGuard, openUploadGate } = ctx;
 
@@ -102,15 +106,30 @@ function createUploadMiddleware(ctx) {
         // может успеть разобрать и поля после небольшого файла, но «после файла»
         // для проверки по-прежнему значит «нет».
         const body = { ...req.body };
-        checkUploadBeforeStore(req.session, body, file).then(() => cb(null, true), (err) => cb(err, false));
+        checkUploadBeforeStore(req, body, file).then(() => cb(null, true), (err) => cb(err, false));
     }
 
-    async function checkUploadBeforeStore(session, body, file) {
+    // Сколько места держать под файл, пока он пишется: длина тела запроса (файл и поля), а без неё — предел файла.
+    function reserveBytesFor(req) {
+        const length = Number(req.headers['content-length']);
+        return Number.isSafeInteger(length) && length > 0 ? Math.min(length, MAX_DRAINED_BODY_BYTES) : MAX_DRAINED_BODY_BYTES;
+    }
+
+    async function checkUploadBeforeStore(req, body, file) {
+        const session = req.session;
         const userId = session && session.userId;
         if (!userId) throw new EarlyResponse(401, { success: false, message: 'Не авторизован' });
-        // Места на томе вложений почти нет (UPLOAD_MIN_FREE_MB): файл не принимается совсем (R1 п.3).
-        if (!(await diskGuard.hasRoom())) {
+        // Места на томе вложений почти нет (UPLOAD_MIN_FREE_MB): файл не принимается совсем (R1 п.3). Пока файл пишется
+        // и обрабатывается, под него держится резерв: одновременные загрузки не проходят по одному остатку (Н8).
+        const release = await diskGuard.tryReserve(reserveBytesFor(req));
+        if (!release) {
             throw new EarlyResponse(507, { success: false, code: 'storage-full', message: STORAGE_FULL_MESSAGE });
+        }
+        if (req.res) {
+            req.res.once('finish', release);
+            req.res.once('close', release);
+        } else {
+            release();
         }
         // Общий признак версии клиента (message-ordering.md, 14.1) — первая проверка
         // запроса после сессии. Поле proto лежит в FormData ДО файла; пришло позже —
@@ -152,7 +171,6 @@ function createUploadMiddleware(ctx) {
     // остаток тела дочитывается и отбрасывается (req.resume) - так клиент получает ответ, а не обрыв
     // соединения. Заведомо огромное или неизвестной длины тело (больше предела файла с запасом на поля) не
     // дочитывается: соединение закрывается после ответа.
-    const MAX_DRAINED_BODY_BYTES = 51 * 1024 * 1024;
     const uploadSingleFile = upload.single('file');
     function uploadFile(req, res, next) {
         if (!(req.session && req.session.userId)) {
