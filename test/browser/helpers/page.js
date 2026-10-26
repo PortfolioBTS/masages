@@ -151,6 +151,10 @@ class BrowserPage {
             this.send('DOM.enable'),
             this.send('Audits.enable'),
             this.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false }),
+            // Тема системы — тёмная, как бы ни была настроена машина: пока выбора нет, приложение следует
+            // за системой (public/theme.js), а headless Chrome сообщает светлую. Без этого «нажал — стала
+            // светлой» зависело бы от настроек компьютера, на котором идёт прогон.
+            this.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] }),
             this.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }),
         ]);
     }
