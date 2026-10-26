@@ -42,8 +42,10 @@ function test(name, fn) {
 function describeStack(app) {
     return app._router.stack.map((layer) => {
         if (layer.route) return `${Object.keys(layer.route.methods).sort().join(',')} ${layer.route.path} [${layer.route.stack.length}]`;
-        const root = String(layer.regexp) === '/^\\/?(?=\\/|$)/i';
-        return `use ${layer.name}${root ? '' : ' ' + layer.regexp}`;
+        // Флаги не печатаются: регистр задаёт одна настройка приложения (проверка ниже), а не каждый слой.
+        const source = `/${layer.regexp.source}/`;
+        const root = source === '/^\\/?(?=\\/|$)/';
+        return `use ${layer.name}${root ? '' : ' ' + source}`;
     });
 }
 
@@ -68,16 +70,16 @@ const EXPECTED_STACK = [
     'get /security.txt [1]',
     'get /client-manifest.json [1]',
     // W7 R1 п.4: лимит выдачи вложений по IP - до загрузки сессии, по аккаунту - после csrf.
-    'use <anonymous> /^\\/uploads\\/?(?=\\/|$)/i',
+    'use <anonymous> /^\\/uploads\\/?(?=\\/|$)/',
     'use session',
     'use <anonymous>',
     'use middleware',
-    'use <anonymous> /^\\/uploads\\/?(?=\\/|$)/i',
-    'use jsonParser /^\\/api\\/keys\\/key-shares\\/?(?=\\/|$)/i',
-    'use jsonParser /^\\/api\\/keys\\/pq-one-time-prekeys\\/?(?=\\/|$)/i',
+    'use <anonymous> /^\\/uploads\\/?(?=\\/|$)/',
+    'use jsonParser /^\\/api\\/keys\\/key-shares\\/?(?=\\/|$)/',
+    'use jsonParser /^\\/api\\/keys\\/pq-one-time-prekeys\\/?(?=\\/|$)/',
     'use <anonymous>',
     'use jsonParser',
-    'use <anonymous> /^\\/api\\/?(?=\\/|$)/i',
+    'use <anonymous> /^\\/api\\/?(?=\\/|$)/',
     'put /api/keys/identity [2]',
     'put /api/keys/signed-prekey [2]',
     'put /api/keys/pq-prekey [2]',
@@ -135,7 +137,7 @@ const EXPECTED_STACK = [
     'post /api/chats/:chatId/set-default-expiry [1]',
     'get /api/chats/:chatId/settings [1]',
     'post /api/chats/:chatId/prefs [1]',
-    'use <anonymous> /^\\/api\\/?(?=\\/|$)/i',
+    'use <anonymous> /^\\/api\\/?(?=\\/|$)/',
     'use <anonymous>',
 ];
 
@@ -162,6 +164,12 @@ test('createServer собирает сервер без базы и не отк�
 
 test('слои Express и маршруты — в прежнем порядке (до разбиения server.js)', () => {
     assert.deepStrictEqual(describeStack(app), EXPECTED_STACK);
+});
+
+test('маршрутизация с учётом регистра (повторное ревью W7, Н1): слои и маршруты без флага i', () => {
+    assert.strictEqual(app.get('case sensitive routing'), true);
+    const insensitive = app._router.stack.filter((layer) => layer.regexp.flags.includes('i'));
+    assert.deepStrictEqual(insensitive.map((layer) => layer.name), []);
 });
 
 test('socket.io: два middleware (сессия, авторизация) и один обработчик подключения', () => {

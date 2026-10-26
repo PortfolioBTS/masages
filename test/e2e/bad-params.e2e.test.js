@@ -81,3 +81,26 @@ test('R2.7: объект вместо числа в теле (JSON {"toString":1
     }
     assert.strictEqual(suite.server.logs.count(/Unhandled error|Cannot convert object to primitive/, { from: mark }), 0);
 });
+
+// Повторное ревью W7, Н1: сессия грузится только для /api и /uploads (R1 п.4), а маршрутизация Express по умолчанию
+// без учёта регистра — /API/chats попадал в обработчик /api/chats без сессии: 500 и «Unhandled error» на каждый запрос.
+// Теперь маршрутизация с учётом регистра: такой путь — обычный 404, без записи в лог и без обращения к сессии.
+test('путь в другом регистре (/API/…, /Uploads/…): 404, а не 500, и в логе нет «Unhandled error»', async () => {
+    const a = suite.client();
+    await a.registerAnon();
+    const mark = suite.server.logs.mark();
+    for (const [method, path] of [
+        ['GET', '/API/chats'], ['GET', '/Api/messages/445267977'], ['POST', '/API/chats'], ['GET', '/UPLOADS/0123456789abcdef0123456789abcdef.jpg'],
+        ['GET', '/api/Chats'], ['DELETE', '/API/messages/1'],
+    ]) {
+        const res = await a.request(method, path, { json: method === 'GET' ? undefined : { name: 'x' } });
+        // Изменяющий запрос без сессии может остановить и проверка CSRF (токен привязан к сессии) — тоже не 500.
+        const allowed = method === 'GET' ? [404] : [403, 404];
+        assert.ok(allowed.includes(res.status), `${method} ${path}: ${res.status} ${JSON.stringify(res.body)}`);
+    }
+    // Чужой сайт с путём в другом регистре — тоже не 500.
+    const cross = await a.request('GET', '/API/messages', { headers: { 'Sec-Fetch-Site': 'cross-site' } });
+    assert.ok(cross.status === 404 || cross.status === 403, `cross-site: ${cross.status}`);
+    assert.strictEqual(suite.server.logs.count('Unhandled error', { from: mark }), 0, 'в логе нет «Unhandled error»');
+    assert.strictEqual((await a.get('/api/chats')).status, 200, 'обычный путь работает');
+});

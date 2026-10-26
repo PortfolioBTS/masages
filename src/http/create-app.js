@@ -26,6 +26,10 @@ function createApp() {
     app.set('trust proxy', resolveTrustProxy(process.env));
     // Express по умолчанию сообщает в каждом ответе «X-Powered-By: Express»: лишняя подсказка о стеке (R1 п.9).
     app.disable('x-powered-by');
+    // Маршрутизация с учётом регистра (повторное ревью W7, Н1). По умолчанию Express сопоставляет пути без учёта
+    // регистра, а проверки путей в middleware (сессия только для /api и /uploads, Sec-Fetch-Site, разбор тела) — с
+    // учётом: /API/chats попадал в обработчик /api/chats без сессии и давал 500. Теперь такой путь — обычный 404.
+    app.set('case sensitive routing', true);
 
     for (const method of ['get', 'post', 'put', 'delete']) {
         const original = app[method].bind(app);
