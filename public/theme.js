@@ -1,6 +1,6 @@
 // Тема оформления Nyxo: тёмная или светлая, <html data-theme="dark|light">.
 //
-// Подключается синхронно в <head> до style.css: атрибут выставляется до
+// Подключается синхронно в <head> до таблиц стилей (css/): атрибут выставляется до
 // первой отрисовки, поэтому страница не мигает «не той» темой.
 // Выбор пользователя хранится в localStorage['nyxo-theme']; пока выбора нет,
 // тема следует за системной (prefers-color-scheme) и меняется вместе с ней.
@@ -11,7 +11,7 @@
 
     const STORAGE_KEY = 'nyxo-theme';
     const THEMES = ['dark', 'light'];
-    // Совпадает с --bg в style.css: цвет системной строки/заголовка окна PWA.
+    // Совпадает с --bg в css/tokens.css: цвет системной строки/заголовка окна PWA.
     const THEME_COLOR = { dark: '#0a0a0a', light: '#ffffff' };
     const root = document.documentElement;
     const media = typeof window.matchMedia === 'function'

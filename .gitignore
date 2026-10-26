@@ -8,5 +8,10 @@ public/uploads/
 tmp_*.js
 bd/
 .DS_Store
-anon-service/target/
-Cargo.lock
+test/e2e/.logs/
+
+# Каталог релизных файлов (scripts/release-manifest.js) — собирается заново, в git не хранится
+release/
+
+# Снимки экрана смоука в настоящем браузере (test/browser): для сравнения до/после правок, в git не хранятся
+test/browser/.screens/

@@ -1,6 +1,6 @@
 'use strict';
 // Встроенное хранилище E2EE-ключей (lib/key-store.js): проверки ввода и
-// подписей, семантика ответов как у e2ee-key-server и полный прогон
+// подписей, статусы и тексты ответов (от них зависит клиент) и полный прогон
 // протокола public/e2ee.js, в котором все операции с ключами идут через него.
 // Запуск: node test/key-store.test.js
 
@@ -10,6 +10,7 @@ const { createKeyStore, _internal } = require('../lib/key-store');
 const { makeFakeKeyDb } = require('./fake-key-db');
 const { makeFakeServer } = require('./fake-server');
 const E2EE = require('../public/e2ee.js');
+require('./membership-harness').install(E2EE);
 const MLKEM = require('../public/mlkem.js');
 
 let passed = 0, failed = 0;
@@ -66,8 +67,8 @@ async function register(store, userId, { pq = true } = {}) {
 }
 
 // Транспорт клиента E2EE: операции с ключами — во встроенное хранилище (как
-// это делает lib/e2ee-proxy.js без INTERNAL_KEY_SERVER_SECRET), участники и
-// key-share — в фейковый сервер.
+// это делают маршруты lib/e2ee-keys.js), участники и key-share — в фейковый
+// сервер.
 function builtinTransport(server, store, userId) {
     const base = server.transportFor(userId);
     const via = async (method, path, body) => {
@@ -79,6 +80,8 @@ function builtinTransport(server, store, userId) {
         putSignedPrekey: (b) => via('PUT', '/internal/v1/keys/signed-prekey', b),
         putPqPrekey: (b) => via('PUT', '/internal/v1/keys/pq-prekey', b),
         postOneTimePrekeys: (b) => via('POST', '/internal/v1/keys/one-time-prekeys', b),
+        postPqOneTimePrekeys: (b) => via('POST', '/internal/v1/keys/pq-one-time-prekeys', b),
+        deletePqOneTimePrekeys: () => via('DELETE', '/internal/v1/keys/pq-one-time-prekeys'),
         getOneTimePrekeyCount: () => via('GET', '/internal/v1/keys/one-time-prekeys/count'),
         getBundle: (id) => via('GET', '/internal/v1/keys/bundle/' + id),
         deleteKeys: () => via('DELETE', '/internal/v1/keys'),
@@ -165,7 +168,7 @@ async function main() {
         const tooMany = Array.from({ length: 201 }, (_, i) => ({ key_id: 100 + i, public_key: b64(x25519Raw()) }));
         assert.strictEqual((await store.call(1, 'POST', '/internal/v1/keys/one-time-prekeys', { keys: tooMany })).status, 400);
         r = await store.call(1, 'GET', '/internal/v1/keys/one-time-prekeys/count');
-        assert.deepStrictEqual(r.data, { count: 4 });
+        assert.deepStrictEqual(r.data, { count: 4, pq_count: 0 });
     });
 
     await test('bundle: 404 before SPK (no OPK consumed), OPKs handed out once each in order, then null', async () => {
@@ -204,13 +207,13 @@ async function main() {
         assert.strictEqual((await store.call(1, 'GET', '/internal/v1/keys/identities?ids=1,x')).status, 400);
     });
 
-    await test('delete removes everything; unknown route → 404; DB errors propagate (proxy answers 502)', async () => {
+    await test('delete removes everything; unknown route → 404; DB errors propagate (the route answers 503 busy or 500)', async () => {
         const { store, db } = makeStore();
         await register(store, 6);
         await store.call(6, 'POST', '/internal/v1/keys/one-time-prekeys', { keys: [{ key_id: 1, public_key: b64(x25519Raw()) }] });
         assert.deepStrictEqual((await store.deleteAll(6)).data, { success: true });
         assert.strictEqual((await store.call(1, 'GET', '/internal/v1/keys/bundle/6')).status, 404);
-        assert.deepStrictEqual((await store.call(6, 'GET', '/internal/v1/keys/one-time-prekeys/count')).data, { count: 0 });
+        assert.deepStrictEqual((await store.call(6, 'GET', '/internal/v1/keys/one-time-prekeys/count')).data, { count: 0, pq_count: 0 });
         assert.strictEqual((await store.call(1, 'GET', '/internal/v1/keys/nope')).status, 404);
         assert.strictEqual((await store.call(1, 'POST', '/internal/v1/keys/bundle/6')).status, 404, 'wrong method');
         db.failNextQuery(new Error('connection lost'));
@@ -228,16 +231,20 @@ async function main() {
         await alice.init(); await bob.init(); await carol.init();
         assert.ok(db._state.identities.has(1) && db._state.pqs.has(2) && db._state.spks.has(3), 'keys registered in the built-in store');
         const opkBefore = db._state.opks.filter(o => o.user_id === 2).length;
+        const pqBefore = db._state.pqOpks.filter(o => o.user_id === 2).length;
+        assert.ok(pqBefore >= 5, 'init() filled the PQ one-time pool through the store (with its signature check)');
         const parts = [{ id: 1, username: 'alice' }, { id: 2, username: 'bob' }, { id: 3, username: 'carol' }];
         const r = await alice.ensureRoomSession(11, 500, parts);
         assert.strictEqual(r.ok, true);
         assert.deepStrictEqual(r.warnings, []);
         assert.strictEqual(db._state.opks.filter(o => o.user_id === 2).length, opkBefore - 1, 'one OPK of bob consumed');
+        assert.strictEqual(db._state.pqOpks.filter(o => o.user_id === 2).length, pqBefore - 1, 'one PQ one-time prekey of bob consumed');
         assert.strictEqual((await bob.syncKeyShares(22, 500)).applied, 1);
         assert.strictEqual((await carol.syncKeyShares(33, 500)).applied, 1);
-        const ct = await alice.encryptOutgoing(500, 'через встроенное хранилище');
-        assert.strictEqual((await bob.decryptIncoming(500, 1, ct, 1)).text, 'через встроенное хранилище');
-        assert.strictEqual((await carol.decryptIncoming(500, 1, ct, 1)).text, 'через встроенное хранилище');
+        // Содержимое привязано к id сообщения (mid), поэтому id выбирается до шифрования.
+        const ct = await alice.encryptOutgoing(500, 'через встроенное хранилище', { messageId: '1000001' });
+        assert.strictEqual((await bob.decryptIncoming(500, 1, ct, '1000001')).text, 'через встроенное хранилище');
+        assert.strictEqual((await carol.decryptIncoming(500, 1, ct, '1000001')).text, 'через встроенное хранилище');
         // Коды безопасности совпадают — identity берутся из того же хранилища
         await alice.checkPeerIdentities([2]);
         await bob.checkPeerIdentities([1]);

@@ -24,6 +24,8 @@ function goodEnv(extra = {}) {
     return Object.assign({
         SESSION_SECRET: rnd(48),
         MESSAGE_ENCRYPTION_KEY: crypto.randomBytes(32).toString('base64'),
+        // Ключ журнала ключей: без него в production есть предупреждение «журнал выключен».
+        KT_SIGNING_KEY: crypto.generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'der' }).toString('base64'),
         DATABASE_URL: `postgresql://postgres:${rnd(24)}@postgres.railway.internal:5432/railway`,
         NODE_ENV: 'production',
         RAILWAY_ENVIRONMENT_NAME: 'production',
@@ -40,7 +42,7 @@ function main() {
         const r = checkEnv(goodEnv());
         assert.deepStrictEqual(r.errors, []);
         assert.deepStrictEqual(r.warnings, []);
-        assert.ok(has(r.info, 'E2EE_KEY_STORE', /встроенном/));
+        assert.ok(!has(r.info, 'E2EE_KEY_STORE'), 'no note about the key store: there is only one way to store keys now');
     });
 
     test('missing required secrets are errors', () => {
@@ -91,33 +93,68 @@ function main() {
         assert.ok(has(checkEnv(goodEnv({ DB_CA_CERT: 'not a cert' })).errors, 'DB_CA_CERT', /PEM/));
     });
 
-    test('key store: leftovers without E2EE_KEY_STORE=remote are warned; remote needs a reachable non-loopback URL on Railway', () => {
-        const leftovers = checkEnv(goodEnv({ INTERNAL_KEY_SERVER_SECRET: rnd(48), KEY_SERVER_URL: 'http://127.0.0.1:7420' }));
-        assert.deepStrictEqual(leftovers.errors, []);
-        assert.ok(has(leftovers.warnings, 'INTERNAL_KEY_SERVER_SECRET', /удалить/));
-        const remoteLoopback = checkEnv(goodEnv({ E2EE_KEY_STORE: 'remote', INTERNAL_KEY_SERVER_SECRET: rnd(48), KEY_SERVER_URL: 'http://127.0.0.1:7420' }));
-        assert.ok(has(remoteLoopback.errors, 'KEY_SERVER_URL', /этот же контейнер/));
-        const remoteNoSecret = checkEnv(goodEnv({ E2EE_KEY_STORE: 'remote', KEY_SERVER_URL: 'http://keys.railway.internal:7420' }));
-        assert.ok(has(remoteNoSecret.errors, 'INTERNAL_KEY_SERVER_SECRET', /не задан/));
-        const remoteOk = checkEnv(goodEnv({ E2EE_KEY_STORE: 'remote', INTERNAL_KEY_SERVER_SECRET: rnd(48), KEY_SERVER_URL: 'http://keys.railway.internal:7420' }));
-        assert.deepStrictEqual(remoteOk.errors, []);
+    test('variables of the removed services: one "not used" warning listing only those that are set, never an error', () => {
+        const all = {
+            E2EE_KEY_STORE: 'remote', KEY_SERVER_URL: 'http://127.0.0.1:7420', INTERNAL_KEY_SERVER_SECRET: rnd(48),
+            ANON_SERVICE_URL: 'http://anon.railway.internal:8080', ANON_SERVICE_SECRET: rnd(48),
+        };
+        assert.deepStrictEqual(checkEnv(goodEnv()).warnings, []);
+        const stale = checkEnv(goodEnv(all));
+        assert.deepStrictEqual(stale.errors, [], 'a leftover remote setup does not fail the check');
+        assert.strictEqual(stale.warnings.length, 1, 'one warning for all of them');
+        assert.ok(has(stale.warnings, 'E2EE_KEY_STORE', /не используется.*удалите/));
+        assert.deepStrictEqual(stale.warnings[0].name.split(', ').sort(), Object.keys(all).sort());
+        // Только заданные: пустая переменная в список не попадает.
+        const partial = checkEnv(goodEnv({ ANON_SERVICE_URL: 'http://anon.railway.internal:8080', KEY_SERVER_URL: '  ' }));
+        assert.deepStrictEqual(names(partial.warnings), ['ANON_SERVICE_URL']);
+        // Значения в отчёт не попадают.
+        const report = formatEnvReport(stale);
+        for (const secret of [all.INTERNAL_KEY_SERVER_SECRET, all.ANON_SERVICE_SECRET, all.KEY_SERVER_URL]) {
+            assert.ok(!report.includes(secret), 'report must not contain values');
+        }
+        // Секрет удалённого сервиса больше не сравнивается с живыми секретами
+        // как «одинаковые значения» — для ANON_SERVICE_SECRET это просто мусор в окружении.
+        const same = rnd(48);
+        assert.deepStrictEqual(checkEnv(goodEnv({ SESSION_SECRET: same, ANON_SERVICE_SECRET: same })).errors, []);
+    });
+
+    test('a leaked INTERNAL_KEY_SERVER_SECRET stays an error even though the variable is not used any more', () => {
+        const value = rnd(48);
+        const leaked = { INTERNAL_KEY_SERVER_SECRET: [_internal.sha256(value)] };
+        const r = checkEnv(goodEnv({ INTERNAL_KEY_SERVER_SECRET: value }), { leaked });
+        assert.ok(has(r.errors, 'INTERNAL_KEY_SERVER_SECRET', /утёкшим/));
+        assert.ok(has(r.warnings, 'INTERNAL_KEY_SERVER_SECRET', /не используется/));
+        assert.ok(!formatEnvReport(r).includes(value), 'report must not contain the value');
+        // Не утёкшее значение той же переменной — только предупреждение.
+        assert.deepStrictEqual(checkEnv(goodEnv({ INTERNAL_KEY_SERVER_SECRET: rnd(48) }), { leaked }).errors, []);
     });
 
     test('the same value reused for two secrets is an error', () => {
-        const same = rnd(48);
-        const r = checkEnv(goodEnv({ SESSION_SECRET: same, PASSWORD_PEPPER: same }));
-        assert.ok(has(r.errors, 'SESSION_SECRET / PASSWORD_PEPPER', /одинаковые/));
+        // base64 от 32 байт годится и как SESSION_SECRET, и как ключ сообщений.
+        const same = crypto.randomBytes(32).toString('base64');
+        const r = checkEnv(goodEnv({ SESSION_SECRET: same, MESSAGE_ENCRYPTION_KEY: same }));
+        assert.ok(has(r.errors, 'SESSION_SECRET / MESSAGE_ENCRYPTION_KEY', /одинаковые/));
     });
 
-    test('Railway without a volume for attachments, onion port clash, anon-service without secret', () => {
+    test('PASSWORD_PEPPER and HIBP_CHECK: in the common "not used" warning, not checked, not compared as secrets', () => {
+        const pepper = rnd(48);
+        const r = checkEnv(goodEnv({ PASSWORD_PEPPER: pepper, HIBP_CHECK: 'true', ANON_SERVICE_URL: 'http://anon.railway.internal:8080' }));
+        assert.deepStrictEqual(r.errors, []);
+        assert.strictEqual(r.warnings.length, 1, 'one warning for all unused variables');
+        assert.deepStrictEqual(r.warnings[0].name.split(', ').sort(), ['ANON_SERVICE_URL', 'HIBP_CHECK', 'PASSWORD_PEPPER']);
+        assert.match(r.warnings[0].message, /не используется.*удалите/);
+        assert.deepStrictEqual(r.info, [], 'no note about keeping the pepper any more');
+        // Заглушка или короткое значение — больше не ошибка: переменная не проверяется.
+        assert.deepStrictEqual(checkEnv(goodEnv({ PASSWORD_PEPPER: 'changeme' })).errors, []);
+        // И не сравнивается с живыми секретами.
+        const same = rnd(48);
+        assert.deepStrictEqual(checkEnv(goodEnv({ SESSION_SECRET: same, PASSWORD_PEPPER: same })).errors, []);
+        assert.ok(!formatEnvReport(r).includes(pepper), 'report must not contain the value');
+    });
+
+    test('Railway without a volume for attachments, onion port clash', () => {
         assert.ok(has(checkEnv(goodEnv({ RAILWAY_VOLUME_MOUNT_PATH: '' })).warnings, 'UPLOADS_DIR', /volume/));
         assert.ok(has(checkEnv(goodEnv({ ONION_PORT: '3000' })).errors, 'ONION_PORT', /PORT/));
-        assert.ok(has(checkEnv(goodEnv({ ANON_SERVICE_URL: 'http://anon.railway.internal:8080' })).warnings, 'ANON_SERVICE_SECRET'));
-    });
-
-    test('loopback detection', () => {
-        for (const h of ['localhost', '127.0.0.1', '127.1.2.3', '::1', '[::1]', '0.0.0.0']) assert.ok(_internal.isLoopbackHost(h), h);
-        for (const h of ['keys.railway.internal', '10.0.0.1']) assert.ok(!_internal.isLoopbackHost(h), h);
     });
 
     console.log('\n' + passed + ' passed, ' + failed + ' failed');

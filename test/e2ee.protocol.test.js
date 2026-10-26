@@ -17,6 +17,7 @@ process.emitWarning = function (warning, ...args) {
 const assert = require('assert');
 const nodeCrypto = require('crypto');
 const E2EE = require('../public/e2ee.js');
+require('./membership-harness').install(E2EE);
 const { makeFakeServer } = require('./fake-server');
 
 const subtle = globalThis.crypto.subtle;
@@ -83,6 +84,28 @@ async function test(name, fn) {
 
 // ===================== Хелперы =====================
 
+// Содержимое сообщения привязано к его id (mid, message-ordering.md, раздел 9),
+// а тесты ниже шифруют и расшифровывают, не думая об id. Обёртка выдаёт id при
+// шифровании (если тест не задал свой) и подставляет его при расшифровке того же
+// конверта, поэтому числа вроде decryptIncoming(room, 1, ct, 3) остаются просто
+// «номером сообщения» для fake-server. Тесты самой привязки (mid, автор, версия)
+// и replay работают с client.raw — клиентом без обёртки.
+let autoMessageId = 5000000;
+const autoMessageIds = new Map();   // конверт -> выданный id; общий для всех клиентов
+function withAutoMessageIds(client) {
+    const wrapped = Object.create(client);
+    wrapped.raw = client;
+    wrapped.encryptOutgoing = async (roomId, content, options = {}) => {
+        const messageId = options.messageId !== undefined ? options.messageId : String(++autoMessageId);
+        const envelope = await client.encryptOutgoing(roomId, content, { ...options, messageId });
+        autoMessageIds.set(envelope, messageId);
+        return envelope;
+    };
+    wrapped.decryptIncoming = (roomId, senderId, text, messageId) =>
+        client.decryptIncoming(roomId, senderId, text, autoMessageIds.has(text) ? autoMessageIds.get(text) : messageId);
+    return wrapped;
+}
+
 function makeUser(server, userId, opts = {}) {
     const storage = opts.storage || new E2EE.MemoryStorage();
     const client = E2EE.createClient({
@@ -93,7 +116,9 @@ function makeUser(server, userId, opts = {}) {
         now: opts.now,
     });
     client._storage = storage;
-    return client;
+    const wrapped = withAutoMessageIds(client);
+    wrapped._storage = storage;
+    return wrapped;
 }
 
 async function setupPair(roomId = 100, opts = {}) {
@@ -252,15 +277,20 @@ async function main() {
         assert.ok(countRes.data.count >= 10, 'should have topped up OPK pool, got ' + countRes.data.count);
     });
 
-    await test('basic round trip v2: Alice sends, Bob decrypts', async () => {
+    await test('basic round trip v3: Alice sends, Bob decrypts', async () => {
         const ctx = await setupPair();
         await connectPair(ctx);
         const ct = await ctx.alice.encryptOutgoing(ctx.roomId, 'привет');
         const env = JSON.parse(ct);
-        assert.strictEqual(env.v, 2);
-        assert.strictEqual(env.alg, 'senderkey-v2');
+        assert.strictEqual(env.v, 3);
+        assert.strictEqual(env.alg, 'senderkey-v3');
         const res = await ctx.bob.decryptIncoming(ctx.roomId, 1, ct, 1);
-        assert.deepStrictEqual(res, { ok: true, text: 'привет' });
+        assert.strictEqual(res.ok, true);
+        assert.strictEqual(res.text, 'привет');
+        assert.strictEqual(res.senderId, 1, 'автор — тот, чей id передан и чьим ключом подписано');
+        assert.ok(Number.isSafeInteger(res.ts) && res.ts > 0, 'ts — время отправителя в мс');
+        assert.strictEqual(res.edit, false);
+        assert.ok(!('file' in res));
     });
 
     await test('ciphertext does not leak plaintext or contain it verbatim', async () => {
@@ -294,20 +324,25 @@ async function main() {
         assert.strictEqual((await ctx.bob.decryptIncoming(ctx.roomId, 1, ct1, 2)).text, 'one');
     });
 
-    await test('history redisplay: same message (same messageId) can be decrypted twice', async () => {
+    await test('history redisplay: same message (same messageId) can be decrypted twice; messageId is required', async () => {
         const ctx = await setupPair();
         await connectPair(ctx);
-        const ct = await ctx.alice.encryptOutgoing(ctx.roomId, 'reread me');
-        assert.strictEqual((await ctx.bob.decryptIncoming(ctx.roomId, 1, ct, 7)).text, 'reread me');
-        assert.strictEqual((await ctx.bob.decryptIncoming(ctx.roomId, 1, ct, 7)).text, 'reread me');
-        assert.strictEqual((await ctx.bob.decryptIncoming(ctx.roomId, 1, ct)).text, 'reread me', 'без messageId проверка повтора не применяется');
+        const ct = await ctx.alice.raw.encryptOutgoing(ctx.roomId, 'reread me', { messageId: '1000007' });
+        assert.strictEqual((await ctx.bob.raw.decryptIncoming(ctx.roomId, 1, ct, '1000007')).text, 'reread me');
+        assert.strictEqual((await ctx.bob.raw.decryptIncoming(ctx.roomId, 1, ct, '1000007')).text, 'reread me');
+        assert.strictEqual((await ctx.bob.raw.decryptIncoming(ctx.roomId, 1, ct, 1000007)).text, 'reread me', 'messageId сравнивается как строка');
+        // Без messageId сверить mid нечем: конверт не показывается ни под каким id.
+        assert.deepStrictEqual(await ctx.bob.raw.decryptIncoming(ctx.roomId, 1, ct), { ok: false, reason: 'id-mismatch' });
     });
 
     await test('sender can decrypt their own past outgoing messages (self chain is cached)', async () => {
         const ctx = await setupPair();
         await ctx.alice.ensureRoomSession(11, ctx.roomId, ctx.parts);
         const ct = await ctx.alice.encryptOutgoing(ctx.roomId, 'note to self');
-        assert.deepStrictEqual(await ctx.alice.decryptIncoming(ctx.roomId, 1, ct, 1), { ok: true, text: 'note to self' });
+        const own = await ctx.alice.decryptIncoming(ctx.roomId, 1, ct, 1);
+        assert.strictEqual(own.ok, true);
+        assert.strictEqual(own.text, 'note to self');
+        assert.strictEqual(own.senderId, 1);
     });
 
     await test('tampered ciphertext is rejected (bit flip in ct)', async () => {
@@ -336,7 +371,7 @@ async function main() {
 
     await test('message from a sender with no known Sender Key fails gracefully', async () => {
         const { bob, roomId } = await setupPair();
-        const fake = JSON.stringify({ v: 2, alg: 'senderkey-v2', senderKeyId: b64(randomBytes(16)), iteration: 0, iv: b64(randomBytes(12)), ct: b64(randomBytes(272)), sig: b64(randomBytes(64)) });
+        const fake = JSON.stringify({ v: 3, alg: 'senderkey-v3', senderKeyId: b64(randomBytes(16)), iteration: 0, iv: b64(randomBytes(12)), ct: b64(randomBytes(272)), sig: b64(randomBytes(64)) });
         assert.deepStrictEqual(await bob.decryptIncoming(roomId, 999, fake, 1), { ok: false, reason: 'no-sender-key' });
         assert.deepStrictEqual(await bob.decryptIncoming(roomId, 999, 'not json', 1), { ok: false, reason: 'bad-envelope' });
     });
@@ -475,13 +510,16 @@ async function main() {
 
     // ===================== Совместимость с историей =====================
 
-    await test('legacy v1 envelope (old format, assembled by hand) still decrypts as text', async () => {
+    await test('legacy v1 envelope (old format, assembled by hand) is a bad envelope: the senderkey-v1 branch is gone, nothing written, chain stays usable', async () => {
         const ctx = await setupPair();
         await connectPair(ctx);
         const v1 = await legacyEncryptV1(ctx.alice._storage, ctx.roomId, 1, 'старое сообщение');
         assert.strictEqual(JSON.parse(v1).alg, 'senderkey-v1');
-        assert.deepStrictEqual(await ctx.bob.decryptIncoming(ctx.roomId, 1, v1, 1), { ok: true, text: 'старое сообщение' });
-        assert.deepStrictEqual(await ctx.alice.decryptIncoming(ctx.roomId, 1, v1, 1), { ok: true, text: 'старое сообщение' });
+        // Конвертов прежнего формата нет (R0): ветка senderkey-v1 удалена целиком.
+        assert.deepStrictEqual(await ctx.bob.decryptIncoming(ctx.roomId, 1, v1, '1000001'), { ok: false, reason: 'bad-envelope' });
+        assert.deepStrictEqual(await ctx.alice.decryptIncoming(ctx.roomId, 1, v1, '1000001'), { ok: false, reason: 'bad-envelope' });
+        assert.deepStrictEqual(await ctx.bob.decryptIncoming(ctx.roomId, null, v1, '1000001'), { ok: false, reason: 'bad-envelope' }, 'и без подсказки отправителя');
+        assert.deepStrictEqual(await ctx.bob._storage.keys('edit:'), [], 'отказ ничего не записал в записи о версиях');
         // v1 и v2 живут на одной цепочке: следующий v2 идёт со следующей итерации.
         const v2 = await ctx.alice.encryptOutgoing(ctx.roomId, 'новое');
         assert.strictEqual(JSON.parse(v2).iteration, 1);
@@ -542,17 +580,24 @@ async function main() {
         assert.ok(await getStored(alice, 'spkOld:' + legacyA.spkId));
         assert.ok(server._pqPrekeys.get(1) && server._pqPrekeys.get(2), 'PQ-prekey загружены при миграции');
 
-        assert.strictEqual((await bob.decryptIncoming(roomId, 1, history1, 1)).text, 'история 1');
-        assert.strictEqual((await bob.decryptIncoming(roomId, 1, history2, 2)).text, 'история 2');
-        assert.strictEqual((await alice.decryptIncoming(roomId, 1, history1, 1)).text, 'история 1');
+        // Конвертов прежнего формата нет (R0): ветка senderkey-v1 удалена, такой конверт не читается.
+        assert.deepStrictEqual(await bob.decryptIncoming(roomId, 1, history1, '1000001'), { ok: false, reason: 'bad-envelope' });
+        assert.deepStrictEqual(await bob.decryptIncoming(roomId, 1, history2, '1000002'), { ok: false, reason: 'bad-envelope' });
+        assert.deepStrictEqual(await alice.decryptIncoming(roomId, 1, history1, '1000001'), { ok: false, reason: 'bad-envelope' });
 
-        // Ключ переразослан по новому каналу; у Боба он уже был — просто подтверждение.
+        // Ключ Алисы с идентификатором, не выведенным из отправителя (создан до
+        // sealed sender), получатели не примут: ensureRoomSession меняет его
+        // (ротация 'upgrade') и рассылает новый по новому каналу.
+        const staleKeyId = own.senderKeyId;
         await alice.ensureRoomSession(11, roomId, [{ id: 1 }, { id: 2 }]);
+        const migrated = await getStored(alice, 'senderKey:' + roomId + ':1');
+        assert.notStrictEqual(migrated.senderKeyId, staleKeyId, 'ключ с невыведенным идентификатором заменён');
+        assert.strictEqual(migrated.senderKeyId, await E2EE._internal.deriveSenderKeyId(roomId, 1, migrated.signingPublicKey));
+        assert.ok(await getStored(alice, 'skIndex:' + roomId + ':' + staleKeyId), 'прежний ключ остаётся в индексе отправителей: свои старые сообщения читаются');
         const synced = await bob.syncKeyShares(22, roomId);
         assert.strictEqual(synced.applied, 1);
         const fresh = await alice.encryptOutgoing(roomId, 'после миграции');
-        assert.strictEqual((await bob.decryptIncoming(roomId, 1, fresh, 3)).text, 'после миграции');
-        assert.strictEqual((await bob.decryptIncoming(roomId, 1, history1, 1)).text, 'история 1');
+        assert.strictEqual((await bob.decryptIncoming(roomId, null, fresh, 3)).text, 'после миграции');
     });
 
     // ===================== Неизвлекаемые ключи =====================
@@ -583,7 +628,9 @@ async function main() {
         assert.strictEqual(env.v, 2);
         assert.strictEqual(env.init.type, 'x3dh-init');
         assert.strictEqual(unb64(env.init.pqCiphertext).length, 1088);
-        assert.strictEqual(env.init.usedPqPrekeyId, ctx.server._pqPrekeys.get(2).key_id);
+        // Пока у Bob есть одноразовые PQ-prekey, Alice берёт один из них, а не запасной.
+        assert.strictEqual(env.init.pqOneTime, true);
+        assert.notStrictEqual(env.init.usedPqPrekeyId, ctx.server._pqPrekeys.get(2).key_id);
         const aliceIdentity = await getStored(ctx.alice, 'identity');
         assert.strictEqual(env.init.senderIdentitySignPub, aliceIdentity.signPub);
         assert.strictEqual(env.init.senderIdentityDhPub, aliceIdentity.dhPub);
@@ -646,6 +693,8 @@ async function main() {
 
     await test('PQXDH: forged PQ-prekey signature in bundle is refused', async () => {
         const ctx = await setupPair();
+        // Запасной (last-resort) ключ используется, когда одноразовых нет.
+        ctx.server.evil.stripPqOneTime(2);
         const t = ctx.server.transportFor(1);
         const realGetBundle = t.getBundle;
         t.getBundle = async (id) => {
@@ -759,9 +808,9 @@ async function main() {
     await test('malicious server: forged x3dh-init under a foreign identity is rejected', async () => {
         const ctx = await setupPair();
         // Клиент атакующего выдаёт себя за Alice (userId 1) со своими ключами.
-        const mallory = E2EE.createClient({
+        const mallory = withAutoMessageIds(E2EE.createClient({
             userId: 1, storage: new E2EE.MemoryStorage(), transport: ctx.server.shadowTransportFor(1), kem: primaryKem,
-        });
+        }));
         await mallory.init();
         await mallory.ensureRoomSession(11, ctx.roomId, ctx.parts);
         const r1 = await ctx.bob.syncKeyShares(22, ctx.roomId);
@@ -814,21 +863,25 @@ async function main() {
     await test('replay: same envelope under another messageId → "replay"; edit of the same message is fine', async () => {
         const ctx = await setupPair();
         await connectPair(ctx);
-        const id1 = ctx.server.postMessage(ctx.roomId, 1, await ctx.alice.encryptOutgoing(ctx.roomId, 'оригинал'));
+        // Клиент выбирает id до шифрования (mid внутри содержимого), сервер кладёт под ним.
+        const id1 = ctx.server.newMessageId();
+        ctx.server.postMessage(ctx.roomId, 1, await ctx.alice.raw.encryptOutgoing(ctx.roomId, 'оригинал', { messageId: id1 }), id1);
         const text1 = ctx.server.getMessage(id1).text;
-        assert.strictEqual((await ctx.bob.decryptIncoming(ctx.roomId, 1, text1, id1)).text, 'оригинал');
+        assert.strictEqual((await ctx.bob.raw.decryptIncoming(ctx.roomId, 1, text1, id1)).text, 'оригинал');
 
         const id2 = ctx.server.evil.replayMessage(id1);
-        assert.deepStrictEqual(await ctx.bob.decryptIncoming(ctx.roomId, 1, ctx.server.getMessage(id2).text, id2), { ok: false, reason: 'replay' });
-        assert.deepStrictEqual(await ctx.alice.decryptIncoming(ctx.roomId, 1, text1, id1), { ok: true, text: 'оригинал' });
-        assert.deepStrictEqual(await ctx.alice.decryptIncoming(ctx.roomId, 1, text1, id2), { ok: false, reason: 'replay' });
-        assert.strictEqual((await ctx.bob.decryptIncoming(ctx.roomId, 1, text1, id1)).text, 'оригинал', 'повторный показ истории — не повтор');
+        assert.deepStrictEqual(await ctx.bob.raw.decryptIncoming(ctx.roomId, 1, ctx.server.getMessage(id2).text, id2), { ok: false, reason: 'replay' });
+        assert.strictEqual((await ctx.alice.raw.decryptIncoming(ctx.roomId, 1, text1, id1)).text, 'оригинал');
+        assert.deepStrictEqual(await ctx.alice.raw.decryptIncoming(ctx.roomId, 1, text1, id2), { ok: false, reason: 'replay' });
+        assert.strictEqual((await ctx.bob.raw.decryptIncoming(ctx.roomId, 1, text1, id1)).text, 'оригинал', 'повторный показ истории — не повтор');
 
-        ctx.server.editMessage(id1, await ctx.alice.encryptOutgoing(ctx.roomId, 'исправлено'));
+        ctx.server.editMessage(id1, await ctx.alice.raw.encryptOutgoing(ctx.roomId, 'исправлено', { messageId: id1, edit: true }));
         const edited = ctx.server.getMessage(id1).text;
-        assert.strictEqual((await ctx.bob.decryptIncoming(ctx.roomId, 1, edited, id1)).text, 'исправлено');
-        assert.strictEqual((await ctx.bob.decryptIncoming(ctx.roomId, 1, edited, id2)).reason, 'replay');
-        assert.strictEqual((await ctx.bob.decryptIncoming(ctx.roomId, 1, edited, String(id1))).text, 'исправлено', 'messageId сравнивается как строка');
+        const shown = await ctx.bob.raw.decryptIncoming(ctx.roomId, 1, edited, id1);
+        assert.strictEqual(shown.text, 'исправлено');
+        assert.strictEqual(shown.edit, true);
+        assert.strictEqual((await ctx.bob.raw.decryptIncoming(ctx.roomId, 1, edited, id2)).reason, 'replay');
+        assert.strictEqual((await ctx.bob.raw.decryptIncoming(ctx.roomId, 1, edited, Number(id1))).text, 'исправлено', 'messageId сравнивается как строка');
     });
 
     // ===================== Паддинг и лимиты =====================
@@ -837,12 +890,14 @@ async function main() {
         const ctx = await setupPair();
         await connectPair(ctx);
         const short = await ctx.alice.encryptOutgoing(ctx.roomId, 'x');
-        const long = await ctx.alice.encryptOutgoing(ctx.roomId, 'y'.repeat(200));
+        // mid и ts лежат внутри шифротекста и занимают часть минимального блока в 256 байт:
+        // текст до ~180 символов по-прежнему даёт конверт той же длины, что и один символ.
+        const long = await ctx.alice.encryptOutgoing(ctx.roomId, 'y'.repeat(150));
         assert.strictEqual(short.length, long.length);
         assert.strictEqual(unb64(JSON.parse(short).ct).length, 256 + 16);
         const longer = await ctx.alice.encryptOutgoing(ctx.roomId, 'z'.repeat(400));
         assert.ok(longer.length > long.length);
-        assert.strictEqual((await ctx.bob.decryptIncoming(ctx.roomId, 1, long, 2)).text, 'y'.repeat(200));
+        assert.strictEqual((await ctx.bob.decryptIncoming(ctx.roomId, 1, long, 2)).text, 'y'.repeat(150));
         const { padmeLength } = E2EE._internal;
         assert.strictEqual(padmeLength(8021), 8192);
         assert.strictEqual(padmeLength(5 * 1024 * 1024), 5 * 1024 * 1024);
@@ -908,10 +963,10 @@ async function main() {
         });
         assert.ok(!env.includes('photo.png') && !env.includes(enc.key));
         const res = await ctx.bob.decryptIncoming(ctx.roomId, 1, env, 9);
-        assert.deepStrictEqual(res, {
-            ok: true, text: 'подпись',
-            file: { mime: 'image/png', name: 'photo.png', size: 12345, key: enc.key, iv: enc.iv },
-        });
+        assert.strictEqual(res.ok, true);
+        assert.strictEqual(res.text, 'подпись');
+        assert.deepStrictEqual(res.file, { mime: 'image/png', name: 'photo.png', size: 12345, key: enc.key, iv: enc.iv });
+        assert.strictEqual(res.edit, false, 'у файла правки нет');
         const plain = await ctx.bob.decryptFile(enc.ciphertext, res.file.key, res.file.iv, res.file.size);
         assert.ok(Buffer.from(plain).equals(Buffer.from(data)));
         const noCaption = await ctx.alice.encryptOutgoing(ctx.roomId, { type: 'file', mime: 'a/b', name: '', size: 1, key: enc.key, iv: enc.iv });
@@ -975,7 +1030,8 @@ async function main() {
         assert.strictEqual((await bob.decryptIncoming(roomId, 1, late, 2)).text, 'без Кэрол');
         const carolRes = await carol.decryptIncoming(roomId, 1, late, 2);
         assert.strictEqual(carolRes.ok, false);
-        assert.strictEqual(carolRes.reason, 'stale-sender-key');
+        // Нового ключа у Кэрол нет и в индексе отправителей: ей неизвестен сам keyId.
+        assert.strictEqual(carolRes.reason, 'no-sender-key');
         // Боб не открывал это сообщение до автоматической ротации — оно всё
         // равно читается по сохранённой позиции архивной цепочки.
         assert.strictEqual((await bob.decryptIncoming(roomId, 1, early, 1)).text, 'все трое', 'история после ротации читается');
@@ -1017,6 +1073,11 @@ async function main() {
         await ctx.bob.init();
         assert.notStrictEqual(ctx.server._signedPrekeys.get(2).key_id, oldSpk, 'SPK ротирован');
         assert.notStrictEqual(ctx.server._pqPrekeys.get(2).key_id, oldPq, 'PQ-prekey ротирован');
+        assert.strictEqual((await ctx.bob.syncKeyShares(22, ctx.roomId)).applied, 1);
+        // Через 8 дней ключ комнаты Alice просрочен: перед отправкой его меняет плановая
+        // ротация в ensureRoomSession, ключ уходит Бобу по новой сессии на свежих prekey.
+        const rotation = await ctx.alice.ensureRoomSession(11, ctx.roomId, ctx.parts);
+        assert.strictEqual(rotation.rotationReason, 'scheduled');
         assert.strictEqual((await ctx.bob.syncKeyShares(22, ctx.roomId)).applied, 1);
         const ct = await ctx.alice.encryptOutgoing(ctx.roomId, 'через неделю');
         assert.strictEqual((await ctx.bob.decryptIncoming(ctx.roomId, 1, ct, 1)).text, 'через неделю');
@@ -1122,6 +1183,7 @@ async function main() {
         const name = 'senderKey:' + ctx.roomId + ':1';
         const state = await getStored(ctx.alice, name);
         state.nextIteration += E2EE._internal.MAX_SKIP + 10;
+        state.startIteration = state.nextIteration; // иначе жёсткий порог числа сообщений не даст шифровать
         await ctx.alice._storage.set(name, state);
         const far = await ctx.alice.encryptOutgoing(ctx.roomId, 'далеко');
         assert.deepStrictEqual(await ctx.bob.decryptIncoming(ctx.roomId, 1, far, 1), { ok: false, reason: 'too-far-ahead' });

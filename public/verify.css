@@ -1,0 +1,124 @@
+/* Страница сверки /verify.html. Нарочно отдельный и маленький файл, не таблицы css/
+   приложения: страница должна читаться и проверяться без остального клиента, а
+   правки интерфейса чата не должны её ломать. Тот же строгий монохром, что и у
+   приложения; тема — по системной (prefers-color-scheme). */
+
+:root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --surface: #f6f6f6;
+    --border: #cfcfcf;
+    --text: #0a0a0a;
+    --text-2: #474747;
+    --accent: #0a0a0a;
+    --accent-fg: #ffffff;
+    --focus: #0a0a0a;
+    --font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #0a0a0a;
+        --surface: #151515;
+        --border: #3a3a3a;
+        --text: #fafafa;
+        --text-2: #b3b3b3;
+        --accent: #fafafa;
+        --accent-fg: #0a0a0a;
+        --focus: #fafafa;
+    }
+}
+
+* { box-sizing: border-box; }
+
+html { background: var(--bg); }
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 15px;
+    line-height: 22px;
+}
+
+[hidden] { display: none !important; }
+
+.page {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 24px 16px 48px;
+}
+
+h1 { margin: 0 0 8px; font-size: 24px; line-height: 32px; font-weight: 600; }
+h2 { margin: 0 0 12px; font-size: 17px; line-height: 24px; font-weight: 600; }
+p { margin: 0 0 12px; }
+ol { margin: 0 0 12px; padding-left: 22px; }
+li { margin-bottom: 8px; }
+
+a { color: var(--text); text-underline-offset: 3px; }
+a:focus-visible, button:focus-visible, input:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+}
+
+code, pre, .hashes dd, .results td:nth-child(3) { font-family: var(--font-mono); font-size: 13px; }
+code { padding: 0 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; }
+
+.lead { color: var(--text-2); }
+
+.notice, .card {
+    margin: 0 0 20px;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+}
+
+/* Предупреждение выделено толщиной рамки, а не цветом: монохром, и цвет не единственный носитель смысла. */
+.notice { border-width: 2px; border-color: var(--text); }
+
+.field { margin: 0 0 16px; }
+.field label { display: block; margin-bottom: 6px; font-weight: 600; }
+.hint { margin: 6px 0 0; color: var(--text-2); font-size: 13px; line-height: 18px; }
+
+.btn {
+    min-height: 44px;
+    padding: 0 20px;
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    background: var(--accent);
+    color: var(--accent-fg);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+}
+.btn[disabled] { opacity: 0.55; cursor: progress; }
+
+.status { margin: 12px 0 0; color: var(--text-2); min-height: 22px; }
+.summary { margin: 12px 0 0; padding: 12px; border: 2px solid var(--text); border-radius: 6px; font-weight: 600; }
+
+.hashes { margin: 16px 0 0; }
+.hashes dt { margin-top: 8px; font-weight: 600; }
+.hashes dd { margin: 4px 0 0; word-break: break-all; }
+
+.table-wrap { margin-top: 16px; overflow-x: auto; }
+.results { width: 100%; border-collapse: collapse; }
+.results th, .results td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+.results td:nth-child(3) { word-break: break-all; }
+.results td:nth-child(4) { white-space: nowrap; }
+.results tr.bad td { font-weight: 700; border-bottom: 2px solid var(--text); }
+
+details { margin-top: 16px; }
+summary { cursor: pointer; font-weight: 600; }
+.output { margin: 8px 0 0; padding: 12px; overflow-x: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; white-space: pre; }
+
+@media (max-width: 520px) {
+    .page { padding-top: 16px; }
+    h1 { font-size: 21px; line-height: 28px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+}

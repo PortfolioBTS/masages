@@ -1,0 +1,112 @@
+# Сторож (6.3, roadmap R10): раз в сутки сверяет продакшен с манифестом ПОСЛЕДНЕГО
+# релиза и открывает issue при расхождении. Проверка идёт на раннере GitHub, то
+# есть вне проверяемого сервера: сервер не может подсунуть ей другой проверяющий
+# код. Честные границы: сторож ловит массовую подмену (всем отдают другой код), но
+# не адресную (другой код только отдельным людям), а «релиз вышел, продакшен ещё
+# на прошлой версии» тоже даёт расхождение — отличать по версии в release.json.
+# Подробности и ручная проверка — docs/VERIFY.md, устройство — docs/dev/ci.md.
+#
+# ВЫКЛЮЧЕН ПО УМОЛЧАНИЮ: job выполняется только если в настройках репозитория
+# (Settings → Secrets and variables → Actions → Variables) задана переменная
+# WATCHDOG_URL — адрес продакшена, например https://chat.example.com. Пока её нет,
+# каждый запуск просто пропускается. Это переменная, а не секрет: адрес публичен.
+#
+# Все `uses:` закреплены полным SHA коммита, версия — в комментарии (зачем — в ci.yml).
+name: Watchdog
+
+on:
+  schedule:
+    # Раз в сутки. Минуты нарочно «некруглые»: на ровные часы у GitHub очередь.
+    - cron: '41 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: watchdog
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    # vars.* доступны в if job-а: без WATCHDOG_URL job пропускается целиком.
+    if: ${{ vars.WATCHDOG_URL != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SITE_URL: ${{ vars.WATCHDOG_URL }}
+      REPO: ${{ github.repository }}
+    steps:
+      # Скрипт сверки берётся из ветки по умолчанию, а эталон — из релиза.
+      - name: Получить код
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Установить Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      # Последний релиз — тот, что gh считает latest (не черновик и не пререлиз).
+      - name: Скачать манифест последнего релиза
+        run: |
+          set -euo pipefail
+          mkdir watchdog
+          gh release download --repo "$REPO" --pattern client-manifest.json --pattern release.json --dir watchdog
+      # Манифест из релиза сам может быть подменён в ресурсах Release — проверяем,
+      # что его собрал workflow release.yml этого репозитория.
+      - name: Проверить аттестацию манифеста
+        run: gh attestation verify watchdog/client-manifest.json --repo "$REPO"
+      - name: Сверить продакшен с релизом
+        id: verify
+        run: |
+          set +e
+          node scripts/verify-deployment.js "$SITE_URL" --manifest watchdog/client-manifest.json > watchdog/report.txt
+          code=$?
+          cat watchdog/report.txt
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          exit 0
+      # Код 1 — расхождение: issue (или комментарий в уже открытом).
+      - name: Открыть issue при расхождении
+        if: ${{ steps.verify.outputs.code == '1' }}
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title='Сторож: клиент на продакшене не совпадает с последним релизом'
+          release=$(jq -r '"\(.version) (коммит \(.commit))"' watchdog/release.json)
+          {
+            echo "Сверка продакшена с манифестом релиза $release нашла расхождения."
+            echo
+            echo "Запуск: $RUN_URL"
+            echo
+            echo '```'
+            cat watchdog/report.txt
+            echo '```'
+            echo
+            echo "Что проверить: выкатилась ли уже версия этого релиза (тогда расхождение временное), не менялись ли файлы на хостинге, не вмешивается ли CDN или прокси (docs/VERIFY.md)."
+          } > watchdog/issue.md
+          number=$(gh issue list --repo "$REPO" --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [[ -n "$number" ]]; then
+            gh issue comment "$number" --repo "$REPO" --body-file watchdog/issue.md
+          else
+            gh issue create --repo "$REPO" --title "$title" --body-file watchdog/issue.md
+          fi
+      # Код 2 — проверить не удалось (сайт недоступен, эталон не читается): это тоже
+      # повод посмотреть, поэтому запуск красный, но issue о подмене не создаётся.
+      - name: Пометить запуск, если проверить не удалось
+        if: ${{ steps.verify.outputs.code != '0' && steps.verify.outputs.code != '1' }}
+        env:
+          CODE: ${{ steps.verify.outputs.code }}
+        run: |
+          echo "Сверка не выполнена (код $CODE), см. отчёт выше." >&2
+          exit 1
+      # После issue запуск тоже красный: расхождение не должно выглядеть как «всё хорошо».
+      - name: Пометить запуск, если найдены расхождения
+        if: ${{ steps.verify.outputs.code == '1' }}
+        run: |
+          echo "Найдены расхождения, issue открыт или дополнен." >&2
+          exit 1

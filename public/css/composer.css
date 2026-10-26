@@ -1,0 +1,459 @@
+/* css/composer.css — поле ввода (ответ, подсказки, поиск по чату, статус отправки) и загрузка файлов.
+   Вынесено без изменений из бывшего public/style.css (раздел 11; строки 3064–3513
+   исходника). Файл 6 из 9. Файлы подключаются из index.html подряд, по номерам: этот порядок и есть
+   порядок каскада, переставлять файлы нельзя. */
+
+/* --------------------------------------------------------------------------
+   11. Поле ввода, загрузка файлов.
+   -------------------------------------------------------------------------- */
+
+.message-input-container {
+    flex: none;
+    padding: 12px max(16px, calc((100% - var(--feed-max)) / 2 - 8px)) max(12px, env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+}
+
+.reply-preview {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+    padding: 4px 4px 4px 12px;
+    border-left: 2px solid var(--text);
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    background: var(--surface-2);
+    color: var(--text-2);
+    font-size: 13px;
+    line-height: 20px;
+}
+
+.reply-preview > span,
+.reply-preview > .reply-preview-text {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.reply-preview > .icon {
+    width: 16px;
+    height: 16px;
+    color: var(--text);
+    stroke-width: 2;
+}
+
+.reply-preview .icon-btn {
+    width: var(--control-h-sm);
+    height: var(--control-h-sm);
+    font-size: 14px;
+}
+
+/* Подсказки в чате с ботом: ряд кнопок-тем над полем ввода. Каждая — обычный
+   .chip (button.chip), только крупнее; цвета берутся из токенов, поэтому
+   обе темы работают без отдельных правил. */
+.suggestions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.suggestion {
+    height: 32px;
+    padding: 0 12px;
+    font-size: 13px;
+}
+
+/* Кольцо фокуса — внутри кнопки: у прокручиваемого ряда (телефон, ниже)
+   внешнее кольцо обрезалось бы краем контейнера. */
+.suggestion:focus-visible {
+    outline-offset: -2px;
+}
+
+/* Идёт отправка: кнопка остаётся в порядке фокуса (aria-disabled, не
+   disabled), но выглядит неактивной и не подсвечивается при наведении. */
+.suggestion[aria-disabled="true"] {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.suggestion[aria-disabled="true"]:hover {
+    border-color: var(--border);
+    color: var(--text-2);
+}
+
+/* Телефон и планшет: одна строка с горизонтальной прокруткой без полосы.
+   Затухание у правого края подсказывает, что ряд прокручивается; отступ
+   справа на ту же ширину оставляет последней кнопке место вне затухания. */
+@media (max-width: 768px) {
+    .suggestions {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        padding-right: 24px;
+        scroll-snap-type: x proximity;
+        scrollbar-width: none;
+        overscroll-behavior-x: contain;
+        -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+        mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+    }
+
+    .suggestions::-webkit-scrollbar {
+        display: none;
+    }
+
+    .suggestion {
+        flex: none;
+        scroll-snap-align: start;
+    }
+}
+
+/* Сенсорный экран: цель нажатия не ниже 40 px. */
+@media (pointer: coarse) {
+    .suggestion {
+        height: 40px;
+    }
+}
+
+.input-wrapper {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+}
+
+.input-wrapper input,
+.input-wrapper textarea {
+    flex: 1;
+    min-height: var(--control-h);
+    border-radius: var(--radius);
+    font-size: 15px;
+}
+
+/* Поле сообщения растёт по тексту (autoResizeMessageInput в 14-send.js) до шести строк
+   (6 × line-height 20 px + отступы 18 px + рамка 2 px), дальше прокручивается. */
+.input-wrapper textarea {
+    height: var(--control-h);
+    max-height: 140px;
+    padding-top: 9px;
+    padding-bottom: 9px;
+    line-height: 20px;
+    overflow-y: hidden;
+    resize: none;
+}
+
+/* Отправка — основное действие: заливка акцентом. */
+.input-wrapper #send-btn,
+.input-wrapper .send-btn {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-fg);
+    border-radius: var(--radius);
+}
+
+.input-wrapper #send-btn:hover,
+.input-wrapper .send-btn:hover {
+    background: color-mix(in srgb, var(--accent) 86%, var(--bg));
+}
+
+.input-wrapper #send-btn:disabled,
+.input-wrapper .send-btn:disabled {
+    background: var(--surface-3);
+    border-color: var(--surface-3);
+    color: var(--text-3);
+    opacity: 1;
+}
+
+/* Поиск по загруженным сообщениям открытого чата: панель под шапкой, подсветка через
+   CSS Custom Highlight API (DOM не меняется). Текущее совпадение — инверсия, остальные — заливка. */
+.chat-search {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    flex: none;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+}
+
+.chat-search input {
+    flex: 1 1 200px;
+    min-width: 0;
+    height: 32px;
+}
+
+.chat-search-counter {
+    flex: none;
+    min-width: 72px;
+    color: var(--text-2);
+    font-size: 12px;
+    line-height: 16px;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+.chat-search .icon-btn,
+.chat-search-older {
+    flex: none;
+}
+
+.message.is-search-current {
+    outline: 2px solid var(--text-2);
+    outline-offset: 2px;
+}
+
+::highlight(nyxo-search) {
+    background-color: color-mix(in srgb, var(--text) 28%, transparent);
+    color: var(--text);
+}
+
+::highlight(nyxo-search-current) {
+    background-color: var(--text);
+    color: var(--bg);
+}
+
+/* Узкие экраны: поле на всю ширину, «Искать в более ранних» — отдельной строкой. */
+@media (max-width: 480px) {
+    .chat-search {
+        padding: 8px 12px;
+    }
+
+    .chat-search input {
+        flex-basis: 100%;
+    }
+
+    .chat-search-counter {
+        flex: 1 1 auto;
+    }
+
+    .chat-search-older {
+        flex: 1 1 100%;
+        order: 5;
+    }
+}
+
+/* Состояние шифрования под полем ввода: что защищено, чего не хватает и что делать.
+   Проблема (отправка недоступна или отклонена) выделяется цветом текста и жирностью,
+   а не цветом-сигналом: палитра монохромная. */
+.composer-status {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    min-height: 20px;
+    margin-top: 8px;
+    color: var(--text-2);
+    font-size: 12px;
+    line-height: 16px;
+}
+
+.composer-status.is-problem {
+    color: var(--text);
+}
+
+.composer-status-icon {
+    display: inline-flex;
+    flex: none;
+}
+
+.composer-status-text {
+    flex: 1 1 200px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.composer-status .btn {
+    flex: none;
+}
+
+/* Статус загрузки: подпись + полоса прогресса (ширина — el.style.width). */
+.upload-status {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    color: var(--text-2);
+    font-size: 12px;
+    line-height: 16px;
+}
+
+.upload-status > .icon {
+    width: 16px;
+    height: 16px;
+    stroke-width: 2;
+    color: var(--text);
+}
+
+.upload-status > span,
+.upload-status > .upload-label {
+    min-width: 0;
+    max-width: 50%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.upload-percent {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+}
+
+.progress {
+    position: relative;
+    flex: 1;
+    min-width: 48px;
+    height: 4px;
+    overflow: hidden;
+    border-radius: 2px;
+    background: var(--surface-3);
+}
+
+.progress-bar {
+    width: 0;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--text);
+    transition: width var(--dur-fast) linear;
+}
+
+/* Прогресс без процента (подготовка, шифрование) — бегущая полоса. */
+.upload-status .progress:not([aria-valuenow]) .progress-bar,
+.progress.is-indeterminate .progress-bar {
+    width: 32% !important;
+    animation: progress-slide 1.1s var(--ease) infinite;
+}
+
+@keyframes progress-slide {
+    from { transform: translateX(-100%); }
+    to { transform: translateX(320%); }
+}
+
+.upload-status .icon-btn {
+    width: 24px;
+    height: 24px;
+    margin: -4px -6px -4px 0;
+}
+
+.upload-status .icon-btn .icon {
+    width: 14px;
+    height: 14px;
+}
+
+/* Очередь файлов к отправке. */
+.send-files-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 240px;
+    margin: 0 0 8px;
+    padding: 0;
+    overflow-y: auto;
+    list-style: none;
+}
+
+.send-file-row {
+    display: flex;
+    /* Строки не сжимаются: при многих файлах (или длинном пояснении об отказе
+       на узком экране) список прокручивается, а не накладывает строки друг на друга. */
+    flex: none;
+    align-items: center;
+    gap: 12px;
+    min-height: 48px;
+    padding: 4px 4px 4px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    font-size: 13px;
+    line-height: 20px;
+}
+
+.send-file-row > .icon {
+    width: 20px;
+    height: 20px;
+    color: var(--text-2);
+}
+
+.send-file-thumb {
+    flex: none;
+    width: 40px;
+    height: 40px;
+    margin-left: -8px;
+    border-radius: 4px;
+    object-fit: cover;
+    background: var(--surface-3);
+}
+
+.send-file-name {
+    flex: 1;
+    min-width: 0;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.send-file-size {
+    flex: none;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-3);
+    font-variant-numeric: tabular-nums;
+}
+
+.send-file-row > div:not([class]) {
+    flex: 1;
+    min-width: 0;
+}
+
+.send-file-row > div:not([class]) > div {
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.send-file-row small {
+    display: block;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-3);
+    font-variant-numeric: tabular-nums;
+}
+
+.send-file-row .icon-btn {
+    width: var(--control-h-sm);
+    height: var(--control-h-sm);
+}
+
+/* Файл не пройдёт (размер, тип): пунктир и полный цвет предупреждения. */
+.send-file-row.muted {
+    border-style: dashed;
+    border-color: var(--border-strong);
+    background: transparent;
+}
+
+.send-file-row.muted > .icon {
+    color: var(--text);
+}
+
+.send-file-row.muted > div:not([class]) > div {
+    color: var(--text-2);
+    text-decoration: line-through;
+}
+
+.send-file-row.muted small.field-hint {
+    color: var(--text-2);
+}
+
+.send-file-row.is-error {
+    border-style: dashed;
+    border-color: var(--text);
+}
+
+

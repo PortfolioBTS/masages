@@ -235,82 +235,85 @@ async function main() {
 
     await test('default difficulty is 18 and challenge has the documented shape', () => {
         assert.deepStrictEqual(defaultWarnings, []);
-        const { token, difficulty } = pow.createChallenge('register');
+        const { token, difficulty } = pow.createChallenge('register-anon');
         assert.strictEqual(difficulty, 18);
         assert.match(token, /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/);
         const payload = decodePayload(token);
         assert.deepStrictEqual(Object.keys(payload).sort(), ['d', 'e', 'p', 's', 'v']);
-        assert.strictEqual(payload.p, 'register');
+        assert.strictEqual(payload.p, 'register-anon');
         assert.strictEqual(payload.d, 18);
         assert.strictEqual(Buffer.from(payload.s, 'base64url').length, 16);
         const ttl = payload.e - Date.now();
         assert.ok(ttl > 4.9 * 60 * 1000 && ttl <= 5 * 60 * 1000, 'expires in 5 minutes');
-        assert.notStrictEqual(pow.createChallenge('register').token, token, 'salt makes tokens unique');
+        assert.notStrictEqual(pow.createChallenge('register-anon').token, token, 'salt makes tokens unique');
     });
 
     await test('solve -> verifySolution is true, and the same solution is single-use', () => {
-        for (const purpose of ['register', 'register-anon']) {
-            const { token, difficulty } = pow.createChallenge(purpose);
-            const nonce = worker.solve(token, difficulty);
-            assert.strictEqual(pow.verifySolution({ token, nonce }, purpose), true);
-            assert.strictEqual(pow.verifySolution({ token, nonce }, purpose), false, 'replay must fail');
-        }
+        const { token, difficulty } = pow.createChallenge('register-anon');
+        const nonce = worker.solve(token, difficulty);
+        assert.strictEqual(pow.verifySolution({ token, nonce }, 'register-anon'), true);
+        assert.strictEqual(pow.verifySolution({ token, nonce }, 'register-anon'), false, 'replay must fail');
     });
 
     await test('a wrong nonce does not burn the challenge', () => {
-        const { token, difficulty } = pow.createChallenge('register');
+        const { token, difficulty } = pow.createChallenge('register-anon');
         const nonce = worker.solve(token, difficulty);
         const bad = findNonceWithExactBits(token, 0);
-        assert.strictEqual(pow.verifySolution({ token, nonce: bad }, 'register'), false);
-        assert.strictEqual(pow.verifySolution({ token, nonce }, 'register'), true);
+        assert.strictEqual(pow.verifySolution({ token, nonce: bad }, 'register-anon'), false);
+        assert.strictEqual(pow.verifySolution({ token, nonce }, 'register-anon'), true);
     });
 
-    await test('purpose mismatch and unknown purpose are rejected', () => {
-        const { token, difficulty } = pow.createChallenge('register');
+    await test('purpose mismatch and unknown purpose are rejected; the removed purpose register too', () => {
+        const { token, difficulty } = pow.createChallenge('register-anon');
         const nonce = worker.solve(token, difficulty);
-        assert.strictEqual(pow.verifySolution({ token, nonce }, 'register-anon'), false);
+        // register — цель регистрации постоянного аккаунта, её больше нет.
+        assert.strictEqual(pow.verifySolution({ token, nonce }, 'register'), false);
         assert.strictEqual(pow.verifySolution({ token, nonce }, 'login'), false);
         assert.strictEqual(pow.verifySolution({ token, nonce }, undefined), false);
+        assert.throws(() => pow.createChallenge('register'));
         assert.throws(() => pow.createChallenge('login'));
         assert.throws(() => pow.createChallenge(undefined));
-        assert.throws(() => pow.createChallenge({ toString: () => 'register' }));
+        assert.throws(() => pow.createChallenge({ toString: () => 'register-anon' }));
         // Отказ по purpose не должен был пометить токен использованным.
-        assert.strictEqual(pow.verifySolution({ token, nonce }, 'register'), true);
+        assert.strictEqual(pow.verifySolution({ token, nonce }, 'register-anon'), true);
     });
 
     await test('expired challenge is rejected (injected clock)', () => {
         const t0 = Date.now();
         try {
             pow._setNowForTests(() => t0);
-            const a = pow.createChallenge('register');
-            const b = pow.createChallenge('register');
+            const a = pow.createChallenge('register-anon');
+            const b = pow.createChallenge('register-anon');
             const nonceA = worker.solve(a.token, a.difficulty);
             const nonceB = worker.solve(b.token, b.difficulty);
             pow._setNowForTests(() => t0 + 5 * 60 * 1000 - 1);
-            assert.strictEqual(pow.verifySolution({ token: a.token, nonce: nonceA }, 'register'), true, 'valid until the last ms');
+            assert.strictEqual(pow.verifySolution({ token: a.token, nonce: nonceA }, 'register-anon'), true, 'valid until the last ms');
             pow._setNowForTests(() => t0 + 5 * 60 * 1000);
-            assert.strictEqual(pow.verifySolution({ token: b.token, nonce: nonceB }, 'register'), false, 'expired');
+            assert.strictEqual(pow.verifySolution({ token: b.token, nonce: nonceB }, 'register-anon'), false, 'expired');
         } finally {
             pow._setNowForTests();
         }
     });
 
     await test('forged tokens are rejected: edited difficulty/purpose, broken HMAC, non-canonical signature, other process', () => {
-        const { token } = pow.createChallenge('register');
+        const { token } = pow.createChallenge('register-anon');
         const [payloadB64, sig] = token.split('.');
         const payload = decodePayload(token);
 
         // Понизили сложность в payload, подпись старая. nonce подобран под d=8,
         // чтобы отказ был именно из-за подписи, а не из-за хэша.
         const easier = `${encodePayload({ ...payload, d: 8 })}.${sig}`;
-        assert.strictEqual(pow.verifySolution({ token: easier, nonce: worker.solve(easier, 8) }, 'register'), false);
+        assert.strictEqual(pow.verifySolution({ token: easier, nonce: worker.solve(easier, 8) }, 'register-anon'), false);
 
-        const otherPurpose = `${encodePayload({ ...payload, p: 'register-anon' })}.${sig}`;
-        assert.strictEqual(pow.verifySolution({ token: otherPurpose, nonce: worker.solve(otherPurpose, 18) }, 'register-anon'), false);
+        // Другая цель или соль в payload, подпись старая.
+        const otherPurpose = `${encodePayload({ ...payload, p: 'register' })}.${sig}`;
+        assert.strictEqual(pow.verifySolution({ token: otherPurpose, nonce: worker.solve(otherPurpose, 18) }, 'register'), false);
+        const otherSalt = `${encodePayload({ ...payload, s: 'A'.repeat(22) })}.${sig}`;
+        assert.strictEqual(pow.verifySolution({ token: otherSalt, nonce: worker.solve(otherSalt, 18) }, 'register-anon'), false);
 
         const flipped = sig[0] === 'A' ? 'B' + sig.slice(1) : 'A' + sig.slice(1);
         const brokenHmac = `${payloadB64}.${flipped}`;
-        assert.strictEqual(pow.verifySolution({ token: brokenHmac, nonce: worker.solve(brokenHmac, 18) }, 'register'), false);
+        assert.strictEqual(pow.verifySolution({ token: brokenHmac, nonce: worker.solve(brokenHmac, 18) }, 'register-anon'), false);
 
         // Те же 32 байта подписи другой строкой (младшие неиспользуемые биты
         // последнего символа): решение нельзя "переупаковать" в новый токен.
@@ -319,59 +322,59 @@ async function main() {
         const altSig = sig.slice(0, -1) + alphabet[lastIndex ^ 1];
         assert.deepStrictEqual(Buffer.from(altSig, 'base64url'), Buffer.from(sig, 'base64url'), 'same bytes');
         const aliased = `${payloadB64}.${altSig}`;
-        assert.strictEqual(pow.verifySolution({ token: aliased, nonce: worker.solve(aliased, 18) }, 'register'), false);
+        assert.strictEqual(pow.verifySolution({ token: aliased, nonce: worker.solve(aliased, 18) }, 'register-anon'), false);
 
         // Токен другого процесса (другой случайный ключ HMAC).
         const { mod: otherPow } = loadFresh(POW_PATH, { POW_DIFFICULTY: undefined });
-        const foreign = otherPow.createChallenge('register');
-        assert.strictEqual(pow.verifySolution({ token: foreign.token, nonce: worker.solve(foreign.token, 18) }, 'register'), false);
+        const foreign = otherPow.createChallenge('register-anon');
+        assert.strictEqual(pow.verifySolution({ token: foreign.token, nonce: worker.solve(foreign.token, 18) }, 'register-anon'), false);
 
         // Мусор вместо токена.
         for (const bad of ['', '.', 'abc', `${token}.x`, `.${sig}`, `${payloadB64}.`, 'x'.repeat(600), `${payloadB64}!.${sig}`]) {
-            assert.strictEqual(pow.verifySolution({ token: bad, nonce: '1' }, 'register'), false, JSON.stringify(bad.slice(0, 20)));
+            assert.strictEqual(pow.verifySolution({ token: bad, nonce: '1' }, 'register-anon'), false, JSON.stringify(bad.slice(0, 20)));
         }
         // Оригинал при этом по-прежнему решаем.
-        assert.strictEqual(pow.verifySolution({ token, nonce: worker.solve(token, 18) }, 'register'), true);
+        assert.strictEqual(pow.verifySolution({ token, nonce: worker.solve(token, 18) }, 'register-anon'), true);
     });
 
     await test('malformed solutions and nonces are rejected', () => {
-        const { token, difficulty } = pow.createChallenge('register');
+        const { token, difficulty } = pow.createChallenge('register-anon');
         const nonce = worker.solve(token, difficulty);
         for (const bad of [null, undefined, 'x', 42, [token, nonce], { token }, { nonce }, { token: 1, nonce }]) {
-            assert.strictEqual(pow.verifySolution(bad, 'register'), false);
+            assert.strictEqual(pow.verifySolution(bad, 'register-anon'), false);
         }
         const badNonces = [
             Number(nonce), '', ' 1', '1 ', '-1', '+1', '1e5', '0x1f', '12a', '١٢', '1.0',
             '1'.repeat(21), '0'.repeat(21)
         ];
         for (const bad of badNonces) {
-            assert.strictEqual(pow.verifySolution({ token, nonce: bad }, 'register'), false, JSON.stringify(bad));
+            assert.strictEqual(pow.verifySolution({ token, nonce: bad }, 'register-anon'), false, JSON.stringify(bad));
         }
         // Ведущие нули допустимы (это всё ещё цифры, ≤ 20 символов): решение,
         // найденное с ними, принимается.
-        assert.strictEqual(pow.verifySolution({ token, nonce }, 'register'), true);
+        assert.strictEqual(pow.verifySolution({ token, nonce }, 'register-anon'), true);
     });
 
     await test('insufficient leading zero bits (near miss d-1) is rejected', () => {
         const { mod: easyPow } = loadFresh(POW_PATH, { POW_DIFFICULTY: '12' });
-        const { token, difficulty } = easyPow.createChallenge('register');
+        const { token, difficulty } = easyPow.createChallenge('register-anon');
         assert.strictEqual(difficulty, 12);
         const nearMiss = findNonceWithExactBits(token, 11);
         assert.strictEqual(leadingZeroBits(sha256Hex(`${token}:${nearMiss}`)), 11);
-        assert.strictEqual(easyPow.verifySolution({ token, nonce: nearMiss }, 'register'), false);
+        assert.strictEqual(easyPow.verifySolution({ token, nonce: nearMiss }, 'register-anon'), false);
         const exact = findNonceWithExactBits(token, 12);
-        assert.strictEqual(easyPow.verifySolution({ token, nonce: exact }, 'register'), true);
+        assert.strictEqual(easyPow.verifySolution({ token, nonce: exact }, 'register-anon'), true);
     });
 
     await test('POW_DIFFICULTY: accepted range 8..28, anything else falls back to 18 with a warning', () => {
         for (const value of ['8', '20', '28']) {
             const { mod, warnings } = loadFresh(POW_PATH, { POW_DIFFICULTY: value });
-            assert.strictEqual(mod.createChallenge('register').difficulty, Number(value));
+            assert.strictEqual(mod.createChallenge('register-anon').difficulty, Number(value));
             assert.deepStrictEqual(warnings, []);
         }
         for (const value of ['7', '29', '18.5', 'abc', '-3', '1e1', '0x10', ' 20', '020']) {
             const { mod, warnings } = loadFresh(POW_PATH, { POW_DIFFICULTY: value });
-            assert.strictEqual(mod.createChallenge('register').difficulty, 18, value);
+            assert.strictEqual(mod.createChallenge('register-anon').difficulty, 18, value);
             assert.strictEqual(warnings.length, 1, value);
         }
     });
@@ -397,10 +400,10 @@ async function main() {
         let hashes = 0;
         const started = process.hrtime.bigint();
         for (let i = 0; i < runs; i++) {
-            const { token, difficulty } = pow.createChallenge('register');
+            const { token, difficulty } = pow.createChallenge('register-anon');
             const nonce = worker.solve(token, difficulty);
             hashes += Number(nonce) + 1;
-            assert.strictEqual(pow.verifySolution({ token, nonce }, 'register'), true);
+            assert.strictEqual(pow.verifySolution({ token, nonce }, 'register-anon'), true);
         }
         const seconds = Number(process.hrtime.bigint() - started) / 1e9;
         console.log(`        info: d=18, ${runs} решений, в среднем ${(seconds / runs * 1000).toFixed(0)} мс, ` +

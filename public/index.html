@@ -4,64 +4,79 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="theme-color" content="#000000">
-    <title>Nyxo — Мессенджер</title>
+    <title>Nyxo — переписка, которой не нужно знать, кто вы</title>
     <link rel="icon" type="image/svg+xml" href="icons/favicon.svg">
     <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
     <link rel="manifest" href="manifest.webmanifest">
-    <script src="theme.js"></script>
-    <script src="icons.js"></script>
-    <link rel="stylesheet" href="style.css">
+    <script src="theme.js" integrity="sha384-T1UMrJ7wNeCotEPdTY8WrewF5BfXH32Af6nBpCERowFUsATGa+iVI8vq2JwkSywQ"></script>
+    <script src="icons.js" integrity="sha384-Y1YHD/B0RxyQDbpBNHVzRNYsP1ps2Tiujel4NwxbUFCWOf0c47syPEGDWKuWM6Gq"></script>
+    <!-- Стили разбиты на части; порядок подключения = порядок каскада, переставлять нельзя. -->
+    <link rel="stylesheet" href="css/tokens.css" integrity="sha384-UTiycNr9EgbUPdUprE47uHWmAUMgxRPxv+pK/4kRLImbiUJmgWXxIzSQqM6F1Dqh">
+    <link rel="stylesheet" href="css/controls.css" integrity="sha384-znDFlBd/IDRgTkQbflCFqMChqAHDgDuVPIrbVgeugrahXsljG3xRffELfKDsfbIX">
+    <link rel="stylesheet" href="css/auth.css" integrity="sha384-PiMCIhU6aYgSHkoTczbWkJI1gxf35vEUgKpJ0bpmduVrdYPlNjmA/gY0DEji9ZWY">
+    <link rel="stylesheet" href="css/app-shell.css" integrity="sha384-pERlehZoKebLSb/igJzUZAnz1smG8rICO1oiqEWVhjLRJx/4DKbXznT9ZE/HgnzX">
+    <link rel="stylesheet" href="css/messages.css" integrity="sha384-kzsZl8BzJ1Rka26a+gHBY06uyEJfEtKSAg3v+peF/pSVZRakalS6o0kpO6NY3lfN">
+    <link rel="stylesheet" href="css/composer.css" integrity="sha384-HmBXm4iuvIQaw6vXNiLeq9CMPbwG/g2vL+jTXwFnApIDVg1WwLpGYKU+tBTyNG+5">
+    <link rel="stylesheet" href="css/modals.css" integrity="sha384-8I2kPQjcrw+DBSVSOB1VcHb6HjqSFQoSZupoHipWtYs9i/KH+x2d2u0GU2QpGqAp">
+    <link rel="stylesheet" href="css/popups.css" integrity="sha384-2uuqAvPdNddpQsYDGq2ndXEuc7O3RRPPFCDKikXUJ7uy35JNVhp8v/iBv7HF3v+p">
+    <link rel="stylesheet" href="css/responsive.css" integrity="sha384-dTUQTcS49/kT0UOwvtBEQDw4CLTXWM18ca9/9tVzlX1Rt7e3iXT6K0vkRw+vV0U2">
 </head>
 <body>
-    <div id="auth-screen" class="auth-screen">
+    <main id="auth-screen" class="auth-screen" aria-labelledby="auth-title">
+        <button id="auth-theme-btn" class="icon-btn auth-theme-toggle" type="button" title="Сменить тему" aria-label="Сменить тему"><svg class="icon" aria-hidden="true"><use href="#i-sun"></use></svg></button>
         <div class="auth-container">
-            <div class="auth-logo">
+            <noscript><p class="auth-noscript">Nyxo работает только с JavaScript. В Tor Browser выберите уровень безопасности «Стандартный» или «Повышенный».</p></noscript>
+            <p id="auth-notice" class="auth-notice hidden" role="status"></p>
+            <header class="auth-hero">
                 <div class="logo-icon" aria-hidden="true"><svg class="icon icon-xl" aria-hidden="true"><use href="#i-brand"></use></svg></div>
-                <h1>Nyxo</h1>
-                <p>Безопасный мессенджер</p>
+                <h1 id="auth-title">Nyxo — переписка, которой не нужно знать, кто вы</h1>
+                <p class="auth-tagline">Без номера. Без почты. Без регистрации.</p>
+            </header>
+
+            <section id="auth-invite" class="auth-invite hidden" aria-label="Приглашение в группу">
+                <label for="auth-invite-input" class="field-label">Ссылка или код приглашения</label>
+                <input type="text" id="auth-invite-input" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="300" aria-describedby="auth-invite-error auth-invite-hint">
+                <p id="auth-invite-error" class="field-error hidden"></p>
+                <p id="auth-invite-hint" class="field-hint">Ссылка вида …/#join=… или код из 26 символов. Код уйдёт на сервер только после создания аккаунта.</p>
+            </section>
+
+            <fieldset id="auth-lifetime" class="lifetime-picker">
+                <legend class="field-label">Сколько хранить аккаунт</legend>
+                <div class="segmented">
+                    <label class="segmented-option"><input type="radio" name="auth-lifetime" value="tab" checked><span>Пока открыта вкладка</span></label>
+                    <label class="segmented-option"><input type="radio" name="auth-lifetime" value="day"><span>1 день</span></label>
+                    <label class="segmented-option"><input type="radio" name="auth-lifetime" value="week"><span>7 дней</span></label>
+                </div>
+                <p class="field-hint">Аккаунт удалится, если не заходить дольше выбранного срока.</p>
+                <p id="auth-lifetime-detail" class="field-hint" aria-live="polite">Удалится через 30 минут после закрытия последней вкладки. Закроете браузер — вход пропадёт сразу.</p>
+                <p id="auth-invite-advice" class="field-hint auth-invite-advice hidden" aria-live="polite"></p>
+            </fieldset>
+
+            <p id="auth-warning" class="auth-warning"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-alert-triangle"></use></svg><span>Если очистить данные браузера или сменить устройство, доступ к аккаунту пропадёт навсегда.</span></p>
+            <p id="auth-progress" class="auth-progress" role="status"></p>
+
+            <div class="auth-actions">
+                <button id="anon-start-btn" class="btn btn-primary btn-block auth-btn" type="button" aria-describedby="auth-lifetime-detail auth-warning"><span>Начать анонимно</span></button>
+                <button id="invite-toggle-btn" class="btn btn-secondary btn-block auth-btn auth-invite-toggle" type="button" aria-expanded="false" aria-controls="auth-invite"><span>У меня есть приглашение</span><svg class="icon icon-sm auth-invite-chevron" aria-hidden="true"><use href="#i-chevron-down"></use></svg></button>
             </div>
-            <div class="auth-tabs" role="tablist">
-                <button class="auth-tab active" data-tab="login" role="tab" aria-selected="true">Вход</button>
-                <button class="auth-tab" data-tab="register" role="tab" aria-selected="false">Регистрация</button>
-            </div>
-            <div id="login-form" class="auth-form active">
-                <div class="form-group">
-                    <label for="login-email">Email</label>
-                    <input type="email" id="login-email" placeholder="Введите email" autocomplete="username" required>
-                </div>
-                <div class="form-group">
-                    <label for="login-password">Пароль</label>
-                    <input type="password" id="login-password" placeholder="Введите пароль" autocomplete="current-password" required>
-                </div>
-                <button id="login-btn" class="auth-btn"><svg class="icon" aria-hidden="true"><use href="#i-log-in"></use></svg><span>Войти</span></button>
-                <div class="auth-divider"><span>или</span></div>
-                <button id="anonymous-login-btn" class="auth-btn anonymous-btn"><svg class="icon" aria-hidden="true"><use href="#i-eye-off"></use></svg><span>Войти в приватном режиме</span></button>
-                <p class="anonymous-hint">Без email и пароля. Аккаунт удалится при выходе или после выбранного срока без активности.</p>
-            </div>
-            <div id="register-form" class="auth-form">
-                <div class="form-group">
-                    <label for="register-username">Имя пользователя</label>
-                    <input type="text" id="register-username" placeholder="Введите имя" autocomplete="nickname" required maxlength="32">
-                </div>
-                <div class="form-group">
-                    <label for="register-email">Email</label>
-                    <input type="email" id="register-email" placeholder="Введите email" autocomplete="email" required>
-                </div>
-                <div class="form-group">
-                    <label for="register-password">Пароль</label>
-                    <input type="password" id="register-password" placeholder="Придумайте пароль (минимум 8 символов)" autocomplete="new-password" required minlength="8">
-                </div>
-                <div class="form-group">
-                    <label for="register-confirm-password">Подтвердите пароль</label>
-                    <input type="password" id="register-confirm-password" placeholder="Повторите пароль" autocomplete="new-password" required>
-                </div>
-                <button id="register-btn" class="auth-btn"><svg class="icon" aria-hidden="true"><use href="#i-user-plus"></use></svg><span>Зарегистрироваться</span></button>
-            </div>
+
+            <ul class="auth-points">
+                <li><svg class="icon" aria-hidden="true"><use href="#i-lock"></use></svg><span>Мы не спрашиваем, кто вы — ни email, ни телефона, ни паролей</span></li>
+                <li><svg class="icon" aria-hidden="true"><use href="#i-shield"></use></svg><span>Сервер не читает переписку в группах — сквозное шифрование</span></li>
+                <li><svg class="icon" aria-hidden="true"><use href="#i-timer"></use></svg><span>Аккаунт временный: когда срок кончается, он и ваши сообщения удаляются</span></li>
+            </ul>
+            <nav class="auth-links" aria-label="Подробнее о Nyxo">
+                <button id="about-open-btn" class="link-btn" type="button" aria-haspopup="dialog">Как это работает</button>
+                <span class="auth-links-sep" aria-hidden="true">·</span>
+                <a class="link-btn" href="/verify.html" target="_blank" rel="noopener noreferrer">Проверка кода</a>
+                <span id="auth-links-sep" class="auth-links-sep hidden" aria-hidden="true">·</span>
+                <button id="onion-open-btn" class="link-btn hidden" type="button" aria-haspopup="dialog">Открыть через Tor (onion)</button>
+            </nav>
         </div>
-    </div>
+    </main>
 
     <div id="app" class="app hidden">
-        <div class="sidebar">
+        <aside class="sidebar" aria-label="Чаты и профиль">
             <div class="sidebar-header">
                 <div class="logo-small"><svg class="icon" aria-hidden="true"><use href="#i-brand"></use></svg><span>Nyxo</span></div>
                 <div class="chat-actions sidebar-actions">
@@ -69,20 +84,28 @@
                     <button id="new-chat-btn" class="icon-btn" type="button" title="Новый чат" aria-label="Новый чат"><svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg></button>
                 </div>
             </div>
-            <div id="anon-note" class="anon-note hidden" role="status">
+            <button id="anon-note" class="anon-note hidden" type="button" aria-haspopup="dialog">
                 <svg class="icon icon-sm" aria-hidden="true"><use href="#i-hourglass"></use></svg>
                 <span id="anon-note-text"></span>
+            </button>
+            <div id="kt-banner" class="banner banner-warning kt-banner hidden" role="alert">
+                <svg class="icon" aria-hidden="true"><use href="#i-alert-triangle"></use></svg>
+                <span id="kt-banner-text" class="banner-text"></span>
+                <div class="banner-actions">
+                    <button id="kt-banner-btn" class="banner-btn btn btn-sm btn-secondary" type="button">Подробнее</button>
+                </div>
             </div>
             <div class="search-container">
-                <input type="text" id="search-input" placeholder="Поиск чатов и сообщений..." aria-label="Поиск чатов и сообщений">
+                <input type="search" id="search-input" placeholder="Поиск чатов" aria-label="Поиск по названиям чатов" aria-controls="chats-list" autocomplete="off">
             </div>
-            <div id="chats-list" class="chats-list"></div>
+            <div id="chats-empty" class="chats-empty hidden" role="status">Ничего не найдено</div>
+            <div id="chats-list" class="chats-list" role="navigation" aria-label="Список чатов"></div>
             <div class="sidebar-footer">
-                <button id="profile-btn" class="footer-btn"><svg class="icon" aria-hidden="true"><use href="#i-user"></use></svg><span>Профиль</span></button>
-                <button id="logout-btn" class="footer-btn"><svg class="icon" aria-hidden="true"><use href="#i-log-out"></use></svg><span>Выйти</span></button>
+                <button id="profile-btn" class="footer-btn" type="button" aria-haspopup="dialog"><svg class="icon" aria-hidden="true"><use href="#i-user"></use></svg><span>Профиль</span></button>
+                <button id="logout-btn" class="footer-btn" type="button" aria-haspopup="dialog"><svg class="icon" aria-hidden="true"><use href="#i-log-out"></use></svg><span>Удалить и выйти</span></button>
             </div>
-        </div>
-        <div class="main-content">
+        </aside>
+        <main class="main-content" hidden>
             <div id="chat-header" class="chat-header hidden">
                 <div class="chat-info">
                     <button id="back-btn" class="icon-btn back-btn" title="Назад к чатам" aria-label="Назад к чатам"><svg class="icon" aria-hidden="true"><use href="#i-arrow-left"></use></svg></button>
@@ -91,9 +114,14 @@
                         <h3 id="chat-name"></h3>
                         <span id="chat-status" class="status"></span>
                         <span id="chat-indicators" class="chat-indicators">
+                            <button id="e2ee-indicator" class="indicator hidden" type="button" title="Участники и ключи" aria-label="Участники и ключи"></button>
                             <span id="expiry-indicator" class="indicator is-on hidden">
                                 <svg class="icon icon-sm" aria-hidden="true"><use href="#i-timer"></use></svg>
                                 <span id="expiry-indicator-text"></span>
+                            </span>
+                            <span id="no-history-indicator" class="indicator is-on hidden" title="История не хранится на этом устройстве" aria-label="История не хранится на этом устройстве">
+                                <svg class="icon icon-sm" aria-hidden="true"><use href="#i-eye-off"></use></svg>
+                                <span>без истории</span>
                             </span>
                             <span id="muted-indicator" class="indicator hidden" title="Без звука" aria-label="Без звука">
                                 <svg class="icon icon-sm" aria-hidden="true"><use href="#i-bell-off"></use></svg>
@@ -102,7 +130,7 @@
                     </div>
                 </div>
                 <div class="chat-actions">
-                    <button id="e2ee-toggle-btn" class="icon-btn hidden" title="Сквозное шифрование" aria-label="Сквозное шифрование" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-lock"></use></svg></button>
+                    <button id="chat-search-btn" class="icon-btn" type="button" title="Поиск по сообщениям" aria-label="Поиск по сообщениям" aria-expanded="false" aria-controls="chat-search"><svg class="icon" aria-hidden="true"><use href="#i-search"></use></svg></button>
                     <button id="members-keys-btn" class="icon-btn hidden" title="Участники и ключи" aria-label="Участники и ключи"><svg class="icon" aria-hidden="true"><use href="#i-key"></use></svg></button>
                     <button id="get-chat-code-btn" class="icon-btn hidden" title="Пригласить" aria-label="Пригласить в группу"><svg class="icon" aria-hidden="true"><use href="#i-user-plus"></use></svg></button>
                     <button id="chat-menu-btn" class="icon-btn" title="Меню" aria-label="Меню чата"><svg class="icon" aria-hidden="true"><use href="#i-more-vertical"></use></svg></button>
@@ -120,7 +148,18 @@
                 <span id="requests-bar-text"></span>
                 <button id="requests-bar-btn" class="btn btn-sm btn-secondary">Открыть</button>
             </div>
-            <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
+            <div id="chat-search" class="chat-search hidden" role="search">
+                <input type="search" id="chat-search-input" placeholder="Поиск по сообщениям" aria-label="Поиск по сообщениям, загруженным на это устройство" autocomplete="off">
+                <span id="chat-search-counter" class="chat-search-counter" aria-live="polite"></span>
+                <button id="chat-search-prev" class="icon-btn icon-btn-sm" type="button" title="Предыдущее совпадение" aria-label="Предыдущее совпадение"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-chevron-up"></use></svg></button>
+                <button id="chat-search-next" class="icon-btn icon-btn-sm" type="button" title="Следующее совпадение" aria-label="Следующее совпадение"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-chevron-down"></use></svg></button>
+                <button id="chat-search-older" class="btn btn-sm btn-secondary chat-search-older" type="button">Искать в более ранних</button>
+                <button id="chat-search-close" class="icon-btn icon-btn-sm" type="button" title="Закрыть поиск" aria-label="Закрыть поиск"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"></use></svg></button>
+            </div>
+            <!-- Лента — журнал (role=log): добавления в него скринридер сам не зачитывает (aria-live=off), чтобы не читать всю историю
+                 при открытии чата и не повторять правки/реакции; о новых входящих говорит отдельный #new-message-status. -->
+            <div id="chat-messages" class="chat-messages" role="log" aria-label="Сообщения чата" aria-live="off" aria-relevant="additions"></div>
+            <div id="new-message-status" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
             <button id="jump-down" class="jump-down hidden" type="button" title="К последним сообщениям" aria-label="К последним сообщениям">
                 <svg class="icon" aria-hidden="true"><use href="#i-arrow-down"></use></svg>
                 <span id="jump-down-badge" class="badge hidden"></span>
@@ -138,25 +177,35 @@
                     </div>
                     <button id="upload-cancel-btn" class="icon-btn icon-btn-sm" type="button" title="Отменить загрузку" aria-label="Отменить загрузку"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"></use></svg></button>
                 </div>
+                <div id="bot-suggestions" class="suggestions hidden" role="group" aria-label="Темы для бота"></div>
                 <div id="reply-preview" class="reply-preview hidden">
                     <svg class="icon icon-sm" aria-hidden="true"><use href="#i-reply"></use></svg>
                     <span id="reply-preview-text"></span>
                     <button id="cancel-reply-btn" class="icon-btn icon-btn-sm" title="Отменить ответ" aria-label="Отменить ответ"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"></use></svg></button>
                 </div>
+                <div id="edit-preview" class="reply-preview edit-preview hidden">
+                    <svg class="icon icon-sm" aria-hidden="true"><use href="#i-pencil"></use></svg>
+                    <span id="edit-preview-text"></span>
+                    <button id="cancel-edit-btn" type="button" class="icon-btn icon-btn-sm" title="Отменить правку" aria-label="Отменить правку"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"></use></svg></button>
+                </div>
                 <div class="input-wrapper">
                     <button id="attach-btn" class="icon-btn" title="Прикрепить файлы" aria-label="Прикрепить файлы"><svg class="icon" aria-hidden="true"><use href="#i-paperclip"></use></svg></button>
-                    <input type="text" id="message-input" placeholder="Введите сообщение..." maxlength="4000" aria-label="Текст сообщения">
+                    <textarea id="message-input" rows="1" placeholder="Введите сообщение..." maxlength="4000" aria-label="Текст сообщения" enterkeyhint="send" autocomplete="off"></textarea>
                     <button id="send-btn" class="icon-btn" title="Отправить" aria-label="Отправить"><svg class="icon" aria-hidden="true"><use href="#i-send"></use></svg></button>
-                    <button id="record-btn" class="icon-btn" title="Голосовые сообщения пока не реализованы" aria-label="Голосовые сообщения пока не реализованы" disabled><svg class="icon" aria-hidden="true"><use href="#i-mic"></use></svg></button>
                 </div>
-                <input type="file" id="file-input" class="hidden" multiple accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/quicktime,video/webm,audio/webm,audio/ogg,audio/mpeg,audio/wav,application/pdf,text/plain,.pdf,.txt">
+                <div id="composer-status" class="composer-status" role="status">
+                    <span id="composer-status-icon" class="composer-status-icon" aria-hidden="true"></span>
+                    <span id="composer-status-text" class="composer-status-text"></span>
+                    <button id="composer-status-retry" class="btn btn-sm btn-secondary hidden" type="button">Повторить</button>
+                </div>
+                <input type="file" id="file-input" class="hidden" multiple accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/quicktime,video/webm,application/pdf,text/plain,.pdf,.txt">
             </div>
             <div id="empty-state" class="empty-state">
                 <div class="empty-icon" aria-hidden="true"><svg class="icon icon-xl" aria-hidden="true"><use href="#i-message-square"></use></svg></div>
                 <h2>Добро пожаловать в Nyxo</h2>
                 <p>Выберите чат или создайте новый</p>
             </div>
-        </div>
+        </main>
     </div>
 
     <div id="connection-status" class="connection-status hidden" role="status" aria-live="polite">
@@ -171,15 +220,18 @@
                 <button class="close-modal icon-btn" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
             </div>
             <div class="modal-body">
-                <div class="form-group field">
-                    <label for="new-chat-name" class="field-label">Название группы</label>
-                    <input type="text" id="new-chat-name" placeholder="Введите название" maxlength="64">
+                <div id="new-chat-create">
+                    <div class="form-group field">
+                        <label for="new-chat-name" class="field-label">Название группы</label>
+                        <input type="text" id="new-chat-name" placeholder="Введите название" maxlength="64">
+                    </div>
+                    <button id="create-chat-btn" class="btn btn-primary btn-block"><svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg><span>Создать группу</span></button>
+                    <div class="auth-divider"><span>или</span></div>
                 </div>
-                <button id="create-chat-btn" class="btn btn-primary btn-block"><svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg><span>Создать группу</span></button>
-                <div class="auth-divider"><span>или</span></div>
                 <div class="form-group field">
-                    <label for="join-chat-code" class="field-label">Код приглашения</label>
-                    <input type="text" id="join-chat-code" placeholder="Например: ABCDE FGHIJ …" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="40">
+                    <label for="join-chat-code" class="field-label">Ссылка или код приглашения</label>
+                    <input type="text" id="join-chat-code" placeholder="Например: ABCDE FGHIJ …" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="300" aria-describedby="join-error">
+                    <p id="join-error" class="field-error hidden" role="alert"></p>
                 </div>
                 <button id="join-chat-btn" class="btn btn-secondary btn-block"><svg class="icon" aria-hidden="true"><use href="#i-log-in"></use></svg><span>Продолжить</span></button>
                 <div id="join-preview" class="pending-card join-preview hidden" aria-live="polite">
@@ -188,6 +240,7 @@
                         <h4 id="join-preview-name"></h4>
                         <p id="join-preview-meta" class="muted"></p>
                         <p id="join-preview-approval" class="field-hint hidden">Вы вступите после того, как кто-то из участников одобрит заявку.</p>
+                        <p id="join-status" class="field-hint hidden" role="status"></p>
                     </div>
                     <div class="invite-actions">
                         <button id="join-confirm-btn" class="btn btn-primary btn-sm">Вступить</button>
@@ -224,6 +277,19 @@
                     <label class="radio-row"><input type="radio" name="chat-expiry" value="604800"><span>7 дней</span></label>
                     <p id="expiry-hint" class="field-hint">Срок действует для новых сообщений всех участников. Уже отправленные сообщения не изменятся.</p>
                 </fieldset>
+                <div id="device-settings" class="hidden">
+                    <div class="divider"></div>
+                    <fieldset class="field device-settings">
+                        <legend class="field-label"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-eye-off"></use></svg><span>На этом устройстве</span></legend>
+                        <label class="toggle-row" for="no-history-toggle">
+                            <input type="checkbox" id="no-history-toggle" role="switch">
+                            <span>
+                                <span class="switch-title">Не хранить историю на этом устройстве</span>
+                                <small class="field-hint">Ключи к прочитанным сообщениям этой группы не сохраняются в браузере: после перезагрузки более ранние сообщения здесь не откроются.</small>
+                            </span>
+                        </label>
+                    </fieldset>
+                </div>
                 <div class="divider"></div>
                 <button id="delete-chat-btn" class="btn btn-danger btn-block"><svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg><span>Удалить чат</span></button>
             </div>
@@ -241,11 +307,19 @@
                     <div id="profile-avatar" class="profile-avatar" aria-hidden="true"></div>
                     <div class="profile-details">
                         <h4 id="profile-username"></h4>
-                        <p id="profile-email"></p>
-                        <p id="profile-code" class="profile-code mono"></p>
-                        <span id="profile-anon-badge" class="anon-badge chip hidden"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-eye-off"></use></svg><span>Приватный режим</span></span>
+                        <p>Временный аккаунт</p>
                     </div>
                 </div>
+                <fieldset id="profile-lifetime" class="lifetime-picker profile-lifetime">
+                    <legend class="field-label">Сколько хранить аккаунт</legend>
+                    <div class="segmented">
+                        <label class="segmented-option"><input type="radio" name="profile-lifetime" value="tab"><span>Пока открыта вкладка</span></label>
+                        <label class="segmented-option"><input type="radio" name="profile-lifetime" value="day"><span>1 день</span></label>
+                        <label class="segmented-option"><input type="radio" name="profile-lifetime" value="week"><span>7 дней</span></label>
+                    </div>
+                    <p id="profile-lifetime-status" class="field-hint profile-lifetime-status" aria-live="polite"></p>
+                    <p class="field-hint">Если очистить данные браузера или сменить устройство, доступ к аккаунту пропадёт навсегда.</p>
+                </fieldset>
                 <div class="field">
                     <span class="field-label">Оформление</span>
                     <button id="profile-theme-btn" class="btn btn-secondary theme-toggle" type="button"><svg class="icon" aria-hidden="true"><use href="#i-sun"></use></svg><span>Светлая тема</span></button>
@@ -266,56 +340,37 @@
                         </span>
                     </label>
                 </div>
-                <section id="security-section" class="security-section">
-                    <h4 class="field-label">Журнал безопасности</h4>
-                    <p class="field-hint">Последние входы и изменения аккаунта. IP-адреса не сохраняются.</p>
-                    <ul id="security-list" class="security-list" aria-live="polite"></ul>
-                </section>
+                <div class="field profile-code">
+                    <span class="field-label">Защита кода</span>
+                    <p id="code-protection-status" class="field-hint" aria-live="polite"></p>
+                    <div class="profile-code-actions">
+                        <button id="code-protection-check" class="btn btn-secondary hidden" type="button"><svg class="icon" aria-hidden="true"><use href="#i-refresh"></use></svg><span>Проверить обновление</span></button>
+                        <a class="btn btn-secondary" href="/verify.html" target="_blank" rel="noopener noreferrer"><svg class="icon" aria-hidden="true"><use href="#i-shield"></use></svg><span>Сверка файлов</span></a>
+                        <button id="code-protection-toggle" class="btn btn-ghost hidden" type="button"></button>
+                    </div>
+                </div>
                 <div class="profile-actions">
-                    <button id="change-password-btn" class="btn btn-secondary"><svg class="icon" aria-hidden="true"><use href="#i-key"></use></svg><span>Сменить пароль</span></button>
-                    <button id="delete-account-btn" class="btn btn-danger"><svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg><span>Удалить аккаунт</span></button>
+                    <button id="profile-about-btn" class="btn btn-secondary" type="button" aria-haspopup="dialog"><svg class="icon" aria-hidden="true"><use href="#i-info"></use></svg><span>Как устроен Nyxo</span></button>
+                    <button id="delete-account-btn" class="btn btn-danger" type="button" aria-haspopup="dialog"><svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg><span>Удалить аккаунт и выйти</span></button>
                 </div>
             </div>
         </div>
     </div>
 
-    <div id="password-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="password-title">
+    <div id="delete-account-modal" class="modal hidden" role="alertdialog" aria-modal="true" aria-labelledby="delete-account-title" aria-describedby="delete-account-text">
         <div class="modal-content modal-sm">
             <div class="modal-header">
-                <h3 id="password-title">Смена пароля</h3>
-                <button class="close-modal icon-btn" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+                <h3 id="delete-account-title">Удалить аккаунт и выйти?</h3>
+                <button class="close-modal icon-btn" type="button" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
             </div>
             <div class="modal-body">
-                <div class="form-group">
-                    <label for="current-password">Текущий пароль</label>
-                    <input type="password" id="current-password" placeholder="Введите текущий пароль" autocomplete="current-password">
-                </div>
-                <div class="form-group">
-                    <label for="new-password">Новый пароль</label>
-                    <input type="password" id="new-password" placeholder="Введите новый пароль (минимум 8 символов)" minlength="8" autocomplete="new-password">
-                </div>
-                <div class="form-group">
-                    <label for="confirm-new-password">Подтвердите новый пароль</label>
-                    <input type="password" id="confirm-new-password" placeholder="Повторите новый пароль" autocomplete="new-password">
-                </div>
-                <button id="save-password-btn" class="btn btn-primary btn-block">Сохранить</button>
+                <p id="delete-account-text" class="modal-warning">Аккаунт удалится сразу и навсегда. Ваши сообщения исчезнут и у собеседников, группы, где вы остались одни, удалятся. Ключи шифрования сотрутся с этого устройства.</p>
+                <p id="delete-account-alt" class="field-hint"></p>
+                <p id="delete-account-error" class="field-error delete-account-error hidden" role="alert"></p>
             </div>
-        </div>
-    </div>
-
-    <div id="delete-account-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="delete-account-title" aria-describedby="delete-account-text">
-        <div class="modal-content modal-sm">
-            <div class="modal-header">
-                <h3 id="delete-account-title">Удаление аккаунта</h3>
-                <button class="close-modal icon-btn" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
-            </div>
-            <div class="modal-body">
-                <p id="delete-account-text" class="modal-warning"></p>
-                <div id="delete-account-password-group" class="form-group">
-                    <label for="delete-account-password">Пароль для подтверждения</label>
-                    <input type="password" id="delete-account-password" placeholder="Введите пароль" autocomplete="current-password">
-                </div>
-                <button id="confirm-delete-account-btn" class="btn btn-danger btn-block"><svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg><span>Удалить навсегда</span></button>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" type="button" data-close-modal data-autofocus>Отмена</button>
+                <button id="confirm-delete-account-btn" class="btn btn-danger" type="button"><svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg><span>Удалить и выйти</span></button>
             </div>
         </div>
     </div>
@@ -357,7 +412,7 @@
                         <input type="checkbox" id="invite-approval" role="switch" checked>
                         <span>
                             <span class="switch-title">Впускать после одобрения</span>
-                            <small class="field-hint">По коду приходит заявка, а в группу человек попадает, только когда кто-то из участников её примет.</small>
+                            <small class="field-hint">По коду приходит заявка, а в группу человек попадает, только когда кто-то из участников её примет. Если выключить, ссылка с секретом впускает сразу, а код без ссылки всё равно отправляет заявку.</small>
                         </span>
                     </label>
                 </fieldset>
@@ -384,6 +439,19 @@
         </div>
     </div>
 
+    <div id="kt-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="kt-title">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h3 id="kt-title">Журнал ключей</h3>
+                <button class="close-modal icon-btn" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+            </div>
+            <div class="modal-body">
+                <p class="members-intro">Журнал ключей — запись, по которой устройство проверяет, что сервер не подменяет ключи шифрования. Он не защищает от сервера, который показывает разным группам разные журналы с самого начала, и от подмены кода самого приложения.</p>
+                <ul id="kt-alert-list" class="members-list" aria-live="polite"></ul>
+            </div>
+        </div>
+    </div>
+
     <div id="requests-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="requests-title">
         <div class="modal-content">
             <div class="modal-header">
@@ -391,65 +459,77 @@
                 <button class="close-modal icon-btn" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
             </div>
             <div class="modal-body">
-                <p class="field-hint">Принятый участник увидит только новые сообщения. Ключ шифрования ему передастся автоматически.</p>
+                <p class="field-hint">Принятый участник увидит только новые сообщения. Ключ шифрования ему передастся автоматически. Одобрение подписывается вашим ключом: в окне «Участники и ключи» рядом с новым человеком будет написано, что его одобрили вы.</p>
                 <ul id="requests-list" class="requests-list" aria-live="polite"></ul>
             </div>
         </div>
     </div>
 
-    <div id="anon-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="anon-title" aria-describedby="anon-desc">
-        <div class="modal-content modal-sm">
+    <div id="about-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="about-title">
+        <div class="modal-content modal-wide">
             <div class="modal-header">
-                <h3 id="anon-title">Приватный режим</h3>
-                <button class="close-modal icon-btn" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+                <h3 id="about-title">Как это работает</h3>
+                <button class="close-modal icon-btn" type="button" aria-label="Закрыть" data-autofocus><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
             </div>
             <div class="modal-body">
-                <p id="anon-desc">Аккаунт без email и пароля. Выберите, когда удалить его, если вы перестанете им пользоваться.</p>
-                <fieldset class="field">
-                    <legend class="field-label">Удалить аккаунт</legend>
-                    <label class="radio-row">
-                        <input type="radio" name="anon-lifetime" value="tab" checked>
-                        <span>
-                            <span class="switch-title">Когда закрою вкладку</span>
-                            <small class="field-hint">Через 30 минут после закрытия вкладки или потери связи</small>
-                        </span>
-                    </label>
-                    <label class="radio-row">
-                        <input type="radio" name="anon-lifetime" value="day">
-                        <span>
-                            <span class="switch-title">Через 1 день без активности</span>
-                            <small class="field-hint">Можно закрыть вкладку и вернуться в течение суток</small>
-                        </span>
-                    </label>
-                    <label class="radio-row">
-                        <input type="radio" name="anon-lifetime" value="week">
-                        <span>
-                            <span class="switch-title">Через 7 дней без активности</span>
-                            <small class="field-hint">Дольше аккаунт не живёт в любом случае</small>
-                        </span>
-                    </label>
-                </fieldset>
-                <p class="field-hint">Активность — это открытая вкладка Nyxo. Независимо от выбора аккаунт удалится не позже чем через 7 дней после создания, а кнопка «Выйти» удаляет его сразу. Удаляются чаты, сообщения и файлы на сервере и ключи шифрования на этом устройстве — восстановить их будет нельзя.</p>
-                <p class="field-hint">Приватный режим не скрывает ваш IP-адрес от сервера и провайдера. Для этого используйте Tor Browser.</p>
-            </div>
-            <div class="modal-footer">
-                <button class="btn btn-ghost" type="button" data-close-modal>Отмена</button>
-                <button id="anon-confirm-btn" class="btn btn-primary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-eye-off"></use></svg><span>Войти</span></button>
-            </div>
-        </div>
-    </div>
-
-    <div id="logout-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="logout-title">
-        <div class="modal-content modal-sm">
-            <div class="modal-header">
-                <h3 id="logout-title">Выход из аккаунта</h3>
-                <button class="close-modal icon-btn" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
-            </div>
-            <div class="modal-body">
-                <button id="logout-keep-btn" class="btn btn-secondary btn-block"><svg class="icon" aria-hidden="true"><use href="#i-log-out"></use></svg><span>Выйти</span></button>
-                <p class="field-hint">Ключи шифрования останутся на этом устройстве: при следующем входе переписка откроется, как раньше.</p>
-                <button id="logout-wipe-btn" class="btn btn-danger btn-block"><svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg><span>Выйти и стереть данные с устройства</span></button>
-                <p class="field-hint">Ключи шифрования и настройки удалятся с этого устройства, а ваши публичные ключи — с сервера. Старые зашифрованные сообщения здесь больше не откроются, а собеседникам придётся заново сверять с вами коды безопасности.</p>
+                <section class="about-section" aria-labelledby="about-server-title">
+                    <h4 id="about-server-title">Что видит сервер</h4>
+                    <ul class="about-list">
+                        <li>Случайное имя-псевдоним, выбранный срок хранения и примерное время последнего входа.</li>
+                        <li>Названия групп и кто в них состоит. Когда отправлены сообщения (с точностью до минуты) и какого они примерно размера. До какого сообщения вы дочитали: так считается счётчик непрочитанного.</li>
+                        <li>У сообщения группы в базе нет ссылки на аккаунт автора, но по косвенным признакам (позиция чтения, время активности) тот, у кого есть вся база, часто может его восстановить. В момент отправки сервер знает, с какого аккаунта пришёл запрос.</li>
+                        <li>Содержимое сообщений и файлов в группах сервер не видит: оно шифруется на вашем устройстве, ключи есть только у участников. Имён и типов файлов в группах он тоже не видит.</li>
+                        <li>Чат с ботом сквозным шифрованием не защищён: бот работает на сервере. Не пишите туда личного.</li>
+                    </ul>
+                </section>
+                <section class="about-section" aria-labelledby="about-absent-title">
+                    <h4 id="about-absent-title">Чего у сервера нет</h4>
+                    <p>Ваших контактов — почты и номера телефона. Аккаунт создаётся без них, поэтому связать его с вами по ним нельзя. Нет у сервера и ваших приватных ключей шифрования, и поисковых запросов: поиск работает на вашем устройстве.</p>
+                </section>
+                <section id="about-tor" class="about-section" tabindex="-1" aria-labelledby="about-tor-title">
+                    <h4 id="about-tor-title">IP-адрес и Tor</h4>
+                    <p>Сервер и ваш провайдер видят IP-адрес, с которого вы заходите. Nyxo не хранит его вместе с аккаунтом, но у хостинга могут быть свои журналы. В адресах запросов к серверу есть номера групп, так что такой журнал может связать ваш IP с группой.</p>
+                    <p>Чтобы скрыть IP, откройте Nyxo в Tor Browser по onion-адресу.</p>
+                    <div id="about-onion" class="about-onion hidden">
+                        <code id="about-onion-address" class="mono"></code>
+                        <div class="about-onion-actions">
+                            <button id="about-onion-copy-btn" class="btn btn-secondary btn-sm" type="button"><svg class="icon" aria-hidden="true"><use href="#i-copy"></use></svg><span>Скопировать адрес</span></button>
+                            <a id="about-onion-link" class="btn btn-ghost btn-sm" target="_blank" rel="noreferrer noopener"><svg class="icon" aria-hidden="true"><use href="#i-external-link"></use></svg><span>Открыть в Tor Browser</span></a>
+                        </div>
+                    </div>
+                    <p id="about-onion-missing" class="field-hint">Onion-адрес для этого сервера не настроен.</p>
+                    <p id="about-onion-current" class="field-hint hidden">Вы уже открыли Nyxo через Tor по onion-адресу.</p>
+                    <p class="field-hint">При уровне безопасности «Наивысший» JavaScript выключен, и Nyxo не работает.</p>
+                </section>
+                <section class="about-section" aria-labelledby="about-trust-title">
+                    <h4 id="about-trust-title">Как проверить, что вас не обманывают</h4>
+                    <ul class="about-list">
+                        <li>Код безопасности: у каждого участника в окне «Участники и ключи» свой код. Сверьте его лично или по другому каналу связи: если коды совпадают, ключи никто не подменил. Пока коды не сверены, подмену ключа сервером исключить нельзя.</li>
+                        <li>Если у участника сменился ключ, вы увидите предупреждение, а ключ группы ему не будет передаваться, пока вы не примете новый ключ. Так бывает после очистки браузера, но так же выглядит и подмена.</li>
+                        <li>Состав группы подтверждают подписи участников. Тот, кто вошёл без подписи, помечен «не подтверждён»: ключ группы ему не передаётся, пока вы не нажмёте «Доверять участнику».</li>
+                        <li>Журнал ключей помогает заметить подмену ключей сервером. Он работает, только если его включил оператор, и не защищает от сервера, который с самого начала показывает разным группам разные журналы.</li>
+                        <li>Код приложения вам отдаёт тот же сервер: если он выдаст изменённый, шифрование можно обойти. «Защита кода» в «Профиле» запоминает проверенную версию и меняет её только с вашего согласия, а «Сверка файлов» сравнивает файлы с контрольными суммами. Первый заход это не проверяет.</li>
+                    </ul>
+                </section>
+                <section class="about-section" aria-labelledby="about-device-title">
+                    <h4 id="about-device-title">Если очистить браузер или сменить устройство</h4>
+                    <ul class="about-list">
+                        <li>Аккаунт живёт только в этом браузере: вход держится на cookie, ключи шифрования лежат в хранилище браузера. Почты и номера нет, поэтому узнать вас иначе нельзя.</li>
+                        <li>Ключи к прочитанным сообщениям хранятся на устройстве, чтобы история открывалась после перезагрузки. Исчезающие сообщения стирают ключи вместе с сообщениями, а «Не хранить историю» в «Меню чата» группы стирает их при закрытии чата или вкладки. Затирание на диске браузер не гарантирует.</li>
+                        <li>Очистка данных сайта, другой браузер или устройство, закрытое окно инкогнито — и доступ пропадёт навсегда. Сам аккаунт удалится по сроку.</li>
+                        <li>В окне инкогнито и в Tor Browser всё стирается при закрытии окна, так что сроки «1 день» и «7 дней» там не помогут.</li>
+                        <li>На iPhone значок на экране «Домой» — отдельное хранилище: аккаунт из Safari там не откроется.</li>
+                    </ul>
+                </section>
+                <section class="about-section" aria-labelledby="about-delete-title">
+                    <h4 id="about-delete-title">Когда всё удаляется</h4>
+                    <ul class="about-list">
+                        <li>Когда вы не заходите дольше выбранного срока. Сразу — кнопкой «Удалить и выйти».</li>
+                        <li>Вместе с аккаунтом исчезают ваши сообщения, в том числе у собеседников. Группы, где вы остались последним участником, удаляются целиком.</li>
+                        <li>Если вы просто вышли из группы, ваши сообщения там остаются: удалить их можно при выходе, иначе они удалятся вместе с аккаунтом.</li>
+                        <li>Исчезающие сообщения удаляются по таймеру группы.</li>
+                    </ul>
+                </section>
             </div>
         </div>
     </div>
@@ -462,7 +542,7 @@
             </div>
             <div class="modal-body">
                 <ul id="send-files-list" class="send-files-list"></ul>
-                <p class="field-hint">Перед отправкой из файлов удаляются метаданные: геометки, EXIF, теги. Имена фото, видео и аудио заменяются обезличенными.</p>
+                <p class="field-hint">Перед отправкой из файлов удаляются метаданные: геометки, EXIF, теги. Имена фото и видео заменяются обезличенными.</p>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-ghost" type="button" data-close-modal>Отмена</button>
@@ -486,13 +566,92 @@
     </div>
 
     <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+    <div id="code-banner" class="code-banner banner banner-warning hidden" role="status" aria-live="polite">
+        <svg class="icon" aria-hidden="true"><use href="#i-shield"></use></svg>
+        <span id="code-banner-text" class="banner-text"></span>
+        <div class="banner-actions">
+            <a class="banner-btn btn btn-sm btn-secondary" href="/verify.html" target="_blank" rel="noopener noreferrer">Сверить</a>
+            <button id="code-banner-apply" class="banner-btn btn btn-sm btn-secondary" type="button"></button>
+            <button id="code-banner-dismiss" class="banner-btn btn btn-sm btn-secondary" type="button"></button>
+        </div>
+    </div>
+
+    <div id="code-warning-modal" class="modal hidden" role="alertdialog" aria-modal="true" aria-labelledby="code-warning-title" aria-describedby="code-warning-text">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h3 id="code-warning-title">Код Nyxo заменён без вашего подтверждения</h3>
+            </div>
+            <div class="modal-body">
+                <p id="code-warning-text" class="modal-warning">Это бывает только при сбое или вмешательстве сервера. Не вводите ничего и не открывайте чаты, пока не сверите отпечаток новой версии на странице проверки.</p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" type="button" data-close-modal>Продолжить</button>
+                <a class="btn btn-primary" href="/verify.html" target="_blank" rel="noopener noreferrer" data-autofocus>Сверить отпечаток</a>
+            </div>
+        </div>
+    </div>
+    <div id="confirm-modal" class="modal hidden" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-body">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h3 id="confirm-title"></h3>
+                <button id="confirm-close-btn" class="icon-btn" type="button" aria-label="Закрыть"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+            </div>
+            <div id="confirm-body" class="modal-body"></div>
+            <div id="confirm-actions" class="modal-footer"></div>
+        </div>
+    </div>
     <div id="overlay" class="overlay hidden"></div>
 
-    <script src="/socket.io/socket.io.js"></script>
-    <script src="mlkem.js"></script>
-    <script src="media-sanitizer.js"></script>
-    <script src="e2ee.js"></script>
-    <script src="vendor/qrcode.js"></script>
-    <script src="script.js"></script>
+    <script src="vendor/socket.io.min.js" integrity="sha384-kzavj5fiMwLKzzD1f8S7TeoVIEi7uKHvbTA3ueZkrzYq75pNQUiUi6Dy98Q3fxb0"></script>
+    <script src="mlkem.js" integrity="sha384-y29mdY0TMEV+7TCesG6OB3uasel8mrbGo/DPJN4MpeHWsuvJbkJg/OhySD3LctRy"></script>
+    <script src="lib/sanitize-common.js" integrity="sha384-41FLm0z8YlrJX0Dc71OEAvhJDdpRt+oDpizTHSJaQlzvWJCuQSqvOvXxV4JerlqB"></script>
+    <script src="lib/sanitize-jpeg.js" integrity="sha384-mkOByoFiEBX1EeZoEhBBut68sVKbYrJYhsIS+aAMMNHtLELCw7ygkpCg4rHmtZ2E"></script>
+    <script src="lib/sanitize-png-gif.js" integrity="sha384-SMfkFRYAJd2bxMCwnAAoziCG1iWIoAE80B7tqDWylnTNHPtPRRgJXpPclUR9u4qy"></script>
+    <script src="lib/sanitize-webp.js" integrity="sha384-0686dLiJk8rlBoGKLjXjIc/iZUfbRnu1PYwLwXXQnG4VDqnpsJyekGbIPbkxlfWp"></script>
+    <script src="lib/sanitize-mp4.js" integrity="sha384-703JVgvje1Isaz0SedekBioq2f5WUREcwDRSTNBeuFh0MN4OfS9YcBQ0r/8R+ftN"></script>
+    <script src="lib/sanitize-webm.js" integrity="sha384-oL1Q/s+ePnYQ216AHdtLyBI60CnZdLWLZ9aZLuvudDDvpMMGoKulQQHuMEyoaBzU"></script>
+    <script src="lib/sanitize-inflate.js" integrity="sha384-0rPwU+4UHf58EE6fGcjqy0Gp9QwrOba04bY6pnM+yEKPqKcYkt6u97MRT/0Mw015"></script>
+    <script src="lib/sanitize-pdf.js" integrity="sha384-CajFQadi2RJASq98UxvdVsWOyWmqfh81Q48fVEnZdQB15HE4HGwea7p/boNrUvvf"></script>
+    <script src="media-sanitizer.js" integrity="sha384-3jHMeiwaejo/rGToNlr0zTjX27XsxewKxliKJHW9Qf5pKZtkjRXNsZvK+089Mh2k"></script>
+    <script src="lib/mime-policy.js" integrity="sha384-8TZkAsiOT7mK/kgQjqjWEPZl7Wb7v6ZQJjTk5fl2SBUrj5mUlXLtBZaIjgntbiAZ"></script>
+    <script src="lib/ed25519-strict.js" integrity="sha384-2kmcj4th901AkOi94l2tEIrqHghnIk8EcWpMovCUjbCYT23hp6XYxW28R4HHnHSt"></script>
+    <script src="lib/kt.js" integrity="sha384-PfoRX2Bt0RaWTdS939YkXl4jFVwi8Gr4ogG/wNA4FBE1Bv5oQLKcgCkDyoV656+O"></script>
+    <script src="lib/kt-client.js" integrity="sha384-gqe2daOf3BWyW7z0iIyai9tn+6q2wE5CX+6ylQ3Tv84PTk2Pyn6helN6F3cDjYXc"></script>
+    <script src="lib/membership.js" integrity="sha384-m3ddEQCczoONakNhEi35CeCiPaBtCWmSdoaVPySWZySfjoUzadPIIuNrTPSmYMLq"></script>
+    <script src="lib/membership-client.js" integrity="sha384-xmIFsMNutY/E50w8IsnP/Xhm4n+LwAxbHqmQQl0Nsb8p64UQnI+JvxneObbM/r4Q"></script>
+    <script src="lib/e2ee-codec.js" integrity="sha384-PnQyCg9nuNVU2TOL7H5zn2B6V5s/zBRFAlhZB/JiP+I9Sle0LN0wDKEMRNhPPKYO"></script>
+    <script src="lib/e2ee-crypto.js" integrity="sha384-bpR2NM2q1muL6Gq9XVLPPWjRy3dnvK7Rr8oQPYV4BjquvZH8oGediNS+QS2/CIOo"></script>
+    <script src="lib/e2ee-formats.js" integrity="sha384-tbUUwv9uIyGXKZrmOdCj8ffNIAI7XBo3bdPT0/7IRiyHrJ0YUprCJvo7ZNnF24yS"></script>
+    <script src="lib/e2ee-state.js" integrity="sha384-fFeHdU8pMjZb84MT7Qtmk04p8z79a3eZ2cxQdCbOfEjxugCxuROMZgngBHQSBPUJ"></script>
+    <script src="e2ee.js" integrity="sha384-1OEVGV/I1ACvD5wcYA97DnhY858rSbMJd3xFWavkiqFXMc8TZPfvTYqyLf9awkC7"></script>
+    <script src="vendor/qrcode.js" integrity="sha384-x4moaWjSk4nOh6fvDWtQRPABXF7x5nhz/QSH2oig0Y7ud+uu7jf+Bm6gKCxDlIzD"></script>
+    <script src="lib/invite.js" integrity="sha384-Y5Da7igKpPeJtf+4pbmyEikXMMpeCHkKlU1cIRINHRwTs5gKWyQa9hf66RdcV7mV"></script>
+    <script src="lib/lifetime.js" integrity="sha384-hsEKl/PFmTyLWSuxc0u6ccp/M5YzK+5aBGHklGwpPpp5ZanBDMEugDN/ZtvUykFd"></script>
+    <script src="lib/message-order.js" integrity="sha384-oS7y46gvUBhTnCuP+5c8WOB3ODZQ2f7MH4TEI+is7EFT2bntvnJ9S7+6xhDuY7qM"></script>
+    <script src="lib/send-outcomes.js" integrity="sha384-26KiQMIgc8HVLPyDA0QS4Syt6mKneiAajrtkCWm2+ZRpqkxzk1a/BOZ5FFJ6LrpD"></script>
+    <script src="lib/e2ee-lock.js" integrity="sha384-VwxL6Hr66z4vqdfe60cB8U2Ni81vSTXYVAiwb+dHDtMVuoazCf5whmVgsNfhUUjC"></script>
+    <script src="lib/e2ee-policy.js" integrity="sha384-ZdaBJCBZSMJozU4CBUaov6mFFiMmHmEEeeVCgyBrlmza1BX5Bj6RubZt7wOmiKK9"></script>
+    <script src="lib/text-search.js" integrity="sha384-f/M60HBwwIXwc50+a81RRopE0oTJLJZEOVrOGRin1mSD152lrJMFiAjTeBITGW0t"></script>
+    <script src="lib/sw-core.js" integrity="sha384-Clw+QSYR6j6Vtkbs5mhNMAYfxGvn/dyR0fkRcFEG8mpPCCuac3s1uLWKpguoLhhb"></script>
+    <script src="lib/sw-client.js" integrity="sha384-OjIhjN4SkkSSYTGZqo4H+4DmqgW4+k+CjGHJruklifNgTXHQBywbHMrlqRdX2Oyx"></script>
+    <script src="js/01-state.js" integrity="sha384-WVe86DT3axIRqhz8HzvvBiQE5nyBIGRLqXijoweYcUMk6wuD41WZSGjLWtsFSzxJ"></script>
+    <script src="js/02-utils.js" integrity="sha384-mc1+cW4EXoUv0cPr4kdaJWY/D31UOhd1BsV2RMI8dJbrrR1jwm96nbWbhXXRWsaA"></script>
+    <script src="js/03-e2ee-client.js" integrity="sha384-cEYp9u4pGL9iTUffQG0rrJGAwzEwcqtSdGslMaeZQWD6btos7QriwYJt9+itRqLR"></script>
+    <script src="js/04-e2ee-rooms.js" integrity="sha384-uJYBjxyyMDuAQIRctqtaFwv4mHZB5zqtyZGOLhtolrR5taLzrlqAk5U1XioxV36F"></script>
+    <script src="js/05-attachments.js" integrity="sha384-N2Nr+cb/ZSqRsUG0g44u1nDACkD99VetGXoGlHO47spcSFTwHoYVDKd9K1+hny7d"></script>
+    <script src="js/06-session-socket.js" integrity="sha384-PnwytZdOvmdJOLQX/mzM8WE8lMXThuOwrqopVNOLzxG+rHaWXNY87IUHd65M6Hb+"></script>
+    <script src="js/07-api-listeners.js" integrity="sha384-9oovaU1BGIdzJhgAh9UqzhpiufzInApVmqXTxX3Pwe91i/SQJupU7oiMpSRN6kus"></script>
+    <script src="js/08-modals-profile.js" integrity="sha384-bZQw3Cc+zr/R0XFtQNOyx4vmy6FSjfWofWhMptN5OEtbs42ZHUqSupbbvBUfxe3G"></script>
+    <script src="js/09-auth-screen.js" integrity="sha384-brjViOA57cGyEvT0gwDTaXc3LHbuLh3Xx5x0iN2LnkA7/CImOVCrrHTqClKyE8Td"></script>
+    <script src="js/10-invites-join.js" integrity="sha384-OwxSLGOOdTK9XPTXLBbl/PbiD+SyZwgV/XgwZpxvjnAIhF+0oCP4Sqq5ovRwc0K4"></script>
+    <script src="js/11-key-log-members.js" integrity="sha384-+91NsICP09HVnTHqo349VwbWrafp0cV5oI1Lxzb7fIHLzeUQmeCw6TNUX3NFdKt2"></script>
+    <script src="js/12-chat-list.js" integrity="sha384-rexV9L70X+YTKbSDUkJ0d3o90wjW8yuTMABcwiRPoQ4QGNrGIXPpSuU5USNkmN9x"></script>
+    <script src="js/13-chat-messages.js" integrity="sha384-E+TMo9BhPtGioqDTDNDHpZ8wYgCmvF+1PxZFLykIsE2G5XLR7kgE+D1c/dlHslD/"></script>
+    <script src="js/14-send.js" integrity="sha384-CptZJCutOKei2uExvjtpuz1Mx5TArSwVC6rHVjmR0THIkZ2yimRS8csmsGd1Ougx"></script>
+    <script src="js/15-bot-suggestions.js" integrity="sha384-wweydTeInr4aMN2Z2+t1C82grT31h0yAY6/YeV/yqmh9Js9MI3PNqoQPctIAWQKp"></script>
+    <script src="js/16-files-composer.js" integrity="sha384-sq9KUIVrUUvFRYS+EsSVv1wzTAINKTDpdUvlTwQIs+Zmak81hNJgQfUX9xJ0jqFB"></script>
+    <script src="js/17-chats-search.js" integrity="sha384-6bySRubheTYbB7wsQfJI9Bi1mvSfoI4LTkpo++Yxum7s5ugx7tJXLw+oUiCalxzD"></script>
+    <script src="js/18-init.js" integrity="sha384-/NHnQxIuoU9nPEO6EwEtfRLbjFSmkUD0AehbJdFa9Zy6ME64WVdisL8Hx6Hd8JZz"></script>
 </body>
 </html>

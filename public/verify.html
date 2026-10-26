@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nyxo — сверка файлов</title>
+    <link rel="icon" type="image/svg+xml" href="icons/favicon.svg">
+    <link rel="stylesheet" href="verify.css">
+</head>
+<body>
+    <main class="page">
+        <header class="head">
+            <h1>Сверка файлов Nyxo</h1>
+            <p class="lead">Страница скачивает файлы клиента с этого сайта, считает их SHA-256 и сравнивает с манифестом
+                (<code>/client-manifest.json</code>). Так видно, что браузеру отдали ровно те файлы, которые перечислены в манифесте.</p>
+            <p><a href="/">Вернуться в Nyxo</a></p>
+        </header>
+
+        <section class="notice" aria-labelledby="limits-title">
+            <h2 id="limits-title">Что эта страница НЕ доказывает</h2>
+            <p>Страница, манифест и сверяемые файлы приходят с одного и того же сервера. Если сервер подменён, он может подменить
+                и эту страницу, и манифест, и показать «всё совпало». Поэтому сверка на том же сервере сама по себе ничего не
+                доказывает против злонамеренного сервера: она ловит только случайные расхождения (неполный выкат, устаревший кэш, ошибку сборки).</p>
+            <p>Настоящую проверку дают шаги вне этого сервера:</p>
+            <ol>
+                <li>Скачайте <code>client-manifest.json</code> из релиза на GitHub (другим каналом, лучше с другого устройства) и выберите его ниже:
+                    файлы будут сверены с эталоном, а не с манифестом самого сервера.</li>
+                <li>Запустите <code>scripts/verify-deployment.js</code> на своём компьютере: проверяющий код тогда не приходит с проверяемого сервера.</li>
+                <li>Сверьте хэши вручную командами <code>sha256sum</code> или <code>Get-FileHash</code> — пошагово в
+                    <a href="https://github.com/PortfolioBTS/masages/blob/main/docs/VERIFY.md" target="_blank" rel="noreferrer noopener">docs/VERIFY.md</a>.</li>
+            </ol>
+            <p>Даже с эталонным файлом вы запускаете код этой страницы, а его тоже отдаёт проверяемый сервер. Для недоверенного сервера надёжны только
+                шаги 2 и 3.</p>
+        </section>
+
+        <noscript>
+            <section class="notice">
+                <p>Для сверки в браузере нужен JavaScript. Без него проверьте файлы вручную — см.
+                    <a href="https://github.com/PortfolioBTS/masages/blob/main/docs/VERIFY.md" target="_blank" rel="noreferrer noopener">docs/VERIFY.md</a>.</p>
+            </section>
+        </noscript>
+
+        <section class="card" aria-labelledby="run-title">
+            <h2 id="run-title">Сверка</h2>
+            <div class="field">
+                <label for="verify-ref-file">Эталонный манифест из релиза (необязательно)</label>
+                <input type="file" id="verify-ref-file" accept=".json,application/json">
+                <p class="hint">Файл <code>client-manifest.json</code> из GitHub Release. Без него файлы сверяются с манифестом этого же сервера.</p>
+            </div>
+            <button id="verify-start" class="btn" type="button">Сверить файлы</button>
+            <p id="verify-status" class="status" role="status" aria-live="polite"></p>
+            <p id="verify-summary" class="summary" hidden></p>
+            <dl id="verify-hashes" class="hashes" hidden>
+                <dt>Хэш манифеста этого сервера (SHA-256)</dt>
+                <dd id="verify-served-hash"></dd>
+                <dt id="verify-ref-hash-title" hidden>Хэш эталонного манифеста (SHA-256)</dt>
+                <dd id="verify-ref-hash" hidden></dd>
+            </dl>
+            <dl id="verify-pin" class="hashes" hidden>
+                <dt>Закреплено в этом браузере (service worker)</dt>
+                <dd id="verify-pin-value"></dd>
+                <dt id="verify-staged-title" hidden>Скачано и ждёт вашего согласия</dt>
+                <dd id="verify-staged-value" hidden></dd>
+                <dt>SHA-256 файла sw.js, который сервер отдаёт сейчас</dt>
+                <dd id="verify-sw-hash"></dd>
+            </dl>
+            <p id="verify-pin-note" class="hint" hidden>Закрепление — это копия кода, проверенная при первом визите (доверие без проверки) и обновляемая только по вашему согласию.
+                Файл <code>sw.js</code> в манифест не входит: сравните его хэш с полем <code>serviceWorker.sha256</code> в <code>release.json</code> из релиза
+                или командой <code>curl -s https://&lt;хост&gt;/sw.js | sha256sum</code>.</p>
+            <div class="table-wrap" id="verify-table-wrap" hidden>
+                <table class="results" aria-label="Результат сверки по файлам">
+                    <thead>
+                        <tr><th scope="col">Файл</th><th scope="col">Результат</th><th scope="col">SHA-256</th><th scope="col">Байт</th></tr>
+                    </thead>
+                    <tbody id="verify-rows"></tbody>
+                </table>
+            </div>
+            <details id="verify-output-wrap" hidden>
+                <summary>Хэши в формате sha256sum (для ручной сверки)</summary>
+                <pre id="verify-output" class="output"></pre>
+            </details>
+        </section>
+    </main>
+
+    <script src="lib/client-verify.js"></script>
+    <script src="lib/sw-core.js"></script>
+    <script src="verify.js"></script>
+</body>
+</html>
