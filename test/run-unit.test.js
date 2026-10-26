@@ -124,7 +124,10 @@ setInterval(() => {}, 1000);
     const filler = 'setTimeout(() => {}, 2000);';
     const checker = `
 const fs = require('fs'); const path = require('path');
-const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+// Зомби (Linux: состояние Z в /proc/<pid>/stat) — уже мёртвый процесс, которого не подобрал init: в контейнере, где PID 1
+// не собирает сирот, kill(pid, 0) для него всё ещё успешен.
+const zombie = (pid) => { try { return /^\\d+ \\(.*\\) Z/.test(fs.readFileSync('/proc/' + pid + '/stat', 'utf8')); } catch { return false; } };
+const alive = (pid) => { try { process.kill(pid, 0); } catch { return false; } return !zombie(pid); };
 const read = (name) => { try { return Number(fs.readFileSync(path.join(__dirname, name), 'utf8')); } catch { return 0; } };
 const started = Date.now();
 const timer = setInterval(() => {

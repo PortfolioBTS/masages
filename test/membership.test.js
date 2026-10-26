@@ -199,10 +199,14 @@ async function main() {
         return crypto.subtle.verify({ name: 'Ed25519' }, key, sig, msg);
     };
 
-    await test('отрицательные векторы 6.6: платформенный verify принимает оба, явная проверка membership отвергает оба', async () => {
+    // Платформенный verify раньше принимал оба вектора, в Node 24.22 уже отвергает их сам. Результат
+    // платформы только печатается, как в test/ed25519-strict.test.js: явная проверка обязана отвергать их в любом случае.
+    await test('отрицательные векторы 6.6: явная проверка membership отвергает оба, что бы ни ответил платформенный verify', async () => {
         const msg = new TextEncoder().encode('любое сообщение');
         for (const key of [ONE, ONE_SIGN]) {
-            assert.strictEqual(await platformVerify(key, msg, ZERO_S_SIG), true, 'платформа принимает ' + hex(key));
+            let platform = null;
+            try { platform = await platformVerify(key, msg, ZERO_S_SIG); } catch { platform = null; }
+            console.log(`        ${hex(key)}: платформенный verify — ${platform}`);
             assert.strictEqual(await M.strictVerify(key, msg, ZERO_S_SIG), false, 'membership отвергает ' + hex(key));
             assert.strictEqual(M.isStrictKey(key), false);
         }

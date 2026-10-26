@@ -91,7 +91,8 @@ function pkcs8ExpandedKey(dk) {
     return derTlv(0x30, Buffer.concat([Buffer.from('020100', 'hex'), ML_KEM_768_ALG_ID, derTlv(0x04, derTlv(0x04, dk))]));
 }
 
-// Node экспортирует приватный ключ в форме «both»: SEQUENCE { seed, expandedKey }
+// Node экспортирует приватный ключ в форме «both»: SEQUENCE { seed, expandedKey }, а с Node 24.22 — только seed
+// ([0] IMPLICIT OCTET STRING). Во втором случае expanded = null.
 function nodeExportSeedAndExpanded(privateKey) {
     const der = nodeCrypto.KeyObject.from(privateKey).export({ format: 'der', type: 'pkcs8' });
     const top = readTlv(der, 0);
@@ -100,7 +101,8 @@ function nodeExportSeedAndExpanded(privateKey) {
     assert.ok(der.subarray(version.end, alg.end).equals(ML_KEM_768_ALG_ID), 'PKCS#8 должен быть id-alg-ml-kem-768');
     const octet = readTlv(der, alg.end);
     const both = readTlv(der, octet.start);
-    assert.strictEqual(both.tag, 0x30, 'Node должен экспортировать форму both');
+    if (both.tag === 0x80) return { seed: new Uint8Array(der.subarray(both.start, both.end)), expanded: null };
+    assert.strictEqual(both.tag, 0x30, 'Node должен экспортировать форму seed или both');
     const seed = readTlv(der, both.start);
     const expanded = readTlv(der, seed.end);
     return {
@@ -259,7 +261,15 @@ async function main() {
             assertBytesEqual(ours.publicKey, node.rawPublic, 'ek');
             const exported = nodeExportSeedAndExpanded(node.privateKey);
             assertBytesEqual(exported.seed, seed, 'seed в PKCS#8 Node');
-            assertBytesEqual(ours.secretKey, exported.expanded, 'dk');
+            if (exported.expanded) {
+                assertBytesEqual(ours.secretKey, exported.expanded, 'dk');
+            } else {
+                // Node не отдаёт dk: наш dk загружается в Node как expandedKey (Node сверяет H(ek)) и даёт тот же ek.
+                // Побайтово dk сверяется с эталоном в KAT NIST ACVP (keyGen) ниже.
+                const imported = nodeCrypto.createPrivateKey({ key: pkcs8ExpandedKey(ours.secretKey), format: 'der', type: 'pkcs8' });
+                const spki = nodeCrypto.createPublicKey(imported).export({ format: 'der', type: 'spki' });
+                assertBytesEqual(spki.subarray(spki.length - 1184), node.rawPublic, 'ek из нашего dk в Node');
+            }
             // Раскладка dk (алг. 16): dk_PKE ‖ ek ‖ H(ek) ‖ z
             assertBytesEqual(ours.secretKey.subarray(384 * K, 768 * K + 32), ours.publicKey, 'ek внутри dk');
             assertBytesEqual(ours.secretKey.subarray(768 * K + 32, 768 * K + 64), nodeHash('sha3-256', ours.publicKey), 'H(ek) внутри dk');
