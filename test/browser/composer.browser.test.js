@@ -266,10 +266,23 @@ suite.test('320×640: «Начать анонимно» и «У меня ест�
             start: document.getElementById('anon-start-btn').getBoundingClientRect().bottom,
             invite: document.getElementById('invite-toggle-btn').getBoundingClientRect().bottom,
             wide: document.documentElement.scrollWidth > innerWidth,
+            options: Array.from(document.querySelectorAll('#auth-lifetime .segmented-option'), (el) => {
+                const span = el.querySelector('span');
+                const box = el.getBoundingClientRect();
+                const text = span.getBoundingClientRect();
+                const clipped = span.scrollWidth > span.clientWidth || text.left < box.left || text.right > box.right;
+                return { text: span.textContent, height: box.height, clipped };
+            }),
         }));
         assert.ok(m.start <= m.vh, `«Начать анонимно» ниже первого экрана: ${m.start} > ${m.vh}`);
         assert.ok(m.invite <= m.vh, `«У меня есть приглашение» ниже первого экрана: ${m.invite} > ${m.vh}`);
         assert.strictEqual(m.wide, false, 'горизонтальная прокрутка');
+        // Варианты срока в две строки (controls.css): текст целиком, цель нажатия не меньше 44 px.
+        assert.strictEqual(m.options.length, 3);
+        for (const option of m.options) {
+            assert.strictEqual(option.clipped, false, `текст варианта «${option.text}» обрезан`);
+            assert.ok(option.height >= 44, `вариант «${option.text}» ниже 44 px: ${option.height}`);
+        }
         await page.screenshot('composer-04-auth-320');
     });
 });

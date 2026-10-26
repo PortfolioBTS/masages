@@ -1,7 +1,8 @@
 'use strict';
 // Экран входа на 320×640 (T7.3, п.18 ревью W7 R3): «Начать анонимно» уходила ниже первого экрана
 // на ~75 px. Отступы и размеры сжаты в конце responsive.css (после блоков «Узкие телефоны» —
-// иначе они бы перебили), варианты срока остаются столбиком (controls.css, WCAG 1.4.10) и по 44 px.
+// иначе они бы перебили), варианты срока — в две строки без обрезки текста (controls.css, WCAG 1.4.10)
+// и по 44 px.
 // Проверка по тексту CSS; настоящий замер положения кнопок на 320×640 — test/browser/composer.browser.test.js.
 // Запуск: node test/client-narrow-auth.test.js
 
@@ -52,13 +53,13 @@ test('отступы карточки, знак, заголовок и пром�
     assert.match(rule('.auth-container'), /padding:\s*16px;/);
     assert.match(rule('.auth-hero'), /margin-bottom:\s*16px/);
     assert.match(rule('.logo-icon'), /width:\s*36px/);
-    assert.match(rule('.auth-hero h1'), /font-size:\s*22px/);
-    assert.match(rule('.auth-hero h1'), /line-height:\s*28px/);
+    assert.match(rule('.auth-hero h1'), /font-size:\s*20px/);
+    assert.match(rule('.auth-hero h1'), /line-height:\s*26px/);
     assert.match(narrow.body, /\.lifetime-picker,\s*\.auth-warning\s*\{[^}]*margin-bottom:\s*12px/);
 });
 
-test('варианты срока остаются столбиком (без обрезки текста) и не ниже 44 px (цель нажатия)', () => {
-    assert.match(controls, /@media \(max-width: 359px\) \{\s*\.segmented \{\s*grid-template-columns: 1fr;/);
+test('варианты срока в две строки: длинный во всю ширину, два коротких рядом (без обрезки текста); не ниже 44 px', () => {
+    assert.match(controls, /@media \(max-width: 359px\) \{\s*\.segmented \{\s*grid-template-columns: 1fr 1fr;\s*\}\s*\.segmented-option:first-child \{\s*grid-column: 1 \/ -1;/);
     assert.match(rule('.segmented-option'), /min-height:\s*44px/);
 });
 
