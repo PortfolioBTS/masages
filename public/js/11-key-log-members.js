@@ -376,8 +376,11 @@ async function acceptIdentityChange(row, peer, ctx, btn) {
 }
 
 // Подтверждение участника вручную (signed-membership.md, 9.7): локальное решение, сертификата не публикует.
-async function trustUnconfirmedMember(peer, ctx, btn, duplicate) {
-    const warning = `Сервер добавил ${peer.username} в группу, но никто из участников это не подписал. Доверяйте, только если знаете, кто это.`
+// suspended — вы подтверждали участника, но его ключ потом сменился: у него свой текст (повторное ревью W7, RR-5б).
+async function trustUnconfirmedMember(peer, ctx, btn, duplicate, suspended = false) {
+    const warning = (suspended
+        ? `Вы подтверждали ${peer.username}, но его ключ сменился. Подтверждайте снова, только если сверили код безопасности нового ключа.`
+        : `Сервер добавил ${peer.username} в группу, но никто из участников это не подписал. Доверяйте, только если знаете, кто это.`)
         + (duplicate ? ' У этого участника такие же ключи шифрования, как у другого: возможно, это подделка.' : '');
     if (!(await confirmAction(warning, { title: 'Подтвердить участника?', confirmLabel: 'Подтвердить', danger: true }))) return;
     btn.disabled = true;
@@ -424,8 +427,9 @@ async function vouchForMember(peer, ctx, btn) {
     openMembersModal();
 }
 
-// Строка о составе под именем участника и действие над ним.
-function appendMembershipInfo(li, info, peer, ctx) {
+// Строка о составе под именем участника и действие над ним. status — статус ключа участника (changed — ключ изменился
+// и ещё не принят).
+function appendMembershipInfo(li, info, peer, ctx, status) {
     const entry = ctx.member;
     if (!entry) return;
     const text = membershipHowLine(ctx.roomId, entry);
@@ -442,13 +446,16 @@ function appendMembershipInfo(li, info, peer, ctx) {
         info.appendChild(warn);
     }
     if (ctx.isSelf || !ctx.client) return;
+    // Подтверждённый ранее, чей новый ключ ещё не принят: действие — «Принять новый ключ», а «Доверять» всё равно
+    // откажет (RR-5б).
+    if (entry.status === 'unconfirmed' && entry.suspended && status === 'changed') return;
     if (entry.status === 'unconfirmed') {
         const trust = document.createElement('button');
         trust.className = 'btn btn-danger btn-sm';
         trust.type = 'button';
         setIconLabel(trust, 'user-check', 'Доверять участнику');
         trust.setAttribute('aria-label', `Доверять участнику ${peer.username}`);
-        trust.addEventListener('click', () => trustUnconfirmedMember(peer, ctx, trust, Boolean(entry.duplicateKeys)));
+        trust.addEventListener('click', () => trustUnconfirmedMember(peer, ctx, trust, Boolean(entry.duplicateKeys), Boolean(entry.suspended)));
         li.appendChild(trust);
     } else if (entry.status === 'confirmed' && entry.how === 'manual' && !entry.vouchedByMe) {
         const vouch = document.createElement('button');
@@ -488,7 +495,7 @@ function createMemberRow(peer, status, ctx) {
     info.appendChild(statusEl);
     li._statusEl = statusEl;
     setMemberStatus(li, status);
-    appendMembershipInfo(li, info, peer, ctx);
+    appendMembershipInfo(li, info, peer, ctx, status);
     const ktText = ctx.kt && KT_PEER_TEXT[ctx.kt];
     if (ktText) {
         const ktEl = document.createElement('small');

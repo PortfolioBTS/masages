@@ -13,6 +13,7 @@ const notedLogMismatches = new Set();        // 'комната:участник
 const warnedRooms = new Set();               // о каких комнатах уже предупреждали, что не все получили ключ
 const pendingUnconfirmed = new Map();        // userId -> username: неподтверждённые участники открытой комнаты (баннер)
 const pendingSuspended = new Map();          // userId -> username: подтверждённые ранее, у которых сменился ключ (баннер)
+const pendingChangedUnconfirmed = new Map(); // userId -> username: «призрак» (не подтверждён) и со сменой ключа (баннер, RR-5)
 const notedMembership = new Set();           // 'комната:вид:...': о чём про состав группы уже писали в ленту
 
 function rememberRoomParticipants(roomId, participants) {
@@ -105,6 +106,13 @@ function renderIdentityBanner() {
         parts.push(names.length === 1
             ? `У участника ${names[0]} сменился ключ шифрования. Ключ группы ему не передаётся, и новые сообщения он не прочитает, пока вы не проверите код безопасности`
             : `У участников ${names.join(', ')} сменились ключи шифрования. Ключ группы им не передаётся, и новые сообщения они не прочитают, пока вы не проверите коды безопасности`);
+        // «Призрак» со сменой ключа (повторное ревью W7, RR-5а): проверка кода и принятие ключа его не подтвердят в этой
+        // группе — ключ группы он получит, только когда вы подтвердите его сами (F1).
+        const ghosts = Array.from(pendingChangedUnconfirmed.entries()).filter(([id]) => pendingIdentityChanges.has(id)).map(([, name]) => name);
+        if (ghosts.length > 0) {
+            const one = ghosts.length === 1;
+            parts.push(`${ghosts.join(', ')} к тому же не ${one ? 'подтверждён' : 'подтверждены'} в этой группе: ключ группы ${one ? 'он не получит' : 'они не получат'} и после проверки кода, пока вы ${one ? 'его' : 'их'} не подтвердите`);
+        }
     }
     if (mismatched.length > 0) {
         parts.push(`Сервер показывает для ${mismatched.join(', ')} ключ, которого нет в журнале ключей (или журнал у участников разный). Возможна подмена. Сверьте код безопасности лично. Ключ комнаты ${mismatched.length === 1 ? 'этому участнику' : 'этим участникам'} не отправляется`);
@@ -220,9 +228,13 @@ const ANCHOR_FAILURE_TEXT = {
 function handleMembershipResult(roomId, result) {
     const unconfirmed = Array.isArray(result.unconfirmed) ? result.unconfirmed : [];
     const skip = new Set((result.identityChanges || []).concat(result.logMismatches || []).map(c => Number(c.userId)));
+    const changed = new Set((result.identityChanges || []).map(c => Number(c.userId)));
     pendingUnconfirmed.clear();
     pendingSuspended.clear();
+    pendingChangedUnconfirmed.clear();
     unconfirmed.filter(u => !skip.has(Number(u.id))).forEach(u => (u.suspended ? pendingSuspended : pendingUnconfirmed).set(Number(u.id), u.username || `участник #${u.id}`));
+    // Сменился ключ и не подтверждён (не suspended): о нём говорит строка «сменился ключ» с оговоркой (RR-5а).
+    unconfirmed.filter(u => changed.has(Number(u.id)) && !u.suspended).forEach(u => pendingChangedUnconfirmed.set(Number(u.id), u.username || `участник #${u.id}`));
     renderIdentityBanner();
 
     const once = (key) => {

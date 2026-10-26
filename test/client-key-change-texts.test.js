@@ -21,7 +21,7 @@ function makeClient() {
         functions: ['renderIdentityBanner', 'membershipHowLine', 'memberLabel', 'handleMembershipResult'],
         prelude: `
             const pendingIdentityChanges = new Map(); const pendingLogMismatches = new Map();
-            const pendingUnconfirmed = new Map(); const pendingSuspended = new Map();
+            const pendingUnconfirmed = new Map(); const pendingSuspended = new Map(); const pendingChangedUnconfirmed = new Map();
             const notedMembership = new Set(); const roomParticipants = new Map(); const roomMemberNames = new Map();
             let currentRoomId = 5;`,
         sandbox: { elements, appendSystemNotice: (roomId, text) => notices.push(text) },
