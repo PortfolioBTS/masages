@@ -690,6 +690,8 @@ function startReply(message) {
 
 function startEditing(message) {
     clearReply();
+    // Черновик запоминается только при входе в правку: второе «Изменить» подряд не делает черновиком текст первой.
+    if (!editingMessageId) draftBeforeEdit = elements.messageInput.value;
     editingMessageId = message.id;
     elements.editPreviewText.textContent = `Редактирование: ${messageSummary(message).substring(0, 100)}`;
     elements.editPreview.classList.remove('hidden');
@@ -704,13 +706,15 @@ function startEditing(message) {
 // Поле ввода не трогает — его очищает вызывающий.
 function finishEditing() {
     editingMessageId = null;
+    draftBeforeEdit = '';
     elements.editPreview.classList.add('hidden');
     elements.editPreviewText.textContent = '';
     elements.messageInput.removeAttribute('aria-describedby');
 }
 
-// Отмена правки: в поле лежал текст редактируемого сообщения, его убираем.
+// Отмена правки: в поле лежал текст редактируемого сообщения — вместо него возвращается черновик, набранный до
+// «Изменить» (пустой, если его не было).
 function cancelEditing() {
-    if (editingMessageId) setMessageInputValue('');
+    if (editingMessageId) setMessageInputValue(draftBeforeEdit);
     finishEditing();
 }

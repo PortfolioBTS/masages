@@ -20,7 +20,7 @@ function makeClient() {
     const elements = fakeElements();
     const client = createClient({
         functions: FUNCTIONS,
-        prelude: 'let replyToMessageId = null; let editingMessageId = null; let uploadQueue = null;',
+        prelude: "let replyToMessageId = null; let editingMessageId = null; let uploadQueue = null; let draftBeforeEdit = '';",
         sandbox: {
             elements,
             showToast() {},
@@ -131,6 +131,35 @@ test('finishEditing (правка сохранена): плашка скрыта
     assert.strictEqual(c.run('editingMessageId'), null);
     assert.strictEqual(c.elements.editPreview.hidden, true);
     assert.strictEqual(c.elements.messageInput.value, 'черновик следующего сообщения');
+});
+
+// Повторное ревью клиента W7 (мелочь): «Изменить» затирал несохранённый черновик в поле, а отмена правки оставляла
+// поле пустым — набранный текст пропадал.
+test('«Изменить» не теряет черновик: отмена правки (крестик, Esc, очистка поля) возвращает его в поле', () => {
+    for (const cancel of ['click', 'escape']) {
+        const c = makeClient();
+        c.elements.messageInput.value = 'черновик';
+        c.run('startEditing(' + JSON.stringify(MSG) + ')');
+        assert.strictEqual(c.elements.messageInput.value, 'старый текст');
+        // Второе «Изменить» подряд не делает черновиком текст первой правки.
+        c.run('startEditing(' + JSON.stringify({ ...MSG, id: 8, text: 'другое' }) + ')');
+        if (cancel === 'click') c.elements.cancelEditBtn.fire('click');
+        else c.elements.messageInput.fire('keydown', { key: 'Escape' });
+        assert.strictEqual(c.run('editingMessageId'), null, cancel);
+        assert.strictEqual(c.elements.messageInput.value, 'черновик', cancel);
+    }
+    // Без черновика отмена по-прежнему очищает поле.
+    const empty = makeClient();
+    empty.run('startEditing(' + JSON.stringify(MSG) + ')');
+    empty.elements.cancelEditBtn.fire('click');
+    assert.strictEqual(empty.elements.messageInput.value, '');
+});
+
+test('код: после сохранённой правки в поле возвращается черновик, набранный до «Изменить»', () => {
+    const script = readClientScript();
+    const send = script.slice(script.indexOf('async function sendMessage('), script.indexOf('async function sendMessage(') + 6000);
+    assert.match(send, /const draft = draftBeforeEdit;/);
+    assert.match(send, /setMessageInputValue\(restoreDraft\)/);
 });
 
 test('код: сохранение правки и сброс вида чата прячут плашку (finishEditing), а не только обнуляют id', () => {

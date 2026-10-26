@@ -224,6 +224,8 @@ async function sendMessage() {
     const chatId = currentChatId;
     const roomId = currentRoomId;
     const replyAtStart = replyToMessageId;
+    // После сохранённой правки в поле возвращается черновик, набранный до «Изменить» (после нового сообщения — пусто).
+    let restoreDraft = '';
 
     setSending(true); // двойной Enter/клик не отправляет сообщение дважды
     try {
@@ -260,7 +262,11 @@ async function sendMessage() {
             showToast('Сообщение изменено', 'success');
             // в бабле — то, что реально набрано, открытым текстом
             if (chatId === currentChatId) applyMessageEdit(messageId, encryptEdit ? text : (data.text || text));
-            if (String(editingMessageId) === String(messageId)) finishEditing();
+            if (String(editingMessageId) === String(messageId)) {
+                const draft = draftBeforeEdit;
+                finishEditing();
+                restoreDraft = draft;
+            }
         } else {
             const sent = await sendText(text, { chatId, roomId, replyToId: replyAtStart });
             if (!sent) return;
@@ -275,7 +281,7 @@ async function sendMessage() {
     // мог набирать следующее сообщение, и стирать его нельзя. То же с ответом: если он
     // успел выбрать другое сообщение для ответа, выбор остаётся.
     if (chatId === currentChatId) {
-        if (elements.messageInput.value.trim() === text) setMessageInputValue('');
+        if (elements.messageInput.value.trim() === text) setMessageInputValue(restoreDraft);
         if (replyToMessageId === replyAtStart) clearReply();
     }
 }

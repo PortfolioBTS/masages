@@ -13,6 +13,8 @@ let currentRoomId = null;
 let currentUser = null;
 let replyToMessageId = null;
 let editingMessageId = null;
+// Черновик, лежавший в поле до «Изменить»: отмена или сохранение правки возвращает его (повторное ревью W7, мелочь).
+let draftBeforeEdit = '';
 let menuMessage = null;              // сообщение, для которого открыто контекстное меню
 
 // Состояние открытого чата: история грузится страницами с конца.
