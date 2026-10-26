@@ -142,7 +142,9 @@ function confirmDialog({ title, paragraphs = [], actions = [], cancelLabel = 'О
         });
         return btn;
     });
-    elements.confirmActions.replaceChildren(cancel, ...buttons);
+    // Две кнопки — ряд «Отмена | действие»; три и больше — столбец, где «Отмена» последняя. Порядок задаёт DOM, а не
+    // CSS order: иначе Tab шёл не в том порядке, что виден (WCAG 2.4.3; повторное ревью W7, RR-8). Фокус — на «Отмене».
+    elements.confirmActions.replaceChildren(...(buttons.length >= 2 ? [...buttons, cancel] : [cancel, ...buttons]));
     confirmChoice = null;
     confirmReturnFocus = document.activeElement;
     return new Promise((resolve) => {

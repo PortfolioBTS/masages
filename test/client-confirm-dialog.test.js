@@ -55,11 +55,12 @@ test('вопросы про ключи участников идут через 
     }
 });
 
-test('CSS: подтверждение с тремя кнопками — столбец на всю ширину, «Отмена» последней', () => {
+test('CSS: подтверждение с тремя кнопками — столбец на всю ширину; порядок задаёт DOM, а не order (RR-8)', () => {
     const { readClientCss } = require('./client-css');
     const css = readClientCss();
     assert.match(css, /#confirm-actions:has\(> button:nth-child\(3\)\) \{\s*flex-direction: column;\s*align-items: stretch;/);
-    assert.match(css, /#confirm-actions:has\(> button:nth-child\(3\)\) > \[data-cancel\] \{\s*order: 1;/);
+    // Повторное ревью клиента W7, RR-8: order: 1 переносил «Отмену» вниз только визуально — Tab шёл в другом порядке.
+    assert.doesNotMatch(css, /\[data-cancel\] \{\s*order:/);
 });
 
 // ---- окно подтверждения в vm ----
@@ -98,10 +99,11 @@ test('confirmDialog: кнопки с подписями, абзацы текст
     assert.strictEqual(c.elements.confirmTitle.textContent, 'Выйти из группы?');
     assert.deepStrictEqual(c.elements.confirmBody.children.map((p) => p.textContent), ['Первый <b>абзац</b>', 'Второй'], 'текст не разбирается как HTML');
     const buttons = c.elements.confirmActions.children;
-    assert.deepStrictEqual(buttons.map((b) => b.textContent), ['Отмена', 'Выйти и оставить сообщения', 'Выйти и удалить сообщения']);
-    assert.ok(buttons[2].className.includes('btn-danger') && buttons[1].className.includes('btn-secondary'));
-    assert.strictEqual(FakeEl.active, buttons[0], 'фокус сначала на «Отмене»');
-    buttons[1].fire('click');
+    // Три кнопки — столбец, «Отмена» последней и в DOM (порядок Tab совпадает с видимым, RR-8), фокус — на ней.
+    assert.deepStrictEqual(buttons.map((b) => b.textContent), ['Выйти и оставить сообщения', 'Выйти и удалить сообщения', 'Отмена']);
+    assert.ok(buttons[1].className.includes('btn-danger') && buttons[0].className.includes('btn-secondary'));
+    assert.strictEqual(FakeEl.active, buttons[2], 'фокус сначала на «Отмене»');
+    buttons[0].fire('click');
     assert.strictEqual(await pending, 'leave-keep');
     assert.strictEqual(c.elements.confirmModal.hidden, true);
     assert.strictEqual(FakeEl.active, trigger, 'фокус вернулся туда, откуда открыли');

@@ -220,7 +220,9 @@ suite.test('выход из группы: «Отмена» не выводит; 
         // Теперь есть своё сообщение: три исхода.
         await app.sendMessage(pb, 'моё сообщение');
         await openLeave();
-        assert.deepStrictEqual(await confirmActions(), ['Отмена', 'Выйти и оставить сообщения', 'Выйти и удалить сообщения']);
+        // Три кнопки — столбец, «Отмена» последней и в DOM: порядок Tab совпадает с видимым (RR-8); фокус — на «Отмене».
+        assert.deepStrictEqual(await confirmActions(), ['Выйти и оставить сообщения', 'Выйти и удалить сообщения', 'Отмена']);
+        assert.strictEqual(await pb.evaluate(() => document.activeElement && document.activeElement.hasAttribute('data-cancel')), true);
         // Затемнение alertdialog не закрывает; Escape закрывает только его — окно меню чата под ним остаётся.
         await clickAt(pb, 4, 4);
         assert.strictEqual(await isHidden(pb, '#confirm-modal'), false, 'alertdialog закрылся кликом по затемнению');
