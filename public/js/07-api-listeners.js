@@ -550,10 +550,10 @@ function setupSocketListeners() {
 
     // Реакцию поставил или снял другой участник (или другая вкладка этого же аккаунта):
     // сервер присылает итог по эмодзи, mine — только вкладкам автора реакции.
-    socket.on('reactionChanged', ({ id, emoji, count, mine, chat_id, room_id } = {}) => {
+    socket.on('reactionChanged', ({ id, emoji, count, mine, v, chat_id, room_id } = {}) => {
         if (!currentUser || id === undefined || typeof emoji !== 'string') return;
         if (!belongsToCurrentChat(chat_id, room_id)) return;
-        applyReactionChange(id, emoji, count, typeof mine === 'boolean' ? mine : undefined);
+        applyReactionChange(id, emoji, count, typeof mine === 'boolean' ? mine : undefined, v);
     });
 
     // Удаление теперь физическое (DELETE на сервере): элемент убирается

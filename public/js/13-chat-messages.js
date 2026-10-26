@@ -542,8 +542,11 @@ function hideMessageMenu() {
 // Сервер отдаёт по сообщению список {emoji, count, mine}: сколько человек поставили
 // эмодзи и стоит ли оно у меня («моя» нужна, чтобы после перезагрузки реакцию можно
 // было снять). Изменения других участников приходят событием reactionChanged
-// (абсолютное число, не «+1»), свои — ответом на POST/DELETE; порядок прихода
-// ответа и события поэтому не важен. Кто именно поставил, не сообщается.
+// (абсолютное число, не «+1»), свои — ответом на POST/DELETE. Кто именно поставил, не сообщается.
+// Ответ и события приходят в любом порядке (копия события автору уходит после ответа и после событий
+// других, посчитанных позже), поэтому итог несёт версию v: число применяется, только если v больше
+// уже применённой, отметка «моя» — если v больше версии прошлой отметки (повторное ревью W7, RR-6).
+const reactionVersions = new Map(); // `${id}:${emoji}` → { v, mv }: версии применённого числа и отметки «моя»
 
 // Элемент списка реакций приводится к виду {emoji, count, mine}: событие newMessage
 // и старые клиентские объекты могут нести просто строку-эмодзи.
@@ -578,12 +581,24 @@ function setReactionState(message, emoji, count, mine) {
     message.reactions = list;
 }
 
-// Применяет новый итог по эмодзи к сообщению в ленте и перерисовывает его реакции.
-function applyReactionChange(messageId, emoji, count, mine) {
+// Применяет новый итог по эмодзи к сообщению в ленте и перерисовывает его реакции. v — версия итога
+// с сервера; без неё (старый сервер) итог применяется как есть.
+function applyReactionChange(messageId, emoji, count, mine, v) {
     const bubble = findMessageEl(messageId);
     const message = bubble && bubble._message;
     if (!message) return;
-    setReactionState(message, emoji, count, mine);
+    let freshCount = true;
+    let freshMine = typeof mine === 'boolean';
+    if (Number.isSafeInteger(v) && v > 0) {
+        const key = `${messageId}:${emoji}`;
+        const known = reactionVersions.get(key) || { v: 0, mv: 0 };
+        freshCount = v > known.v;
+        freshMine = freshMine && v > known.mv;
+        reactionVersions.set(key, { v: freshCount ? v : known.v, mv: freshMine ? v : known.mv });
+    }
+    if (!freshCount && !freshMine) return;
+    const current = messageReactions(message).find((entry) => entry.emoji === emoji);
+    setReactionState(message, emoji, freshCount ? count : (current ? current.count : 0), freshMine ? mine : undefined);
     const container = bubble.querySelector('.reactions');
     if (container) renderReactions(container, message);
     if (menuMessage && String(menuMessage.id) === String(messageId)) updateReactionPicker(menuMessage);
@@ -652,7 +667,7 @@ async function toggleReaction(message, emoji) {
     const known = messageReactions(message).find((entry) => entry.emoji === emoji);
     const before = known ? known.count : 0;
     const count = typeof data.count === 'number' ? data.count : Math.max(0, before + (removing ? -1 : 1));
-    applyReactionChange(message.id, emoji, count, !removing);
+    applyReactionChange(message.id, emoji, count, !removing, data.v);
 }
 
 function clearReply() {

@@ -9,7 +9,9 @@
 //  * событие reactionChanged: участникам комнаты без автора реакции, автору (всем его
 //    вкладкам) — копия с mine; тем, кто вступил позже сообщения, и посторонним события нет;
 //  * в событии нет данных о том, КТО поставил реакцию;
-//  * чат с ботом: событие владельцу.
+//  * чат с ботом: событие владельцу;
+//  * итог несёт версию v (повторное ревью клиента W7, RR-6): изменения одной реакции выстраиваются в очередь,
+//    версии строго растут, у ответа и событий одного изменения версия одна — клиент применяет только более новый итог.
 
 const { test } = require('node:test');
 const assert = require('assert');
@@ -35,6 +37,14 @@ async function pair(t) {
 const reactionsOf = async (client, chatId, messageId) =>
     (await client.messages(chatId)).messages.find(m => m.id === messageId).reactions;
 
+// Версия итога: целое > 0; сравнение тел — без неё.
+function withoutV(body) {
+    assert.ok(body && Number.isSafeInteger(body.v) && body.v > 0, `версия итога: ${JSON.stringify(body)}`);
+    const { v, ...rest } = body;
+    void v;
+    return rest;
+}
+
 // Сервер отдаёт реакции по порядку эмодзи (ORDER BY emoji).
 const byEmoji = (list) => [...list].sort((a, b) => (a.emoji < b.emoji ? -1 : 1));
 
@@ -44,9 +54,9 @@ test('история: {emoji, count, mine} у каждого читающего;
     assert.deepStrictEqual(await reactionsOf(p.owner, p.ownerChat.id, message.id), [], 'у нового сообщения реакций нет');
 
     const first = await p.member.post('/api/reactions', { messageId: message.id, emoji: LIKE });
-    assert.deepStrictEqual(first.body, { success: true, count: 1, mine: true });
+    assert.deepStrictEqual(withoutV(first.body), { success: true, count: 1, mine: true });
     const second = await p.owner.post('/api/reactions', { messageId: message.id, emoji: LIKE });
-    assert.deepStrictEqual(second.body, { success: true, count: 2, mine: true });
+    assert.deepStrictEqual(withoutV(second.body), { success: true, count: 2, mine: true });
     // Повтор того же — не удваивает (ON CONFLICT DO NOTHING).
     assert.strictEqual((await p.owner.post('/api/reactions', { messageId: message.id, emoji: LIKE })).body.count, 2);
     await p.owner.post('/api/reactions', { messageId: message.id, emoji: HEART });
@@ -62,11 +72,11 @@ test('история: {emoji, count, mine} у каждого читающего;
 
     // Снятие: после перезагрузки (новая история) признак «моя» позволяет снять реакцию.
     const removed = await p.member.del(`/api/reactions/${message.id}/${encodeURIComponent(LIKE)}`);
-    assert.deepStrictEqual(removed.body, { success: true, count: 1, mine: false });
+    assert.deepStrictEqual(withoutV(removed.body), { success: true, count: 1, mine: false });
     const afterMember = await reactionsOf(p.member, p.memberChat.id, message.id);
     assert.deepStrictEqual(afterMember.find(r => r.emoji === LIKE), { emoji: LIKE, count: 1, mine: false });
     const gone = await p.owner.del(`/api/reactions/${message.id}/${encodeURIComponent(HEART)}`);
-    assert.deepStrictEqual(gone.body, { success: true, count: 0, mine: false });
+    assert.deepStrictEqual(withoutV(gone.body), { success: true, count: 0, mine: false });
     assert.ok(!(await reactionsOf(p.owner, p.ownerChat.id, message.id)).some(r => r.emoji === HEART), 'реакция с нулём не отдаётся');
 });
 
@@ -78,11 +88,11 @@ test('reactionChanged: остальным участникам — итог бе
 
     await p.member.post('/api/reactions', { messageId: message.id, emoji: LIKE });
     const seen = await p.ownerSock.waitFor('reactionChanged', e => e.id === String(message.id));
-    assert.deepStrictEqual(seen, { id: String(message.id), emoji: LIKE, count: 1, room_id: p.roomId },
+    assert.deepStrictEqual(withoutV(seen), { id: String(message.id), emoji: LIKE, count: 1, room_id: p.roomId },
         'владелец видит итог; кто поставил, в событии не раскрывается, mine отсутствует');
     for (const sock of [p.memberSock, memberSecondTab]) {
         const own = await sock.waitFor('reactionChanged', e => e.id === String(message.id));
-        assert.deepStrictEqual(own, { id: String(message.id), emoji: LIKE, count: 1, room_id: p.roomId, mine: true }, 'вкладки автора реакции получают mine: true');
+        assert.deepStrictEqual(withoutV(own), { id: String(message.id), emoji: LIKE, count: 1, room_id: p.roomId, mine: true }, 'вкладки автора реакции получают mine: true');
     }
 
     // Снятие: автор получает mine: false, остальные — новое число.
@@ -90,9 +100,9 @@ test('reactionChanged: остальным участникам — итог бе
     const markMember = p.memberSock.mark();
     await p.member.del(`/api/reactions/${message.id}/${encodeURIComponent(LIKE)}`);
     const goneForOwner = await p.ownerSock.waitFor('reactionChanged', e => e.id === String(message.id), { since: markOwner });
-    assert.deepStrictEqual(goneForOwner, { id: String(message.id), emoji: LIKE, count: 0, room_id: p.roomId });
+    assert.deepStrictEqual(withoutV(goneForOwner), { id: String(message.id), emoji: LIKE, count: 0, room_id: p.roomId });
     const goneForMember = await p.memberSock.waitFor('reactionChanged', e => e.id === String(message.id), { since: markMember });
-    assert.deepStrictEqual(goneForMember, { id: String(message.id), emoji: LIKE, count: 0, room_id: p.roomId, mine: false });
+    assert.deepStrictEqual(withoutV(goneForMember), { id: String(message.id), emoji: LIKE, count: 0, room_id: p.roomId, mine: false });
 });
 
 test('событие не уходит тем, кто вступил после сообщения, и посторонним; на новое сообщение — уходит', async (t) => {
@@ -142,8 +152,40 @@ test('чат с ботом: событие приходит владельцу �
     const message = await user.send(bot.id, 'привет');
 
     const res = await user.post('/api/reactions', { messageId: message.id, emoji: LIKE });
-    assert.deepStrictEqual(res.body, { success: true, count: 1, mine: true });
+    assert.deepStrictEqual(withoutV(res.body), { success: true, count: 1, mine: true });
     const event = await sock.waitFor('reactionChanged', e => e.id === String(message.id));
-    assert.deepStrictEqual(event, { id: String(message.id), emoji: LIKE, count: 1, chat_id: bot.id, room_id: null, mine: true });
+    assert.deepStrictEqual(withoutV(event), { id: String(message.id), emoji: LIKE, count: 1, chat_id: bot.id, room_id: null, mine: true });
+    assert.strictEqual(event.v, res.body.v, 'у ответа и события одного изменения версия одна');
     assert.deepStrictEqual(await reactionsOf(user, bot.id, message.id), [{ emoji: LIKE, count: 1, mine: true }]);
+});
+
+test('RR-6: версии итога строго растут; у ответа и событий одного изменения версия одна; итог с наибольшей версией — верный', async (t) => {
+    const p = await pair(t);
+    const message = await p.owner.send(p.ownerChat.id, 'много реакций');
+    const markOwner = p.ownerSock.mark();
+    const markMember = p.memberSock.mark();
+    const a = await p.member.post('/api/reactions', { messageId: message.id, emoji: LIKE });
+    const b = await p.owner.post('/api/reactions', { messageId: message.id, emoji: LIKE });
+    const c = await p.member.del(`/api/reactions/${message.id}/${encodeURIComponent(LIKE)}`);
+    assert.ok(a.body.v < b.body.v && b.body.v < c.body.v, `версии растут: ${a.body.v}, ${b.body.v}, ${c.body.v}`);
+    const ownerEvents = await p.ownerSock.waitFor('reactionChanged', e => e.id === String(message.id) && e.v === c.body.v, { since: markOwner });
+    assert.strictEqual(ownerEvents.count, 1);
+    const memberOwn = await p.memberSock.waitFor('reactionChanged', e => e.id === String(message.id) && e.v === a.body.v, { since: markMember });
+    assert.strictEqual(memberOwn.mine, true);
+
+    // Одновременно ставят и снимают несколько раз: событие с наибольшей версией совпадает с историей.
+    const mark = p.ownerSock.mark();
+    await Promise.all([
+        p.member.post('/api/reactions', { messageId: message.id, emoji: HEART }),
+        p.owner.post('/api/reactions', { messageId: message.id, emoji: HEART }),
+        p.member.del(`/api/reactions/${message.id}/${encodeURIComponent(HEART)}`),
+    ]);
+    const final = (await reactionsOf(p.owner, p.ownerChat.id, message.id)).find(r => r.emoji === HEART);
+    const finalCount = final ? final.count : 0;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const events = p.ownerSock.collect('reactionChanged', { since: mark }).filter(e => e.id === String(message.id) && e.emoji === HEART);
+    const newest = events.reduce((best, e) => (!best || e.v > best.v ? e : best), null);
+    assert.ok(newest, 'события пришли');
+    assert.strictEqual(newest.count, finalCount, `итог с наибольшей версией (${newest.v}) — ${newest.count}, в истории — ${finalCount}`);
+    assert.strictEqual(new Set(events.map(e => e.v)).size, events.length, 'версии событий не повторяются');
 });

@@ -28,7 +28,7 @@ function makeClient({ api } = {}) {
             'normalizeReaction', 'messageReactions', 'myReaction', 'setReactionState', 'applyReactionChange',
             'renderReactions', 'updateReactionPicker', 'toggleReaction', 'findMessageEl',
         ],
-        prelude: 'let menuMessage = null; const REACTIONS = __REACTIONS;',
+        prelude: 'let menuMessage = null; const REACTIONS = __REACTIONS; const reactionVersions = new Map();',
         sandbox: {
             elements,
             __REACTIONS: REACTIONS,
@@ -151,6 +151,34 @@ test('в picker отметка нажатости берётся из mine', () 
     c.context.__m = { id: 1, reactions: [{ emoji: HEART, count: 1, mine: true }] };
     c.run('updateReactionPicker(__m)');
     assert.deepStrictEqual(buttons.map((b) => b.getAttribute('aria-pressed')), ['false', 'true']);
+});
+
+// Повторное ревью клиента W7, RR-6: ответ на свой POST, пришедший после события другого участника, затирал более
+// свежее число (у Алисы «1», на сервере 2). Ответы и события несут версию итога v, применяется только более новый.
+test('RR-6: устаревший итог (меньшая версия) не затирает более свежий — ни ответом, ни событием; «моя» — по своей версии', async () => {
+    let c;
+    c = makeClient({
+        api: async () => {
+            // Пока запрос Алисы в пути, приходит событие о реакции Боба (сервер посчитал его позже: v больше).
+            c.run(`applyReactionChange(5, ${JSON.stringify(LIKE)}, 2, undefined, 20)`);
+            return { success: true, count: 1, mine: true, v: 10 };
+        },
+    });
+    const message = { id: 5, reactions: [] };
+    const { container } = c.bubbleFor(message);
+    c.context.__m = message;
+    await c.run(`toggleReaction(__m, ${JSON.stringify(LIKE)})`);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(c.run('messageReactions(__m)'))), [{ emoji: LIKE, count: 2, mine: true }], 'число — свежее (2), отметка «моя» — из ответа');
+    // Копия события для вкладок Алисы (та же версия, что у ответа) приходит последней — тоже устаревшая.
+    c.run(`applyReactionChange(5, ${JSON.stringify(LIKE)}, 1, true, 10)`);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(c.run('messageReactions(__m)'))), [{ emoji: LIKE, count: 2, mine: true }]);
+    // Боб снял реакцию — новое событие с большей версией применяется.
+    c.run(`applyReactionChange(5, ${JSON.stringify(LIKE)}, 1, undefined, 30)`);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(c.run('messageReactions(__m)'))), [{ emoji: LIKE, count: 1, mine: true }]);
+    assert.deepStrictEqual(shown(container), [{ icon: 'thumbs-up', count: null, active: true }]);
+    // Без версии (сервер без v) — применяется как раньше.
+    c.run(`applyReactionChange(5, ${JSON.stringify(LIKE)}, 4, undefined)`);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(c.run('messageReactions(__m)'))), [{ emoji: LIKE, count: 4, mine: true }]);
 });
 
 test('код: подписка на reactionChanged есть, локальной таблицы myReactions больше нет', () => {
