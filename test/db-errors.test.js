@@ -67,6 +67,9 @@ async function main() {
             pgError('22P02', 'invalid input syntax for type integer'),
             pgError('42P01', 'relation "x" does not exist'),
             pgError('55000', 'object not in prerequisite state'),
+            // Повторное ревью W7, Н7: 08P01 (protocol_violation) — класс 08, но это ошибка самого запроса (например,
+            // больше 65535 параметров в одном запросе): повтор не поможет, её нужно видеть в логе как 500.
+            pgError('08P01', 'bind message supplies 70000 parameters, but prepared statement requires 4464'),
             new TypeError('Cannot read properties of undefined'),
             pgError('ENOENT', 'no such file'),
             null, undefined, 'строка',
