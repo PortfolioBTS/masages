@@ -175,6 +175,25 @@ test('выход из группы: нерасшифрованное сообщ�
     assert.strictEqual(more.run('feedMayHaveOwnMessages()'), true, 'история загружена не вся');
 });
 
+// ===================== Мелочь: два <main> =====================
+
+test('<main> без атрибута hidden ровно один: в разметке и после переключения экранов', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+    const mains = html.match(/<main\b[^>]*>/g) || [];
+    assert.strictEqual(mains.length, 2);
+    assert.strictEqual(mains.filter((tag) => !/\shidden(\s|>|=)/.test(tag)).length, 1, mains.join(' '));
+    // У FakeEl hidden — только чтение (по классу); здесь нужен настоящий атрибут.
+    const screen = (hidden) => ({ hidden, classList: { add() {}, remove() {} } });
+    const elements = fakeElements({ authScreen: screen(false), mainContent: screen(true) });
+    const c = createClient({ functions: ['showAuth', 'showApp'], sandbox: { elements } });
+    c.run('showApp()');
+    assert.deepStrictEqual([elements.authScreen.hidden, elements.mainContent.hidden], [true, false]);
+    c.run('showAuth()');
+    assert.deepStrictEqual([elements.authScreen.hidden, elements.mainContent.hidden], [false, true]);
+});
+
 function makeEl(tag, classes, children = []) {
     const el = new FakeEl(tag);
     el.classList.add(...classes);

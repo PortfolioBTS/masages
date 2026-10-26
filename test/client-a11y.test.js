@@ -28,7 +28,7 @@ test('лента сообщений — role="log" с названием, без
 test('ориентиры: боковая панель — aside, список чатов — navigation, содержимое чата — main', () => {
     assert.match(html, /<aside class="sidebar" aria-label="Чаты и профиль">/);
     assert.match(html, /<div id="chats-list" class="chats-list" role="navigation" aria-label="Список чатов">/);
-    assert.match(html, /<main class="main-content">/);
+    assert.match(html, /<main class="main-content" hidden>/);
     // Теги закрыты теми же именами (не осталось div-закрытия у aside/main).
     assert.strictEqual((html.match(/<aside\b/g) || []).length, (html.match(/<\/aside>/g) || []).length);
     assert.strictEqual((html.match(/<main\b/g) || []).length, (html.match(/<\/main>/g) || []).length);

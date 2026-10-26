@@ -3,13 +3,19 @@
 // showAuth/showApp/showToast, api/postFormData*, setupEventListeners и все setup*Listeners.
 // Классический скрипт (не ES-модуль): общая глобальная область со всеми файлами public/js/, порядок подключения — как в index.html.
 
+// <main> у входа и у приложения свой; видимый (без атрибута hidden) — ровно один, как требует HTML (повторное ревью W7,
+// мелочь): класс hidden прячет экран, атрибут говорит то же вспомогательным технологиям.
 function showAuth() {
     elements.authScreen.classList.remove('hidden');
+    elements.authScreen.hidden = false;
+    elements.mainContent.hidden = true;
     elements.app.classList.add('hidden');
 }
 
 function showApp() {
     elements.authScreen.classList.add('hidden');
+    elements.authScreen.hidden = true;
+    elements.mainContent.hidden = false;
     elements.app.classList.remove('hidden');
 }
 
