@@ -77,6 +77,16 @@ function unknownSendKey(chatId, roomId, text, replyToId) {
     return JSON.stringify([chatId, roomId || null, text, replyToId || null]);
 }
 
+// Sender Key, которым зашифрован конверт запроса (null — не конверт комнаты).
+function requestSenderKeyId(request) {
+    try {
+        const envelope = JSON.parse(request && request.text);
+        return envelope && typeof envelope.senderKeyId === 'string' ? envelope.senderKeyId : null;
+    } catch {
+        return null;
+    }
+}
+
 // Текст для пользователя по отказу сервера. client-outdated — просьба обновить
 // страницу; bad-message-id — ошибка клиента, подробности только в консоль.
 function sendFailureText(data, fallback) {
@@ -122,8 +132,16 @@ async function sendText(text, { chatId, roomId, replyToId } = {}) {
     const encrypted = Boolean(client);
     let encryptFailed = false;
     const key = unknownSendKey(chatId, roomId, text, replyToId);
-    const reuse = unknownSend && unknownSend.key === key && Date.now() - unknownSend.at < UNKNOWN_SEND_TTL_MS ? unknownSend : null;
+    let reuse = unknownSend && unknownSend.key === key && Date.now() - unknownSend.at < UNKNOWN_SEND_TTL_MS ? unknownSend : null;
     unknownSend = null;
+    // Свой ключ комнаты сменился с момента шифрования (ротация — например, исключили участника): старый конверт не
+    // повторяется. Если первая попытка не дошла, его под прежним ключом мог бы прочитать исключённый (повторное ревью
+    // W7, RR-9); цена — возможный дубликат, если она всё же дошла, о чём и сказано.
+    if (reuse && reuse.senderKeyId && client && typeof client.currentSenderKeyId === 'function'
+        && (await client.currentSenderKeyId(roomId)) !== reuse.senderKeyId) {
+        reuse = null;
+        showToast('Ключ группы сменился: сообщение зашифровано заново. Если первая попытка всё же дошла, оно может появиться дважды', 'info', 6000);
+    }
     const deadline = Date.now() + SEND_TOTAL_MS;
     const outcome = await sendWithOutcomes({
         roomId,
@@ -154,7 +172,10 @@ async function sendText(text, { chatId, roomId, replyToId } = {}) {
         }),
     });
     if (isUnknownSendOutcome(outcome.data) && outcome.request) {
-        unknownSend = { key, request: outcome.request, clientMessageId: outcome.clientMessageId, at: Date.now() };
+        unknownSend = {
+            key, request: outcome.request, clientMessageId: outcome.clientMessageId, at: Date.now(),
+            senderKeyId: roomId ? requestSenderKeyId(outcome.request) : null,
+        };
     }
     if (encryptFailed) {
         showToast('Не удалось зашифровать сообщение — попробуйте ещё раз', 'error');

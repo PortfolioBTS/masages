@@ -2765,6 +2765,14 @@
             return Boolean(await storage.get(ownKeyName(roomId)));
         }
 
+        // Идентификатор моего текущего Sender Key в комнате (null — ключа нет): по нему отправка с неизвестным исходом
+        // узнаёт, сменился ли ключ с момента шифрования (повторное ревью W7, RR-9).
+        async function currentSenderKeyId(roomId) {
+            await ensureLocal();
+            const own = await storage.get(ownKeyName(Number(roomId)));
+            return own && typeof own.senderKeyId === 'string' ? own.senderKeyId : null;
+        }
+
         // Что клиент знает о составе из ответа GET participants (signed-membership.md, 7.2): свои сертификаты,
         // снимки к ним и сертификат приглашения. Всё разбирается строго: сервер недоверенный.
         function normalizeMembershipInfo(info, meId) {
@@ -3449,6 +3457,7 @@
             ensureRoomSession,
             syncKeyShares,
             hasRoomKey,
+            currentSenderKeyId,
             rotateRoomKey,
 
             // Состав группы: подписи, приглашения, вход, подтверждение участников (signed-membership.md, 10)

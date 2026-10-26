@@ -132,13 +132,14 @@ test('загрузка: отмена пользователем остаётся
 
 // ---- отправка сообщения ----
 
-function sendClient({ responses }) {
+// keys — { current }: текущий Sender Key отправителя в комнате (RR-9); без него клиент E2EE-заглушка о ключе не знает.
+function sendClient({ responses, keys = null }) {
     const log = { posts: [], encrypts: 0, toasts: [], appended: [], delays: 0 };
     let clock = 1_000_000;
     let idCounter = 0;
     class E2eeBlockedError extends Error {}
     const client = createClient({
-        functions: ['isUnknownSendOutcome', 'sendWithOutcomes', 'unknownSendKey', 'sendFailureText', 'sendText'],
+        functions: ['isUnknownSendOutcome', 'sendWithOutcomes', 'unknownSendKey', 'requestSenderKeyId', 'sendFailureText', 'sendText'],
         consts: ['SEND_RETRY_DELAYS_MS', 'MAX_ID_CONFLICTS', 'SEND_TIMEOUT_MS', 'SEND_TOTAL_MS', 'UNKNOWN_SEND_TTL_MS'],
         prelude: 'let unknownSend = null; let currentChatId = 1; const PROTO_VERSION = 4;',
         sandbox: {
@@ -147,9 +148,12 @@ function sendClient({ responses }) {
             E2eeBlockedError,
             NyxoMessageOrder: { newClientMessageId: () => `id-${++idCounter}` },
             delay: async () => { log.delays++; },
-            prepareOutgoing: async () => ({ fake: 'client' }),
+            prepareOutgoing: async () => (keys ? { currentSenderKeyId: async () => keys.current } : { fake: 'client' }),
             reportBlockedSend() {},
-            encryptForRoom: async (_client, _chatId, _roomId, text, { messageId }) => { log.encrypts++; return `ENV[${messageId}:${text}]`; },
+            encryptForRoom: async (_client, _chatId, _roomId, text, { messageId }) => {
+                log.encrypts++;
+                return keys ? JSON.stringify({ senderKeyId: keys.current, mid: messageId, t: text }) : `ENV[${messageId}:${text}]`;
+            },
             api: async (url, init) => {
                 log.posts.push({ url, body: JSON.parse(init.body), timeoutMs: init.timeoutMs });
                 const next = responses.shift();
@@ -223,6 +227,33 @@ test('запомненный запрос устаревает через UNKNOW
     c.run('unknownSend.at -= 6 * 60 * 1000');
     await c.run("sendText('привет', { chatId: 1, roomId: 10 })");
     assert.strictEqual(c.log.posts[4].body.clientMessageId, 'id-2', 'старый запрос не используется');
+});
+
+// Повторное ревью клиента W7, RR-9: unknownSend повторял конверт, зашифрованный до ротации ключа комнаты. Если первая
+// попытка не дошла, а ключ сменился из-за исключения участника, старый конверт под прежним ключом может прочитать
+// исключённый (сервер по модели угроз может отдать его ему). Конфиденциальность важнее возможного дубликата.
+test('RR-9: свой ключ комнаты сменился после неизвестного исхода — старый конверт не повторяется: заново, новый id, предупреждение', async () => {
+    const keys = { current: 'k1' };
+    const c = sendClient({ responses: [...Array.from({ length: 4 }, () => ({ ...TIMED_OUT, advance: 1000 })), OK], keys });
+    await c.run("sendText('привет', { chatId: 1, roomId: 10 })");
+    assert.strictEqual(c.run('unknownSend.senderKeyId'), 'k1', 'ключ конверта запомнен');
+    keys.current = 'k2';
+    const again = await c.run("sendText('привет', { chatId: 1, roomId: 10 })");
+    assert.strictEqual(again, true);
+    assert.strictEqual(c.log.encrypts, 2, 'зашифровано заново');
+    const last = c.log.posts[4].body;
+    assert.notStrictEqual(last.clientMessageId, c.log.posts[0].body.clientMessageId, 'новый id');
+    assert.strictEqual(JSON.parse(last.text).senderKeyId, 'k2', 'под новым ключом');
+    assert.ok(c.log.toasts.some((t) => /Ключ группы сменился/.test(t.text) && /дважды/.test(t.text)), JSON.stringify(c.log.toasts));
+});
+
+test('RR-9: ключ комнаты тот же — повторяется тот же запрос, как раньше', async () => {
+    const keys = { current: 'k1' };
+    const c = sendClient({ responses: [...Array.from({ length: 4 }, () => ({ ...TIMED_OUT, advance: 1000 })), OK], keys });
+    await c.run("sendText('привет', { chatId: 1, roomId: 10 })");
+    await c.run("sendText('привет', { chatId: 1, roomId: 10 })");
+    assert.strictEqual(c.log.encrypts, 1);
+    assert.deepStrictEqual(c.log.posts[4].body, c.log.posts[0].body);
 });
 
 test('отказ сервера (не «неизвестный исход») запрос не запоминает', async () => {

@@ -28,6 +28,7 @@ const CLIENT_METHODS = [
     'ensureRoomSession',
     'syncKeyShares',
     'hasRoomKey',
+    'currentSenderKeyId',
     'rotateRoomKey',
 
     // Состав группы: подписи, приглашения, вход, подтверждение участников
