@@ -40,11 +40,11 @@
     "cookie-parser": "^1.4.7",
     "dotenv": "^16.4.5",
     "express": "^4.18.2",
-    "express-rate-limit": "^8.5.2",
+    "express-rate-limit": "^8.7.1",
     "express-session": "^1.17.3",
     "multer": "^2.4.0",
-    "pg": "^8.21.0",
+    "pg": "^8.23.1",
     "sharp": "^0.35.4",
-    "socket.io": "^4.8.3"
+    "socket.io": "^4.8.4"
   }
 }
