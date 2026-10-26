@@ -54,11 +54,11 @@ async function main() {
     await test('значения из окружения; мусор, ноль, отрицательные и экспонента дают умолчание', () => {
         const limits = resolveAccountLimits({
             REGISTER_GLOBAL_PER_MIN: '7', REGISTER_PACE_PER_MIN: '3', TEXT_QUOTA_MB_PER_DAY: '0.5',
-            ROOMS_PER_USER_MAX: '4', UPLOAD_MIN_FREE_MB: '1024', UPLOADS_IP_PER_MIN: '5', UPLOADS_USER_PER_15MIN: '6', OPEN_UPLOADS_PER_10MIN: '8',
+            ROOMS_PER_USER_MAX: '4', UPLOAD_MIN_FREE_MB: '1024', UPLOADS_IP_PER_MIN: '50', UPLOADS_USER_PER_15MIN: '60', OPEN_UPLOADS_PER_10MIN: '8',
         });
         assert.deepStrictEqual({ ...limits }, {
             registerGlobalPerMin: 7, registerPacePerMin: 3, textQuotaBytesPerDay: 524288,
-            roomsPerUserMax: 4, uploadMinFreeBytes: 1024 * 1024 * 1024, uploadsIpPerMin: 5, uploadsUserPer15Min: 6, openUploadsPer10Min: 8,
+            roomsPerUserMax: 4, uploadMinFreeBytes: 1024 * 1024 * 1024, uploadsIpPerMin: 50, uploadsUserPer15Min: 60, openUploadsPer10Min: 8,
         });
         for (const bad of ['', 'abc', '0', '-5', '1e3', '0x10', ' ', '1.5']) {
             const l = resolveAccountLimits({ REGISTER_GLOBAL_PER_MIN: bad, ROOMS_PER_USER_MAX: bad });
@@ -70,8 +70,12 @@ async function main() {
         }
     });
 
-    await test('суточный объём текста не превышает INT счётчика (2^31-1 байт)', () => {
-        assert.strictEqual(resolveAccountLimits({ TEXT_QUOTA_MB_PER_DAY: '999999' }).textQuotaBytesPerDay, 2147483647);
+    await test('суточный объём текста не превышает INT счётчика (2^31-1 байт); вне диапазона env-check — умолчание, как он и пишет', () => {
+        assert.strictEqual(resolveAccountLimits({ TEXT_QUOTA_MB_PER_DAY: '2000' }).textQuotaBytesPerDay, 2000 * 1024 * 1024);
+        assert.ok(2000 * 1024 * 1024 <= 2147483647);
+        assert.strictEqual(resolveAccountLimits({ TEXT_QUOTA_MB_PER_DAY: '999999' }).textQuotaBytesPerDay, 20 * 1024 * 1024);
+        // Ниже минимума env-check — тоже умолчание (раньше сервер брал 5, а env-check обещал 600).
+        assert.strictEqual(resolveAccountLimits({ UPLOADS_IP_PER_MIN: '5' }).uploadsIpPerMin, 600);
     });
 
     await test('давление регистраций: ниже темпа 0 бит, на темпе 1, каждое удвоение - ещё бит, потолок +6', () => {

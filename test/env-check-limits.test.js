@@ -61,6 +61,54 @@ test('допустимые значения принимаются, гранич
     }
 });
 
+// Повторное ревью W7, Н2: env-check и сервер разбирали одни и те же переменные по-разному (разные регулярные
+// выражения и пределы): env-check писал «будет использовано умолчание», а сервер брал значение как есть — и наоборот.
+// Теперь разбор один (lib/numeric-knobs.js): что env-check назвал, то сервер и берёт.
+const MB = 1024 * 1024;
+const { _internal: stripper } = require('../lib/metadata-stripper');
+const { resolveAccountLimits } = require('../lib/account-limits');
+const { resolveDbSessionTimeouts } = require('../src/db/pool');
+const { resolveSocketEventRates } = require('../src/realtime/socket-handlers');
+const SERVER_VALUE = {
+    IMAGE_MAX_PIXELS: (env) => stripper.resolveImageLimits(env).maxPixels,
+    IMAGE_MAX_FRAMES: (env) => stripper.resolveImageLimits(env).maxFrames,
+    UPLOAD_PROCESS_CONCURRENCY: (env) => stripper.resolveProcessLimits(env).concurrency,
+    UPLOAD_PROCESS_QUEUE: (env) => stripper.resolveProcessLimits(env).maxQueue,
+    REGISTER_GLOBAL_PER_MIN: (env) => resolveAccountLimits(env).registerGlobalPerMin,
+    REGISTER_PACE_PER_MIN: (env) => resolveAccountLimits(env).registerPacePerMin,
+    TEXT_QUOTA_MB_PER_DAY: (env) => resolveAccountLimits(env).textQuotaBytesPerDay / MB,
+    ROOMS_PER_USER_MAX: (env) => resolveAccountLimits(env).roomsPerUserMax,
+    UPLOAD_MIN_FREE_MB: (env) => resolveAccountLimits(env).uploadMinFreeBytes / MB,
+    UPLOADS_IP_PER_MIN: (env) => resolveAccountLimits(env).uploadsIpPerMin,
+    UPLOADS_USER_PER_15MIN: (env) => resolveAccountLimits(env).uploadsUserPer15Min,
+    OPEN_UPLOADS_PER_10MIN: (env) => resolveAccountLimits(env).openUploadsPer10Min,
+    SOCKET_EVENT_RATE: (env) => resolveSocketEventRates(env).rate,
+    SOCKET_EVENT_BURST: (env) => resolveSocketEventRates(env).burst,
+    DB_STATEMENT_TIMEOUT_MS: (env) => resolveDbSessionTimeouts(env).statement_timeout,
+    DB_LOCK_TIMEOUT_MS: (env) => resolveDbSessionTimeouts(env).lock_timeout,
+    DB_IDLE_TX_TIMEOUT_MS: (env) => resolveDbSessionTimeouts(env).idle_in_transaction_session_timeout,
+};
+
+test('у каждой числовой настройки есть разбор на сервере', () => {
+    assert.deepStrictEqual(Object.keys(SERVER_VALUE).sort(), NUMERIC_KNOBS.map(k => k.name).sort());
+});
+
+test('сервер берёт ровно то значение, которое называет env-check (Н2)', () => {
+    for (const knob of NUMERIC_KNOBS) {
+        const raws = [knob.min, knob.max, knob.def, knob.min - 1, knob.max + 1, knob.max * 10, '0', '-1', '1e1', '0x10', '1.5',
+            '0.0005', 'abc', ' 12 ', '00012', '', '1234567890', String(Math.floor((knob.min + knob.max) / 2))].map(String);
+        for (const raw of raws) {
+            const env = goodEnv({ [knob.name]: raw });
+            const warned = checkEnv(env).warnings.some(w => w.name === knob.name);
+            const expected = warned || raw.trim() === '' ? knob.def : Number(raw);
+            const got = SERVER_VALUE[knob.name](env);
+            // Мегабайты сервер хранит в байтах (с округлением вниз) — сравнение с точностью до байта.
+            const same = knob.float ? Math.abs(got - expected) * MB < 1 : got === expected;
+            assert.ok(same, `${knob.name}=${JSON.stringify(raw)}: env-check ${warned ? 'предупредил (умолчание ' + knob.def + ')' : 'принял'}, сервер взял ${got}`);
+        }
+    }
+});
+
 test('каждая числовая настройка описана в .env.example и docs/ops/deploy-railway.md', () => {
     const example = read('.env.example');
     const deploy = read('docs/ops/deploy-railway.md');

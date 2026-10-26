@@ -159,7 +159,7 @@ lib/                       # серверные модули (чистые фу�
   account-limits.js, registration-pressure.js, text-quota.js, disk-space.js, work-limiter.js, token-bucket.js  # лимиты против массовых аккаунтов и «бомб»
   sanitizer-pool.js, sanitizer-worker.js                         # очистка PDF и видео в отдельном потоке: тайм-аут, предел памяти
   trust-proxy.js, onion-access.js, db-errors.js, pg-client-guard.js, ids.js, room-name.js, drain-batches.js, orphan-uploads.js  # прокси и onion-порт, 503 busy, разбор id и названий, чистка
-  env-check.js, legacy-reset.js, metrics.js, advisory-locks.js, tx-retry.js, log-error.js, proto.js
+  env-check.js, numeric-knobs.js, legacy-reset.js, metrics.js, advisory-locks.js, tx-retry.js, log-error.js, proto.js
   jobs/, routes/, migrations/                                    # фоновые задачи, вынесенные маршруты, миграции
 public/                    # клиент без сборщика
   index.html, css/ (tokens, controls, auth, app-shell, messages, composer, modals, popups, responsive), js/ (01-state.js … 18-init.js — классические скрипты в порядке подключения), theme.js, icons.js, icons/, manifest.webmanifest

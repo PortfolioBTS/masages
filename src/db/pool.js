@@ -5,7 +5,7 @@
 const { Pool } = require('pg');
 const { resolveDbTlsConfig } = require('../../lib/security-utils');
 const { logError } = require('../../lib/log-error');
-const { NUMERIC_KNOBS } = require('../../lib/env-check');
+const { knobValue } = require('../../lib/numeric-knobs');
 
 // Таймауты сессии Postgres (ревью W7 R2.4) — параметрами соединения, у каждой сессии пулов
 // сервера. Без них один долгий замок (зависшая транзакция, блокировка строки комнаты) держал
@@ -16,7 +16,7 @@ const { NUMERIC_KNOBS } = require('../../lib/env-check');
 //   * idle_in_transaction_session_timeout — открытая и брошенная транзакция (код, который
 //     ждёт чего-то вне базы с BEGIN) не держит блокировки дольше этого срока.
 // Миграции снимают их у своих сессий сами (lib/advisory-locks.js). Значения — DB_*_TIMEOUT_MS;
-// вне диапазона lib/env-check.js (NUMERIC_KNOBS) — умолчание (env-check об этом предупреждает).
+// негодные — умолчание; разбор общий с env-check (lib/numeric-knobs.js), он же и предупреждает.
 const SESSION_TIMEOUTS = [
     ['statement_timeout', 'DB_STATEMENT_TIMEOUT_MS'],
     ['lock_timeout', 'DB_LOCK_TIMEOUT_MS'],
@@ -32,12 +32,7 @@ const DB_SESSION_OPTIONS = '-c TimeZone=UTC';
 
 function resolveDbSessionTimeouts(env = process.env) {
     const timeouts = {};
-    for (const [param, name] of SESSION_TIMEOUTS) {
-        const knob = NUMERIC_KNOBS.find(k => k.name === name);
-        const raw = typeof env[name] === 'string' ? env[name].trim() : '';
-        const value = Number(raw);
-        timeouts[param] = raw !== '' && Number.isInteger(value) && value >= knob.min && value <= knob.max ? value : knob.def;
-    }
+    for (const [param, name] of SESSION_TIMEOUTS) timeouts[param] = knobValue(env, name);
     return timeouts;
 }
 

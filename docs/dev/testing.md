@@ -39,7 +39,7 @@
 - `--jobs=N` — размер пула; `--timeout=СЕК` — тайм-аут на файл.
 
 Две проверки, о которых полезно знать при правках сервера: новая числовая
-переменная окружения (лимит) вносится в `NUMERIC_KNOBS` (`lib/env-check.js`),
+переменная окружения (лимит) вносится в `NUMERIC_KNOBS` (`lib/numeric-knobs.js`; сервер читает её через `knobValue` — тот же разбор, что у env-check),
 `.env.example` и `docs/ops/deploy-railway.md` одновременно, согласованность этих
 трёх мест проверяет `test/env-check-limits.test.js`; новый слой Express
 (middleware) вносится в `EXPECTED_STACK` теста `test/server-structure.test.js`.

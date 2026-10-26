@@ -6,22 +6,22 @@
 const { isOnionSocket } = require('../../lib/tor-support');
 const { logError } = require('../../lib/log-error');
 const { createTokenBucket } = require('../../lib/token-bucket');
+const { knobValue } = require('../../lib/numeric-knobs');
 const { MAX_SOCKETS_PER_USER, MAX_SOCKETS_PER_IP, getSocketRoomKey } = require('./io');
 
 // Частота входящих событий одного сокета (токен-бакет): клиент от себя ничего не шлёт, подписка
 // на чаты делается сервером, так что любой поток событий - не работа, а нагрузка. SOCKET_EVENT_RATE
 // - событий в секунду в среднем, SOCKET_EVENT_BURST - всплеск. Превышение - disconnect.
-function envInt(value, fallback) {
-    const n = typeof value === 'string' && /^\d{1,9}$/.test(value.trim()) ? Number(value) : NaN;
-    return Number.isInteger(n) && n >= 1 ? n : fallback;
+// Значения и их проверка — lib/numeric-knobs.js (тот же разбор, что у env-check, Н2).
+function resolveSocketEventRates(env = process.env) {
+    return { rate: knobValue(env, 'SOCKET_EVENT_RATE'), burst: knobValue(env, 'SOCKET_EVENT_BURST') };
 }
 
 function registerSocketHandlers(ctx) {
     const {
         io, userSocketCount, ipSocketCount, getClientIp, dbAll, sessionMiddleware, anonActivity,
     } = ctx;
-    const eventRate = envInt(process.env.SOCKET_EVENT_RATE, 5);
-    const eventBurst = envInt(process.env.SOCKET_EVENT_BURST, 20);
+    const { rate: eventRate, burst: eventBurst } = resolveSocketEventRates();
 
     // Socket.io: источник (allowRequest — в realtime/io.js) -> сессия -> авторизация ->
     // лимит подключений на аккаунт и (для clearnet) на IP.
@@ -114,4 +114,4 @@ function registerSocketHandlers(ctx) {
     });
 }
 
-module.exports = { registerSocketHandlers };
+module.exports = { registerSocketHandlers, resolveSocketEventRates };
