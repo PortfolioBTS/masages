@@ -230,7 +230,7 @@ function setupAuthListeners() {
     elements.inviteToggleBtn.addEventListener('click', () => setInviteMode(!authInviteMode, { focus: true }));
     elements.authInviteInput.addEventListener('input', clearInviteError);
     elements.authInviteInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.isComposing) {
+        if (e.key === 'Enter' && !isImeKeyEvent(e)) {
             e.preventDefault();
             startAccount();
         }
@@ -258,14 +258,14 @@ function setupSidebarListeners() {
     elements.newChatBtn.addEventListener('click', () => openNewChatModal());
     elements.createChatBtn.addEventListener('click', createChat);
     document.getElementById('new-chat-name').addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.isComposing) {
+        if (e.key === 'Enter' && !isImeKeyEvent(e)) {
             e.preventDefault();
             createChat();
         }
     });
     elements.joinChatBtn.addEventListener('click', previewJoin);
     elements.joinChatCode.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.isComposing) {
+        if (e.key === 'Enter' && !isImeKeyEvent(e)) {
             e.preventDefault();
             previewJoin();
         }
@@ -346,13 +346,21 @@ function setupProfileListeners() {
     elements.deleteAccountBtn.addEventListener('click', openDeleteAccountModal);
 }
 
+// Нажатие при вводе через IME (китайский, японский, корейский...) принадлежит IME, а не полю. Safari присылает Enter,
+// подтверждающий композицию, уже после compositionend: isComposing=false, но keyCode=229 (повторное ревью W7, RR-7).
+function isImeKeyEvent(e) {
+    return Boolean(e.isComposing) || e.keyCode === 229;
+}
+
 // Поле ввода: отправка по кнопке и Enter, Escape (отмена правки и ответа),
 // вложения (скрепка, окно «Отправить файлы», перетаскивание), отмена ответа.
 function setupComposerListeners() {
     elements.sendBtn.addEventListener('click', sendMessage);
     elements.messageInput.addEventListener('keydown', (e) => {
+        // Клавиши при вводе через IME принадлежат IME (isImeKeyEvent): иначе уходило недописанное сообщение (RR-7).
+        if (isImeKeyEvent(e)) return;
         // Enter отправляет, Shift+Enter переносит строку (поле многострочное).
-        if (e.key === 'Enter' && !e.isComposing && !e.shiftKey) {
+        if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
             sendMessage();
         } else if (e.key === 'Escape' && (editingMessageId || replyToMessageId)) {

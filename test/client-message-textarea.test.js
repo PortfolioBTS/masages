@@ -41,7 +41,7 @@ function composerClient() {
     const log = { sent: 0 };
     const elements = fakeElements();
     const client = createClient({
-        functions: ['setupComposerListeners', 'setMessageInputValue', 'autoResizeMessageInput'],
+        functions: ['setupComposerListeners', 'isImeKeyEvent', 'setMessageInputValue', 'autoResizeMessageInput'],
         prelude: 'let editingMessageId = null; let replyToMessageId = null; let uploadQueue = null;',
         sandbox: {
             elements,
@@ -74,6 +74,17 @@ test('Enter отправляет, Shift+Enter переносит строку, E
     const composing = input.fire('keydown', { key: 'Enter', shiftKey: false, isComposing: true });
     assert.strictEqual(composing.defaultPrevented, false);
     assert.strictEqual(c.log.sent, 1);
+    // Повторное ревью клиента W7, RR-7: Safari присылает Enter, подтверждающий композицию IME, уже после compositionend —
+    // isComposing=false, но keyCode=229. Такой Enter завершает ввод слова, а не отправляет недописанное сообщение.
+    const safariIme = input.fire('keydown', { key: 'Enter', shiftKey: false, isComposing: false, keyCode: 229 });
+    assert.strictEqual(safariIme.defaultPrevented, false);
+    assert.strictEqual(c.log.sent, 1, 'Enter с keyCode 229 не отправляет');
+    // Escape во время композиции IME отменяет композицию, а не правку и не ответ.
+    c.run('editingMessageId = 7');
+    let cancelled = 0;
+    c.context.cancelEditing = () => { cancelled++; };
+    input.fire('keydown', { key: 'Escape', isComposing: true });
+    assert.strictEqual(cancelled, 0);
 });
 
 // ---- автовысота ----
@@ -130,7 +141,7 @@ test('ввод в поле и изменение размера окна пер�
     const elements = fakeElements();
     const windowListeners = {};
     const c = createClient({
-        functions: ['setupComposerListeners'],
+        functions: ['setupComposerListeners', 'isImeKeyEvent'],
         prelude: 'let editingMessageId = null; let replyToMessageId = null; let uploadQueue = null;',
         sandbox: {
             elements,

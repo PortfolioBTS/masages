@@ -362,7 +362,7 @@ function setupChatSearchListeners() {
         chatSearch.timer = setTimeout(() => runChatSearch(), CHAT_SEARCH_DEBOUNCE_MS);
     });
     elements.chatSearchInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.isComposing) {
+        if (e.key === 'Enter' && !isImeKeyEvent(e)) {
             e.preventDefault();
             // Ввод ещё не обработан (пауза не прошла): сначала пересчёт.
             if (chatSearch.pending) runChatSearch();

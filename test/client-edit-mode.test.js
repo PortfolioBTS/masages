@@ -14,7 +14,7 @@ const { readClientScript } = require('./client-script-source');
 const { test, done } = createHarness();
 const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
 
-const FUNCTIONS = ['messageSummary', 'clearReply', 'startReply', 'startEditing', 'finishEditing', 'cancelEditing', 'setMessageInputValue', 'setupComposerListeners'];
+const FUNCTIONS = ['messageSummary', 'clearReply', 'startReply', 'startEditing', 'finishEditing', 'cancelEditing', 'setMessageInputValue', 'setupComposerListeners', 'isImeKeyEvent'];
 
 function makeClient() {
     const elements = fakeElements();
