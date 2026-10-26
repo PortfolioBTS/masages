@@ -432,6 +432,13 @@ test('уборка: просроченные счётчики, корзины и
     }, { timeoutMs: 20000, what: 'уборка просроченных строк' });
     assert.deepStrictEqual(state, { counters: ['test:live'], buckets: ['cd'], pow: ['cd'] });
 
-    const metrics = await (await fetch(url('/metrics'), { headers: { Authorization: `Bearer ${METRICS_TOKEN}` } })).text();
-    assert.match(metrics, /nyxo_job_runs_total\{job="purgeExpiredLimits",result="ok"\} [1-9]/);
+    // Счётчик проходов растёт чуть ПОСЛЕ того, как строки уже удалены (проход ещё отпускает блокировку и
+    // только потом сообщает метрике), а предыдущий тест перезапускал сервер, и его счётчики начались с нуля:
+    // первым мог оказаться как раз проход, удаливший строки. Одиночный запрос сразу после удаления иногда
+    // видел ещё нулевой счётчик (флейк под нагрузкой), поэтому счётчик ждётся, как и сами строки.
+    const OK_PASS = /nyxo_job_runs_total\{job="purgeExpiredLimits",result="ok"\} [1-9]/;
+    await waitUntil(async () => {
+        const metrics = await (await fetch(url('/metrics'), { headers: { Authorization: `Bearer ${METRICS_TOKEN}` } })).text();
+        return OK_PASS.test(metrics);
+    }, { timeoutMs: 10000, what: 'успешный проход purgeExpiredLimits в /metrics' });
 });
